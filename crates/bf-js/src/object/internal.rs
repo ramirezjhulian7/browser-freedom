@@ -57,6 +57,9 @@ impl Agent {
 
     /// `[[PreventExtensions]]` (§10.1.4).
     pub fn prevent_extensions(&mut self, o: Gc<Object>) -> JsResult<bool> {
+        if !crate::builtins::typed_array::can_prevent_extensions(self, o) {
+            return Ok(false); // E3: TypedArray [[PreventExtensions]] (§10.4.5.1)
+        }
         // Los elementos densos pasan al almacén general (el vector supone extensibilidad).
         self.array_make_sparse(o);
         self.heap[o].extensible = false;
@@ -71,6 +74,9 @@ impl Agent {
         o: Gc<Object>,
         key: &PropertyKey,
     ) -> JsResult<Option<PropertyDescriptor>> {
+        if let Some(i) = self.ta_numeric_key(o, key) {
+            return Ok(crate::builtins::typed_array::get_own_element(self, o, i)); // E3
+        }
         Ok(self.own_prop(o, key))
     }
 
@@ -153,6 +159,9 @@ impl Agent {
                 Ok(self.ordinary_define_own_property(o, key, desc))
             }
             ObjectKind::Arguments(Some(_)) => self.arguments_define_own_property(o, key, desc),
+            ObjectKind::TypedArray(_) => {
+                crate::builtins::typed_array::define_own_property(self, o, key, desc) // E3
+            }
             _ => Ok(self.ordinary_define_own_property(o, key, desc)),
         }
     }
@@ -339,6 +348,11 @@ impl Agent {
     pub fn has_property(&mut self, o: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
         let mut cur = o;
         loop {
+            if let Some(i) = self.ta_numeric_key(cur, key) {
+                return Ok(crate::builtins::typed_array::is_valid_integer_index(
+                    self, cur, i,
+                )); // E3
+            }
             if self.own_prop(cur, key).is_some() {
                 return Ok(true);
             }
@@ -353,6 +367,9 @@ impl Agent {
     pub fn get(&mut self, o: Gc<Object>, key: &PropertyKey, receiver: Value) -> JsResult<Value> {
         let mut cur = o;
         loop {
+            if let Some(i) = self.ta_numeric_key(cur, key) {
+                return Ok(crate::builtins::typed_array::get_element(self, cur, i)); // E3
+            }
             match self.own_prop(cur, key) {
                 Some(d) => {
                     if d.is_data() {
@@ -379,6 +396,9 @@ impl Agent {
         v: Value,
         receiver: Value,
     ) -> JsResult<bool> {
+        if let Some(i) = self.ta_numeric_key(o, &key) {
+            return crate::builtins::typed_array::set(self, o, i, key, v, receiver); // E3
+        }
         // Camino rápido: escritura de un elemento denso propio con receiver = o.
         if let Value::Object(r) = &receiver
             && *r == o
@@ -443,6 +463,11 @@ impl Agent {
 
     /// `[[Delete]]` (§10.1.10, OrdinaryDelete; arguments §10.4.4.5).
     pub fn delete(&mut self, o: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
+        if let Some(i) = self.ta_numeric_key(o, key) {
+            return Ok(!crate::builtins::typed_array::is_valid_integer_index(
+                self, o, i,
+            )); // E3
+        }
         let Some(d) = self.own_prop(o, key) else {
             return Ok(true);
         };
@@ -480,6 +505,9 @@ impl Agent {
 
     /// `[[OwnPropertyKeys]]` (§10.1.11, OrdinaryOwnPropertyKeys; Array y String).
     pub fn own_property_keys(&mut self, o: Gc<Object>) -> JsResult<Vec<PropertyKey>> {
+        if let ObjectKind::TypedArray(_) = self.heap[o].kind {
+            return Ok(crate::builtins::typed_array::own_keys(self, o)); // E3
+        }
         let obj = &self.heap[o];
         let mut out = Vec::new();
         match &obj.kind {

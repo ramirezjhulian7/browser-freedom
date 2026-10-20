@@ -324,6 +324,10 @@ impl Agent {
         frame.callee = Some(f);
         frame.new_target = new_target;
         frame.args = args;
+        // E3: las funciones async corren hasta el primer `await` y devuelven su promesa.
+        if frame.code.is_async && !frame.code.is_generator {
+            return crate::builtins::r#async::async_function_start(self, frame);
+        }
         match self.run_frame(frame)? {
             (FrameExit::Return(v), _) => Ok(v),
             (FrameExit::GeneratorStart(g), frame) => {
@@ -331,6 +335,7 @@ impl Agent {
                 Ok(Value::Object(g))
             }
             (FrameExit::Yield(..), _) => unreachable!("yield fuera de un generador"),
+            (FrameExit::Await(_), _) => unreachable!("await fuera de una función async"),
         }
     }
 
@@ -432,11 +437,14 @@ impl Agent {
         name: Option<Value>,
     ) -> Gc<Object> {
         let i = self.intrinsics();
-        let proto = if code.is_generator && !code.is_async {
-            i.generator_function_prototype
-        } else {
-            i.function_prototype
+        let proto = match (code.is_generator, code.is_async) {
+            (true, false) => i.generator_function_prototype,
+            // E3: %AsyncGeneratorFunction.prototype% y %AsyncFunction.prototype%.
+            (true, true) => i.async_generator_function_prototype,
+            (false, true) => i.async_function_prototype,
+            (false, false) => i.function_prototype,
         };
+        let is_async = code.is_async;
         let is_constructor =
             matches!(code.kind, CodeKind::Normal) && !code.is_generator && !code.is_async;
         let realm = self.current_realm;
@@ -462,8 +470,13 @@ impl Agent {
         self.set_function_name_value(f, name);
         if has_prototype {
             if is_gen {
-                // §15.5.3: el prototype de un generador hereda de %GeneratorPrototype%.
-                let gp = self.intrinsics().generator_prototype;
+                // §15.5.3: el prototype de un generador hereda de %GeneratorPrototype%
+                // (§15.6.3: %AsyncGeneratorPrototype% si es async).
+                let gp = if is_async {
+                    self.intrinsics().async_generator_prototype
+                } else {
+                    self.intrinsics().generator_prototype
+                };
                 let p = self.new_object(Some(gp));
                 let k = self.keys.prototype.clone();
                 self.put_data(f, k, Value::Object(p), true, false, false);

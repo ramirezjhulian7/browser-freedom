@@ -89,6 +89,7 @@ pub fn init_global_object(agent: &mut Agent, global: Gc<Object>) {
             true,
         );
     }
+    crate::builtins::promise::install_e3_globals(agent, global); // E3
 }
 
 /// eval ( x ) (§19.2.1): eval indirecto.

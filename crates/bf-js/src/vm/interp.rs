@@ -34,6 +34,8 @@ pub enum FrameExit {
     /// Valor y si se devuelve sin envolver (`yield*`).
     Yield(Value, bool),
     GeneratorStart(Gc<Object>),
+    /// `Await(value)` (§27.7.5.3): el frame se suspende hasta que la promesa se asiente.
+    Await(Value),
 }
 
 enum Flow {
@@ -41,6 +43,7 @@ enum Flow {
     Return(Value),
     Yield(Value, bool),
     GenStart(Gc<Object>),
+    Await(Value),
 }
 
 macro_rules! frame {
@@ -92,6 +95,7 @@ impl Agent {
                 }
                 Ok(Flow::Yield(v, raw)) => return Ok(FrameExit::Yield(v, raw)),
                 Ok(Flow::GenStart(g)) => return Ok(FrameExit::GeneratorStart(g)),
+                Ok(Flow::Await(v)) => return Ok(FrameExit::Await(v)),
                 Err(Throw::Value(e)) => {
                     if !self.unwind_throw(&e) {
                         return Err(Throw::Value(e));
@@ -1392,7 +1396,54 @@ impl Agent {
                 value_slot,
                 done,
             } => return self.yield_star_step(slot, kind_slot, value_slot, done),
-            Op::Await => return self.internal_error("async/await (requiere Promise, paso 4)"),
+            // E3
+            Op::Await => {
+                let v = self.pop();
+                return Ok(Flow::Await(v));
+            }
+            Op::GetAsyncIterator(slot) => {
+                let obj = self.pop();
+                let (it, next) = self.get_async_iterator(&obj)?;
+                let f = frame!(self);
+                f.locals[slot as usize] = Some(it);
+                f.locals[slot as usize + 1] = Some(next);
+                f.locals[slot as usize + 2] = Some(Value::Boolean(false));
+            }
+            Op::AsyncIterNext(slot) => {
+                let it = self.local(slot);
+                let next = self.local(slot + 1);
+                let r = self.call(&next, it, &[]);
+                if r.is_err() {
+                    frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+                }
+                self.push(r?);
+            }
+            Op::AsyncIterResult { slot, done } => return self.async_iter_result(slot, done),
+            Op::AsyncIterClose {
+                slot,
+                kind_slot,
+                skip,
+            } => return self.async_iter_close(slot, kind_slot, skip),
+            Op::AsyncIterCloseCheck { kind_slot } => {
+                let r = self.pop();
+                if !self.completion_is_throw(kind_slot) && !r.is_object() {
+                    return self.type_error("iterator.return() did not return an object");
+                }
+            }
+            Op::AsyncIterCloseCatch { kind_slot } => {
+                let e = self.pop();
+                if !self.completion_is_throw(kind_slot) {
+                    return Err(Throw::Value(e));
+                }
+            }
+            Op::AsyncYieldStarCall {
+                slot,
+                kind_slot,
+                value_slot,
+            } => return self.async_yield_star_call(slot, kind_slot, value_slot),
+            Op::AsyncYieldStarResult { slot, done } => {
+                return self.async_yield_star_result(slot, done);
+            }
 
             // --- Funciones ---
             Op::CreateArguments(table) => {
@@ -2044,4 +2095,150 @@ fn add_private_element(
         },
     };
     list.push((name, e));
+}
+
+// --- E3: iteración asíncrona (`for await`, `yield*` en generadores async) ---
+
+/// Los modos de `yield*` asíncrono entre `AsyncYieldStarCall` y `AsyncYieldStarResult`.
+const YS_NEXT: i32 = 0;
+const YS_THROW: i32 = 1;
+const YS_RETURN: i32 = 2;
+/// Sin método `return`: el valor recibido se espera y se retorna (§15.5.5 paso 6.c.iii).
+const YS_RETURN_DIRECT: i32 = 3;
+/// Sin método `throw`: se cerró el iterador y queda lanzar TypeError (paso 6.b.iii).
+const YS_CLOSE: i32 = 4;
+
+impl Agent {
+    /// ¿La completion guardada en `kind_slot` es throw? (`u32::MAX`: completion normal.)
+    fn completion_is_throw(&self, kind_slot: u32) -> bool {
+        kind_slot != u32::MAX
+            && matches!(self.local(kind_slot), Value::Number(n) if n as u32 == COMPLETION_THROW)
+    }
+
+    /// `for await`: el resultado ya esperado de `next()` (§14.7.5.7 pasos 6.c–f).
+    fn async_iter_result(&mut self, slot: u32, done: u32) -> JsResult<Flow> {
+        let r = self.pop();
+        let Value::Object(ro) = r else {
+            frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+            return self.type_error("Iterator result is not an object");
+        };
+        let complete = self.iterator_complete(ro);
+        if !matches!(complete, Ok(false)) {
+            frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+        }
+        if complete? {
+            frame!(self).pc = done as usize;
+            return Ok(Flow::Next);
+        }
+        let v = self.iterator_value(ro);
+        if v.is_err() {
+            frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+        }
+        self.push(v?);
+        Ok(Flow::Next)
+    }
+
+    /// AsyncIteratorClose (§7.4.13) hasta el `Await` de `return()`.
+    fn async_iter_close(&mut self, slot: u32, kind_slot: u32, skip: u32) -> JsResult<Flow> {
+        let throw = self.completion_is_throw(kind_slot);
+        if matches!(self.local(slot + 2), Value::Boolean(true)) {
+            frame!(self).pc = skip as usize;
+            return Ok(Flow::Next);
+        }
+        let it = self.local(slot);
+        let k = self.keys.return_.clone();
+        let ret = match self.get_method_of(&it, &k) {
+            Ok(r) => r,
+            Err(Throw::Value(_)) if throw => None,
+            Err(e) => return Err(e),
+        };
+        let Some(ret) = ret else {
+            frame!(self).pc = skip as usize;
+            return Ok(Flow::Next);
+        };
+        match self.call(&ret, it, &[]) {
+            Ok(r) => {
+                self.push(r);
+                Ok(Flow::Next)
+            }
+            Err(Throw::Value(_)) if throw => {
+                frame!(self).pc = skip as usize;
+                Ok(Flow::Next)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `yield*` asíncrono (§15.5.5, pasos 6.a.i, 6.b.ii.1, 6.b.iii, 6.c.ii–iv): la llamada
+    /// al iterador interno según la completion recibida; el valor se espera a continuación.
+    fn async_yield_star_call(&mut self, slot: u32, ks: u32, vs: u32) -> JsResult<Flow> {
+        let it = self.local(slot);
+        let next = self.local(slot + 1);
+        let kind = match self.local(ks) {
+            Value::Number(n) => n as u32,
+            _ => COMPLETION_NORMAL,
+        };
+        let received = self.local(vs);
+        let (mode, v) = match kind {
+            COMPLETION_NORMAL => (YS_NEXT, self.call(&next, it, &[received])?),
+            COMPLETION_THROW => {
+                let k = self.keys.throw.clone();
+                match self.get_method_of(&it, &k)? {
+                    Some(t) => (YS_THROW, self.call(&t, it, &[received])?),
+                    None => {
+                        // AsyncIteratorClose(iteratorRecord, NormalCompletion(empty)).
+                        let k = self.keys.return_.clone();
+                        match self.get_method_of(&it, &k)? {
+                            None => {
+                                return self
+                                    .type_error("The iterator does not provide a 'throw' method");
+                            }
+                            Some(r) => (YS_CLOSE, self.call(&r, it, &[])?),
+                        }
+                    }
+                }
+            }
+            _ => {
+                let k = self.keys.return_.clone();
+                match self.get_method_of(&it, &k)? {
+                    None => (YS_RETURN_DIRECT, received),
+                    Some(r) => (YS_RETURN, self.call(&r, it, &[received])?),
+                }
+            }
+        };
+        self.push(Value::Number(f64::from(mode)));
+        self.push(v);
+        Ok(Flow::Next)
+    }
+
+    /// `yield*` asíncrono después del `Await`: el resultado del iterador interno.
+    fn async_yield_star_result(&mut self, _slot: u32, done: u32) -> JsResult<Flow> {
+        let r = self.pop();
+        let mode = match self.pop() {
+            Value::Number(n) => n as i32,
+            _ => YS_NEXT,
+        };
+        if mode == YS_RETURN_DIRECT {
+            return Ok(Flow::Return(r));
+        }
+        let Value::Object(ro) = r else {
+            return self.type_error("iterator result is not an object");
+        };
+        if mode == YS_CLOSE {
+            return self.type_error("The iterator does not provide a 'throw' method");
+        }
+        let complete = self.iterator_complete(ro)?;
+        let v = self.iterator_value(ro)?;
+        if complete {
+            if mode == YS_RETURN {
+                return Ok(Flow::Return(v));
+            }
+            self.push(v);
+            frame!(self).pc = done as usize;
+            return Ok(Flow::Next);
+        }
+        let _ = YS_THROW;
+        self.push(v);
+        Ok(Flow::Next)
+    }
 }

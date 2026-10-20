@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
 use crate::bigint::BigInt;
+use crate::builtins::weak::WeakKey;
 use crate::object::Object;
 use crate::value::{Symbol, Value};
 use crate::vm::env::Env;
@@ -166,6 +167,13 @@ impl<T> Arena<T> {
     pub fn live(&self) -> usize {
         self.live
     }
+
+    /// ¿El slot está marcado en la recolección en curso? (E3: referencias débiles.)
+    fn is_marked(&self, gc: Gc<T>) -> bool {
+        self.slots
+            .get(gc.index as usize)
+            .is_some_and(|s| s.generation == gc.generation && s.data.is_some() && s.marked)
+    }
 }
 
 /// Tipos que viven en el heap.
@@ -269,6 +277,9 @@ pub struct Heap {
     collections: usize,
     freed_total: usize,
     min_threshold: usize,
+    // E3: los objetos con referencias débiles y los FinalizationRegistry por limpiar.
+    weak_containers: Vec<Gc<Object>>,
+    finalization_pending: Vec<Gc<Object>>,
 }
 
 /// Umbral mínimo de asignaciones entre recolecciones.
@@ -287,6 +298,8 @@ impl Default for Heap {
             collections: 0,
             freed_total: 0,
             min_threshold: MIN_THRESHOLD,
+            weak_containers: Vec::new(),
+            finalization_pending: Vec::new(),
         }
     }
 }
@@ -345,11 +358,108 @@ impl Heap {
         for v in &self.handles {
             roots.value(v);
         }
+        self.drain(&mut roots);
+        self.mark_ephemerons(&mut roots);
+        self.clear_weak_refs();
+        let freed =
+            self.objects.sweep() + self.symbols.sweep() + self.bigints.sweep() + self.envs.sweep();
+        let objects = &self.objects;
+        self.weak_containers.retain(|c| objects.is_alive(*c));
+        self.finalization_pending.retain(|c| objects.is_alive(*c));
+        self.freed_total += freed;
+        self.collections += 1;
+        self.allocated_since_gc = 0;
+        let live = self.stats().live;
+        self.threshold = if self.min_threshold < MIN_THRESHOLD {
+            self.min_threshold
+        } else {
+            self.min_threshold.max(live)
+        };
+    }
+
+    // --- E3: referencias débiles ---
+
+    /// Registra un objeto con referencias débiles (WeakMap, WeakSet, WeakRef,
+    /// FinalizationRegistry): el GC no traza esas referencias y las vacía al morir su
+    /// destino.
+    pub fn register_weak(&mut self, o: Gc<Object>) {
+        self.weak_containers.push(o);
+    }
+
+    /// Los FinalizationRegistry con celdas vaciadas desde la última consulta.
+    pub fn take_finalization_pending(&mut self) -> Vec<Gc<Object>> {
+        std::mem::take(&mut self.finalization_pending)
+    }
+
+    fn weak_key_marked(&self, k: WeakKey) -> bool {
+        match k {
+            WeakKey::Object(o) => self.objects.is_marked(o),
+            WeakKey::Symbol(s) => self.symbols.is_marked(s),
+        }
+    }
+
+    fn value_marked(&self, v: &Value) -> bool {
+        match v {
+            Value::Object(o) => self.objects.is_marked(*o),
+            Value::Symbol(s) => self.symbols.is_marked(*s),
+            Value::BigInt(b) => self.bigints.is_marked(*b),
+            _ => true,
+        }
+    }
+
+    /// Marcado efímero (§9.10.3): el valor de una entrada de WeakMap vive si viven el
+    /// WeakMap y la clave; se itera hasta un punto fijo.
+    fn mark_ephemerons(&mut self, roots: &mut Tracer) {
+        loop {
+            let mut newly: Vec<Value> = Vec::new();
+            for &c in &self.weak_containers {
+                if !self.objects.is_marked(c) {
+                    continue;
+                }
+                for (k, v) in crate::builtins::weak::ephemerons(&self.objects.get(c).kind) {
+                    if self.weak_key_marked(k) && !self.value_marked(&v) {
+                        newly.push(v);
+                    }
+                }
+            }
+            if newly.is_empty() {
+                return;
+            }
+            for v in &newly {
+                roots.value(v);
+            }
+            self.drain(roots);
+        }
+    }
+
+    /// Vacía las referencias débiles cuyo destino no se marcó (las entradas de WeakMap y
+    /// WeakSet, los WeakRef y las celdas de FinalizationRegistry).
+    fn clear_weak_refs(&mut self) {
+        for i in 0..self.weak_containers.len() {
+            let c = self.weak_containers[i];
+            if !self.objects.is_marked(c) {
+                continue;
+            }
+            let dead: Vec<WeakKey> = crate::builtins::weak::weak_targets(&self.objects.get(c).kind)
+                .into_iter()
+                .filter(|k| !self.weak_key_marked(*k))
+                .collect();
+            if dead.is_empty() {
+                continue;
+            }
+            if crate::builtins::weak::clear_dead(&mut self.objects.get_mut(c).kind, &dead) {
+                self.finalization_pending.push(c);
+            }
+        }
+    }
+
+    /// Marca todo lo alcanzable desde la lista de trabajo.
+    fn drain(&mut self, roots: &mut Tracer) {
         while let Some(r) = roots.work.pop() {
             match r {
                 GcRef::Object(o) => {
                     if self.objects.mark(o.index, o.generation) {
-                        self.objects.get(o).trace(&mut roots);
+                        self.objects.get(o).trace(roots);
                     }
                 }
                 GcRef::Symbol(s) => {
@@ -360,22 +470,11 @@ impl Heap {
                 }
                 GcRef::Env(e) => {
                     if self.envs.mark(e.index, e.generation) {
-                        self.envs.get(e).trace(&mut roots);
+                        self.envs.get(e).trace(roots);
                     }
                 }
             }
         }
-        let freed =
-            self.objects.sweep() + self.symbols.sweep() + self.bigints.sweep() + self.envs.sweep();
-        self.freed_total += freed;
-        self.collections += 1;
-        self.allocated_since_gc = 0;
-        let live = self.stats().live;
-        self.threshold = if self.min_threshold < MIN_THRESHOLD {
-            self.min_threshold
-        } else {
-            self.min_threshold.max(live)
-        };
     }
 }
 

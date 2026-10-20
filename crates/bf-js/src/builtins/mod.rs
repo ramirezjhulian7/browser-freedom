@@ -16,6 +16,15 @@ pub mod object;
 pub mod reflect;
 pub mod string;
 pub mod symbol;
+// E3
+pub mod array_buffer;
+pub mod r#async;
+pub mod atomics;
+pub mod dataview;
+pub mod map_set;
+pub mod promise;
+pub mod typed_array;
+pub mod weak;
 
 use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, Prop, PropValue};
@@ -195,6 +204,15 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     reflect::init(agent, realm);
     math::init(agent, realm);
     global::init_functions(agent, realm);
+    // E3
+    promise::init(agent, realm);
+    r#async::init(agent, realm);
+    map_set::init(agent, realm);
+    weak::init(agent, realm);
+    array_buffer::init(agent, realm);
+    typed_array::init(agent, realm);
+    dataview::init(agent, realm);
+    atomics::init(agent, realm);
     // %BigInt.prototype% (el constructor y sus métodos son del paso 4).
     let bp = agent.new_object(Some(object_prototype));
     to_string_tag(agent, bp, "BigInt");

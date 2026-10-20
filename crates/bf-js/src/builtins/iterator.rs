@@ -59,7 +59,10 @@ fn array_iterator_next(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(o) = object else {
         return agent.create_iter_result(Value::Undefined, true);
     };
-    let len = agent.length_of_array_like(o)?;
+    let len = match crate::builtins::typed_array::iteration_length(agent, o) {
+        Some(len) => len?, // E3: TypedArray (§23.1.5.1 paso 2.b)
+        None => agent.length_of_array_like(o)?,
+    };
     if index >= len {
         if let ObjectKind::ArrayIterator(d) = &mut agent.heap[it].kind {
             d.object = None;

@@ -169,6 +169,7 @@ fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
         deadline: Some(Instant::now() + TIME_LIMIT),
     });
     agent.reset_stack_base();
+    agent.can_block = meta.flags.iter().any(|f| f == "CanBlockIsTrue"); // E3: AgentCanSuspend
     if let Some(t) = std::env::var("BF_GC_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -235,7 +236,10 @@ fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
             if phase == Some("parse") {
                 return Status::Failed("se parseó (negative: parse)".into());
             }
-            agent.script_evaluation(code)
+            // E3: RunJobs al terminar el script (la cola de promesas).
+            agent
+                .script_evaluation(code)
+                .and_then(|v| agent.run_jobs().map(|_| v))
         }
     };
     let internal = agent.internal_errors.first().cloned();

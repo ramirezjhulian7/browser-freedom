@@ -340,9 +340,6 @@ impl Agent {
             DynamicKind::Async => "async function",
             DynamicKind::AsyncGenerator => "async function*",
         };
-        if matches!(kind, DynamicKind::Async | DynamicKind::AsyncGenerator) {
-            return self.internal_error("funciones async dinámicas (paso 4)");
-        }
         let head = format!("{prefix} anonymous({p}\n) ");
         let source_string = format!("{head}{{{body_string}}}");
         let text = format!("({source_string})");
@@ -380,7 +377,10 @@ impl Agent {
         };
         let fallback: fn(&crate::vm::realm::Intrinsics) -> Gc<Object> = match kind {
             DynamicKind::Generator => |i| i.generator_function_prototype,
-            _ => |i| i.function_prototype,
+            // E3
+            DynamicKind::Async => |i| i.async_function_prototype,
+            DynamicKind::AsyncGenerator => |i| i.async_generator_function_prototype,
+            DynamicKind::Normal => |i| i.function_prototype,
         };
         let proto = self.get_prototype_from_constructor(new_target, fallback)?;
         let genv = self.global_env();
