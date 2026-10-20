@@ -164,7 +164,7 @@ impl PropertyKey {
 
     /// La clave de un Number: `Index` si es un entero en el rango, si no `ToString(n)`.
     pub fn from_number(n: f64) -> PropertyKey {
-        if n >= 0.0 && n < 4294967295.0 && n.fract() == 0.0 {
+        if (0.0..4294967295.0).contains(&n) && n.fract() == 0.0 {
             return PropertyKey::Index(n as u32);
         }
         PropertyKey::from_js_string(crate::abstract_ops::number::number_to_string(n))

@@ -33,6 +33,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     agent.realms[realm].intrinsics.date_prototype = proto;
     let ctor = constructor(agent, "Date", 7, date_ctor, proto);
     agent.realms[realm].intrinsics.date_ctor = ctor;
+    crate::builtins::register_global(agent, realm, "Date", ctor);
     const STATICS: &[FnEntry] = &[("now", 0, now), ("parse", 1, parse), ("UTC", 7, utc)];
     methods(agent, ctor, STATICS);
     const PROTO: &[FnEntry] = &[

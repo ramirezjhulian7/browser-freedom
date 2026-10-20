@@ -18,6 +18,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     let proto = agent.realms[realm].intrinsics.bigint_prototype;
     let ctor = constructor(agent, "BigInt", 1, bigint_ctor, proto);
     agent.realms[realm].intrinsics.bigint_ctor = ctor;
+    crate::builtins::register_global(agent, realm, "BigInt", ctor);
     const STATICS: &[FnEntry] = &[("asIntN", 2, as_int_n), ("asUintN", 2, as_uint_n)];
     methods(agent, ctor, STATICS);
     const PROTO: &[FnEntry] = &[

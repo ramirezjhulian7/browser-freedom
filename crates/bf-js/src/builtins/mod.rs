@@ -10,9 +10,12 @@ pub mod generator;
 pub mod global;
 pub mod host;
 pub mod iterator;
+pub mod iterator_helpers;
+pub mod json;
 pub mod math;
 pub mod number;
 pub mod object;
+pub mod proxy;
 pub mod reflect;
 pub mod string;
 pub mod symbol;
@@ -133,6 +136,12 @@ pub fn constructor(
     c
 }
 
+/// Registra un binding del objeto global (`{writable, configurable}`, no enumerable) que
+/// `global::init_global_object` define al crear el objeto global del realm.
+pub fn register_global(agent: &mut Agent, realm: RealmId, name: &'static str, o: Gc<Object>) {
+    agent.realms[realm].globals.push((name, o));
+}
+
 /// Los datos de una función built-in (`slots`).
 pub fn slots(agent: &Agent, f: Gc<Object>) -> Vec<Value> {
     match &agent.heap[f].kind {
@@ -188,9 +197,11 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
 
     object::init(agent, realm);
     function::init(agent, realm);
+    global::init_functions(agent, realm);
     error::init(agent, realm);
     symbol::init(agent, realm);
     iterator::init(agent, realm);
+    iterator_helpers::init(agent, realm);
     array::init(agent, realm);
     string::init(agent, realm);
     number::init(agent, realm);
@@ -198,7 +209,8 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     generator::init(agent, realm);
     reflect::init(agent, realm);
     math::init(agent, realm);
-    global::init_functions(agent, realm);
+    json::init(agent, realm);
+    proxy::init(agent, realm);
     // %BigInt.prototype% (el constructor y sus métodos son del paso 4).
     let bp = agent.new_object(Some(object_prototype));
     to_string_tag(agent, bp, "BigInt");

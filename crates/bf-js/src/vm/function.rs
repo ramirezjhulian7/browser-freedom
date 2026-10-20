@@ -186,6 +186,13 @@ impl Agent {
         match &self.heap[fo].kind {
             ObjectKind::Function(_) => self.call_closure(fo, this, args.to_vec(), None),
             ObjectKind::HtmlDda => Ok(Value::Null),
+            // E1: Proxy exótico.
+            ObjectKind::Proxy(p) if p.callable => {
+                self.call_depth += 1;
+                let r = self.proxy_call(fo, this, args);
+                self.call_depth -= 1;
+                r
+            }
             ObjectKind::Builtin(b) => {
                 let (func, realm) = (b.func, b.realm);
                 let saved = self.current_realm;
@@ -258,6 +265,13 @@ impl Agent {
                 let nt = if new_target == f { target } else { new_target };
                 self.call_depth += 1;
                 let r = self.construct_internal(target, &all, nt);
+                self.call_depth -= 1;
+                r
+            }
+            // E1: Proxy exótico.
+            ObjectKind::Proxy(p) if p.constructor => {
+                self.call_depth += 1;
+                let r = self.proxy_construct(f, args, new_target);
                 self.call_depth -= 1;
                 r
             }
@@ -391,12 +405,10 @@ impl Agent {
         if let Some(t) = this_arg {
             return Ok(Value::Object(t));
         }
+        // E1: el error se crea en el realm del llamador (§10.2.2 paso 9 ya restauró su
+        // contexto).
         if !result.is_undefined() {
-            let saved = self.current_realm;
-            self.current_realm = realm;
-            let e = self.type_error("Derived constructors may only return object or undefined");
-            self.current_realm = saved;
-            return e;
+            return self.type_error("Derived constructors may only return object or undefined");
         }
         // GetThisBinding del environment del constructor.
         let this = match frame.function_env {
@@ -408,15 +420,9 @@ impl Agent {
         };
         match this {
             Some(v) => Ok(v),
-            None => {
-                let saved = self.current_realm;
-                self.current_realm = realm;
-                let e = self.reference_error(
-                    "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
-                );
-                self.current_realm = saved;
-                e
-            }
+            None => self.reference_error(
+                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+            ),
         }
     }
 
@@ -437,6 +443,10 @@ impl Agent {
         } else {
             i.function_prototype
         };
+        let is_sloppy_plain = matches!(code.kind, CodeKind::Normal)
+            && !code.strict
+            && !code.is_generator
+            && !code.is_async;
         let is_constructor =
             matches!(code.kind, CodeKind::Normal) && !code.is_generator && !code.is_async;
         let realm = self.current_realm;
@@ -460,6 +470,18 @@ impl Agent {
         self.put_data(f, k, Value::Number(length), false, false, true);
         let name = name.unwrap_or(Value::String(code_name));
         self.set_function_name_value(f, name);
+        // E1: `caller` propio (null) en las funciones no estrictas comunes (§17.1 permite la
+        // extensión salvo en las estrictas).
+        if is_sloppy_plain {
+            self.put_data(
+                f,
+                PropertyKey::from("caller"),
+                Value::Null,
+                false,
+                false,
+                false,
+            );
+        }
         if has_prototype {
             if is_gen {
                 // §15.5.3: el prototype de un generador hereda de %GeneratorPrototype%.
@@ -590,6 +612,11 @@ impl Agent {
                 let t = b.target;
                 self.get_function_realm(t)
             }
+            // E1: Proxy exótico (§7.3.24 paso 4).
+            ObjectKind::Proxy(p) => match p.target {
+                Some(t) => self.get_function_realm(t),
+                None => self.type_error("Cannot perform operation on a revoked proxy"),
+            },
             _ => Ok(self.current_realm),
         }
     }

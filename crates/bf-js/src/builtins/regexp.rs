@@ -55,6 +55,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     agent.realms[realm].intrinsics.regexp_prototype = proto;
     let ctor = constructor(agent, "RegExp", 2, regexp_ctor, proto);
     agent.realms[realm].intrinsics.regexp_ctor = ctor;
+    crate::builtins::register_global(agent, realm, "RegExp", ctor);
     init_legacy_state(agent, ctor);
     method(agent, ctor, "escape", 1, escape);
     let species = PropertyKey::Symbol(agent.well_known.species);

@@ -23,6 +23,7 @@ historial, scroll y zoom. El plan de las fases siguientes está en
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **77.0%**; total **56.8%** (29 559 / 52 017) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
@@ -111,13 +112,20 @@ motor JavaScript.
 - **`bf-shell`**: el binario. Carga en un hilo de trabajo y muestra el resultado en una
   ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
   páginas `about:` (ver [La interfaz](#la-interfaz)).
-- **`bf-js`** (fase 2, en curso): el front-end de ECMAScript 2026:
+- **`bf-js`** (fase 2, en curso): el motor de ECMAScript 2026:
   - lexer (§12) con identificadores Unicode, números correctamente redondeados, templates y
     re-escaneo de regex dirigido por el parser;
   - parser con las cover grammars, ASI, Annex B y todos los early errors;
   - validador de la sintaxis de RegExp (§22.2.1, modos `u` y `v`);
   - AST con la forma de ESTree (`bf-js dump-ast archivo.js [--module]`);
-  - `JsString` UTF-16.
+  - `JsString` UTF-16;
+  - compilador a bytecode con resolución de ámbitos, VM de pila y heap con GC mark-sweep
+    sobre arenas indexadas (raíces explícitas y `HandleScope`);
+  - built-ins: Object, Function, Boolean, Symbol, Error y los NativeError, Number, Math,
+    String (la ruta sin RegExp), Array, Iterator (con los iterator helpers, `concat`, `zip`,
+    `chunks`/`windows`), JSON, Reflect, Proxy y las funciones globales (`parseInt`,
+    `encodeURI`, `escape` de Annex B…);
+  - `bf-js run archivo.js` ejecuta un script con `print`.
 
 ## Arquitectura
 
@@ -128,7 +136,7 @@ motor JavaScript.
           encoding)                                                 ▲
                                                bf-font ─────────────┤ (métricas, shaping)
                                                bf-image ────────────┘ (tamaños naturales; pixmaps a bf-paint)
- bf-infra: tipos comunes, ResourceLoader, encodings (lo usan todos)       bf-js: parser de JS (fase 2)
+ bf-infra: tipos comunes, ResourceLoader, encodings (lo usan todos)       bf-js: motor de JS (fase 2)
 ```
 
 El flujo de una página:
@@ -302,6 +310,8 @@ cargo test -p bf-url --test wpt_url -- --nocapture
 cargo test -p bf-js --test parser_tests -- --nocapture         # test262-parser-tests
 cargo test -p bf-js --test test262_parse -- --nocapture        # parsing de test262 (escribe docs/test262-status.md)
 cargo test -p bf-js --release --test fuzz -- --ignored --nocapture   # 1000 mutaciones sin pánico
+cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md   # ejecución de test262
+cargo test -p bf-js --release --test test262_run -- --ignored --nocapture   # regresión de language/
 cargo test -p bf-layout --test layout       # 102 casos propios (BF_LAYOUT_PRINT=1 imprime)
 cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPECTED=1 regenera)
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture  # reftests (~1,5 min)

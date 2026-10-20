@@ -24,7 +24,14 @@ impl Agent {
     /// IsArray (§7.2.2) (sin Proxy todavía).
     pub fn is_array(&mut self, v: &Value) -> JsResult<bool> {
         match v {
-            Value::Object(o) => Ok(self.heap[*o].is_array()),
+            Value::Object(o) => match &self.heap[*o].kind {
+                // Un Proxy es array si su target lo es (paso 3).
+                ObjectKind::Proxy(p) => match p.target {
+                    Some(t) => self.is_array(&Value::Object(t)),
+                    None => self.type_error("Cannot perform 'IsArray' on a revoked proxy"),
+                },
+                _ => Ok(self.heap[*o].is_array()),
+            },
             _ => Ok(false),
         }
     }
@@ -232,7 +239,7 @@ impl Agent {
         let key = crate::value::PropertyKey::Symbol(self.well_known.has_instance);
         let handler = self.get_method_of(target, &key)?;
         if let Some(h) = handler {
-            let r = self.call(&h, target.clone(), &[v.clone()])?;
+            let r = self.call(&h, target.clone(), std::slice::from_ref(v))?;
             return Ok(crate::abstract_ops::conversion::to_boolean(self, &r));
         }
         if !self.heap[*t].is_callable() {

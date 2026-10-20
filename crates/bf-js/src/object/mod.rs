@@ -5,6 +5,7 @@
 
 pub mod internal;
 mod property_map;
+pub mod proxy;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -113,6 +114,14 @@ pub enum ObjectKind {
     ForIn(Box<ForInData>),
     /// Un objeto con `[[IsHTMLDDA]]` (B.3.6, `$262.IsHTMLDDA`): llamable, devuelve null.
     HtmlDda,
+    /// Un objeto de `JSON.rawJSON` (`[[IsRawJSON]]`).
+    RawJson,
+    /// Proxy exótico (§10.5).
+    Proxy(Box<proxy::ProxyData>),
+    /// %IteratorHelperPrototype% (§27.1.2.1).
+    IteratorHelper(Box<crate::builtins::iterator_helpers::HelperData>),
+    /// %WrapForValidIteratorPrototype% (`[[Iterated]]`).
+    WrappedIterator(Box<crate::builtins::iterator_helpers::IterRec>),
     // E2: RegExp (§22.2), RegExp String Iterator (§22.2.9) y Date (`[[DateValue]]`, §21.4).
     RegExp(Box<crate::builtins::regexp::RegExpData>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpStringIteratorData>),
@@ -152,7 +161,7 @@ impl Object {
                 | ObjectKind::Builtin(_)
                 | ObjectKind::Bound(_)
                 | ObjectKind::HtmlDda
-        )
+        ) || matches!(&self.kind, ObjectKind::Proxy(p) if p.callable)
     }
 
     /// ¿Tiene `[[Construct]]`?
@@ -161,6 +170,7 @@ impl Object {
             ObjectKind::Function(c) => c.is_constructor,
             ObjectKind::Builtin(b) => b.constructor,
             ObjectKind::Bound(b) => b.constructor,
+            ObjectKind::Proxy(p) => p.constructor,
             _ => false,
         }
     }
@@ -206,7 +216,13 @@ impl Trace for Object {
             ObjectKind::BigInt(b) => t.gc(*b),
             ObjectKind::Generator(g) => g.trace(t),
             ObjectKind::ArrayIterator(it) => t.opt(it.object),
-            ObjectKind::StringIterator { .. } | ObjectKind::HtmlDda => {}
+            ObjectKind::StringIterator { .. } | ObjectKind::HtmlDda | ObjectKind::RawJson => {}
+            ObjectKind::Proxy(p) => {
+                t.opt(p.target);
+                t.opt(p.handler);
+            }
+            ObjectKind::IteratorHelper(h) => h.trace(t),
+            ObjectKind::WrappedIterator(r) => r.trace(t),
             ObjectKind::ForIn(f) => {
                 t.opt(f.object);
                 for k in f.visited.iter().chain(f.remaining.iter()) {

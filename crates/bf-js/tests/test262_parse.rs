@@ -304,9 +304,8 @@ fn write_status(table: &str, ran: usize) {
         .iter()
         .map(|(f, why)| format!("- `{f}`: {why}.\n"))
         .collect();
-    let doc = format!(
-        "# Estado de test262\n\n\
-         ## Parsing\n\n\
+    let section = format!(
+        "## Parsing\n\n\
          Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.\n\n\
          - Commit de test262: `{}`\n\
          - {ran} tests parseados (sin ejecutar): deben parsear, salvo los `negative: phase: parse`, \
@@ -318,5 +317,22 @@ fn write_status(table: &str, ran: usize) {
         commit.trim(),
     );
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/test262-status.md");
-    let _ = fs::write(path, doc);
+    let current = fs::read_to_string(&path).unwrap_or_else(|_| "# Estado de test262\n".to_owned());
+    let _ = fs::write(path, replace_section(&current, "## Parsing", &section));
+}
+
+/// Reemplaza la sección que empieza con `heading` (hasta la próxima `## `) o la agrega al
+/// final; las demás secciones (la "Ejecución" del runner) quedan como estaban.
+fn replace_section(doc: &str, heading: &str, section: &str) -> String {
+    let section = format!("{}\n", section.trim_end_matches('\n'));
+    match doc.find(heading) {
+        Some(start) => {
+            let after = start + heading.len();
+            match doc[after..].find("\n## ") {
+                Some(e) => format!("{}{section}\n{}", &doc[..start], &doc[after + e + 1..]),
+                None => format!("{}{section}", &doc[..start]),
+            }
+        }
+        None => format!("{}\n\n{section}", doc.trim_end_matches('\n')),
+    }
 }
