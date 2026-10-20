@@ -1,0 +1,23 @@
+<!DOCTYPE html><style>body{margin:0}table{border-spacing:0}td{padding:0}</style>
+<table><tfoot><tr><td>foot</td></tr></tfoot><tbody><tr><td>body</td></tr></tbody><thead><tr><td>head</td></tr></thead></table>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 800×48
+    Block <table> 0,0 32×48
+      Block <table> 0,0 32×48
+        Block <thead> 0,0 32×16
+          Block <tr> 0,0 32×16
+            Block <td> 0,0 32×16
+              Line 0,0 32×16
+                Text "head" 0,0 32×16
+        Block <tbody> 0,16 32×16
+          Block <tr> 0,16 32×16
+            Block <td> 0,16 32×16
+              Line 0,16 32×16
+                Text "body" 0,16 32×16
+        Block <tfoot> 0,32 32×16
+          Block <tr> 0,32 32×16
+            Block <td> 0,32 32×16
+              Line 0,32 32×16
+                Text "foot" 0,32 32×16
+-->

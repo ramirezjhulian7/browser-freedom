@@ -14,7 +14,10 @@ use tiny_skia::{
     SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use crate::display_list::{DisplayItem, DisplayList, PathOp, Radii};
+use crate::display_list::{
+    BoxShadowParams, DisplayItem, DisplayList, PathOp, Radii, ResolvedGradient,
+};
+use crate::effects::{GradientSampler, blur_channel, blur_margin, spread_radii, to_u8};
 
 /// Constante de Bézier para aproximar un cuarto de elipse.
 const KAPPA: f32 = 0.552_284_8;
@@ -38,6 +41,19 @@ fn paint(c: Rgba, anti_alias: bool) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color(color(c));
     p.anti_alias = anti_alias;
+    // Los colores translúcidos se componen con el pipeline de alta precisión (el de baja
+    // precisión redondea `x / 255` hacia arriba y se aparta en 1 de la composición de los
+    // navegadores), con el color ya premultiplicado y cuantizado a 8 bits como hace Skia (E4).
+    if c.a < 1.0 {
+        let a8 = (c.a * 255.0).round().clamp(0.0, 255.0);
+        if a8 > 0.0 {
+            let q = |v: f32| (v.round().clamp(0.0, 255.0) * a8 / 255.0).round() / a8;
+            if let Some(col) = tiny_skia::Color::from_rgba(q(c.r), q(c.g), q(c.b), a8 / 255.0) {
+                p.set_color(col);
+            }
+        }
+        p.force_hq_pipeline = true;
+    }
     p
 }
 
@@ -161,8 +177,18 @@ struct Canvas {
     layers: Vec<(Pixmap, f32)>,
     masks: Vec<Mask>,
     transforms: Vec<Transform>,
+    /// Grupos de `text-shadow` abiertos (cada uno con su capa en `layers`).
+    shadows: Vec<ShadowGroup>,
     width: u32,
     height: u32,
+}
+
+/// Un grupo de sombra abierto: lo que se pinta dentro va a una capa propia, sin recortes, y al
+/// cerrarlo se desenfoca y se compone con los recortes guardados.
+struct ShadowGroup {
+    bounds: Rect,
+    blur: f32,
+    saved_masks: Vec<Mask>,
 }
 
 impl Canvas {
@@ -255,15 +281,26 @@ impl Canvas {
         radii: &Radii,
     ) {
         let w = [widths.top, widths.right, widths.bottom, widths.left];
-        // Cuatro lados sólidos del mismo color: un solo anillo, sin costuras en las esquinas.
-        if styles.iter().all(|s| *s == BorderStyle::Solid) && colors.iter().all(|c| *c == colors[0])
+        // Todos los lados que se ven son sólidos y del mismo color (y los demás no tienen
+        // ancho): un solo anillo, sin costuras en las esquinas (E4).
+        let shown: Vec<usize> = (0..4)
+            .filter(|&i| {
+                w[i] > 0.0 && !matches!(styles[i], BorderStyle::None | BorderStyle::Hidden)
+            })
+            .collect();
+        let hidden_have_width = (0..4).any(|i| !shown.contains(&i) && w[i] > 0.0);
+        if let Some(&first) = shown.first()
+            && !hidden_have_width
+            && shown
+                .iter()
+                .all(|&i| styles[i] == BorderStyle::Solid && colors[i] == colors[first])
         {
             let inner = shrink(rect, widths);
             let mut pb = PathBuilder::new();
             push_rounded(&mut pb, rect, radii);
             push_rounded(&mut pb, &inner, &radii.shrink(widths));
             if let Some(ring) = pb.finish() {
-                self.fill(&ring, colors[0], !radii.is_zero(), FillRule::EvenOdd);
+                self.fill(&ring, colors[first], !radii.is_zero(), FillRule::EvenOdd);
             }
             return;
         }
@@ -480,17 +517,61 @@ impl Canvas {
         if iw <= 0.0 || ih <= 0.0 || tile.width <= 0.0 || tile.height <= 0.0 {
             return;
         }
-        let x_spans: Vec<(f32, f32, f32)> = match xs {
-            None => vec![(area.x, area.right(), tile.x)],
-            Some(v) => v.iter().map(|&x| (x, x + tile.width, x)).collect(),
+        // Cada tile se pinta por separado con `SpreadMode::Pad`, para que el filtro bilineal no
+        // mezcle un borde de la imagen con el opuesto (E4); si hay demasiados tiles, un solo
+        // patrón repetido por región.
+        let tiles_on = |start: f32, end: f32, origin: f32, size: f32| -> Vec<f32> {
+            let first = ((start - origin) / size).floor() as i64;
+            let last = ((end - origin) / size).ceil() as i64;
+            (first..last).map(|k| origin + k as f32 * size).collect()
         };
-        let y_spans: Vec<(f32, f32, f32)> = match ys {
-            None => vec![(area.y, area.bottom(), tile.y)],
-            Some(v) => v.iter().map(|&y| (y, y + tile.height, y)).collect(),
+        let mut x_tiles: Vec<f32> = match xs {
+            None => tiles_on(area.x, area.right(), tile.x, tile.width),
+            Some(v) => v.to_vec(),
         };
-        let ring = (!radii.is_zero())
-            .then(|| rounded_path(area, radii))
-            .flatten();
+        let mut y_tiles: Vec<f32> = match ys {
+            None => tiles_on(area.y, area.bottom(), tile.y, tile.height),
+            Some(v) => v.to_vec(),
+        };
+        let ts = self.ts();
+        // Tiles de menos de 2 px de dispositivo: el patrón repetido (rellenar regiones subpíxel
+        // sin antialias dejaría huecos).
+        let per_tile = x_tiles.len() * y_tiles.len() <= 4096
+            && tile.width * ts.sx.abs() >= 2.0
+            && tile.height * ts.sy.abs() >= 2.0;
+        // (inicio, fin, origen del patrón) de cada franja.
+        let spans =
+            |tiles: &mut Vec<f32>, list: Option<&[f32]>, a0: f32, a1: f32, o: f32, t: f32| {
+                if per_tile || list.is_some() {
+                    std::mem::take(tiles)
+                        .into_iter()
+                        .map(|p| (p, p + t, p))
+                        .collect()
+                } else {
+                    vec![(a0, a1, o)]
+                }
+            };
+        let x_spans: Vec<(f32, f32, f32)> =
+            spans(&mut x_tiles, xs, area.x, area.right(), tile.x, tile.width);
+        let y_spans: Vec<(f32, f32, f32)> =
+            spans(&mut y_tiles, ys, area.y, area.bottom(), tile.y, tile.height);
+        let spread = if per_tile {
+            SpreadMode::Pad
+        } else {
+            SpreadMode::Repeat
+        };
+        let mut mask = self.masks.last().cloned();
+        if !radii.is_zero()
+            && let Some(ring) = rounded_path(area, radii)
+        {
+            let mut m = mask.unwrap_or_else(|| {
+                let mut m = Mask::new(self.width, self.height).expect("tamaño válido");
+                m.data_mut().fill(255);
+                m
+            });
+            m.intersect_path(&ring, FillRule::Winding, true, ts);
+            mask = Some(m);
+        }
         for &(x0, x1, ox) in &x_spans {
             for &(y0, y1, oy) in &y_spans {
                 let (l, r) = (x0.max(area.x), x1.min(area.right()));
@@ -504,7 +585,7 @@ impl Canvas {
                 };
                 let shader = Pattern::new(
                     image.as_ref(),
-                    SpreadMode::Repeat,
+                    spread,
                     FilterQuality::Bilinear,
                     1.0,
                     Transform::from_translate(ox, oy).pre_scale(tile.width / iw, tile.height / ih),
@@ -514,17 +595,6 @@ impl Canvas {
                     anti_alias: false,
                     ..Paint::default()
                 };
-                let ts = self.ts();
-                let mut mask = self.masks.last().cloned();
-                if let Some(ring) = &ring {
-                    let mut m = mask.unwrap_or_else(|| {
-                        let mut m = Mask::new(self.width, self.height).expect("tamaño válido");
-                        m.data_mut().fill(255);
-                        m
-                    });
-                    m.intersect_path(ring, FillRule::Winding, true, ts);
-                    mask = Some(m);
-                }
                 self.target()
                     .fill_path(&region, &paint, FillRule::Winding, ts, mask.as_ref());
             }
@@ -755,6 +825,515 @@ impl Canvas {
     }
 }
 
+impl Canvas {
+    /// Glifos rellenos como paths, con el origen de cada uno ajustado al píxel de dispositivo.
+    fn text(
+        &mut self,
+        glyphs: &[crate::display_list::GlyphInstance],
+        size: f32,
+        color: Rgba,
+        origin: (f32, f32),
+        y_fit: (f32, f32),
+    ) {
+        let mut pb = PathBuilder::new();
+        // El origen de cada glifo se ajusta al píxel de dispositivo (sin posicionamiento
+        // subpíxel), como hacen los navegadores: así un glifo de Ahem coincide con un
+        // rectángulo en la misma posición.
+        let ts = self.ts();
+        let snap = |v: f32, s: f32, t: f32| {
+            if s != 0.0 {
+                ((v * s + t).round() - t) / s
+            } else {
+                v
+            }
+        };
+        for g in glyphs {
+            let Some(outline) = &g.outline else {
+                continue;
+            };
+            let k = size / outline.units_per_em;
+            let ox = snap(origin.0 + g.x, ts.sx, ts.tx);
+            let oy = snap(origin.1 + g.y, ts.sy, ts.ty);
+            let map = |x: f32, y: f32| {
+                let fit = if y >= 0.0 { y_fit.0 } else { y_fit.1 };
+                (ox + x * k, oy - y * k * fit)
+            };
+            for cmd in &outline.commands {
+                match *cmd {
+                    PathCommand::MoveTo(x, y) => {
+                        let (x, y) = map(x, y);
+                        pb.move_to(x, y);
+                    }
+                    PathCommand::LineTo(x, y) => {
+                        let (x, y) = map(x, y);
+                        pb.line_to(x, y);
+                    }
+                    PathCommand::QuadTo(x1, y1, x, y) => {
+                        let (x1, y1) = map(x1, y1);
+                        let (x, y) = map(x, y);
+                        pb.quad_to(x1, y1, x, y);
+                    }
+                    PathCommand::CurveTo(x1, y1, x2, y2, x, y) => {
+                        let (x1, y1) = map(x1, y1);
+                        let (x2, y2) = map(x2, y2);
+                        let (x, y) = map(x, y);
+                        pb.cubic_to(x1, y1, x2, y2, x, y);
+                    }
+                    PathCommand::Close => pb.close(),
+                }
+            }
+        }
+        if let Some(path) = pb.finish() {
+            self.fill(&path, color, true, FillRule::Winding);
+        }
+    }
+}
+
+// --- E4: gradientes y sombras ---
+
+/// Rectángulo de píxeles de dispositivo `[x0, x1) × [y0, y1)`.
+#[derive(Debug, Clone, Copy)]
+struct DevRect {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+impl DevRect {
+    fn width(&self) -> u32 {
+        (self.x1 - self.x0).max(0) as u32
+    }
+    fn height(&self) -> u32 {
+        (self.y1 - self.y0).max(0) as u32
+    }
+    fn is_empty(&self) -> bool {
+        self.x1 <= self.x0 || self.y1 <= self.y0
+    }
+    fn expand(&self, m: i32) -> DevRect {
+        DevRect {
+            x0: self.x0 - m,
+            y0: self.y0 - m,
+            x1: self.x1 + m,
+            y1: self.y1 + m,
+        }
+    }
+    fn intersect(&self, o: &DevRect) -> DevRect {
+        DevRect {
+            x0: self.x0.max(o.x0),
+            y0: self.y0.max(o.y0),
+            x1: self.x1.min(o.x1),
+            y1: self.y1.min(o.y1),
+        }
+    }
+}
+
+/// `r` agrandado `d` px por cada lado (encogido si `d < 0`).
+fn inflate(r: &Rect, d: f32) -> Rect {
+    Rect::new(
+        r.x - d,
+        r.y - d,
+        (r.width + 2.0 * d).max(0.0),
+        (r.height + 2.0 * d).max(0.0),
+    )
+}
+
+/// `a` menos `b`, como hasta cuatro rectángulos (arriba, abajo, izquierda y derecha).
+fn rect_difference(a: &Rect, b: &Rect) -> Vec<Rect> {
+    let (ax1, ay1) = (a.right(), a.bottom());
+    let (bx0, by0) = (b.x.max(a.x), b.y.max(a.y));
+    let (bx1, by1) = (b.right().min(ax1), b.bottom().min(ay1));
+    if b.width <= 0.0 || b.height <= 0.0 || bx1 <= bx0 || by1 <= by0 {
+        return vec![*a];
+    }
+    let mut out = Vec::with_capacity(4);
+    let mut push = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        if x1 > x0 && y1 > y0 {
+            out.push(Rect::new(x0, y0, x1 - x0, y1 - y0));
+        }
+    };
+    push(a.x, a.y, ax1, by0);
+    push(a.x, by1, ax1, ay1);
+    push(a.x, by0, bx0, by1);
+    push(bx1, by0, ax1, by1);
+    out
+}
+
+/// Coordenada local al tile del punto `p` de un eje: repetido (`list` = `None`) o solo en los
+/// tiles que empiezan en `list`.
+fn tile_local(p: f32, origin: f32, size: f32, list: Option<&[f32]>) -> Option<f32> {
+    match list {
+        None => Some((p - origin).rem_euclid(size)),
+        Some(v) => v.iter().find(|&&s| p >= s && p < s + size).map(|&s| p - s),
+    }
+}
+
+impl Canvas {
+    fn canvas_rect(&self) -> DevRect {
+        DevRect {
+            x0: 0,
+            y0: 0,
+            x1: self.width as i32,
+            y1: self.height as i32,
+        }
+    }
+
+    /// Píxeles de dispositivo que toca `r` (px CSS) con la transformación actual.
+    fn device_rect(&self, r: &Rect) -> DevRect {
+        let ts = self.ts();
+        let (ax, bx) = (r.x * ts.sx + ts.tx, r.right() * ts.sx + ts.tx);
+        let (ay, by) = (r.y * ts.sy + ts.ty, r.bottom() * ts.sy + ts.ty);
+        let clampi = |v: f32| v.clamp(-1e7, 1e7) as i32;
+        DevRect {
+            x0: clampi(ax.min(bx).floor()),
+            y0: clampi(ay.min(by).floor()),
+            x1: clampi(ax.max(bx).ceil()),
+            y1: clampi(ay.max(by).ceil()),
+        }
+    }
+
+    /// El recorte activo, o una máscara que deja pasar todo.
+    fn full_mask(&self) -> Option<Mask> {
+        match self.masks.last() {
+            Some(m) => Some(m.clone()),
+            None => {
+                let mut m = Mask::new(self.width, self.height)?;
+                m.data_mut().fill(255);
+                Some(m)
+            }
+        }
+    }
+
+    /// Una capa de fondo con un gradiente (CSS Images 3 §3): cada píxel de dispositivo del área
+    /// se muestrea en su centro, en la posición correspondiente de su tile.
+    fn gradient(
+        &mut self,
+        area: &Rect,
+        radii: &Radii,
+        tile: &Rect,
+        xs: Option<&[f32]>,
+        ys: Option<&[f32]>,
+        g: &ResolvedGradient,
+    ) {
+        let ts = self.ts();
+        if tile.width <= 0.0 || tile.height <= 0.0 || ts.sx <= 0.0 || ts.sy <= 0.0 {
+            return;
+        }
+        let dev = self.device_rect(area).intersect(&self.canvas_rect());
+        if dev.is_empty() {
+            return;
+        }
+        let sampler = GradientSampler::new(g);
+        let us: Vec<Option<f32>> = (dev.x0..dev.x1)
+            .map(|d| {
+                let p = (d as f32 + 0.5 - ts.tx) / ts.sx;
+                if p < area.x || p >= area.right() {
+                    return None;
+                }
+                tile_local(p, tile.x, tile.width, xs)
+            })
+            .collect();
+        let vs: Vec<Option<f32>> = (dev.y0..dev.y1)
+            .map(|d| {
+                let p = (d as f32 + 0.5 - ts.ty) / ts.sy;
+                if p < area.y || p >= area.bottom() {
+                    return None;
+                }
+                tile_local(p, tile.y, tile.height, ys)
+            })
+            .collect();
+        let Some(mut pix) = Pixmap::new(dev.width(), dev.height()) else {
+            return;
+        };
+        let w = dev.width() as usize;
+        let data = pix.data_mut();
+        for (j, v) in vs.iter().enumerate() {
+            let Some(v) = *v else { continue };
+            for (i, u) in us.iter().enumerate() {
+                let Some(u) = *u else { continue };
+                let k = (j * w + i) * 4;
+                data[k..k + 4].copy_from_slice(&to_u8(&sampler.at(u, v)));
+            }
+        }
+        let mask = if radii.is_zero() {
+            self.masks.last().cloned()
+        } else {
+            let mut m = self.full_mask();
+            if let (Some(m), Some(path)) = (&mut m, rounded_path(area, radii)) {
+                m.intersect_path(&path, FillRule::Winding, true, ts);
+            }
+            m
+        };
+        self.target().draw_pixmap(
+            dev.x0,
+            dev.y0,
+            pix.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            mask.as_ref(),
+        );
+    }
+
+    /// Una sombra de `box-shadow` (CSS Backgrounds 3 §7.1–§7.2). Exterior: la border box
+    /// desplazada y extendida, desenfocada y visible solo fuera de la border box. Interior: el
+    /// exterior de la padding box desplazada y encogida, visible solo dentro de la padding box.
+    fn box_shadow(&mut self, rect: &Rect, radii: &Radii, s: &BoxShadowParams) {
+        if s.color.a <= 0.0 {
+            return;
+        }
+        let ts = self.ts();
+        // σ = blur / 2 (§7.1), en px de dispositivo.
+        let sigma = s.blur / 2.0 * ts.sx.abs();
+        let margin = blur_margin(sigma) as i32 + 1;
+        let spread = if s.inset { -s.spread } else { s.spread };
+        let mut shape = inflate(rect, spread);
+        shape.translate(s.offset.0, s.offset.1);
+        let shape_radii = spread_radii(radii, spread, (rect.width, rect.height)).fit(&shape);
+        // Sin desenfoque ni radios: la sombra es una diferencia de rectángulos que se rellena
+        // igual que un fondo (mismos píxeles y redondeos que un `background-color`).
+        if sigma <= 0.0 && radii.is_zero() && shape_radii.is_zero() {
+            let (from, minus) = if s.inset {
+                (*rect, shape)
+            } else {
+                (shape, *rect)
+            };
+            for r in rect_difference(&from, &minus) {
+                if let Some(p) = rounded_path(&r, &Radii::default()) {
+                    self.fill(&p, s.color, false, FillRule::Winding);
+                }
+            }
+            return;
+        }
+        let shape_path = rounded_path(&shape, &shape_radii);
+        if !s.inset && shape_path.is_none() {
+            return;
+        }
+        let visible = self.canvas_rect().expand(margin);
+        let region = if s.inset {
+            self.device_rect(rect)
+        } else {
+            self.device_rect(&shape)
+        }
+        .expand(margin)
+        .intersect(&visible);
+        if region.is_empty() {
+            return;
+        }
+        let (bw, bh) = (region.width(), region.height());
+        let Some(mut shape_mask) = Mask::new(bw, bh) else {
+            return;
+        };
+        let local = ts.post_translate(-region.x0 as f32, -region.y0 as f32);
+        // Sin radios, sin antialias: como los fondos, para que los bordes coincidan.
+        if let Some(path) = &shape_path {
+            shape_mask.fill_path(path, FillRule::Winding, !shape_radii.is_zero(), local);
+        }
+        if s.inset {
+            shape_mask.invert();
+        }
+        let mut alpha: Vec<f32> = shape_mask
+            .data()
+            .iter()
+            .map(|&a| f32::from(a) / 255.0)
+            .collect();
+        blur_channel(&mut alpha, bw as usize, bh as usize, sigma);
+        // Solo la parte dentro del canvas.
+        let out = region.intersect(&self.canvas_rect());
+        if out.is_empty() {
+            return;
+        }
+        let Some(mut pix) = Pixmap::new(out.width(), out.height()) else {
+            return;
+        };
+        let c = [
+            s.color.r / 255.0 * s.color.a,
+            s.color.g / 255.0 * s.color.a,
+            s.color.b / 255.0 * s.color.a,
+            s.color.a,
+        ];
+        let ow = out.width() as usize;
+        let data = pix.data_mut();
+        for y in out.y0..out.y1 {
+            for x in out.x0..out.x1 {
+                let a = alpha[((y - region.y0) as usize) * bw as usize + (x - region.x0) as usize];
+                if a <= 0.0 {
+                    continue;
+                }
+                let k = (((y - out.y0) as usize) * ow + (x - out.x0) as usize) * 4;
+                let px = [c[0] * a, c[1] * a, c[2] * a, c[3] * a];
+                data[k..k + 4].copy_from_slice(&to_u8(&px));
+            }
+        }
+        // Recorte: fuera de la border box (exterior) o dentro de la padding box (interior).
+        let Some(mut mask) = self.full_mask() else {
+            return;
+        };
+        if let Some(box_path) = rounded_path(rect, radii) {
+            let aa = !radii.is_zero();
+            if s.inset {
+                mask.intersect_path(&box_path, FillRule::Winding, aa, ts);
+            } else if let Some(mut inside) = Mask::new(self.width, self.height) {
+                inside.fill_path(&box_path, FillRule::Winding, aa, ts);
+                for (m, i) in mask.data_mut().iter_mut().zip(inside.data()) {
+                    *m = ((u16::from(*m) * (255 - u16::from(*i)) + 127) / 255) as u8;
+                }
+            }
+        } else if s.inset {
+            return;
+        }
+        self.target().draw_pixmap(
+            out.x0,
+            out.y0,
+            pix.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            Some(&mask),
+        );
+    }
+
+    /// Cobertura de lo que pinta `draw` (en una capa aparte, sin recortes).
+    fn coverage(&mut self, draw: impl FnOnce(&mut Canvas)) -> Option<Mask> {
+        let layer = Pixmap::new(self.width, self.height)?;
+        let saved = std::mem::take(&mut self.masks);
+        self.layers.push((layer, 1.0));
+        draw(self);
+        let (layer, _) = self.layers.pop().expect("capa del recorte");
+        self.masks = saved;
+        Some(Mask::from_pixmap(
+            layer.as_ref(),
+            tiny_skia::MaskType::Alpha,
+        ))
+    }
+
+    /// Apila `mask` intersecada con el recorte activo. Se cierra con `PopClip`.
+    fn push_mask(&mut self, mut mask: Mask) {
+        if let Some(prev) = self.masks.last() {
+            for (m, p) in mask.data_mut().iter_mut().zip(prev.data()) {
+                *m = ((u16::from(*m) * u16::from(*p) + 127) / 255) as u8;
+            }
+        }
+        self.masks.push(mask);
+    }
+
+    /// Recorte con la cobertura de lo que pinta `draw`.
+    fn push_clip_drawn(&mut self, draw: impl FnOnce(&mut Canvas)) {
+        let mask = self
+            .coverage(draw)
+            .or_else(|| Mask::new(self.width, self.height));
+        if let Some(mask) = mask {
+            self.push_mask(mask);
+        }
+    }
+
+    /// Recorte a los glifos (`background-clip: text`). Los glifos de texto opaco (que se pinta
+    /// encima) solo dejan pasar los píxeles que cubren del todo: así el fondo no asoma por el
+    /// antialias de sus bordes; los de texto translúcido, su cobertura.
+    fn push_clip_text(&mut self, items: &[DisplayItem]) {
+        let draw = |c: &mut Canvas, opaque: bool| {
+            for item in items {
+                if let DisplayItem::Text {
+                    glyphs,
+                    size,
+                    origin,
+                    y_fit,
+                    color,
+                    ..
+                } = item
+                    && (color.a >= 1.0) == opaque
+                {
+                    c.text(glyphs, *size, Rgba::BLACK, *origin, *y_fit);
+                }
+            }
+        };
+        let soft = self.coverage(|c| draw(c, false));
+        let hard = self.coverage(|c| draw(c, true));
+        let (Some(mut soft), Some(hard)) = (soft, hard) else {
+            return self.push_clip_drawn(|_| {});
+        };
+        for (s, h) in soft.data_mut().iter_mut().zip(hard.data()) {
+            if *h == 255 {
+                *s = 255;
+            }
+        }
+        self.push_mask(soft);
+    }
+
+    /// Abre un grupo de sombra de texto: una capa nueva, sin recortes.
+    fn push_shadow(&mut self, bounds: Rect, blur: f32) {
+        let Some(layer) = Pixmap::new(self.width, self.height) else {
+            return;
+        };
+        let saved_masks = std::mem::take(&mut self.masks);
+        self.layers.push((layer, 1.0));
+        self.shadows.push(ShadowGroup {
+            bounds,
+            blur,
+            saved_masks,
+        });
+    }
+
+    /// Cierra el grupo: desenfoca la capa (σ = blur / 2, CSS Text Decoration 3 §4) en la zona
+    /// de `bounds` y la compone con los recortes que había al abrirlo.
+    fn pop_shadow(&mut self) {
+        let Some(group) = self.shadows.pop() else {
+            return;
+        };
+        if self.layers.len() <= 1 {
+            self.masks = group.saved_masks;
+            return;
+        }
+        let (layer, _) = self.layers.pop().expect("capa del grupo");
+        self.masks = group.saved_masks;
+        let ts = self.ts();
+        let sigma = group.blur / 2.0 * ts.sx.abs();
+        let margin = blur_margin(sigma) as i32 + 1;
+        let region = self
+            .device_rect(&group.bounds)
+            .expand(margin)
+            .intersect(&self.canvas_rect());
+        if region.is_empty() {
+            return;
+        }
+        let (rw, rh) = (region.width() as usize, region.height() as usize);
+        let lw = layer.width() as usize;
+        let src = layer.data();
+        let mut channels = vec![vec![0.0f32; rw * rh]; 4];
+        for y in 0..rh {
+            for x in 0..rw {
+                let k = ((y + region.y0 as usize) * lw + x + region.x0 as usize) * 4;
+                for (c, ch) in channels.iter_mut().enumerate() {
+                    ch[y * rw + x] = f32::from(src[k + c]) / 255.0;
+                }
+            }
+        }
+        for ch in &mut channels {
+            blur_channel(ch, rw, rh, sigma);
+        }
+        let Some(mut pix) = Pixmap::new(region.width(), region.height()) else {
+            return;
+        };
+        let data = pix.data_mut();
+        for i in 0..rw * rh {
+            let px = [
+                channels[0][i],
+                channels[1][i],
+                channels[2][i],
+                channels[3][i],
+            ];
+            data[i * 4..i * 4 + 4].copy_from_slice(&to_u8(&px));
+        }
+        let mask = self.masks.last().cloned();
+        self.target().draw_pixmap(
+            region.x0,
+            region.y0,
+            pix.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            mask.as_ref(),
+        );
+    }
+}
+
 /// Rasteriza `dl` en un pixmap de `size` px CSS por `scale` (RGBA8 premultiplicado), sobre el
 /// color de fondo `bg`.
 pub fn render(dl: &DisplayList, size: Size, scale: f32, bg: Rgba) -> Pixmap {
@@ -778,6 +1357,7 @@ pub fn render_scrolled(
         layers: vec![(base, 1.0)],
         masks: Vec::new(),
         transforms: vec![Transform::from_scale(scale, scale).pre_translate(-scroll.0, -scroll.1)],
+        shadows: Vec::new(),
         width,
         height,
     };
@@ -802,59 +1382,7 @@ pub fn render_scrolled(
                 origin,
                 y_fit,
                 ..
-            } => {
-                let mut pb = PathBuilder::new();
-                // El origen de cada glifo se ajusta al píxel de dispositivo (sin posicionamiento
-                // subpíxel), como hacen los navegadores: así un glifo de Ahem coincide con un
-                // rectángulo en la misma posición.
-                let ts = canvas.ts();
-                let snap = |v: f32, s: f32, t: f32| {
-                    if s != 0.0 {
-                        ((v * s + t).round() - t) / s
-                    } else {
-                        v
-                    }
-                };
-                for g in glyphs {
-                    let Some(outline) = &g.outline else {
-                        continue;
-                    };
-                    let k = size / outline.units_per_em;
-                    let ox = snap(origin.0 + g.x, ts.sx, ts.tx);
-                    let oy = snap(origin.1 + g.y, ts.sy, ts.ty);
-                    let map = |x: f32, y: f32| {
-                        let fit = if y >= 0.0 { y_fit.0 } else { y_fit.1 };
-                        (ox + x * k, oy - y * k * fit)
-                    };
-                    for cmd in &outline.commands {
-                        match *cmd {
-                            PathCommand::MoveTo(x, y) => {
-                                let (x, y) = map(x, y);
-                                pb.move_to(x, y);
-                            }
-                            PathCommand::LineTo(x, y) => {
-                                let (x, y) = map(x, y);
-                                pb.line_to(x, y);
-                            }
-                            PathCommand::QuadTo(x1, y1, x, y) => {
-                                let (x1, y1) = map(x1, y1);
-                                let (x, y) = map(x, y);
-                                pb.quad_to(x1, y1, x, y);
-                            }
-                            PathCommand::CurveTo(x1, y1, x2, y2, x, y) => {
-                                let (x1, y1) = map(x1, y1);
-                                let (x2, y2) = map(x2, y2);
-                                let (x, y) = map(x, y);
-                                pb.cubic_to(x1, y1, x2, y2, x, y);
-                            }
-                            PathCommand::Close => pb.close(),
-                        }
-                    }
-                }
-                if let Some(path) = pb.finish() {
-                    canvas.fill(&path, *color, true, FillRule::Winding);
-                }
-            }
+            } => canvas.text(glyphs, *size, *color, *origin, *y_fit),
             DisplayItem::Line { rect, color, style } => canvas.decoration(rect, *color, *style),
             DisplayItem::Image { rect, image } => canvas.image(rect, image),
             DisplayItem::Widget {
@@ -890,7 +1418,34 @@ pub fn render_scrolled(
                 ys,
                 image,
             } => canvas.background_image(area, radii, tile, xs.as_deref(), ys.as_deref(), image),
+            DisplayItem::Gradient {
+                area,
+                radii,
+                tile,
+                xs,
+                ys,
+                gradient,
+            } => canvas.gradient(area, radii, tile, xs.as_deref(), ys.as_deref(), gradient),
+            DisplayItem::BoxShadow {
+                rect,
+                radii,
+                shadow,
+            } => canvas.box_shadow(rect, radii, shadow),
+            DisplayItem::PushShadow { bounds, blur } => canvas.push_shadow(*bounds, *blur),
+            DisplayItem::PopShadow => canvas.pop_shadow(),
             DisplayItem::PushClip { rect, radii } => canvas.push_clip(rect, radii),
+            DisplayItem::PushClipBorder {
+                rect,
+                widths,
+                styles,
+                radii,
+            } => {
+                let (rect, widths, styles, radii) = (*rect, *widths, *styles, *radii);
+                canvas.push_clip_drawn(|c| {
+                    c.border(&rect, &widths, &[Rgba::BLACK; 4], &styles, &radii);
+                });
+            }
+            DisplayItem::PushClipText { glyphs } => canvas.push_clip_text(glyphs),
             DisplayItem::PopClip => {
                 canvas.masks.pop();
             }

@@ -308,6 +308,8 @@ impl<'a> Layout<'a> {
                     width: 0.0,
                     break_after: true,
                 }),
+                // E4: las cajas de tabla nunca quedan en un IFC (van dentro de su envoltorio).
+                BoxKind::Table | BoxKind::TablePart => {}
                 BoxKind::InlineBlock
                 | BoxKind::Replaced { .. }
                 | BoxKind::Block
@@ -364,6 +366,14 @@ impl<'a> Layout<'a> {
             // inline-flex: la baseline del contenedor es la de su primer ítem (Flexbox §8.5).
             (BoxKind::InlineBlock, _) if crate::flex::is_flex_container(b) => {
                 crate::flex::container_baseline(&fragment).map_or(outer.height, |y| y - outer.y)
+            }
+            // E4: inline-grid (CSS Grid 2 §9.1) e inline-table (CSS 2.2 §17.5.3: la baseline de
+            // la primera fila).
+            (BoxKind::InlineBlock, _) if crate::grid::is_grid_container(b) => {
+                crate::grid::container_baseline(&fragment).map_or(outer.height, |y| y - outer.y)
+            }
+            (BoxKind::InlineBlock, _) if crate::table::is_table_wrapper(b) => {
+                fragment.baseline.map_or(outer.height, |y| y - outer.y)
             }
             (BoxKind::InlineBlock, true) => {
                 last_line_baseline(&fragment.children).unwrap_or(outer.height)
@@ -1173,7 +1183,7 @@ fn last_line_baseline(frags: &[Fragment]) -> Option<f32> {
         if f.kind == FragmentKind::Line {
             return f.baseline;
         }
-        if f.kind == FragmentKind::Block
+        if (f.kind == FragmentKind::Block || crate::grid::is_item_fragment(f)) // E4 grid
             && let Some(b) = last_line_baseline(&f.children)
         {
             return Some(b);

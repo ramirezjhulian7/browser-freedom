@@ -19,7 +19,7 @@ use bf_dom::{Document, NodeData, NodeId, QuirksMode};
 
 use crate::hints::presentational_hints;
 use crate::properties::shorthands::{ShorthandDef, shorthand_by_name};
-use crate::properties::types::{Content, Display, Float, Position};
+use crate::properties::types::{Content, Display, Float, Position, TextAlign};
 use crate::properties::{
     ComputeContext, ComputedStyle, CssWide, CustomProperties, LonghandId, PROPERTIES, Value,
     initial_values, longhand_by_name,
@@ -653,6 +653,14 @@ impl<'a> Styler<'a> {
                 for d in quirks_margin_declarations(self.doc, node) {
                     owned.push((Origin::UserAgent, false, d));
                 }
+            }
+            // E4: HTML §15.3.8: un `th` cuyo padre tiene el valor inicial de `text-align` se
+            // centra (regla de la hoja UA que depende de un valor computado).
+            if self.doc.element(node).is_some_and(|e| e.is_html("th"))
+                && parent.is_some_and(|p| p.text_align == TextAlign::Start)
+                && let Ok(d) = parse_declaration("text-align: center")
+            {
+                owned.push((Origin::UserAgent, false, d));
             }
             for d in presentational_hints(self.doc, node) {
                 owned.push((Origin::Author, false, d));

@@ -1,0 +1,15 @@
+<!DOCTYPE html><style>body{margin:0} .g{display:grid;grid-template-columns:100px 100px;grid-template-rows:60px 60px} .g>div{width:20px;height:10px}</style>
+<div class=g><div id=a style="justify-self:center;align-self:center"></div><div id=b style="justify-self:end;align-self:end"></div><div id=c style="margin:auto"></div><div id=d style="margin-left:auto;align-self:start"></div></div>
+<div class=g style="justify-items:center;align-items:end"><div id=e></div><div id=f style="width:auto;height:auto"></div></div>
+<!-- expect
+Block <html> 0,0 800×240
+  Block <body> 0,0 800×240
+    Block <div.g> 0,0 800×120
+      InlineBlock <div#a> 40,25 20×10
+      InlineBlock <div#b> 180,50 20×10
+      InlineBlock <div#c> 40,85 20×10
+      InlineBlock <div#d> 180,60 20×10
+    Block <div.g> 0,120 800×120
+      InlineBlock <div#e> 40,170 20×10
+      InlineBlock <div#f> 150,180 0×0
+-->

@@ -118,6 +118,43 @@ pub enum Widget {
     ColorSwatch(Rgba),
 }
 
+/// Un tramo de borde colapsado ya resuelto (CSS 2.2 §17.6.2), en coordenadas absolutas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderSegment {
+    /// Rectángulo del tramo: su alto es el ancho del borde si es horizontal, y su ancho si es
+    /// vertical.
+    pub rect: Rect,
+    pub horizontal: bool,
+    pub style: bf_style::properties::types::BorderStyle,
+    pub color: Rgba,
+}
+
+/// Datos de pintura de una tabla (CSS 2.2 §17.5.1 y §17.6).
+#[derive(Debug, Clone, Default)]
+pub struct TablePaint {
+    /// Bordes colapsados (`border-collapse: collapse`); `None` en el modelo separado.
+    pub collapsed: Option<Vec<BorderSegment>>,
+}
+
+/// Datos de pintura de una celda: las capas de la tabla que se pintan detrás de ella (grupo de
+/// columnas, columna, grupo de filas y fila, en ese orden) con su rectángulo, y si se oculta por
+/// `empty-cells: hide`.
+#[derive(Debug, Clone, Default)]
+pub struct CellPaint {
+    pub layers: Vec<(Arc<ComputedStyle>, Rect)>,
+    pub hidden: bool,
+}
+
+/// Papel de un fragmento en una tabla: la tabla pinta los fondos y bordes de sus partes y
+/// celdas (CSS 2.2 Apéndice E, paso 4 para tablas).
+#[derive(Debug, Clone)]
+pub enum TableRole {
+    Table(Box<TablePaint>),
+    /// Grupo de filas o fila.
+    Part,
+    Cell(Box<CellPaint>),
+}
+
 #[derive(Debug, Clone)]
 pub struct Fragment {
     /// Border box (para `Line`, la line box; para `Text`, el content area del texto).
@@ -145,6 +182,8 @@ pub struct Fragment {
     /// Border box de la leyenda que corta el borde superior de un `<fieldset>` (HTML
     /// §15.3.13).
     pub legend: Option<Rect>,
+    /// Papel en una tabla (E4).
+    pub table: Option<TableRole>,
 }
 
 impl Fragment {
@@ -166,6 +205,7 @@ impl Fragment {
             baseline: None,
             widget: None,
             legend: None,
+            table: None,
         }
     }
 
@@ -180,6 +220,19 @@ impl Fragment {
         }
         if let Some(legend) = &mut self.legend {
             legend.translate(dx, dy);
+        }
+        match &mut self.table {
+            Some(TableRole::Table(t)) => {
+                for s in t.collapsed.iter_mut().flatten() {
+                    s.rect.translate(dx, dy);
+                }
+            }
+            Some(TableRole::Cell(c)) => {
+                for (_, r) in &mut c.layers {
+                    r.translate(dx, dy);
+                }
+            }
+            _ => {}
         }
         for child in &mut self.children {
             child.translate(dx, dy);

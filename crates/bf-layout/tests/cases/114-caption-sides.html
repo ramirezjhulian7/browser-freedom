@@ -1,0 +1,19 @@
+<!DOCTYPE html><style>body{margin:0}table{border-spacing:0}td{padding:0}</style>
+<table><caption>top</caption><caption style="caption-side:bottom">bottom</caption><tr><td>cell</td></tr></table>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 800×48
+    Block <table> 0,0 48×48
+      Block <caption> 0,0 48×16
+        Line 0,0 48×16
+          Text "top" 12,0 24×16
+      Block <table> 0,16 48×16
+        Block <tbody> 0,16 48×16
+          Block <tr> 0,16 48×16
+            Block <td> 0,16 48×16
+              Line 0,16 48×16
+                Text "cell" 0,16 32×16
+      Block <caption> 0,32 48×16
+        Line 0,32 48×16
+          Text "bottom" 0,32 48×16
+-->
