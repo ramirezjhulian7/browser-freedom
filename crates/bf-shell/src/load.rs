@@ -120,6 +120,7 @@ pub struct Meta {
     pub error: Option<LoadError>,
 }
 
+#[derive(Clone)]
 pub struct Loaded {
     pub doc: Document,
     /// URL del documento: la final, después de redirecciones.
@@ -196,6 +197,8 @@ pub struct LoadContext {
     /// (título, URL) de las páginas visitadas, la más reciente primero.
     pub recent: Vec<(String, String)>,
     pub theme: Theme,
+    /// Cuerpo `POST` y su `Content-Type` (envío de un formulario).
+    pub post: Option<(Vec<u8>, String)>,
 }
 
 impl LoadContext {
@@ -210,6 +213,7 @@ impl LoadContext {
             },
             recent: Vec::new(),
             theme: Theme::for_system(None),
+            post: None,
         }
     }
 }
@@ -230,7 +234,7 @@ pub fn load_with(url: &Url, ctx: &LoadContext) -> Loaded {
     if url.scheme == "about" {
         return internal::page(url, ctx);
     }
-    match fetch_document(url, ctx.net.clone()) {
+    match fetch_document_with(url, ctx.net.clone(), ctx.post.clone()) {
         // Un 4xx/5xx sin cuerpo: la página de error interna (con cuerpo, se muestra el del
         // servidor, como hacen los navegadores).
         Ok(l) if l.meta.bytes == 0 && l.meta.status.as_ref().is_some_and(|s| s.0 >= 400) => {
@@ -260,10 +264,24 @@ pub fn document_base_url(doc: &Document, url: &Url) -> Url {
 
 /// Fetch y parseo de `url` con `net` (que conserva conexiones y cookies entre cargas).
 pub fn fetch_document(url: &Url, net: Arc<NetLoader>) -> Result<Loaded, LoadError> {
+    fetch_document_with(url, net, None)
+}
+
+/// Como [`fetch_document`], con un cuerpo `POST` (envío de formularios): `(bytes, Content-Type)`.
+pub fn fetch_document_with(
+    url: &Url,
+    net: Arc<NetLoader>,
+    post: Option<(Vec<u8>, String)>,
+) -> Result<Loaded, LoadError> {
     let start = Instant::now();
+    let mut options = FetchOptions::document();
+    if let Some(body) = post {
+        options.method = bf_net::Method::Post;
+        options.body = Some(body);
+    }
     let response = net
         .fetcher
-        .fetch(url, &FetchOptions::document())
+        .fetch(url, &options)
         .map_err(|e| LoadError::from_fetch(&e))?;
     if !response.ok() {
         eprintln!(

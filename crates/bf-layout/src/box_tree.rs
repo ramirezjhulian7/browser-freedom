@@ -251,7 +251,7 @@ fn replaced_default(el: &bf_dom::Element) -> Option<Size> {
             width: attr_px("width").unwrap_or(300.0),
             height: attr_px("height").unwrap_or(150.0),
         }),
-        Namespace::Html => match el.name.as_str() {
+        Namespace::Html => match el.name.as_lossy_str() {
             // Sin datos de imagen: "represents nothing" → dimensiones naturales 0 (HTML §15.4.2).
             "img" => Some(Size::default()),
             // Tamaño por defecto de los reemplazados sin dimensiones naturales (CSS 2.2 §10.3.2).
@@ -495,7 +495,7 @@ impl<'a> Builder<'a> {
             match &self.doc.get(child).data {
                 NodeData::Text(t) => {
                     out.push(Item::Inline(LayoutBox::new(
-                        BoxKind::Text(t.clone()),
+                        BoxKind::Text(t.to_string()),
                         style.clone(),
                         Some(node),
                     )));

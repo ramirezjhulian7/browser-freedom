@@ -1,14 +1,16 @@
-//! Tipos comunes del motor: interning de strings (`Atom`), `SourceLocation` y utilidades compartidas.
+//! Tipos comunes del motor: el texto del DOM ([`DomString`], WTF-8), strings internados
+//! ([`Atom`]), namespaces y utilidades compartidas.
 
 #![forbid(unsafe_code)]
 
-/// Texto del DOM.
-///
-/// Alias temporal. Cuando exista bf-js pasará a un tipo WTF-8 para admitir surrogates sueltos (ver
-/// TODO(bf-dom) en el tokenizador).
-pub type DomString = String;
+mod atom;
+mod dom_string;
 
-/// Namespaces de <https://infra.spec.whatwg.org/#namespaces>.
+pub use atom::Atom;
+pub use dom_string::DomString;
+
+/// Namespaces de <https://infra.spec.whatwg.org/#namespaces>; `Other` es cualquier otro
+/// namespace URI (no vacío) de un documento XML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Namespace {
     Html,
@@ -17,6 +19,7 @@ pub enum Namespace {
     XLink,
     Xml,
     XmlNs,
+    Other(Atom),
 }
 
 impl Namespace {
@@ -28,7 +31,22 @@ impl Namespace {
             Namespace::XLink => "http://www.w3.org/1999/xlink",
             Namespace::Xml => "http://www.w3.org/XML/1998/namespace",
             Namespace::XmlNs => "http://www.w3.org/2000/xmlns/",
+            Namespace::Other(a) => a.as_str(),
         }
+    }
+
+    /// El namespace de un URI (`None` para el string vacío, que es "sin namespace").
+    pub fn from_uri(uri: &str) -> Option<Namespace> {
+        Some(match uri {
+            "" => return None,
+            "http://www.w3.org/1999/xhtml" => Namespace::Html,
+            "http://www.w3.org/2000/svg" => Namespace::Svg,
+            "http://www.w3.org/1998/Math/MathML" => Namespace::MathMl,
+            "http://www.w3.org/1999/xlink" => Namespace::XLink,
+            "http://www.w3.org/XML/1998/namespace" => Namespace::Xml,
+            "http://www.w3.org/2000/xmlns/" => Namespace::XmlNs,
+            other => Namespace::Other(Atom::new(other)),
+        })
     }
 }
 

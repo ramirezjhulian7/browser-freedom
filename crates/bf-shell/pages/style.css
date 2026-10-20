@@ -41,6 +41,7 @@ code {
   font-weight: 700;
   font-size: 26px;
 }
+img.mark { display: block; }
 .card {
   background: var(--surface);
   border: 1px solid var(--border);

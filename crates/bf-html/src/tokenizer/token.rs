@@ -9,6 +9,9 @@ pub enum Token {
     Comment(String),
     ProcessingInstruction(ProcessingInstruction),
     Character(char),
+    /// Un surrogate suelto de la entrada (13.2.3.5): se trata como un carácter más pero no es
+    /// representable en `char`.
+    LoneSurrogate(u16),
     Eof,
 }
 
