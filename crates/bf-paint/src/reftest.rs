@@ -585,6 +585,11 @@ pub const GROUPS: &[&str] = &[
     "css/css-backgrounds",
     "css/css-flexbox",
     "css/selectors",
+    // E4: tablas, grid y outline.
+    "css/CSS2/tables",
+    "css/css-tables",
+    "css/css-grid",
+    "css/css-ui",
 ];
 
 /// Tabla Markdown por directorio.
@@ -699,6 +704,9 @@ const KNOWN_ISSUES: &str = "## Tests con expectativa dudosa
 - Namespaces arbitrarios en el DOM (`Namespace::Other` con la URI): hoy el parser XML mapea
   los namespaces desconocidos o ausentes a HTML, así que `css/selectors/of-type-selectors.xhtml`
   no puede pasar.
+- `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
+  que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
+- `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.
 ";

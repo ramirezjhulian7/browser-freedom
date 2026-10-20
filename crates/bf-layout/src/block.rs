@@ -83,6 +83,12 @@ pub(crate) struct Layout<'a> {
     pub forced_height: Option<f32>,
     /// Leyenda renderizada del `<fieldset>` en curso, que `block_children` no coloca.
     pub legend: Option<&'a LayoutBox>,
+    /// E4: columnas de cada tabla ya medidas (por dirección de la caja de tabla).
+    pub table_cache: std::collections::HashMap<usize, std::rc::Rc<crate::table::ColumnInfo>>,
+    /// E4: datos de pintura de la última tabla maquetada, para su fragmento.
+    pub table_paint: Option<crate::fragment::TablePaint>,
+    pub grid_baseline: Option<f32>, // E4 grid: baseline del último contenedor grid maquetado
+    pub bfc_items: Vec<usize>,      // E4 grid: ítems en curso (raíces de formato independientes)
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -285,6 +291,10 @@ impl<'a> Layout<'a> {
             root: None,
             forced_height: None,
             legend: None,
+            table_cache: std::collections::HashMap::new(),
+            table_paint: None,
+            grid_baseline: None,   // E4 grid
+            bfc_items: Vec::new(), // E4 grid
         }
     }
 
@@ -344,7 +354,7 @@ impl<'a> Layout<'a> {
     }
 
     pub(crate) fn bfc(&self, b: &LayoutBox) -> bool {
-        establishes_bfc(b, self.is_root(b))
+        establishes_bfc(b, self.is_root(b)) || self.bfc_items.contains(&(b as *const _ as usize)) // E4 grid
     }
 
     fn collapses_top(&self, b: &LayoutBox) -> bool {
@@ -609,19 +619,25 @@ impl<'a> Layout<'a> {
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);
         let edges_h = border.horizontal() + padding.horizontal();
+        // E4: el ancho de una tabla (y de su envoltorio) lo decide el algoritmo de tablas.
+        let margins_h = margin_value(&style.margin_left, cb.width).unwrap_or(0.0)
+            + margin_value(&style.margin_right, cb.width).unwrap_or(0.0);
+        let table_w = self.table_fixed_width(b, (avail.width - margins_h).max(0.0), cb.width);
         // Ancho fijo: el de un reemplazado o el intrínseco de un control con `width: auto`.
-        let fixed_w = match &b.kind {
-            BoxKind::Replaced { natural, ratio } => {
-                Some(self.replaced_size(b, *natural, *ratio, cb).width)
-            }
-            _ if specified_width(style, cb.width, edges_h).is_none() => {
-                self.control_size(b).0.map(|w| {
-                    let (min, max) = width_limits(style, cb.width, edges_h);
-                    w.min(max).max(min)
-                })
-            }
-            _ => None,
-        };
+        let fixed_w = table_w
+            .or(match &b.kind {
+                BoxKind::Replaced { natural, ratio } => {
+                    Some(self.replaced_size(b, *natural, *ratio, cb).width)
+                }
+                _ if specified_width(style, cb.width, edges_h).is_none() => {
+                    self.control_size(b).0.map(|w| {
+                        let (min, max) = width_limits(style, cb.width, edges_h);
+                        w.min(max).max(min)
+                    })
+                }
+                _ => None,
+            })
+            .or_else(|| self.keyword_width(b, avail.width - margins_h - edges_h, cb.width));
         let (content_w, ml, mr) = match fixed_w {
             Some(width) => {
                 let rest = avail.width - width - edges_h;
@@ -720,16 +736,20 @@ impl<'a> Layout<'a> {
             x: content_x,
             y: content_top,
             width: content_w,
-            height: spec_h.map(|h| {
-                let (lo, hi) = height_limits(style, cb.height, edges_v);
-                h.min(hi).max(lo)
-            }),
+            height: spec_h
+                .map(|h| {
+                    let (lo, hi) = height_limits(style, cb.height, edges_v);
+                    h.min(hi).max(lo)
+                })
+                // E4: el alto en % de una tabla se resuelve contra el containing block de su
+                // envoltorio.
+                .or_else(|| cb.height.filter(|_| crate::table::is_table_wrapper(b))),
         };
         let positioned = is_positioned(style);
         if positioned {
             self.abs_frames.push(Vec::new());
         }
-        let bfc = establishes_bfc(b, is_root);
+        let bfc = establishes_bfc(b, is_root) || self.bfc(b); // E4 grid
         let mut own_floats = FloatContext::default();
         let fl: &mut FloatContext = if bfc { &mut own_floats } else { floats };
         let mut trailing = CollapsedMargin::default();
@@ -740,6 +760,9 @@ impl<'a> Layout<'a> {
                 (Vec::new(), size.height)
             }
             _ if crate::flex::is_flex_container(b) => self.flex_layout(b, child_cb),
+            // E4: grid y tablas.
+            _ if crate::grid::is_grid_container(b) => self.grid_layout(b, child_cb),
+            BoxKind::Table => self.table_layout(b, child_cb),
             _ if b.has_inline_children() => self.inline_content(b, child_cb, fl),
             _ => {
                 let (frags, end, pending) = self.block_children(b, child_cb, fl);
@@ -754,6 +777,13 @@ impl<'a> Layout<'a> {
         };
         self.legend = outer_legend;
         let mut content_h = spec_h.unwrap_or(auto_h);
+        // E4: en tablas `height` es un mínimo; en celdas solo cuenta para la altura de la fila
+        // (CSS 2.2 §17.5.3), así que la celda mide su contenido.
+        if matches!(b.kind, BoxKind::Table) {
+            content_h = spec_h.map_or(auto_h, |h| h.max(auto_h));
+        } else if b.style.display == Display::TableCell && forced.is_none() {
+            content_h = auto_h;
+        }
         // Un botón vacío mide una línea.
         if spec_h.is_none() && b.control == Some(Control::Button) {
             content_h = content_h.max(self.line_height(style));
@@ -780,6 +810,8 @@ impl<'a> Layout<'a> {
         );
         if !matches!(b.kind, BoxKind::Replaced { .. })
             && !crate::flex::is_flex_container(b)
+            && !crate::grid::is_grid_container(b) // E4
+            && !matches!(b.kind, BoxKind::Table) // E4
             && !scrolls
         {
             let free = content_h - auto_h;
@@ -815,7 +847,7 @@ impl<'a> Layout<'a> {
         let mut fragment = Fragment::new(kind, rect, b.style.clone());
         fragment.node = b.node;
         fragment.pseudo = b.pseudo;
-        fragment.anonymous = matches!(b.kind, BoxKind::AnonymousBlock);
+        fragment.anonymous = matches!(b.kind, BoxKind::AnonymousBlock) || b.node.is_none();
         fragment.margin = margins;
         fragment.border = border;
         fragment.padding = padding;
@@ -854,6 +886,10 @@ impl<'a> Layout<'a> {
             children.push(self.marker_fragment(marker, anchor, content_x, content_top));
         }
         fragment.children = children;
+        self.table_fragment(b, &mut fragment); // E4
+        if crate::grid::is_grid_container(b) {
+            fragment.baseline = self.grid_baseline.take(); // E4 grid
+        }
         if positioned {
             fragment.z_index = match style.z_index {
                 ZIndex::Integer(z) => Some(z),
@@ -968,6 +1004,13 @@ impl<'a> Layout<'a> {
         if let BoxKind::Replaced { natural, ratio } = &b.kind {
             return self.replaced_size(b, *natural, *ratio, cb).width;
         }
+        // E4: tablas.
+        if let Some(w) = self.table_fixed_width(b, (cb.width - margins_h).max(0.0), cb.width) {
+            return w;
+        }
+        if let Some(w) = self.keyword_width(b, cb.width - margins_h - edges_h, cb.width) {
+            return w;
+        }
         let w = match specified_width(style, cb.width, edges_h) {
             Some(w) => w,
             None => match self.control_size(b).0 {
@@ -977,6 +1020,33 @@ impl<'a> Layout<'a> {
         };
         let (min, max) = width_limits(style, cb.width, edges_h);
         w.min(max).max(min)
+    }
+
+    /// E4: `width: min-content | max-content | fit-content` (CSS Sizing 3 §3.1 y §3.2): el
+    /// ancho de contenido, limitado por `min-width`/`max-width`.
+    pub(crate) fn keyword_width(
+        &mut self,
+        b: &'a LayoutBox,
+        available: f32,
+        cb_width: f32,
+    ) -> Option<f32> {
+        if matches!(b.kind, BoxKind::Replaced { .. }) {
+            return None;
+        }
+        let kind = b.style.width.clone();
+        if !matches!(kind, Size::MinContent | Size::MaxContent | Size::FitContent) {
+            return None;
+        }
+        let (min, max) = self.intrinsic_widths(b);
+        let w = match kind {
+            Size::MinContent => min,
+            Size::MaxContent => max,
+            _ => min.max(available).min(max),
+        };
+        let s = &b.style;
+        let edges_h = border_edges(s).horizontal() + padding_edges(s, cb_width).horizontal();
+        let (lo, hi) = width_limits(s, cb_width, edges_h);
+        Some(w.min(hi).max(lo))
     }
 
     /// Layout y colocación de un float.
@@ -990,6 +1060,7 @@ impl<'a> Layout<'a> {
         let margins = margin_edges(&b.style, cb.width);
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
+        let pending = self.pending_abs_marks(); // E4 grid
         let (mut f, _) =
             self.box_contents(b, cb, 0.0, 0.0, content_w, margins, &mut scratch, false);
         let outer = f.margin_rect();
@@ -1008,6 +1079,7 @@ impl<'a> Layout<'a> {
             cb.x + cb.width,
         );
         f.translate(x - outer.x, y - outer.y);
+        self.shift_pending_abs(pending, x - outer.x, y - outer.y); // E4 grid
         f
     }
 
@@ -1032,6 +1104,13 @@ impl<'a> Layout<'a> {
         }
         if crate::flex::is_flex_container(b) {
             return self.flex_intrinsic_widths(b);
+        }
+        // E4: grid y tablas.
+        if crate::grid::is_grid_container(b) {
+            return self.grid_intrinsic_widths(b);
+        }
+        if let Some(w) = self.table_intrinsic_widths(b) {
+            return w;
         }
         if b.has_inline_children() {
             return self.inline_intrinsic_widths(b);

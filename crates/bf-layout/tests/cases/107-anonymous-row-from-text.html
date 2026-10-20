@@ -1,0 +1,16 @@
+<!DOCTYPE html><style>body{margin:0}</style>
+<div style="display:table">xy<span style="display:table-cell">z</span></div>
+<!-- expect
+Block <html> 0,0 800×16
+  Block <body> 0,0 800×16
+    Block <div> 0,0 24×16
+      Block <div> 0,0 24×16
+        Block <anonymous> 0,0 24×16
+          Block <anonymous> 0,0 24×16
+            Block <anonymous> 0,0 16×16
+              Line 0,0 16×16
+                Text "xy" 0,0 16×16
+            Block <span> 16,0 8×16
+              Line 16,0 8×16
+                Text "z" 16,0 8×16
+-->

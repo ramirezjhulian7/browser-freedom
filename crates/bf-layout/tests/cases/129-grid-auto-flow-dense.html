@@ -1,0 +1,17 @@
+<!DOCTYPE html><style>body{margin:0} .g{display:grid;grid-template-columns:repeat(3,50px);grid-auto-rows:10px} .w{grid-column:span 2}</style>
+<div class=g><div id=a class=w></div><div id=b class=w></div><div id=c></div><div id=d></div></div>
+<div class=g style="grid-auto-flow:row dense"><div id=e class=w></div><div id=f class=w></div><div id=g></div><div id=h></div></div>
+<!-- expect
+Block <html> 0,0 800×50
+  Block <body> 0,0 800×50
+    Block <div.g> 0,0 800×30
+      InlineBlock <div#a.w> 0,0 100×10
+      InlineBlock <div#b.w> 0,10 100×10
+      InlineBlock <div#c> 100,10 50×10
+      InlineBlock <div#d> 0,20 50×10
+    Block <div.g> 0,30 800×20
+      InlineBlock <div#e.w> 0,30 100×10
+      InlineBlock <div#f.w> 0,40 100×10
+      InlineBlock <div#g> 100,30 50×10
+      InlineBlock <div#h> 100,40 50×10
+-->

@@ -1,0 +1,19 @@
+<!DOCTYPE html><style>body{margin:0}table{width:400px;border-spacing:0}td{padding:0}</style>
+<table><tr><td style="width:50%">a</td><td>bb</td><td style="width:40px">c</td></tr></table>
+<!-- expect
+Block <html> 0,0 800×16
+  Block <body> 0,0 800×16
+    Block <table> 0,0 400×16
+      Block <table> 0,0 400×16
+        Block <tbody> 0,0 400×16
+          Block <tr> 0,0 400×16
+            Block <td> 0,0 200×16
+              Line 0,0 200×16
+                Text "a" 0,0 8×16
+            Block <td> 200,0 160×16
+              Line 200,0 160×16
+                Text "bb" 200,0 16×16
+            Block <td> 360,0 40×16
+              Line 360,0 40×16
+                Text "c" 360,0 8×16
+-->

@@ -598,6 +598,306 @@ fn place(ids: [L; 2], input: &[ComponentValue]) -> Option<Vec<Value>> {
     pair(ids, input)
 }
 
+// --- E4: outline y grid ---
+
+/// `outline: <'outline-width'> || <'outline-style'> || <'outline-color'>` (CSS UI 4 §5.1).
+fn outline(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    expand_side([L::OutlineWidth, L::OutlineStyle, L::OutlineColor], input)
+}
+
+/// Parte `input` en los tramos separados por `/` de nivel superior.
+fn split_slash(input: &[ComponentValue]) -> Vec<&[ComponentValue]> {
+    input
+        .split(|v| matches!(v.token(), Some(TokenKind::Delim('/'))))
+        .collect()
+}
+
+fn grid_line(part: &[ComponentValue]) -> Option<GridLine> {
+    GridLine::parse(trim(part))
+}
+
+/// El valor del extremo omitido (§8.4): el `<custom-ident>` del otro extremo o `auto`.
+fn omitted_line(other: &GridLine) -> GridLine {
+    match other.lone_ident() {
+        Some(name) => GridLine::Line {
+            integer: 0,
+            name: Some(name.to_owned()),
+        },
+        None => GridLine::Auto,
+    }
+}
+
+/// `grid-row` / `grid-column: <grid-line> [ / <grid-line> ]?` (§8.4).
+fn grid_row_column(ids: [L; 2], input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let parts = split_slash(input);
+    let (start, end) = match parts.as_slice() {
+        [a] => {
+            let a = grid_line(a)?;
+            let b = omitted_line(&a);
+            (a, b)
+        }
+        [a, b] => (grid_line(a)?, grid_line(b)?),
+        _ => return None,
+    };
+    let v = |id: L, l: GridLine| match id {
+        L::GridRowStart => Value::GridRowStart(l),
+        L::GridRowEnd => Value::GridRowEnd(l),
+        L::GridColumnStart => Value::GridColumnStart(l),
+        _ => Value::GridColumnEnd(l),
+    };
+    Some(vec![v(ids[0], start), v(ids[1], end)])
+}
+
+/// `grid-area: <grid-line> [ / <grid-line> ]{0,3}` (§8.4): row-start / column-start /
+/// row-end / column-end.
+fn grid_area(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let parts = split_slash(input);
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let lines: Vec<GridLine> = parts.iter().map(|p| grid_line(p)).collect::<Option<_>>()?;
+    let rs = lines[0].clone();
+    let cs = lines.get(1).cloned().unwrap_or_else(|| omitted_line(&rs));
+    let re = lines.get(2).cloned().unwrap_or_else(|| omitted_line(&rs));
+    let ce = lines.get(3).cloned().unwrap_or_else(|| omitted_line(&cs));
+    Some(vec![
+        Value::GridRowStart(rs),
+        Value::GridColumnStart(cs),
+        Value::GridRowEnd(re),
+        Value::GridColumnEnd(ce),
+    ])
+}
+
+/// La forma con áreas de `grid-template` (§7.4): `[ <line-names>? <string> <track-size>?
+/// <line-names>? ]+ [ / <explicit-track-list> ]?`.
+fn grid_template_areas_form(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let parts = split_slash(input);
+    let (rows_part, cols_part) = match parts.as_slice() {
+        [r] => (*r, None),
+        [r, c] => (*r, Some(*c)),
+        _ => return None,
+    };
+    let items = components(rows_part);
+    let mut strings = Vec::new();
+    let mut rows: Vec<TrackListItem> = Vec::new();
+    let mut i = 0;
+    let push_names = |rows: &mut Vec<TrackListItem>, names: Vec<String>| {
+        if let Some(TrackListItem::Names(prev)) = rows.last_mut() {
+            prev.extend(names);
+        } else {
+            rows.push(TrackListItem::Names(names));
+        }
+    };
+    while i < items.len() {
+        if let Some(n) = names_only(items[i]) {
+            push_names(&mut rows, n);
+            i += 1;
+        }
+        let Some(TokenKind::String(s)) = items.get(i).and_then(|v| v.token()) else {
+            return None;
+        };
+        strings.push(s.clone());
+        i += 1;
+        let size = items
+            .get(i)
+            .filter(|v| !matches!(v, ComponentValue::Block(_)))
+            .filter(|v| !matches!(v.token(), Some(TokenKind::String(_))))
+            .map(|v| crate::properties::grid::parse_track_size(v));
+        let size = match size {
+            Some(s) => {
+                i += 1;
+                // Algo que no es un tamaño de pista invalida la declaración.
+                s?
+            }
+            None => TrackSize::AUTO,
+        };
+        rows.push(TrackListItem::Track(size));
+        if let Some(n) = items.get(i).and_then(|v| names_only(v)) {
+            push_names(&mut rows, n);
+            i += 1;
+        }
+    }
+    let areas = GridTemplateAreas::from_strings(strings)?;
+    let columns = match cols_part {
+        Some(c) => {
+            let list = crate::properties::grid::parse_track_list(c)?;
+            // Una lista explícita: sin `repeat()` automáticos.
+            if list.iter().any(|i| {
+                matches!(
+                    i,
+                    TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, _)
+                )
+            }) {
+                return None;
+            }
+            GridTemplate::List(list)
+        }
+        None => GridTemplate::None,
+    };
+    Some(vec![
+        Value::GridTemplateRows(GridTemplate::List(rows)),
+        Value::GridTemplateColumns(columns),
+        Value::GridTemplateAreas(areas),
+    ])
+}
+
+/// `[ <custom-ident>* ]` como lista de nombres.
+fn names_only(v: &ComponentValue) -> Option<Vec<String>> {
+    let ComponentValue::Block(b) = v else {
+        return None;
+    };
+    if b.kind != bf_css::syntax::BlockKind::Square {
+        return None;
+    }
+    components(&b.value)
+        .iter()
+        .map(|n| ident(n).map(str::to_owned))
+        .collect()
+}
+
+/// `grid-template: none | [ <'grid-template-rows'> / <'grid-template-columns'> ] | <áreas>`
+/// (§7.4): rows, columns, areas.
+fn grid_template(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    if let [v] = trim(input)
+        && is_ident(v, "none")
+    {
+        return Some(vec![
+            Value::GridTemplateRows(GridTemplate::None),
+            Value::GridTemplateColumns(GridTemplate::None),
+            Value::GridTemplateAreas(GridTemplateAreas::None),
+        ]);
+    }
+    if components(input)
+        .iter()
+        .any(|v| matches!(v.token(), Some(TokenKind::String(_))))
+    {
+        return grid_template_areas_form(input);
+    }
+    let parts = split_slash(input);
+    let [rows, cols] = parts.as_slice() else {
+        return None;
+    };
+    Some(vec![
+        Value::GridTemplateRows(GridTemplate::parse(trim(rows))?),
+        Value::GridTemplateColumns(GridTemplate::parse(trim(cols))?),
+        Value::GridTemplateAreas(GridTemplateAreas::None),
+    ])
+}
+
+/// `[ auto-flow && dense? ] <auto-tracks>?`: (dense, tracks).
+fn auto_flow_part(part: &[ComponentValue]) -> Option<Option<(bool, GridAutoTracks)>> {
+    let items = components(part);
+    let mut auto_flow = false;
+    let mut dense = false;
+    let mut k = 0;
+    while k < items.len() && k < 2 {
+        if !auto_flow && is_ident(items[k], "auto-flow") {
+            auto_flow = true;
+        } else if !dense && is_ident(items[k], "dense") {
+            dense = true;
+        } else {
+            break;
+        }
+        k += 1;
+    }
+    if !auto_flow {
+        return Some(None);
+    }
+    let rest: Vec<ComponentValue> = items[k..].iter().map(|v| (*v).clone()).collect();
+    let tracks = if rest.is_empty() {
+        GridAutoTracks(vec![TrackSize::AUTO])
+    } else {
+        GridAutoTracks::parse(&rest)?
+    };
+    Some(Some((dense, tracks)))
+}
+
+/// `grid` (§7.8): `<'grid-template'> | <'grid-template-rows'> / [ auto-flow && dense? ]
+/// <'grid-auto-columns'>? | [ auto-flow && dense? ] <'grid-auto-rows'>? /
+/// <'grid-template-columns'>`.
+fn grid(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let auto = || GridAutoTracks(vec![TrackSize::AUTO]);
+    let parts = split_slash(input);
+    if let [a, b] = parts.as_slice() {
+        if let Some((dense, tracks)) = auto_flow_part(b)? {
+            return Some(vec![
+                Value::GridTemplateRows(GridTemplate::parse(trim(a))?),
+                Value::GridTemplateColumns(GridTemplate::None),
+                Value::GridTemplateAreas(GridTemplateAreas::None),
+                Value::GridAutoFlow(GridAutoFlow {
+                    column: true,
+                    dense,
+                }),
+                Value::GridAutoRows(auto()),
+                Value::GridAutoColumns(tracks),
+            ]);
+        }
+        if let Some((dense, tracks)) = auto_flow_part(a)? {
+            return Some(vec![
+                Value::GridTemplateRows(GridTemplate::None),
+                Value::GridTemplateColumns(GridTemplate::parse(trim(b))?),
+                Value::GridTemplateAreas(GridTemplateAreas::None),
+                Value::GridAutoFlow(GridAutoFlow {
+                    column: false,
+                    dense,
+                }),
+                Value::GridAutoRows(tracks),
+                Value::GridAutoColumns(auto()),
+            ]);
+        }
+    }
+    let mut out = grid_template(input)?;
+    out.push(Value::GridAutoFlow(GridAutoFlow {
+        column: false,
+        dense: false,
+    }));
+    out.push(Value::GridAutoRows(auto()));
+    out.push(Value::GridAutoColumns(auto()));
+    Some(out)
+}
+
+const BORDER_BLOCK: &[L] = &[
+    L::BorderTopWidth,
+    L::BorderTopStyle,
+    L::BorderTopColor,
+    L::BorderBottomWidth,
+    L::BorderBottomStyle,
+    L::BorderBottomColor,
+];
+const BORDER_INLINE: &[L] = &[
+    L::BorderLeftWidth,
+    L::BorderLeftStyle,
+    L::BorderLeftColor,
+    L::BorderRightWidth,
+    L::BorderRightStyle,
+    L::BorderRightColor,
+];
+
+/// `border-block` / `border-inline`: el mismo `<line-width> || <line-style> || <color>` en
+/// los dos lados.
+fn two_sides(ids: &[L], input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let first = expand_side([ids[0], ids[1], ids[2]], input)?;
+    let mut out = first.clone();
+    for (v, &id) in first.iter().zip(&ids[3..]) {
+        out.push(retarget(v, id));
+    }
+    Some(out)
+}
+
+const GRID_TEMPLATE: &[L] = &[
+    L::GridTemplateRows,
+    L::GridTemplateColumns,
+    L::GridTemplateAreas,
+];
+const GRID: &[L] = &[
+    L::GridTemplateRows,
+    L::GridTemplateColumns,
+    L::GridTemplateAreas,
+    L::GridAutoFlow,
+    L::GridAutoRows,
+    L::GridAutoColumns,
+];
+
 /// Alias de un solo longhand (propiedades lógicas).
 macro_rules! alias {
     ($name:literal => $id:ident) => {
@@ -874,6 +1174,106 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
     alias!("border-inline-start-color" => BorderLeftColor),
     alias!("border-inline-end-color" => BorderRightColor),
     alias!("word-wrap" => OverflowWrap),
+    // E4: outline y grid.
+    ShorthandDef {
+        name: "outline",
+        longhands: &[L::OutlineWidth, L::OutlineStyle, L::OutlineColor],
+        expand: outline,
+    },
+    ShorthandDef {
+        name: "grid-row",
+        longhands: &[L::GridRowStart, L::GridRowEnd],
+        expand: |i| grid_row_column([L::GridRowStart, L::GridRowEnd], i),
+    },
+    ShorthandDef {
+        name: "grid-column",
+        longhands: &[L::GridColumnStart, L::GridColumnEnd],
+        expand: |i| grid_row_column([L::GridColumnStart, L::GridColumnEnd], i),
+    },
+    ShorthandDef {
+        name: "grid-area",
+        longhands: &[
+            L::GridRowStart,
+            L::GridColumnStart,
+            L::GridRowEnd,
+            L::GridColumnEnd,
+        ],
+        expand: grid_area,
+    },
+    ShorthandDef {
+        name: "grid-template",
+        longhands: GRID_TEMPLATE,
+        expand: grid_template,
+    },
+    ShorthandDef {
+        name: "grid",
+        longhands: GRID,
+        expand: grid,
+    },
+    // Bordes lógicos (horizontal-tb, ltr).
+    ShorthandDef {
+        name: "border-block",
+        longhands: BORDER_BLOCK,
+        expand: |i| two_sides(BORDER_BLOCK, i),
+    },
+    ShorthandDef {
+        name: "border-inline",
+        longhands: BORDER_INLINE,
+        expand: |i| two_sides(BORDER_INLINE, i),
+    },
+    ShorthandDef {
+        name: "border-block-start",
+        longhands: &[L::BorderTopWidth, L::BorderTopStyle, L::BorderTopColor],
+        expand: |i| expand_side([L::BorderTopWidth, L::BorderTopStyle, L::BorderTopColor], i),
+    },
+    ShorthandDef {
+        name: "border-block-end",
+        longhands: &[
+            L::BorderBottomWidth,
+            L::BorderBottomStyle,
+            L::BorderBottomColor,
+        ],
+        expand: |i| {
+            expand_side(
+                [
+                    L::BorderBottomWidth,
+                    L::BorderBottomStyle,
+                    L::BorderBottomColor,
+                ],
+                i,
+            )
+        },
+    },
+    ShorthandDef {
+        name: "border-inline-start",
+        longhands: &[L::BorderLeftWidth, L::BorderLeftStyle, L::BorderLeftColor],
+        expand: |i| {
+            expand_side(
+                [L::BorderLeftWidth, L::BorderLeftStyle, L::BorderLeftColor],
+                i,
+            )
+        },
+    },
+    ShorthandDef {
+        name: "border-inline-end",
+        longhands: &[
+            L::BorderRightWidth,
+            L::BorderRightStyle,
+            L::BorderRightColor,
+        ],
+        expand: |i| {
+            expand_side(
+                [
+                    L::BorderRightWidth,
+                    L::BorderRightStyle,
+                    L::BorderRightColor,
+                ],
+                i,
+            )
+        },
+    },
+    alias!("grid-row-gap" => RowGap),
+    alias!("grid-column-gap" => ColumnGap),
 ];
 
 pub fn shorthand_by_name(name: &str) -> Option<&'static ShorthandDef> {
@@ -990,5 +1390,40 @@ mod tests {
             expand("border-radius", "1px 2px / 3px").unwrap()[1],
             "border-top-right-radius: 2px 3px"
         );
+        // E4
+        assert_eq!(
+            expand("outline", "2px dashed red").unwrap(),
+            [
+                "outline-width: 2px",
+                "outline-style: dashed",
+                "outline-color: rgb(255, 0, 0)"
+            ]
+        );
+        assert_eq!(
+            expand("grid-area", "a").unwrap(),
+            [
+                "grid-row-start: a",
+                "grid-column-start: a",
+                "grid-row-end: a",
+                "grid-column-end: a"
+            ]
+        );
+        assert_eq!(
+            expand("grid-column", "2 / span 3").unwrap(),
+            ["grid-column-start: 2", "grid-column-end: span 3"]
+        );
+        assert_eq!(
+            expand("grid-template", "[a] \"x y\" 10px [b] \"z z\" / 1fr 2fr").unwrap(),
+            [
+                "grid-template-rows: [a] 10px [b] auto",
+                "grid-template-columns: 1fr 2fr",
+                "grid-template-areas: \"x y\" \"z z\""
+            ]
+        );
+        assert_eq!(
+            expand("grid", "auto-flow dense 40px / 1fr").unwrap()[3..5],
+            ["grid-auto-flow: row dense", "grid-auto-rows: 40px"]
+        );
+        assert!(expand("grid-template", "\"a b\" \"c\"").is_none());
     }
 }

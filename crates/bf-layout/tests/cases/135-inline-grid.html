@@ -1,0 +1,13 @@
+<!DOCTYPE html><style>body{margin:0}</style>
+<div>ab <div style="display:inline-grid;grid-template-columns:auto auto;column-gap:4px"><div style="width:30px;height:20px"></div><div style="width:10px;height:40px"></div></div> cd</div>
+<!-- expect
+Block <html> 0,0 800×40
+  Block <body> 0,0 800×40
+    Block <div> 0,0 800×40
+      Line 0,0 800×40
+        Text "ab " 0,7.2 24×16
+        InlineBlock <div> 24,0 44×40
+          InlineBlock <div> 24,0 30×20
+          InlineBlock <div> 58,0 10×40
+        Text " cd" 68,7.2 24×16
+-->

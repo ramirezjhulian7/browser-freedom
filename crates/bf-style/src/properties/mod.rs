@@ -2,6 +2,8 @@
 //! inicial, parseo, cómputo y acceso al campo tipado de [`ComputedStyle`] de cada longhand.
 //! Los shorthands están en [`shorthands`].
 
+pub mod gradient; // E4
+pub mod grid; // E4
 pub mod shorthands;
 pub mod types;
 
@@ -212,6 +214,28 @@ longhands! {
     Order "order" order: Integer = "0", inherited: false, animatable: true;
     RowGap "row-gap" row_gap: Gap = "normal", inherited: false, animatable: true;
     ColumnGap "column-gap" column_gap: Gap = "normal", inherited: false, animatable: true;
+    // E4: tablas, outline, sombras y grid.
+    BorderCollapse "border-collapse" border_collapse: BorderCollapse = "separate", inherited: true, animatable: false;
+    BorderSpacing "border-spacing" border_spacing: BorderSpacing = "0", inherited: true, animatable: true;
+    CaptionSide "caption-side" caption_side: CaptionSide = "top", inherited: true, animatable: false;
+    TableLayout "table-layout" table_layout: TableLayout = "auto", inherited: false, animatable: false;
+    EmptyCells "empty-cells" empty_cells: EmptyCells = "show", inherited: true, animatable: false;
+    OutlineWidth "outline-width" outline_width: BorderWidth = "medium", inherited: false, animatable: true;
+    OutlineStyle "outline-style" outline_style: OutlineStyle = "none", inherited: false, animatable: false;
+    OutlineColor "outline-color" outline_color: OutlineColor = "auto", inherited: false, animatable: true;
+    OutlineOffset "outline-offset" outline_offset: LengthPx = "0", inherited: false, animatable: true;
+    BoxShadow "box-shadow" box_shadow: BoxShadow = "none", inherited: false, animatable: true;
+    TextShadow "text-shadow" text_shadow: TextShadow = "none", inherited: true, animatable: true;
+    GridTemplateColumns "grid-template-columns" grid_template_columns: GridTemplate = "none", inherited: false, animatable: true;
+    GridTemplateRows "grid-template-rows" grid_template_rows: GridTemplate = "none", inherited: false, animatable: true;
+    GridTemplateAreas "grid-template-areas" grid_template_areas: GridTemplateAreas = "none", inherited: false, animatable: false;
+    GridAutoColumns "grid-auto-columns" grid_auto_columns: GridAutoTracks = "auto", inherited: false, animatable: true;
+    GridAutoRows "grid-auto-rows" grid_auto_rows: GridAutoTracks = "auto", inherited: false, animatable: true;
+    GridAutoFlow "grid-auto-flow" grid_auto_flow: GridAutoFlow = "row", inherited: false, animatable: false;
+    GridRowStart "grid-row-start" grid_row_start: GridLine = "auto", inherited: false, animatable: false;
+    GridRowEnd "grid-row-end" grid_row_end: GridLine = "auto", inherited: false, animatable: false;
+    GridColumnStart "grid-column-start" grid_column_start: GridLine = "auto", inherited: false, animatable: false;
+    GridColumnEnd "grid-column-end" grid_column_end: GridLine = "auto", inherited: false, animatable: false;
 }
 
 impl LonghandId {
