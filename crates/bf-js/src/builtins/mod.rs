@@ -23,6 +23,15 @@ pub mod symbol;
 pub mod bigint;
 pub mod date;
 pub mod regexp;
+// E3
+pub mod array_buffer;
+pub mod r#async;
+pub mod atomics;
+pub mod dataview;
+pub mod map_set;
+pub mod promise;
+pub mod typed_array;
+pub mod weak;
 
 use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, Prop, PropValue};
@@ -219,4 +228,14 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     regexp::init(agent, realm);
     bigint::init(agent, realm);
     date::init(agent, realm);
+    // E3
+    promise::init(agent, realm);
+    r#async::init(agent, realm);
+    map_set::init(agent, realm);
+    weak::init(agent, realm);
+    array_buffer::init(agent, realm);
+    typed_array::init(agent, realm);
+    dataview::init(agent, realm);
+    atomics::init(agent, realm);
+    promise::register_e3_globals(agent, realm);
 }

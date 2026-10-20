@@ -67,6 +67,8 @@ pub(crate) enum Control {
     Handler,
     /// Un iterador con su handler de limpieza.
     Iter(u32),
+    /// Un iterador async de `for await` con su handler de limpieza (E3).
+    AsyncIter(u32),
     Finally {
         kind_slot: u32,
         entry: Label,
@@ -283,6 +285,9 @@ fn patch_target(op: &mut Op, t: u32) {
         Op::IterStep { done, .. } | Op::ForInNext { done, .. } | Op::YieldStarStep { done, .. } => {
             *done = t
         }
+        // E3
+        Op::AsyncIterResult { done, .. } | Op::AsyncYieldStarResult { done, .. } => *done = t,
+        Op::AsyncIterClose { skip, .. } => *skip = t,
         _ => panic!("instrucción sin destino: {op:?}"),
     }
 }
@@ -1149,13 +1154,19 @@ impl<'t> Codegen<'t> {
             let t = self.lookup(&f.id.as_ref().expect("nombre").name);
             self.emit_init(&t);
         }
-        if info.is_generator && !info.is_async {
+        // Generadores (§15.5.2) y generadores async (§15.6.2): los errores de la instanciación
+        // se lanzan antes de crear el objeto. Las funciones async (§15.8.4) no tienen marca:
+        // corren desde el principio y sus errores rechazan la promesa.
+        if info.is_generator {
             self.emit(Op::GeneratorStart);
             self.emit(Op::Pop);
         }
-        if info.is_async {
-            self.emit(Op::Await);
-        }
+    }
+
+    /// ¿El código actual es el de un generador async? (E3)
+    pub(crate) fn in_async_generator(&self) -> bool {
+        let info = &self.tree.funcs[self.sti().func];
+        info.is_async && info.is_generator
     }
 
     /// Como `enter_scope`, pero sin registrar el control (los scopes del prólogo duran toda

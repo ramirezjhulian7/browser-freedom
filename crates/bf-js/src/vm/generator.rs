@@ -32,15 +32,27 @@ impl Trace for GeneratorData {
 
 /// Guarda el frame recién suspendido en GeneratorStart.
 pub(crate) fn store_start_frame(agent: &mut Agent, g: Gc<Object>, frame: Frame) {
-    if let ObjectKind::Generator(data) = &mut agent.heap[g].kind {
-        data.frame = Some(Box::new(frame));
-        data.state = GenState::SuspendedStart;
+    match &mut agent.heap[g].kind {
+        ObjectKind::Generator(data) => {
+            data.frame = Some(Box::new(frame));
+            data.state = GenState::SuspendedStart;
+        }
+        // E3: AsyncGeneratorStart (§27.6.3.5).
+        ObjectKind::AsyncGenerator(data) => {
+            data.frame = Some(Box::new(frame));
+            data.state = crate::builtins::r#async::AsyncGenState::SuspendedStart;
+        }
+        _ => {}
     }
 }
 
 /// Crea el objeto generador (OrdinaryCreateFromConstructor(functionObject,
 /// "%GeneratorPrototype%"), §15.5.2 EvaluateGeneratorBody).
 pub(crate) fn create_generator(agent: &mut Agent, f: Gc<Object>) -> JsResult<Gc<Object>> {
+    // E3: los generadores async (§15.6.2 EvaluateAsyncGeneratorBody).
+    if matches!(&agent.heap[f].kind, ObjectKind::Function(c) if c.code.is_async) {
+        return crate::builtins::r#async::create_async_generator(agent, f);
+    }
     agent.ordinary_create_from_constructor(
         f,
         |i| i.generator_prototype,
@@ -112,6 +124,7 @@ pub fn generator_resume(agent: &mut Agent, g: &Value, mode: Resume) -> JsResult<
             agent.create_iter_result(v, true)
         }
         Ok(FrameExit::GeneratorStart(_)) => unreachable!("GeneratorStart al reanudar"),
+        Ok(FrameExit::Await(_)) => unreachable!("await en un generador"),
         Err(e) => {
             set_state(agent, o, GenState::Completed);
             Err(e)
