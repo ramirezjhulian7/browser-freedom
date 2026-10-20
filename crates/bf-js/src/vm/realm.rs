@@ -140,6 +140,7 @@ intrinsics!(
     bigint_ctor,
     date_ctor,
     date_prototype,
+    web_registry,
 );
 
 pub struct Realm {

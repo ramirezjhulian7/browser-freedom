@@ -22,7 +22,9 @@ pub mod symbol;
 // E2
 pub mod bigint;
 pub mod date;
+pub mod intl;
 pub mod regexp;
+pub mod web;
 // E3
 pub mod array_buffer;
 pub mod r#async;
@@ -238,4 +240,7 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     dataview::init(agent, realm);
     atomics::init(agent, realm);
     promise::register_e3_globals(agent, realm);
+    // E2: Web APIs puras de JS e Intl (después de E3: usan TypedArray y la cola de jobs).
+    web::init(agent, realm);
+    intl::init(agent, realm);
 }
