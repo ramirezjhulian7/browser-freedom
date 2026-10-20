@@ -18,8 +18,9 @@ use super::icons::{Icon, icon};
 use crate::internal::{self, escape, fill};
 use crate::theme::Theme;
 
-/// Alto de la barra superior, de la línea de estado y ancho del panel, en px lógicos.
-pub const BAR: f32 = 40.0;
+/// Alto de la barra superior (franja de pestañas más controles), de la línea de estado y
+/// ancho del panel, en px lógicos.
+pub const BAR: f32 = 72.0;
 pub const STATUS: f32 = 24.0;
 pub const PANEL: f32 = 320.0;
 
@@ -31,6 +32,17 @@ pub enum Region {
     Reload,
     Field,
     Engine,
+    /// La pestaña `i`, su botón de cerrar, y el botón de pestaña nueva.
+    Tab(usize),
+    CloseTab(usize),
+    NewTab,
+}
+
+/// Lo que la franja de pestañas muestra de cada una.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabInfo {
+    pub title: String,
+    pub loading: bool,
 }
 
 const REGIONS: [(&str, Region); 5] = [
@@ -249,6 +261,9 @@ pub struct Chrome {
     /// La página usó algo que el motor aún no soporta (punto ámbar en el botón del panel).
     pub engine_alert: bool,
     pub panel_open: bool,
+    /// Pestañas abiertas, en orden, y la activa.
+    pub tabs: Vec<TabInfo>,
+    pub active: usize,
     /// Texto de la izquierda de la línea de estado y si se resalta.
     pub status_left: String,
     pub status_em: bool,
@@ -277,6 +292,8 @@ impl Chrome {
             hover: None,
             engine_alert: false,
             panel_open: false,
+            tabs: Vec::new(),
+            active: 0,
             status_left: String::new(),
             status_em: false,
             status_right: Vec::new(),
@@ -337,8 +354,44 @@ impl Chrome {
         } else {
             formatted_url(&self.url)
         };
+        let mut tabs = String::new();
+        for (i, t) in self.tabs.iter().enumerate() {
+            let mut class = String::from("tab");
+            if i == self.active {
+                class.push_str(" active");
+            }
+            if self.hover == Some(Region::Tab(i)) {
+                class.push_str(" hover");
+            }
+            let close = if self.hover == Some(Region::CloseTab(i)) {
+                "close hover"
+            } else {
+                "close"
+            };
+            let title = if t.title.is_empty() {
+                "Nueva pestaña"
+            } else {
+                &t.title
+            };
+            let mark = if t.loading {
+                "<span class=\"spin\"></span>"
+            } else {
+                ""
+            };
+            tabs.push_str(&format!(
+                "<span id=\"tab-{i}\" class=\"{class}\">{mark}<span class=\"title\">{}</span><span id=\"tabclose-{i}\" class=\"{close}\">×</span></span>",
+                escape(title)
+            ));
+        }
+        let newtab = if self.hover == Some(Region::NewTab) {
+            "newtab hover"
+        } else {
+            "newtab"
+        };
+        tabs.push_str(&format!("<span id=\"newtab\" class=\"{newtab}\">+</span>"));
         let vars = [
             ("theme", self.theme.css_vars()),
+            ("tabs", tabs),
             ("brand", "<span class=\"brand\">bf</span>".to_owned()),
             ("back", button("back", self.can_back, Region::Back, false)),
             (
@@ -399,10 +452,23 @@ impl Chrome {
         } else if !self.field.focused {
             self.field.scroll = 0.0;
         }
-        self.regions = REGIONS
+        let mut regions: Vec<(Region, Rect)> = REGIONS
             .iter()
             .filter_map(|&(id, region)| bar.rect(id).map(|r| (region, r)))
             .collect();
+        // El botón de cerrar está dentro de la pestaña: va antes para que gane en `region_at`.
+        for i in 0..self.tabs.len() {
+            if let Some(r) = bar.rect(&format!("tabclose-{i}")) {
+                regions.push((Region::CloseTab(i), r));
+            }
+            if let Some(r) = bar.rect(&format!("tab-{i}")) {
+                regions.push((Region::Tab(i), r));
+            }
+        }
+        if let Some(r) = bar.rect("newtab") {
+            regions.push((Region::NewTab, r));
+        }
+        self.regions = regions;
         let reload = if self.loading {
             Icon::Stop
         } else {
