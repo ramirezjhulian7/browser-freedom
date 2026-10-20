@@ -215,6 +215,8 @@ pub struct Agent {
     /// Los waiters de `Atomics.waitAsync` y los timers del host, que RunJobs dispara cuando
     /// la cola queda vacía.
     pub(crate) timers: Vec<crate::builtins::atomics::Timer>,
+    /// Los objetos host, los hooks del embebedor y el bucle de eventos (`crate::host`).
+    pub host: crate::host::HostState,
 }
 
 impl Agent {
@@ -265,6 +267,7 @@ impl Agent {
             job_errors: Vec::new(),
             can_block: false,
             timers: Vec::new(),
+            host: crate::host::HostState::default(),
         };
         let realm = agent.create_realm();
         agent.current_realm = realm;
@@ -423,6 +426,7 @@ impl Agent {
         self.heap.collect(t);
         // E3: los FinalizationRegistry con celdas vaciadas piden su job de limpieza.
         crate::builtins::weak::enqueue_cleanup_jobs(self);
+        crate::host::after_gc(self);
         true
     }
 
@@ -438,6 +442,7 @@ impl Agent {
         for v in self.kept_alive.iter().chain(self.job_errors.iter()) {
             t.value(v);
         }
+        self.host.trace(t);
         for timer in &self.timers {
             timer.trace(t);
         }
