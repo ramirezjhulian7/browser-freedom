@@ -1042,19 +1042,7 @@ impl Canvas {
                 tile_local(p, tile.y, tile.height, ys)
             })
             .collect();
-        let Some(mut pix) = Pixmap::new(dev.width(), dev.height()) else {
-            return;
-        };
-        let w = dev.width() as usize;
-        let data = pix.data_mut();
-        for (j, v) in vs.iter().enumerate() {
-            let Some(v) = *v else { continue };
-            for (i, u) in us.iter().enumerate() {
-                let Some(u) = *u else { continue };
-                let k = (j * w + i) * 4;
-                data[k..k + 4].copy_from_slice(&to_u8(&sampler.at(u, v)));
-            }
-        }
+
         let mask = if radii.is_zero() {
             self.masks.last().cloned()
         } else {
@@ -1064,14 +1052,40 @@ impl Canvas {
             }
             m
         };
-        self.target().draw_pixmap(
-            dev.x0,
-            dev.y0,
-            pix.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            mask.as_ref(),
-        );
+        // Se compone en `f32` directamente sobre el destino (source-over premultiplicado, con
+        // la máscara como cobertura) y se redondea una sola vez: componer un tile de 8 bits
+        // redondea dos veces y deja saltos no monótonos (anillos) en los gradientes
+        // semitransparentes.
+        let canvas_w = self.width as usize;
+        let target = self.target().data_mut();
+        for (j, v) in vs.iter().enumerate() {
+            let Some(v) = *v else { continue };
+            let y = dev.y0 as usize + j;
+            for (i, u) in us.iter().enumerate() {
+                let Some(u) = *u else { continue };
+                let idx = y * canvas_w + dev.x0 as usize + i;
+                let coverage = mask
+                    .as_ref()
+                    .map_or(1.0, |m| f32::from(m.data()[idx]) / 255.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let src = sampler.at(u, v);
+                let k = idx * 4;
+                let alpha = src[3].clamp(0.0, 1.0) * coverage;
+                let mut out = [0u8; 4];
+                for c in 0..4 {
+                    let d = f32::from(target[k + c]) / 255.0;
+                    let value = src[c].clamp(0.0, 1.0) * coverage + d * (1.0 - alpha);
+                    out[c] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+                // Premultiplicado: ningún canal supera el alfa.
+                for c in 0..3 {
+                    out[c] = out[c].min(out[3]);
+                }
+                target[k..k + 4].copy_from_slice(&out);
+            }
+        }
     }
 
     /// Una sombra de `box-shadow` (CSS Backgrounds 3 §7.1–§7.2). Exterior: la border box
