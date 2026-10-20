@@ -124,6 +124,13 @@ const CASES: &[(&str, &str)] = &[
          <fieldset><legend></legend><div style='height:20px;background:#9c9'></div></fieldset>
          <fieldset style='border:12px groove #c66'><legend style='height:6px;margin-left:10px'></legend><div style='height:10px;background:#99c'></div></fieldset>",
     ),
+    (
+        "15-gradients-translucent",
+        "<!DOCTYPE html><style>body{margin:0;background:#1d1f27} div{height:50px}</style>
+         <div style='background:radial-gradient(closest-side, rgba(90,140,255,0.18), transparent)'></div>
+         <div style='background:linear-gradient(to right, rgba(255,0,0,0.6), transparent)'></div>
+         <div style='margin:0 40px;border-radius:25px;background:radial-gradient(circle, rgba(255,255,255,0.3), rgba(0,200,120,0.05))'></div>",
+    ),
 ];
 
 fn expected_dir() -> PathBuf {
@@ -154,5 +161,33 @@ fn raster_cases() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(CASES.len(), 14);
+    assert_eq!(CASES.len(), 15);
+}
+
+/// CSS Images 4 §3.4.3: un gradiente semitransparente hacia `transparent` se interpola en
+/// premultiplicado (sin pasar por negro) y, compuesto sobre un fondo, varía de forma monótona
+/// (sin anillos ni bandas por el redondeo a 8 bits).
+#[test]
+fn translucent_gradients_are_monotonic() {
+    let pix = paint(
+        CASES
+            .iter()
+            .find(|c| c.0 == "15-gradients-translucent")
+            .unwrap()
+            .1,
+    );
+    let px = |x: u32, y: u32| {
+        let i = ((y * pix.width() + x) * 4) as usize;
+        let d = pix.data();
+        [d[i], d[i + 1], d[i + 2]]
+    };
+    // Radial: del centro (x=100) hacia el borde, cada canal baja o se mantiene.
+    for c in 0..3 {
+        let row: Vec<u8> = (100..200).map(|x| px(x, 25)[c]).collect();
+        assert!(row.windows(2).all(|w| w[1] <= w[0]), "canal {c}: {row:?}");
+    }
+    // Lineal hacia `transparent`: el rojo baja hasta el fondo sin oscurecerse por debajo.
+    let reds: Vec<u8> = (0..200).map(|x| px(x, 75)[0]).collect();
+    assert!(reds.windows(2).all(|w| w[1] <= w[0]), "{reds:?}");
+    assert!(reds.iter().all(|&r| r >= 0x1d), "pasa por negro: {reds:?}");
 }

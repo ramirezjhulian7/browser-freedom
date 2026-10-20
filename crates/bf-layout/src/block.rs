@@ -165,6 +165,7 @@ pub(crate) fn establishes_bfc(b: &LayoutBox, is_root: bool) -> bool {
         || b.is_out_of_flow()
         || matches!(b.kind, BoxKind::InlineBlock)
         || b.fieldset.is_some()
+        || b.independent
     {
         return true;
     }

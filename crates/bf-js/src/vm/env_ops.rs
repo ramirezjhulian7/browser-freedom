@@ -87,8 +87,17 @@ impl Agent {
             EnvKind::Declarative(d) => match d.find(name) {
                 Some(slot) => match d.get(slot) {
                     Some(v) => Ok(v.clone()),
-                    None => self
-                        .reference_error(&format!("Cannot access '{name}' before initialization")),
+                    None => {
+                        // Un binding de import indirecto (§9.1.1.5.1) (E1).
+                        if let crate::vm::env::DeclSlot::Slot(i) = slot
+                            && let Some(Some(v)) = self.module_link_value(env, i as u32)
+                        {
+                            return Ok(v);
+                        }
+                        self.reference_error(&format!(
+                            "Cannot access '{name}' before initialization"
+                        ))
+                    }
                 },
                 None => self.reference_error(&format!("{name} is not defined")),
             },
@@ -143,11 +152,21 @@ impl Agent {
                     return Ok(());
                 };
                 let kind = d.kind_of(slot);
-                let cell = d.get_mut(slot);
-                if cell.is_none() {
+                if d.get(slot).is_none() {
+                    // Un binding de import inicializado es inmutable (§9.1.1.5) (E1).
+                    if let DeclSlot::Slot(i) = slot
+                        && let Some(Some(_)) = self.module_link_value(env, i as u32)
+                    {
+                        return self
+                            .type_error(&format!("Assignment to constant variable '{name}'"));
+                    }
                     return self
                         .reference_error(&format!("Cannot access '{name}' before initialization"));
                 }
+                let EnvKind::Declarative(d) = &mut self.heap[env].kind else {
+                    unreachable!("declarativo");
+                };
+                let cell = d.get_mut(slot);
                 match kind {
                     BindingKind::Mutable | BindingKind::Deletable => {
                         *cell = Some(value);
@@ -292,7 +311,8 @@ impl Agent {
         let mut e = start;
         loop {
             match &self.heap[e].kind {
-                EnvKind::Declarative(d) if d.function.is_some() => return e,
+                // Un Module Environment Record también tiene `this` (§9.1.1.5.3) (E1).
+                EnvKind::Declarative(d) if d.function.is_some() || d.module.is_some() => return e,
                 EnvKind::Global(_) => return e,
                 _ => {}
             }

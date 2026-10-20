@@ -17,6 +17,7 @@ pub mod frame;
 pub mod function;
 pub mod generator;
 pub mod interp;
+pub mod module; // E1
 pub mod realm;
 
 use std::collections::HashMap;
@@ -197,6 +198,8 @@ pub struct Agent {
     /// Profundidad de llamadas nativas (para el límite de pila).
     pub(crate) call_depth: usize,
     stack_base: usize,
+    /// Los Module Records y el loader del host (§16.2.1) (E1).
+    pub modules: module::ModuleHost,
     // E3
     /// La cola de jobs (HostEnqueuePromiseJob, §9.5.5; HostEnqueueFinalizationRegistryCleanupJob,
     /// §9.5.6), en orden FIFO.
@@ -260,6 +263,7 @@ impl Agent {
             printer: Box::new(|s| println!("{s}")),
             call_depth: 0,
             stack_base: crate::parser::stack_position(),
+            modules: module::ModuleHost::default(), // E1
             jobs: std::collections::VecDeque::new(),
             running_jobs: Vec::new(),
             rejections: crate::builtins::promise::RejectionTracker::default(),
@@ -455,6 +459,7 @@ impl Agent {
         for (_, s) in self.well_known.all() {
             t.gc(s);
         }
+        self.modules.trace(t); // E1
     }
 
     pub fn gc_stats(&self) -> GcStats {

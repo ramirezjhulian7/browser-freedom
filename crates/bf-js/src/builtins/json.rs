@@ -270,6 +270,12 @@ fn materialize(agent: &mut Agent, n: &Node) -> JsResult<Value> {
     }
 }
 
+/// ParseJSON (§25.5.1 pasos 2–10 sin reviver): para los módulos JSON (ParseJSONModule).
+pub fn parse_json(agent: &mut Agent, s: &[u16]) -> JsResult<Value> {
+    let node = parse_text(agent, s)?;
+    materialize(agent, &node)
+}
+
 /// JSON.parse (§25.5.1).
 fn parse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = agent.to_string(&a.arg(0))?;

@@ -13,6 +13,7 @@
 pub mod bytecode;
 mod class;
 mod expr;
+pub mod module; // E1
 mod pattern;
 pub mod scope;
 mod stmt;
