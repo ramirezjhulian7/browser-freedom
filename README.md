@@ -218,6 +218,20 @@ bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"
 
 ### La interfaz
 
+- **Pestañas**: `Ctrl+T` abre una, `Ctrl+W` la cierra, `Ctrl+Tab`/`Ctrl+1…9` cambian; el clic
+  central o `Ctrl+clic` en un enlace lo abre en otra pestaña, y cada pestaña conserva su
+  historial, su scroll y su panel del motor.
+- **Formularios**: los campos de texto y `<textarea>` se editan (caret, selección con Mayús,
+  `Ctrl+A/C/X/V`), `Enter` en un campo envía el formulario (GET o POST `urlencoded`) y los
+  botones de envío funcionan.
+- **Menú contextual** (clic derecho): abrir enlaces o imágenes en otra pestaña, copiar sus
+  direcciones, guardar una imagen o la página con un diálogo del sistema, cortar/copiar/pegar
+  en un campo, ver el código fuente (`about:source?<url>`) e inspeccionar las cajas.
+- **Logo**: `assets/browser-freedom.png`; las versiones recortadas de `crates/bf-shell/assets/`
+  son el icono de la ventana, la marca de la barra y la de `about:home`.
+
+## La interfaz (detalle)
+
 La interfaz muestra lo que el motor hace con cada página, en lugar de imitar el cromo de otros
 navegadores. La dibujan el propio motor y el propio rasterizador. La barra, la línea de estado,
 el panel y las páginas internas son HTML generado con plantillas de `crates/bf-shell/pages/`.
