@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<style>
+{{theme}}
+html, body { margin: 0; height: 40px; overflow: hidden; background: var(--chrome); }
+body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+.bar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+  font-size: 12px;
+  margin-right: 10px;
+}
+.btn { flex: none; display: block; position: relative; width: 28px; height: 28px; border-radius: 6px; margin-right: 2px; }
+.btn.hover, .btn.on { background: var(--hover); }
+.icon { display: block; width: 16px; height: 16px; margin: 6px; }
+#field {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  margin: 0 8px;
+  padding: 0 12px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  white-space: pre;
+  overflow: hidden;
+}
+#field.focus { border-color: var(--accent); }
+#field .icon { width: 14px; height: 14px; margin: 0 6px 0 0; flex: none; }
+#text { flex: none; }
+.sec { color: var(--text2); }
+.sel { background: var(--selection); }
+#caret { display: inline-block; width: 1px; height: 16px; background: var(--accent); vertical-align: -3px; margin-right: -1px; }
+.dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 4px; background: var(--accent); }
+</style>
+<div class="bar">{{brand}}{{back}}{{forward}}{{reload}}<div id="field" class="{{field_class}}">{{lock}}<span id="text" style="margin-left: {{scroll}}px">{{text}}</span></div>{{engine}}</div>
+</html>

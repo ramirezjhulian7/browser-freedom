@@ -109,6 +109,13 @@ pub enum DisplayItem {
         widget: Widget,
         color: Rgba,
     },
+    /// Un trazo vectorial en px CSS (iconos de la interfaz): relleno opcional y contorno de
+    /// `stroke.0` px con extremos y uniones redondeados.
+    Path {
+        ops: Vec<PathOp>,
+        fill: Option<Rgba>,
+        stroke: Option<(f32, Rgba)>,
+    },
     /// Decoración de texto horizontal: `rect` es la banda de la línea.
     Line {
         rect: Rect,
@@ -131,6 +138,16 @@ pub enum DisplayItem {
     /// desplazamiento del scroll.
     PushFixed,
     PopFixed,
+}
+
+/// Comando de un [`DisplayItem::Path`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathOp {
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    QuadTo(f32, f32, f32, f32),
+    CubicTo(f32, f32, f32, f32, f32, f32),
+    Close,
 }
 
 #[derive(Debug, Clone, Default)]

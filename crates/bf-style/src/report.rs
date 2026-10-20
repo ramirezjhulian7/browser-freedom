@@ -122,7 +122,10 @@ mod tests {
         let r = style_report(&doc, &[sheet]);
         assert_eq!(r.sheets, 1);
         assert_eq!(r.rules, 2);
-        assert_eq!(r.unknown_properties.get("-webkit-tap-highlight-color"), Some(&1));
+        assert_eq!(
+            r.unknown_properties.get("-webkit-tap-highlight-color"),
+            Some(&1)
+        );
         assert_eq!(r.unknown_properties.get("zoom"), Some(&1));
         assert_eq!(r.unknown_properties.get("grid-template-columns"), Some(&1));
         assert_eq!(r.unknown_properties.get("foo"), Some(&1));

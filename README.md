@@ -107,7 +107,8 @@ motor JavaScript.
   - partes nativas de los controles;
   - rasterizado con `tiny-skia` y el harness de reftests de WPT.
 - **`bf-shell`**: el binario. Carga en un hilo de trabajo y muestra el resultado en una
-  ventana con barra de URL propia (ver [Uso](#uso)).
+  ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
+  páginas `about:` (ver [La interfaz](#la-interfaz)).
 - **`bf-js`**: reservado para el motor ECMAScript de la fase 2.
 
 ## Arquitectura
@@ -175,15 +176,17 @@ El binario queda en `target/release/bf-shell` (`bf-shell.exe` en Windows).
 
 ## Uso
 
-`<url>` es una URL `http(s)://`, `file://` o `data:`, o una ruta local.
+`<url>` es una URL `http(s)://`, `file://`, `data:` o `about:`, o una ruta local.
 
 ```sh
-# Ventana navegable
+# Ventana navegable (sin argumento abre about:home)
+bf-shell open
 bf-shell open https://es.wikipedia.org/wiki/Navegador_web
 
 # PNG de 1024×768 con tiempos por fase en stderr
 bf-shell render https://www.google.com -o google.png --width 1024 --height 768
-bf-shell render pagina.html -o pagina.png --scale 2
+bf-shell render about:home -o home.png
+bf-shell render "about:engine?https://www.google.com" -o motor.png --height 1100
 
 # Volcados para depurar
 bf-shell dump-dom https://example.com
@@ -191,27 +194,78 @@ bf-shell dump-css estilos.css
 bf-shell dump-style pagina.html --selector "nav a"
 bf-shell dump-layout pagina.html --width 800 --system-fonts
 
-# La lógica de la ventana sin abrir una: un PNG por paso y el estado en stdout
-bf-shell session https://es.wikipedia.org/wiki/Navegador_web "key:pagedown" \
-    "link:World Wide Web" "key:alt+left" "key:ctrl+l" "type:example.com" "key:enter" -o sesion
+# La lógica de la ventana sin abrir una: un PNG por paso (con el cromo) y el estado en stdout
+bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"     "move:600,300" -o sesion
 ```
 
-En la ventana (`open`):
+### La interfaz
 
-| Acción | Teclas / ratón |
+La interfaz muestra lo que el motor hace con cada página, en lugar de imitar el cromo de otros
+navegadores. La dibujan el propio motor y el propio rasterizador. La barra, la línea de estado,
+el panel y las páginas internas son HTML generado con plantillas de `crates/bf-shell/pages/`.
+Los iconos son paths. Todos los colores salen de un único `Theme`
+(`crates/bf-shell/src/theme.rs`):
+
+- **Paleta oscura:** pizarra `#14171F`, superficie `#1E2330`, texto `#E6E8EE`/`#8A92A6` y un
+  único acento ámbar `#F5A524`.
+- **Paleta clara:** `#F7F7F9`/`#FFFFFF`/`#1A1D26`/`#6B7280`, con el mismo ámbar.
+- **Elección del tema:** sigue al del sistema; `BF_THEME=light|dark` lo fuerza.
+- **Tipografía:** `system-ui`, 13 px en el cromo y 12 px en la línea de estado.
+
+Sus partes:
+
+- **Barra superior** (40 px):
+  - el monograma `bf`, ← → y ↻ (que pasa a ✕ mientras carga);
+  - el campo de URL: sin foco, formateado (candado en `https`, host destacado, esquema y
+    ruta en gris); con foco, editable;
+  - una línea de progreso ámbar mientras carga;
+  - el botón del **panel del motor**, con un punto ámbar si la página usó algo que el motor
+    aún no soporta.
+- **Panel del motor** (320 px, `Ctrl+I`):
+  - tiempos por fase con barras: fetch, parse, estilo, imágenes, layout, pintura y raster;
+  - el documento: URL final, redirecciones, HTTP, tipo, encoding y de dónde salió (BOM,
+    cabecera, `<meta>`, default), modo quirks, tamaño, nodos DOM, hojas y reglas, imágenes,
+    cookies;
+  - lo que el motor ignoró, con contadores de `bf-style`, `bf-layout` y `bf-image`:
+    `<script>`, propiedades CSS desconocidas con su frecuencia, valores no aceptados,
+    at-rules sin efecto, `display` degradados, formatos de imagen sin decodificador y
+    controles sin interactividad;
+  - las fuentes resueltas;
+  - botones para guardar PNG, volcar el layout y volcar el DOM (junto al ejecutable).
+- **Línea de estado** (24 px): el destino del enlace bajo el puntero; zoom, viewport en px CSS
+  y tiempo total de carga.
+- **Superposición de cajas** (`F12`):
+  - los fragmentos sobre la página: bloques en ámbar, inline en verde, texto en gris;
+  - el fragmento bajo el puntero, resaltado y descrito como `<tag.class> tipo x,y w×h`.
+- **Páginas internas**:
+
+  | Página | Contenido |
+  |---|---|
+  | `about:home` | Inicio: búsqueda, accesos, historial reciente y la tabla de atajos. Escribir en ella va a la barra; lo que no parece una dirección se busca en Google. |
+  | `about:engine` | El panel como página completa (`about:engine?<url>` analiza esa URL). |
+  | `about:wpt` | El estado de compatibilidad de `docs/wpt-status.md`. |
+  | `about:error` | Error de carga (DNS, TLS, timeout, conexión, HTTP 4xx/5xx), con "Reintentar". |
+  | `about:` | El índice de las páginas internas. |
+
+  Solo usan CSS que el motor soporta, y un test lo verifica.
+
+| Atajo | Acción |
 |---|---|
-| Enfocar la barra y seleccionar todo | `Ctrl+L`, `F6` o clic en el campo |
-| Navegar a lo escrito | `Intro`; sin esquema se antepone `https://`; una ruta local se abre como `file://` |
-| Editar el campo | escribir, `Retroceso`, `Supr`, flechas, `Inicio`/`Fin` (con `Mayús`, seleccionando), `Ctrl+A` |
-| Volver a la página | `Esc` |
-| Seguir un enlace | clic (el cursor cambia a una mano y la barra muestra el destino) |
-| Atrás / adelante | `Alt+←` / `Alt+→`, botones ◀ ▶, botones laterales del ratón |
-| Recargar | `Ctrl+R`, `F5`, botón ⟳ |
-| Desplazar | rueda, flechas, `Re Pág`/`Av Pág`, `Inicio`/`Fin`, espacio (`Mayús+espacio` sube) |
-| Zoom | `Ctrl +`, `Ctrl -`, `Ctrl 0`, `Ctrl`+rueda |
+| `Ctrl+L`, `F6`, clic en el campo | Ir a la barra de dirección |
+| `Intro` en la barra | Navegar (sin esquema, `https://`; una ruta, `file://`; si no, buscar) |
+| `Ctrl+I` | Panel del motor |
+| `F12` | Superposición de cajas |
+| `Ctrl+R`, `F5` | Recargar |
+| `Esc` | Detener la carga o volver a la página |
+| `Alt+←` / `Alt+→`, botones ← →, botones laterales del ratón | Atrás / adelante |
+| `Ctrl +`, `Ctrl -`, `Ctrl 0`, `Ctrl`+rueda | Zoom |
+| `Ctrl+S` | Guardar un PNG de la ventana (con el cromo) |
+| `Ctrl+Shift+D` | Volcar el layout |
+| `Ctrl+H` | Inicio |
+| rueda, flechas, `Re Pág`/`Av Pág`, `Inicio`/`Fin`, `Espacio`/`Mayús+Espacio` | Desplazar |
 
-La carga (red, parseo, estilo, imágenes, layout) corre en un hilo de trabajo, así que la
-ventana no se bloquea. Los errores de red se muestran como una página de error interna.
+La carga (red, parseo, estilo, imágenes y layout) corre en un hilo de trabajo, así que la
+ventana nunca se bloquea.
 
 ## Pruebas
 

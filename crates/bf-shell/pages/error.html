@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>{{title}}</title>
+<style>
+{{theme}}
+{{style}}
+body { padding-top: 72px; }
+.mark { width: 44px; height: 44px; line-height: 44px; font-size: 22px; margin-bottom: 18px; }
+.kind { color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6px; }
+.card { margin: 20px 0 24px; }
+.card code { overflow-wrap: anywhere; }
+.detail { color: var(--text2); margin: 10px 0 0; font-size: 13px; }
+</style>
+<main>
+  <span class="mark">!</span>
+  <p class="kind">{{kind}}</p>
+  <h1>{{title}}</h1>
+  <p class="muted">{{explanation}}</p>
+  <div class="card">
+    <code>{{url}}</code>
+    <p class="detail">{{detail}}</p>
+  </div>
+  <a class="button" href="{{url}}">Reintentar</a><a class="button quiet" href="about:home">Inicio</a>
+</main>
+</html>

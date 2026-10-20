@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Inicio</title>
+<style>
+{{theme}}
+{{style}}
+.hero { display: flex; align-items: center; margin: 24px 0 28px; }
+.hero .text { margin-left: 18px; }
+.search {
+  display: flex;
+  align-items: center;
+  height: 52px;
+  padding: 0 22px;
+  border-radius: 26px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 16px;
+}
+.search .caret { display: block; width: 2px; height: 22px; background: var(--accent); margin-right: 12px; }
+.tiles { display: flex; margin: 22px -6px 0; }
+.tile {
+  display: block;
+  flex: 1;
+  margin: 0 6px;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.tile .letter {
+  display: block;
+  width: 32px;
+  height: 32px;
+  line-height: 32px;
+  text-align: center;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.tile .host { display: block; color: var(--text2); font-size: 12px; }
+.recent a { display: block; padding: 4px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.keys { display: flex; flex-wrap: wrap; padding: 8px 18px; }
+.key { display: flex; width: 50%; padding: 5px 0; }
+.key .k { width: 176px; flex: none; }
+.key .k span {
+  font-family: monospace;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+  background: var(--chrome);
+}
+.key .d { color: var(--text2); }
+.foot { margin-top: 28px; }
+</style>
+<main>
+  <div class="hero">
+    <span class="mark">bf</span>
+    <div class="text">
+      <h1>browser-freedom</h1>
+      <p class="muted">Un navegador con motor propio: HTML, CSS, layout y pintura escritos desde cero.</p>
+    </div>
+  </div>
+  <a class="search" href="bf:focus-url"><span class="caret"></span>Busca en Google o escribe una dirección</a>
+  <div class="tiles">{{tiles}}</div>
+  <h2>Recientes</h2>
+  <div class="recent">{{recent}}</div>
+  <h2>Atajos</h2>
+  <div class="card keys">{{shortcuts}}</div>
+  <p class="foot muted">Páginas internas: <a href="about:">about:</a> · <a href="about:engine">about:engine</a> · <a href="about:wpt">about:wpt</a></p>
+</main>
+</html>

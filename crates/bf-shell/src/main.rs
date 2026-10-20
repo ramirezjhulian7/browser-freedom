@@ -4,7 +4,9 @@
 
 use std::process::ExitCode;
 
+mod internal;
 mod load;
+mod theme;
 mod window;
 
 use bf_css::media::MediaContext;
@@ -17,9 +19,9 @@ const USAGE: &str = "uso: browser-freedom [dump-dom <url|archivo>
                        | dump-style <url|archivo> [--selector <css>]
                        | dump-layout <url|archivo> [--width <px>] [--height <px>] [--system-fonts]
                        | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>]
-                       | open <url|archivo>
+                       | open [<url|archivo>]
                        | session <url|archivo> <paso>... -o <prefijo>]
-(<url> puede ser http(s)://, file:// o data:)";
+(<url> puede ser http(s)://, file://, data: o about:; open sin argumento abre about:home)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +35,8 @@ fn main() -> ExitCode {
         [cmd, path, rest @ ..] if cmd == "dump-style" => dump_style(path, rest),
         [cmd, path, rest @ ..] if cmd == "dump-layout" => dump_layout(path, rest),
         [cmd, path, rest @ ..] if cmd == "render" => render(path, rest),
-        [cmd, path] if cmd == "open" => window::open(path),
+        [cmd] if cmd == "open" => window::open(None),
+        [cmd, path] if cmd == "open" => window::open(Some(path)),
         [cmd, path, rest @ ..] if cmd == "session" => session(path, rest),
         _ => Err(USAGE.to_owned()),
     };

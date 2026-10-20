@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Páginas internas</title>
+<style>
+{{theme}}
+{{style}}
+.page { display: flex; padding: 10px 14px; border-top: 1px solid var(--border); }
+.page:first-child { border-top: 0; }
+.page a { width: 160px; flex: none; font-family: monospace; }
+</style>
+<main>
+  <h1>Páginas internas</h1>
+  <p class="muted">Se generan en el navegador y las maqueta y pinta el mismo motor que las páginas de la web.</p>
+  <div class="grid">
+    <div class="page"><a href="about:home">about:home</a><span>Inicio: búsqueda, accesos, historial reciente y atajos.</span></div>
+    <div class="page"><a href="about:engine">about:engine</a><span>Reporte del motor para una página: tiempos por fase, documento y lo que se ignoró. <code>about:engine?&lt;url&gt;</code> analiza esa URL.</span></div>
+    <div class="page"><a href="about:wpt">about:wpt</a><span>Estado de compatibilidad con web-platform-tests.</span></div>
+    <div class="page"><a href="about:error">about:error</a><span>Página de error de carga (DNS, TLS, timeout, HTTP).</span></div>
+  </div>
+</main>
+</html>

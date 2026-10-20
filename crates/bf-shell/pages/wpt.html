@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Compatibilidad (WPT)</title>
+<style>
+{{theme}}
+{{style}}
+.summary { display: flex; align-items: center; margin: 18px 0 8px; }
+.summary .big { font-size: 40px; font-weight: 700; color: var(--accent); margin-right: 16px; line-height: 1; }
+.notes li { margin-bottom: 8px; color: var(--text2); }
+.notes { padding-left: 20px; }
+</style>
+<main>
+  <h1>Compatibilidad</h1>
+  <p class="muted">Reftests de web-platform-tests ejecutados por el propio motor (<code>docs/wpt-status.md</code>, {{date}}, WPT <code>{{commit}}</code>).</p>
+  <div class="summary"><span class="big">{{total}}</span><span class="muted">{{total_detail}}</span></div>
+  <div class="grid">{{rows}}</div>
+  {{notes}}
+</main>
+</html>

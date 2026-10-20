@@ -23,7 +23,7 @@ use bf_style::values::color::Rgba;
 use bf_style::{Resources, document_stylesheets, font_face_rules, style_document_with_sheets};
 
 pub use builder::{build_display_list, build_display_list_with_images, document_extent};
-pub use display_list::{DisplayItem, DisplayList, GlyphInstance, Radii};
+pub use display_list::{DisplayItem, DisplayList, GlyphInstance, PathOp, Radii};
 pub use images::{PageImages, load_images};
 pub use raster::{raster_color, render, render_scrolled};
 pub use tiny_skia::{Pixmap, PixmapPaint, Transform};
@@ -35,6 +35,36 @@ pub struct Page {
     pub display_list: DisplayList,
     pub images: PageImages,
     pub timings: PageTimings,
+    pub report: EngineReport,
+}
+
+/// Qué hizo el motor con un documento y qué ignoró. Cada contador sale del subsistema que lo
+/// decide: `bf-style` (CSS), `bf-layout` (`display` degradados), `bf-image` (formatos) y
+/// `bf-font` (fuentes resueltas).
+#[derive(Debug, Clone, Default)]
+pub struct EngineReport {
+    pub style: bf_style::StyleReport,
+    pub layout: bf_layout::LayoutReport,
+    pub images: bf_image::DecodeStats,
+    /// Imágenes que no se pudieron descargar.
+    pub images_unreachable: usize,
+    /// Elementos `<script>` (no se ejecutan: el motor JavaScript es la fase 2).
+    pub scripts: usize,
+    pub dom_nodes: usize,
+    pub elements: usize,
+    pub quirks: bf_dom::QuirksMode,
+    /// `font-family` pedido → cara resuelta.
+    pub fonts: Vec<(String, String)>,
+}
+
+impl EngineReport {
+    /// ¿La página usó algo que el motor todavía no soporta?
+    pub fn has_unsupported(&self) -> bool {
+        self.scripts > 0
+            || self.style.ignored() > 0
+            || !self.layout.is_empty()
+            || !self.images.unsupported.is_empty()
+    }
 }
 
 /// Duración de cada fase de [`prepare_page`].
@@ -99,11 +129,27 @@ pub fn prepare_page(doc: &Document, ctx: &PageContext<'_>, viewport: Size) -> Pa
     let layout = start.elapsed();
     let start = Instant::now();
     let display_list = build_display_list_with_images(doc, &tree, &fonts, &images);
+    let nodes = doc.inclusive_descendants(doc.root());
+    let report = EngineReport {
+        style: bf_style::style_report(doc, &sheets),
+        layout: tree.report.clone(),
+        images: images.stats.clone(),
+        images_unreachable: images.fetch_failed,
+        scripts: nodes
+            .iter()
+            .filter(|&&n| doc.element(n).is_some_and(|e| e.is_html("script")))
+            .count(),
+        dom_nodes: nodes.len(),
+        elements: nodes.iter().filter(|&&n| doc.element(n).is_some()).count(),
+        quirks: doc.mode,
+        fonts: fonts.used_fonts(),
+    };
     Page {
         fonts,
         tree,
         display_list,
         images,
+        report,
         timings: PageTimings {
             style,
             images: images_time,

@@ -4,3 +4,6 @@
 [submodule "tests/css-parsing-tests"]
 	path = tests/css-parsing-tests
 	url = https://github.com/SimonSapin/css-parsing-tests
+[submodule "tests/test262-parser-tests"]
+	path = tests/test262-parser-tests
+	url = https://github.com/tc39/test262-parser-tests

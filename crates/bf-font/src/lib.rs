@@ -114,6 +114,7 @@ impl Fonts {
         }
         self.loader = Some(loader);
         lock(&self.families).clear();
+        lock(&self.used).clear();
         lock(&self.shaped).clear();
     }
 

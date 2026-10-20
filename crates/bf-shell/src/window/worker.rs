@@ -12,17 +12,26 @@ use bf_layout::Size;
 use bf_net::NetLoader;
 use bf_paint::{Page, PageContext, prepare_page};
 
-use crate::load::{Loaded, error_page, load_url};
+use crate::internal;
+use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
+use crate::theme::Theme;
+
+/// Cargar `url` y maquetarla. `recent` y `theme` son para las páginas internas.
+pub struct LoadJob {
+    pub id: u64,
+    pub url: Url,
+    pub net: Arc<NetLoader>,
+    pub recent: Vec<(String, String)>,
+    pub theme: Theme,
+}
 
 pub enum Job {
-    /// Cargar `url` y maquetarla.
-    Load {
-        id: u64,
-        url: Url,
-        net: Arc<NetLoader>,
-    },
+    Load(Box<LoadJob>),
     /// Volver a hacer estilo y layout de un documento ya cargado (otro viewport).
-    Relayout { id: u64, loaded: Arc<Loaded> },
+    Relayout {
+        id: u64,
+        loaded: Arc<Loaded>,
+    },
 }
 
 pub struct Done {
@@ -47,6 +56,13 @@ fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "error interno".to_owned())
 }
 
+fn engine_error(message: String) -> LoadError {
+    LoadError {
+        kind: ErrorKind::Engine,
+        message,
+    }
+}
+
 impl Worker {
     pub fn spawn(fonts: Arc<FontDb>, wake: impl Fn() + Send + 'static) -> Worker {
         let (jobs, rx) = channel::<Job>();
@@ -59,24 +75,40 @@ impl Worker {
         std::thread::Builder::new()
             .name("bf-carga".into())
             .spawn(move || {
+                let current_viewport = || *shared.lock().unwrap_or_else(|e| e.into_inner());
                 while let Ok(mut job) = rx.recv() {
                     // Solo importa el último trabajo pendiente.
                     while let Ok(next) = rx.try_recv() {
                         job = next;
                     }
-                    let (id, loaded) = match job {
-                        Job::Load { id, url, net } => {
-                            let result =
-                                catch_unwind(AssertUnwindSafe(|| load_url(&url, net.clone())))
-                                    .unwrap_or_else(|e| Err(panic_message(&*e)));
-                            let loaded = result.unwrap_or_else(|e| error_page(&url, &e, net));
-                            (id, Arc::new(loaded))
+                    let (id, loaded, ctx) = match job {
+                        Job::Load(job) => {
+                            let LoadJob {
+                                id,
+                                url,
+                                net,
+                                recent,
+                                theme,
+                            } = *job;
+                            let ctx = LoadContext {
+                                net,
+                                fonts: fonts.clone(),
+                                viewport: current_viewport(),
+                                recent,
+                                theme,
+                            };
+                            let loaded = catch_unwind(AssertUnwindSafe(|| load_with(&url, &ctx)))
+                                .unwrap_or_else(|e| {
+                                    let err = engine_error(panic_message(&*e));
+                                    internal::error_page(&url, &err, &ctx)
+                                });
+                            (id, Arc::new(loaded), Some(ctx))
                         }
-                        Job::Relayout { id, loaded } => (id, loaded),
+                        Job::Relayout { id, loaded } => (id, loaded, None),
                     };
-                    let viewport = *shared.lock().unwrap_or_else(|e| e.into_inner());
+                    let viewport = current_viewport();
                     let page = |loaded: &Loaded| {
-                        let ctx = PageContext {
+                        let pctx = PageContext {
                             base: &loaded.base,
                             encoding: loaded.encoding,
                             loader: loaded.loader.clone(),
@@ -84,7 +116,7 @@ impl Worker {
                             extra: &[],
                         };
                         catch_unwind(AssertUnwindSafe(|| {
-                            prepare_page(&loaded.doc, &ctx, viewport)
+                            prepare_page(&loaded.doc, &pctx, viewport)
                         }))
                     };
                     let (loaded, page) = match page(&loaded) {
@@ -94,15 +126,19 @@ impl Worker {
                         Err(e) => {
                             let message = format!("error del motor: {}", panic_message(&*e));
                             eprintln!("{message}");
-                            let err = Arc::new(error_page(
-                                &loaded.url,
-                                &message,
-                                loaded.loader.net.clone(),
-                            ));
-                            let Ok(p) = page(&err) else {
+                            let ctx = ctx.unwrap_or_else(|| LoadContext {
+                                net: loaded.loader.net.clone(),
+                                fonts: fonts.clone(),
+                                viewport,
+                                recent: Vec::new(),
+                                theme: Theme::for_system(None),
+                            });
+                            let err = engine_error(message);
+                            let shown = Arc::new(internal::error_page(&loaded.url, &err, &ctx));
+                            let Ok(p) = page(&shown) else {
                                 continue;
                             };
-                            (err, p)
+                            (shown, p)
                         }
                     };
                     let done = Done {

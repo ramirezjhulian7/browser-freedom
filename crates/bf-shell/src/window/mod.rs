@@ -1,47 +1,52 @@
-//! `browser-freedom open <url|archivo>`: una ventana nativa (winit + softbuffer) navegable.
+//! `browser-freedom open [url|archivo]`: la ventana del navegador (winit + softbuffer).
 //!
-//! - **Barra** (36 px, [`chrome`]): ◀ ▶ ⟳ y el campo de URL. `Ctrl+L` (o `F6`, o un clic)
-//!   enfoca el campo y selecciona todo; se escribe, se borra con `Retroceso`/`Supr`, se mueve
-//!   el cursor con las flechas, `Inicio` y `Fin` (con `Mayús`, seleccionando) y `Intro` navega:
-//!   sin esquema se antepone `https://`, y lo que parece una ruta local se abre como `file://`.
-//!   `Esc` devuelve el foco a la página.
-//! - **Carga** en un hilo ([`worker`]): la interfaz nunca se bloquea; la barra muestra
-//!   "Cargando…" y los errores de red se muestran como una página de error interna.
-//! - **Navegación**: un clic en un enlace navega (resuelto contra la URL base del documento,
-//!   `<base href>` incluido); un fragmento `#id` del mismo documento solo desplaza. El cursor
-//!   es una mano sobre los enlaces y respeta `cursor`. Historial con `Alt+←`/`Alt+→` y los
-//!   botones; `Ctrl+R`/`F5` recarga.
-//! - **Scroll**: rueda, flechas, `Re Pág`/`Av Pág`, `Inicio`/`Fin` y espacio, limitado al tamaño
-//!   del documento; las cajas `position: fixed` no se desplazan. Redimensionar vuelve a hacer
-//!   estilo y layout.
-//! - **Zoom**: `Ctrl +`, `Ctrl -` y `Ctrl 0` cambian la escala del raster y el ancho del
-//!   viewport en px CSS.
+//! La interfaz muestra lo que el motor hace con cada página. Todo el cromo se dibuja con el
+//! propio motor y el propio rasterizador, con la paleta de [`Theme`]:
+//! - **Barra superior** (40 px, [`chrome`]):
+//!   - la marca `bf`, atrás, adelante y recargar (detener mientras carga);
+//!   - el campo de URL: sin foco, formateado (candado en `https`, host destacado); con foco,
+//!     editable con cursor y selección; una línea de progreso ámbar mientras carga;
+//!   - el botón del panel del motor, con un punto ámbar si la página usó algo sin soporte.
+//! - **Panel del motor** (320 px a la derecha, `Ctrl+I`): tiempos por fase, datos del
+//!   documento, lo que el motor ignoró y las fuentes resueltas ([`crate::internal`]).
+//! - **Línea de estado** (24 px): el enlace bajo el puntero; zoom, viewport y tiempo de carga.
+//! - **Superposición de depuración** (`F12`, [`overlay`]): los fragmentos sobre la página.
+//! - Carga en un hilo ([`worker`]); navegación por enlaces, fragmentos e historial; scroll con
+//!   `position: fixed` fuera del desplazamiento; zoom; páginas internas `about:`.
+//!
+//! Los atajos están en [`crate::internal::SHORTCUTS`] (y en `about:home`).
 
 mod chrome;
 mod hit;
+mod icons;
+mod overlay;
 mod worker;
 
+use std::cell::Cell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bf_font::FontDb;
 use bf_infra::Url;
-use bf_layout::Fragment;
-use bf_layout::Size;
+use bf_layout::fragment::Rect;
+use bf_layout::{Fragment, Size};
 use bf_net::NetLoader;
-use bf_paint::{Page, Pixmap, document_extent, render, render_scrolled};
+use bf_paint::{Page, Pixmap, PixmapPaint, Transform, document_extent, render, render_scrolled};
 use bf_style::values::color::Rgba;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::internal;
 use crate::load::{Loaded, indicated_element};
-use chrome::{Region, Toolbar};
-use worker::{Done, Job, Worker};
+use crate::theme::Theme;
+use chrome::{BAR, Chrome, PANEL, Region, STATUS};
+use worker::{Done, Job, LoadJob, Worker};
 
 /// Px CSS por "línea" de rueda y por pulsación de flecha.
 const LINE: f32 = 40.0;
@@ -51,6 +56,12 @@ const ZOOM_LEVELS: [f32; 15] = [
     0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
 ];
 
+/// Duración de un ciclo de la línea de progreso indeterminada.
+const PROGRESS_CYCLE: f32 = 1.4;
+
+/// Cuánto se muestra un aviso en la línea de estado.
+const NOTICE: Duration = Duration::from_secs(4);
+
 struct Graphics {
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
@@ -58,9 +69,10 @@ struct Graphics {
     _context: softbuffer::Context<Rc<Window>>,
 }
 
-/// Una entrada del historial de sesión: la URL y dónde estaba el scroll al salir.
+/// Una entrada del historial de sesión: la URL, el título y dónde estaba el scroll al salir.
 struct Entry {
     url: Url,
+    title: String,
     scroll: (f32, f32),
 }
 
@@ -74,6 +86,23 @@ enum Navigation {
     Reload,
 }
 
+/// Una carga en curso.
+struct Loading {
+    id: u64,
+    nav: Navigation,
+    url: Url,
+    started: Instant,
+}
+
+/// Dónde está el puntero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Area {
+    Bar,
+    Status,
+    Panel,
+    Page,
+}
+
 struct App {
     net: Arc<NetLoader>,
     worker: Worker,
@@ -83,11 +112,10 @@ struct App {
     history: Vec<Entry>,
     index: usize,
     next_id: u64,
-    /// Carga en curso: su id, qué hacer con el historial y la URL pedida.
-    loading: Option<(u64, Navigation, Url)>,
+    loading: Option<Loading>,
     /// Re-layout en curso (id).
     relayout: Option<u64>,
-    toolbar: Toolbar,
+    chrome: Chrome,
     zoom: f32,
     modifiers: ModifiersState,
     /// Posición del puntero en px lógicos de la ventana.
@@ -98,9 +126,22 @@ struct App {
     /// Tamaño lógico cuando no hay ventana (sesiones sin ventana de [`session`]).
     headless: Size,
     initial: Option<Url>,
+    /// Superposición de depuración activa, y el fragmento bajo el puntero (rect, si es fijo y
+    /// su descripción).
+    overlay: bool,
+    overlay_hover: Option<(Rect, bool, String)>,
+    /// Último tiempo de raster de la página y el que muestra el panel.
+    raster: Cell<Option<Duration>>,
+    panel_raster: Option<Duration>,
+    /// Tiempo total de la última carga (pedido → página lista).
+    load_time: Option<Duration>,
+    /// Aviso temporal en la línea de estado ("Guardado …").
+    notice: Option<(String, Instant)>,
+    clock: Instant,
 }
 
-/// Interpreta lo escrito en el campo de URL.
+/// Interpreta lo escrito en el campo de URL: una URL, una ruta local, un host (se antepone
+/// `https://`) o, si no parece una dirección, una búsqueda en Google.
 fn url_from_input(input: &str) -> Option<Url> {
     let s = input.trim();
     if s.is_empty() {
@@ -121,7 +162,14 @@ fn url_from_input(input: &str) -> Option<Url> {
     if has_scheme && let Ok(u) = Url::parse(s, None) {
         return Some(u);
     }
-    Url::parse(&format!("https://{s}"), None).ok()
+    let host = s.split(['/', '?', '#']).next().unwrap_or("");
+    let looks_like_host = !s.contains(char::is_whitespace)
+        && (host.contains('.') || host.starts_with("localhost") || host.contains(':'));
+    if looks_like_host {
+        return Url::parse(&format!("https://{s}"), None).ok();
+    }
+    let query = bf_url::form::serialize(&[("q".to_owned(), s.to_owned())]);
+    Url::parse(&format!("https://www.google.com/search?{query}"), None).ok()
 }
 
 /// ¿`a` y `b` son el mismo documento salvo el fragmento?
@@ -129,8 +177,43 @@ fn same_document(a: &Url, b: &Url) -> bool {
     a.serialize(true) == b.serialize(true)
 }
 
+/// Fecha y hora UTC `AAAAMMDD-HHMMSS` (sin dependencias: días desde la época civil).
+fn timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant, `civil_from_days`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
+    frame.draw_pixmap(
+        x.round() as i32,
+        y.round() as i32,
+        part.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
 impl App {
-    fn new(worker: Worker, fonts: Arc<FontDb>, initial: Option<Url>) -> App {
+    fn new(worker: Worker, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
         App {
             net: Arc::new(NetLoader::new()),
             worker,
@@ -142,7 +225,7 @@ impl App {
             next_id: 0,
             loading: None,
             relayout: None,
-            toolbar: Toolbar::new(fonts),
+            chrome: Chrome::new(fonts, theme),
             zoom: 1.0,
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
@@ -154,6 +237,13 @@ impl App {
                 height: 768.0,
             },
             initial,
+            overlay: false,
+            overlay_hover: None,
+            raster: Cell::new(None),
+            panel_raster: None,
+            load_time: None,
+            notice: None,
+            clock: Instant::now(),
         }
     }
 
@@ -178,13 +268,44 @@ impl App {
         }
     }
 
-    /// Viewport de la página en px CSS: la ventana menos la barra, dividida por el zoom.
-    fn viewport(&self) -> Size {
+    /// El área de la página en px lógicos de la ventana: entre la barra y la línea de estado,
+    /// sin el panel.
+    fn page_area(&self) -> Rect {
         let s = self.logical_size();
+        let panel = if self.chrome.panel_open { PANEL } else { 0.0 };
+        Rect::new(
+            0.0,
+            BAR,
+            (s.width - panel).max(1.0),
+            (s.height - BAR - STATUS).max(1.0),
+        )
+    }
+
+    /// Viewport de la página en px CSS.
+    fn viewport(&self) -> Size {
+        let a = self.page_area();
         Size {
-            width: (s.width / self.zoom).max(1.0),
-            height: ((s.height - chrome::HEIGHT) / self.zoom).max(1.0),
+            width: (a.width / self.zoom).max(1.0),
+            height: (a.height / self.zoom).max(1.0),
         }
+    }
+
+    fn area_at(&self, x: f32, y: f32) -> Area {
+        let s = self.logical_size();
+        if y < BAR {
+            Area::Bar
+        } else if y >= s.height - STATUS {
+            Area::Status
+        } else if self.chrome.panel_open && x >= self.page_area().right() {
+            Area::Panel
+        } else {
+            Area::Page
+        }
+    }
+
+    /// Coordenadas del viewport de la página (px CSS) para un punto de la ventana.
+    fn page_point(&self, x: f32, y: f32) -> (f32, f32) {
+        (x / self.zoom, (y - BAR) / self.zoom)
     }
 
     fn redraw_later(&self) {
@@ -193,36 +314,42 @@ impl App {
         }
     }
 
-    fn update_title(&self) {
-        let Some(g) = &self.graphics else {
-            return;
-        };
-        let name = if self.loading.is_some() {
-            "Cargando…".to_owned()
-        } else {
-            self.current.as_ref().map_or_else(String::new, |l| {
-                l.title().unwrap_or_else(|| match &l.url.path {
-                    bf_url::Path::List(segments) if l.url.scheme == "file" => {
-                        segments.last().cloned().unwrap_or_default()
-                    }
-                    _ => l.url.host_string(),
-                })
+    fn display_name(&self) -> String {
+        if self.loading.is_some() {
+            return "Cargando…".to_owned();
+        }
+        self.current.as_ref().map_or_else(String::new, |l| {
+            l.title().unwrap_or_else(|| match &l.url.path {
+                bf_url::Path::List(segments) if l.url.scheme == "file" => {
+                    segments.last().cloned().unwrap_or_default()
+                }
+                _ if l.url.scheme == "about" => l.url.href(),
+                _ => l.url.host_string(),
             })
-        };
-        g.window.set_title(&format!("{name} — browser-freedom"));
+        })
     }
 
-    fn refresh_toolbar(&mut self) {
-        self.toolbar.can_back = self.index > 0 && !self.history.is_empty();
-        self.toolbar.can_forward = self.index + 1 < self.history.len();
-        self.toolbar.status = if self.loading.is_some() {
-            "Cargando…".to_owned()
-        } else {
-            self.hover_link.clone().unwrap_or_default()
-        };
-        if !self.toolbar.field.focused {
-            let shown = match &self.loading {
-                Some((_, _, url)) => url.href(),
+    fn update_title(&self) {
+        if let Some(g) = &self.graphics {
+            g.window
+                .set_title(&format!("«{}» — browser-freedom", self.display_name()));
+        }
+    }
+
+    /// Vuelve a maquetar la barra y la línea de estado con el estado actual.
+    fn refresh_chrome(&mut self) {
+        let vp = self.viewport();
+        let c = &mut self.chrome;
+        c.can_back = self.index > 0 && !self.history.is_empty();
+        c.can_forward = self.index + 1 < self.history.len();
+        c.loading = self.loading.is_some();
+        c.engine_alert = self
+            .page
+            .as_ref()
+            .is_some_and(|p| p.report.has_unsupported());
+        if !c.field.focused {
+            c.url = match &self.loading {
+                Some(l) => l.url.href(),
                 None => self
                     .history
                     .get(self.index)
@@ -230,11 +357,59 @@ impl App {
                     .or_else(|| self.current.as_ref().map(|l| l.url.href()))
                     .unwrap_or_default(),
             };
-            self.toolbar.field.set_text(shown);
+            c.field.set_text(c.url.clone());
         }
+        // Línea de estado.
+        let notice = self
+            .notice
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < NOTICE)
+            .map(|(m, _)| m.clone());
+        c.status_em = notice.is_some();
+        c.status_left = notice
+            .or_else(|| self.overlay_hover.as_ref().map(|h| h.2.clone()))
+            .or_else(|| self.hover_link.clone())
+            .unwrap_or_else(|| {
+                if self.loading.is_some() {
+                    "Cargando…".to_owned()
+                } else {
+                    String::new()
+                }
+            });
+        let mut right = vec![
+            format!("Zoom {:.0} %", self.zoom * 100.0),
+            format!("{:.0} × {:.0} px", vp.width, vp.height),
+        ];
+        if let Some(t) = self.load_time {
+            right.push(format!("{:.2} s", t.as_secs_f64()).replace('.', ","));
+        }
+        if self.overlay {
+            right.insert(0, "F12 cajas".to_owned());
+        }
+        c.status_right = right;
         let width = self.logical_size().width;
-        self.toolbar.layout(width);
+        self.chrome.layout(width);
         self.redraw_later();
+    }
+
+    /// Vuelve a generar el panel del motor para la página actual.
+    fn refresh_panel(&mut self) {
+        if !self.chrome.panel_open {
+            return;
+        }
+        let height = self.page_area().height;
+        let body = match (&self.current, &self.page) {
+            (Some(l), Some(p)) => internal::engine_body(l, p, self.raster.get(), true),
+            _ => "<p class=\"muted\">Sin página.</p>".to_owned(),
+        };
+        self.panel_raster = self.raster.get();
+        self.chrome.layout_panel(&body, height);
+        self.redraw_later();
+    }
+
+    fn set_notice(&mut self, message: String) {
+        self.notice = Some((message, Instant::now()));
+        self.refresh_chrome();
     }
 
     // --- Navegación ---
@@ -246,20 +421,57 @@ impl App {
         }
         self.next_id += 1;
         let id = self.next_id;
+        let mut recent: Vec<(String, String)> = Vec::new();
+        for e in self.history.iter().rev() {
+            let href = e.url.href();
+            if e.url.scheme != "about" && !recent.iter().any(|(_, h)| *h == href) {
+                recent.push((e.title.clone(), href));
+            }
+        }
         self.worker.set_viewport(self.viewport());
-        self.worker.send(Job::Load {
+        self.worker.send(Job::Load(Box::new(LoadJob {
             id,
             url: url.clone(),
             net: self.net.clone(),
+            recent,
+            theme: self.chrome.theme,
+        })));
+        self.loading = Some(Loading {
+            id,
+            nav,
+            url,
+            started: Instant::now(),
         });
-        self.loading = Some((id, nav, url));
         self.relayout = None;
         self.update_title();
-        self.refresh_toolbar();
+        self.refresh_chrome();
+    }
+
+    /// Detiene la carga en curso (su resultado se descarta).
+    fn stop(&mut self) {
+        if self.loading.take().is_some() {
+            self.update_title();
+            self.refresh_chrome();
+        }
     }
 
     /// Navega a `url` (un enlace o lo escrito en la barra).
     fn navigate(&mut self, url: Url) {
+        if url.scheme == "bf" {
+            return self.action(&url.path_string());
+        }
+        // `about:engine` desde una página: el reporte de esa página.
+        if url.scheme == "about"
+            && url.path_string() == "engine"
+            && url.query.is_none()
+            && let Some(current) = &self.current
+            && current.url.scheme != "about"
+        {
+            let target = format!("about:engine?{}", current.url.href());
+            if let Ok(u) = Url::parse(&target, None) {
+                return self.start_load(u, Navigation::Push);
+            }
+        }
         if let Some(current) = &self.current
             && url.fragment.is_some()
             && same_document(&current.url, &url)
@@ -269,14 +481,16 @@ impl App {
             if let Some(e) = self.history.get_mut(self.index) {
                 e.scroll = self.scroll;
             }
+            let title = self.display_name();
             self.history.truncate(self.index + 1);
             self.history.push(Entry {
                 url: url.clone(),
+                title,
                 scroll: (0.0, 0.0),
             });
             self.index = self.history.len() - 1;
             self.scroll_to_fragment(&url);
-            self.refresh_toolbar();
+            self.refresh_chrome();
             return;
         }
         self.start_load(url, Navigation::Push);
@@ -298,8 +512,8 @@ impl App {
             self.index = to;
             self.scroll = scroll;
             self.clamp_scroll();
-            self.toolbar.field.focused = false;
-            self.refresh_toolbar();
+            self.chrome.field.focused = false;
+            self.refresh_chrome();
             return;
         }
         self.start_load(url, Navigation::Traverse(to));
@@ -319,11 +533,17 @@ impl App {
 
     fn reload(&mut self) {
         let url = match (&self.loading, &self.current) {
-            (Some((_, _, url)), _) => url.clone(),
+            (Some(l), _) => l.url.clone(),
             (None, Some(c)) => c.url.clone(),
             _ => return,
         };
         self.start_load(url, Navigation::Reload);
+    }
+
+    fn home(&mut self) {
+        if let Ok(u) = Url::parse("about:home", None) {
+            self.navigate(u);
+        }
     }
 
     fn scroll_to_fragment(&mut self, url: &Url) {
@@ -341,6 +561,74 @@ impl App {
         };
         self.clamp_scroll();
         self.redraw_later();
+    }
+
+    /// Acciones de la interfaz (enlaces `bf:` del panel y de `about:home`, y atajos).
+    fn action(&mut self, name: &str) {
+        match name {
+            "focus-url" => self.focus_bar(),
+            "save-png" => self.save_png(),
+            "dump-layout" => self.dump(true),
+            "dump-dom" => self.dump(false),
+            "engine-page" => {
+                if let Ok(u) = Url::parse("about:engine", None) {
+                    self.navigate(u);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Ruta junto al ejecutable con el host de la página y la fecha.
+    fn output_path(&self, extension: &str) -> std::path::PathBuf {
+        let host = self
+            .current
+            .as_ref()
+            .map(|l| {
+                let h = l.url.host_string();
+                if h.is_empty() {
+                    l.url.href().replace([':', '/', '?', '#', '\\'], "-")
+                } else {
+                    h
+                }
+            })
+            .unwrap_or_else(|| "browser-freedom".to_owned());
+        let dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_default();
+        dir.join(format!("{host}-{}.{extension}", timestamp()))
+    }
+
+    /// `Ctrl+S`: un PNG del cuadro completo (cromo incluido).
+    fn save_png(&mut self) {
+        let path = self.output_path("png");
+        let message = match self.frame().save_png(&path) {
+            Ok(()) => format!("Guardado {}", path.display()),
+            Err(e) => format!("No se pudo guardar {}: {e}", path.display()),
+        };
+        self.set_notice(message);
+    }
+
+    /// Volcado del árbol de fragmentos (`layout`) o del DOM.
+    fn dump(&mut self, layout: bool) {
+        let (Some(current), Some(page)) = (&self.current, &self.page) else {
+            return;
+        };
+        let (text, ext) = if layout {
+            (bf_layout::dump(&current.doc, &page.tree), "layout.txt")
+        } else {
+            (
+                bf_dom::test_serialize(&current.doc, current.doc.root()),
+                "dom.txt",
+            )
+        };
+        let path = self.output_path(ext);
+        let message = match std::fs::write(&path, text) {
+            Ok(()) => format!("Guardado {}", path.display()),
+            Err(e) => format!("No se pudo guardar {}: {e}", path.display()),
+        };
+        self.set_notice(message);
     }
 
     /// Resultados del hilo de trabajo.
@@ -366,22 +654,28 @@ impl App {
         if self.relayout == Some(id) {
             self.relayout = None;
             self.page = Some(page);
+            self.raster.set(None);
             self.clamp_scroll();
+            self.refresh_panel();
             self.redraw_later();
             return;
         }
-        let Some((pending, nav, _)) = &self.loading else {
+        let Some(loading) = &self.loading else {
             return;
         };
-        if *pending != id {
+        if loading.id != id {
             return;
         }
-        let nav = *nav;
+        let (nav, started) = (loading.nav, loading.started);
         self.loading = None;
+        self.load_time = Some(started.elapsed());
         let url = loaded.url.clone();
+        let title = loaded.title().unwrap_or_else(|| url.href());
         self.current = Some(loaded);
         self.page = Some(page);
+        self.raster.set(None);
         self.hover_link = None;
+        self.overlay_hover = None;
         match nav {
             Navigation::Push => {
                 self.history.truncate(self.index + 1);
@@ -392,6 +686,7 @@ impl App {
                 }
                 self.history.push(Entry {
                     url: url.clone(),
+                    title,
                     scroll: (0.0, 0.0),
                 });
                 self.scroll = (0.0, 0.0);
@@ -404,13 +699,15 @@ impl App {
                 self.scroll = self.history[i].scroll;
                 // La URL final (después de redirecciones).
                 self.history[i].url = url;
+                self.history[i].title = title;
             }
             Navigation::Reload => {}
         }
         self.clamp_scroll();
-        self.toolbar.field.focused = false;
+        self.chrome.field.focused = false;
         self.update_title();
-        self.refresh_toolbar();
+        self.refresh_chrome();
+        self.refresh_panel();
     }
 
     fn request_relayout(&mut self) {
@@ -424,7 +721,7 @@ impl App {
         self.relayout = Some(id);
     }
 
-    /// El viewport cambió (ventana o zoom): se rehace el layout (en el hilo) y la barra.
+    /// El viewport cambió (ventana, panel o zoom): se rehace el layout (en el hilo) y el cromo.
     fn resized(&mut self) {
         if self.loading.is_some() {
             // La carga en curso lee el viewport nuevo antes del layout (o se rehace al
@@ -433,7 +730,21 @@ impl App {
         } else {
             self.request_relayout();
         }
-        self.refresh_toolbar();
+        self.refresh_chrome();
+        self.refresh_panel();
+    }
+
+    fn toggle_panel(&mut self) {
+        self.chrome.panel_open = !self.chrome.panel_open;
+        self.chrome.panel_scroll = 0.0;
+        self.resized();
+    }
+
+    fn toggle_overlay(&mut self) {
+        self.overlay = !self.overlay;
+        self.overlay_hover = None;
+        self.mouse_moved();
+        self.refresh_chrome();
     }
 
     // --- Scroll ---
@@ -486,53 +797,85 @@ impl App {
 
     // --- Pintura ---
 
-    /// El cuadro completo (barra y página) en px de dispositivo.
+    /// Fase (0 a 1) de la animación de la línea de progreso.
+    fn progress_phase(&self) -> f32 {
+        (self.clock.elapsed().as_secs_f32() % PROGRESS_CYCLE) / PROGRESS_CYCLE
+    }
+
+    /// El cuadro completo (cromo y página) en px de dispositivo.
     fn frame(&self) -> Pixmap {
+        let theme = self.chrome.theme;
         let dpi = self.dpi();
         let logical = self.logical_size();
         let width = (logical.width * dpi).round().max(1.0) as u32;
         let height = (logical.height * dpi).round().max(1.0) as u32;
         let mut frame = Pixmap::new(width, height).expect("tamaño de cuadro válido");
-        frame.fill(bf_paint::raster_color(Rgba::WHITE));
-        let bar_rows = (chrome::HEIGHT * dpi).round();
+        frame.fill(bf_paint::raster_color(theme.chrome));
+        let area = self.page_area();
+        let viewport = self.viewport();
         if let Some(p) = &self.page {
+            let start = Instant::now();
             let page = render_scrolled(
                 &p.display_list,
-                self.viewport(),
+                viewport,
                 dpi * self.zoom,
                 Rgba::WHITE,
                 self.scroll,
             );
-            frame.draw_pixmap(
-                0,
-                bar_rows as i32,
-                page.as_ref(),
-                &bf_paint::PixmapPaint::default(),
-                bf_paint::Transform::identity(),
-                None,
-            );
+            self.raster.set(Some(start.elapsed()));
+            blit(&mut frame, &page, 0.0, area.y * dpi);
+            if self.overlay {
+                let view = Rect::new(
+                    self.scroll.0,
+                    self.scroll.1,
+                    viewport.width,
+                    viewport.height,
+                );
+                let vp = Rect::new(0.0, 0.0, viewport.width, viewport.height);
+                let hover = self.overlay_hover.as_ref().map(|h| (h.0, h.1));
+                let list = overlay::overlay(&p.tree, &theme, view, vp, hover);
+                let layer = render_scrolled(
+                    &list,
+                    viewport,
+                    dpi * self.zoom,
+                    Rgba::TRANSPARENT,
+                    self.scroll,
+                );
+                blit(&mut frame, &layer, 0.0, area.y * dpi);
+            }
         }
-        if let Some(p) = self.toolbar.page() {
-            let bar = render(
-                &p.display_list,
-                self.toolbar.size(),
+        if let Some(panel) = self.chrome.panel() {
+            let layer = render_scrolled(
+                panel.display_list(),
+                panel.size,
                 dpi,
-                Rgba::rgb(0xDE, 0xE1, 0xE6),
+                theme.chrome,
+                (0.0, self.chrome.panel_scroll),
             );
-            frame.draw_pixmap(
-                0,
-                0,
-                bar.as_ref(),
-                &bf_paint::PixmapPaint::default(),
-                bf_paint::Transform::identity(),
-                None,
+            blit(&mut frame, &layer, area.right() * dpi, area.y * dpi);
+        }
+        if let Some(list) = self.chrome.bar_display_list(self.progress_phase()) {
+            let bar = render(&list, self.chrome.bar_size(), dpi, theme.chrome);
+            blit(&mut frame, &bar, 0.0, 0.0);
+        }
+        if let Some(status) = self.chrome.status() {
+            let layer = render(
+                status.display_list(),
+                self.chrome.status_size(),
+                dpi,
+                theme.chrome,
             );
+            blit(&mut frame, &layer, 0.0, (logical.height - STATUS) * dpi);
         }
         frame
     }
 
     fn redraw(&mut self) {
         let frame = self.frame();
+        // El panel muestra el tiempo de raster en cuanto se conoce.
+        if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
+            self.refresh_panel();
+        }
         let Some(g) = &mut self.graphics else {
             return;
         };
@@ -549,7 +892,7 @@ impl App {
         let (bw, bh) = (size.width as usize, size.height as usize);
         let (fw, fh) = (frame.width() as usize, frame.height() as usize);
         let data = frame.data();
-        buffer.fill(0x00FF_FFFF);
+        buffer.fill(0);
         for y in 0..bh.min(fh) {
             for x in 0..bw.min(fw) {
                 let i = (y * fw + x) * 4;
@@ -575,84 +918,132 @@ impl App {
 
     fn mouse_moved(&mut self) {
         let (x, y) = self.mouse;
-        if y < chrome::HEIGHT {
-            let region = self.toolbar.region_at(x, y);
-            self.set_cursor(if region == Some(Region::Field) {
-                CursorIcon::Text
-            } else {
-                CursorIcon::Default
-            });
-            let hover = region.filter(|r| *r != Region::Field);
-            if hover != self.toolbar.hover || self.hover_link.is_some() {
-                self.toolbar.hover = hover;
-                self.hover_link = None;
-                self.refresh_toolbar();
-            }
-            return;
-        }
-        let mut link = None;
         let mut cursor = CursorIcon::Default;
-        if let (Some(current), Some(page)) = (&self.current, &self.page) {
-            let (px, py) = (x / self.zoom, (y - chrome::HEIGHT) / self.zoom);
-            if let Some(f) = hit::hit_test(&page.tree, px, py, self.scroll) {
-                let href = f.node.and_then(|n| hit::link_at(&current.doc, n));
-                cursor = hit::cursor_for(f, href.is_some());
-                link = href
-                    .and_then(|(_, h)| Url::parse(&h, Some(&current.base)).ok())
-                    .map(|u| u.href());
+        let mut link = None;
+        let mut bar_hover = None;
+        let mut overlay_hover = None;
+        match self.area_at(x, y) {
+            Area::Bar => {
+                let region = self.chrome.region_at(x, y);
+                if region == Some(Region::Field) {
+                    cursor = CursorIcon::Text;
+                } else if region.is_some() {
+                    cursor = CursorIcon::Pointer;
+                }
+                bar_hover = region.filter(|r| *r != Region::Field);
+            }
+            Area::Status => {}
+            Area::Panel => {
+                let px = x - self.page_area().right();
+                if let Some(panel) = self.chrome.panel()
+                    && let Some(href) = panel.link_at(px, y - BAR, self.chrome.panel_scroll)
+                {
+                    cursor = CursorIcon::Pointer;
+                    if !href.starts_with("bf:") {
+                        link = Some(href);
+                    }
+                }
+            }
+            Area::Page => {
+                if let (Some(current), Some(page)) = (&self.current, &self.page) {
+                    let (px, py) = self.page_point(x, y);
+                    if let Some(f) = hit::hit_test(&page.tree, px, py, self.scroll) {
+                        let href = f.node.and_then(|n| hit::link_at(&current.doc, n));
+                        cursor = hit::cursor_for(f, href.is_some());
+                        link = href
+                            .and_then(|(_, h)| Url::parse(&h, Some(&current.base)).ok())
+                            .filter(|u| u.scheme != "bf")
+                            .map(|u| u.href());
+                        if self.overlay {
+                            overlay_hover = Some((
+                                f.rect,
+                                fixed_ancestry(page.tree.root.as_ref(), f),
+                                overlay::describe(&current.doc, f),
+                            ));
+                        }
+                    }
+                }
             }
         }
         self.set_cursor(cursor);
-        if link != self.hover_link || self.toolbar.hover.is_some() {
+        let overlay_changed =
+            overlay_hover.as_ref().map(|h| h.0) != self.overlay_hover.as_ref().map(|h| h.0);
+        if link != self.hover_link || bar_hover != self.chrome.hover || overlay_changed {
             self.hover_link = link;
-            self.toolbar.hover = None;
-            self.refresh_toolbar();
+            self.chrome.hover = bar_hover;
+            self.overlay_hover = overlay_hover;
+            self.refresh_chrome();
         }
     }
 
     fn click(&mut self) {
         let (x, y) = self.mouse;
-        if y < chrome::HEIGHT {
-            match self.toolbar.region_at(x, y) {
+        match self.area_at(x, y) {
+            Area::Bar => match self.chrome.region_at(x, y) {
                 Some(Region::Back) => self.back(),
                 Some(Region::Forward) => self.forward(),
+                Some(Region::Reload) if self.loading.is_some() => self.stop(),
                 Some(Region::Reload) => self.reload(),
-                Some(Region::Field) if !self.toolbar.field.focused => self.focus_bar(),
+                Some(Region::Engine) => self.toggle_panel(),
+                Some(Region::Field) if !self.chrome.field.focused => self.focus_bar(),
                 _ => {}
+            },
+            Area::Status => {}
+            Area::Panel => {
+                let px = x - self.page_area().right();
+                let href = self
+                    .chrome
+                    .panel()
+                    .and_then(|p| p.link_at(px, y - BAR, self.chrome.panel_scroll));
+                if let Some(url) = href.and_then(|h| Url::parse(&h, None).ok()) {
+                    self.navigate(url);
+                }
             }
-            return;
-        }
-        if self.toolbar.field.focused {
-            self.toolbar.field.focused = false;
-            self.refresh_toolbar();
-        }
-        let (Some(current), Some(page)) = (&self.current, &self.page) else {
-            return;
-        };
-        let (px, py) = (x / self.zoom, (y - chrome::HEIGHT) / self.zoom);
-        let target = hit::hit_test(&page.tree, px, py, self.scroll)
-            .and_then(|f| f.node)
-            .and_then(|n| hit::link_at(&current.doc, n))
-            .and_then(|(_, href)| Url::parse(&href, Some(&current.base)).ok());
-        if let Some(url) = target {
-            // `javascript:` necesita el motor de JavaScript (fase 2).
-            if url.scheme != "javascript" {
-                self.navigate(url);
+            Area::Page => {
+                if self.chrome.field.focused {
+                    self.chrome.field.focused = false;
+                    self.refresh_chrome();
+                }
+                let (Some(current), Some(page)) = (&self.current, &self.page) else {
+                    return;
+                };
+                let (px, py) = self.page_point(x, y);
+                let target = hit::hit_test(&page.tree, px, py, self.scroll)
+                    .and_then(|f| f.node)
+                    .and_then(|n| hit::link_at(&current.doc, n))
+                    .and_then(|(_, href)| Url::parse(&href, Some(&current.base)).ok());
+                // `javascript:` necesita el motor de JavaScript (fase 2).
+                if let Some(url) = target.filter(|u| u.scheme != "javascript") {
+                    self.navigate(url);
+                }
             }
         }
     }
 
+    fn wheel(&mut self, dx: f32, dy: f32) {
+        let (x, y) = self.mouse;
+        if self.area_at(x, y) == Area::Panel {
+            self.chrome.panel_scroll += dy;
+            self.chrome.clamp_panel_scroll();
+            self.redraw_later();
+            return;
+        }
+        self.scroll_by(dx, dy);
+        self.mouse_moved();
+    }
+
     fn focus_bar(&mut self) {
-        self.toolbar.field.focused = true;
-        self.toolbar.field.select_all();
-        self.refresh_toolbar();
+        self.chrome.field.focused = true;
+        self.chrome.field.set_text(self.chrome.url.clone());
+        self.chrome.field.select_all();
+        self.refresh_chrome();
     }
 
     /// Teclas con el foco en el campo de URL. Devuelve si la tecla se consumió.
     fn field_key(&mut self, key: &Key, text: Option<&str>) -> bool {
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
-        let field = &mut self.toolbar.field;
+        let field = &mut self.chrome.field;
         match key {
             Key::Named(NamedKey::Escape) => {
                 field.focused = false;
@@ -679,7 +1070,7 @@ impl App {
                 _ => return false,
             },
         }
-        self.refresh_toolbar();
+        self.refresh_chrome();
         true
     }
 
@@ -693,12 +1084,20 @@ impl App {
     fn key_press(&mut self, key: &Key, text: Option<&str>) {
         let ctrl = self.modifiers.control_key();
         let alt = self.modifiers.alt_key();
+        let shift = self.modifiers.shift_key();
+        let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
         // Atajos globales.
         match key {
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("l") => return self.focus_bar(),
+            Key::Character(c) if ctrl && is(c, "l") => return self.focus_bar(),
             Key::Named(NamedKey::F6) => return self.focus_bar(),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("r") => return self.reload(),
+            Key::Character(c) if ctrl && is(c, "i") => return self.toggle_panel(),
+            Key::Named(NamedKey::F12) => return self.toggle_overlay(),
+            Key::Character(c) if ctrl && is(c, "r") => return self.reload(),
             Key::Named(NamedKey::F5) => return self.reload(),
+            Key::Character(c) if ctrl && shift && is(c, "d") => return self.dump(true),
+            Key::Character(c) if ctrl && is(c, "s") => return self.save_png(),
+            Key::Character(c) if ctrl && is(c, "h") => return self.home(),
+            Key::Named(NamedKey::Escape) if self.loading.is_some() => return self.stop(),
             Key::Named(NamedKey::ArrowLeft) if alt => return self.back(),
             Key::Named(NamedKey::ArrowRight) if alt => return self.forward(),
             Key::Named(NamedKey::BrowserBack) => return self.back(),
@@ -708,7 +1107,24 @@ impl App {
             Key::Character(c) if ctrl && c == "0" => return self.set_zoom(1.0),
             _ => {}
         }
-        if self.toolbar.field.focused && self.field_key(key, text) {
+        if self.chrome.field.focused && self.field_key(key, text) {
+            return;
+        }
+        // En `about:home`, escribir va al campo de URL.
+        let on_home = self
+            .current
+            .as_ref()
+            .is_some_and(|l| l.url.href() == "about:home");
+        if on_home
+            && !ctrl
+            && !alt
+            && let Some(t) =
+                text.filter(|t| !t.chars().any(char::is_control) && !t.trim().is_empty())
+        {
+            self.chrome.field.focused = true;
+            self.chrome.field.set_text(String::new());
+            self.chrome.field.insert(t);
+            self.refresh_chrome();
             return;
         }
         let page = self.viewport().height - LINE;
@@ -719,15 +1135,25 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) => self.scroll_by(-LINE, 0.0),
             Key::Named(NamedKey::PageDown) => self.scroll_by(0.0, page),
             Key::Named(NamedKey::PageUp) => self.scroll_by(0.0, -page),
-            Key::Named(NamedKey::Space) if self.modifiers.shift_key() => {
-                self.scroll_by(0.0, -page);
-            }
+            Key::Named(NamedKey::Space) if shift => self.scroll_by(0.0, -page),
             Key::Named(NamedKey::Space) => self.scroll_by(0.0, page),
             Key::Named(NamedKey::Home) => self.scroll_by(0.0, f32::NEG_INFINITY),
             Key::Named(NamedKey::End) => self.scroll_by(0.0, f32::INFINITY),
             _ => {}
         }
     }
+}
+
+/// ¿`target` está dentro de una caja con `position: fixed`?
+fn fixed_ancestry(root: Option<&Fragment>, target: &Fragment) -> bool {
+    fn walk(f: &Fragment, target: &Fragment, fixed: bool) -> Option<bool> {
+        let fixed = fixed || f.style.position == bf_style::properties::types::Position::Fixed;
+        if std::ptr::eq(f, target) {
+            return Some(fixed);
+        }
+        f.children.iter().find_map(|c| walk(c, target, fixed))
+    }
+    root.and_then(|r| walk(r, target, false)).unwrap_or(false)
 }
 
 /// Evento de usuario: el hilo de trabajo terminó algo.
@@ -739,8 +1165,8 @@ impl ApplicationHandler<Wake> for App {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("Cargando… — browser-freedom")
-            .with_inner_size(LogicalSize::new(1024.0, 768.0));
+            .with_title("«Cargando…» — browser-freedom")
+            .with_inner_size(LogicalSize::new(1180.0, 800.0));
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -765,10 +1191,17 @@ impl ApplicationHandler<Wake> for App {
                 return;
             }
         }
-        if let Some(url) = self.initial.take() {
+        // Tema del sistema (`prefers-color-scheme`).
+        let dark = window.theme().map(|t| t == winit::window::Theme::Dark);
+        self.chrome.theme = Theme::for_system(dark);
+        let url = self
+            .initial
+            .take()
+            .or_else(|| Url::parse("about:home", None).ok());
+        if let Some(url) = url {
             self.start_load(url, Navigation::Push);
         } else {
-            self.refresh_toolbar();
+            self.refresh_chrome();
         }
         window.request_redraw();
     }
@@ -777,10 +1210,36 @@ impl ApplicationHandler<Wake> for App {
         self.receive();
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // La línea de progreso se anima mientras carga; el aviso se borra al vencer.
+        if self.loading.is_some() {
+            self.redraw_later();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(33),
+            ));
+        } else if let Some((_, at)) = &self.notice {
+            let until = *at + NOTICE;
+            if Instant::now() >= until {
+                self.notice = None;
+                self.refresh_chrome();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resized(),
+            WindowEvent::ThemeChanged(t) => {
+                self.chrome.theme = Theme::for_system(Some(t == winit::window::Theme::Dark));
+                self.refresh_chrome();
+                self.refresh_panel();
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
@@ -814,8 +1273,7 @@ impl ApplicationHandler<Wake> for App {
                         ((-p.x / s) as f32, (-p.y / s) as f32)
                     }
                 };
-                self.scroll_by(dx, dy);
-                self.mouse_moved();
+                self.wheel(dx, dy);
             }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),
             _ => {}
@@ -823,9 +1281,15 @@ impl ApplicationHandler<Wake> for App {
     }
 }
 
-/// Abre una ventana con el documento y corre el bucle de eventos hasta que se cierre.
-pub fn open(arg: &str) -> Result<(), String> {
-    let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
+/// Abre una ventana con el documento (o `about:home`) y corre el bucle de eventos hasta que
+/// se cierre.
+pub fn open(arg: Option<&str>) -> Result<(), String> {
+    let url = match arg {
+        Some(a) => {
+            Some(bf_infra::url_from_arg(a).ok_or_else(|| format!("URL o ruta inválida: {a}"))?)
+        }
+        None => None,
+    };
     let event_loop = EventLoop::<Wake>::with_user_event()
         .build()
         .map_err(|e| format!("no se pudo iniciar la ventana: {e}"))?;
@@ -834,7 +1298,7 @@ pub fn open(arg: &str) -> Result<(), String> {
     let worker = Worker::spawn(fonts.clone(), move || {
         let _ = proxy.send_event(Wake);
     });
-    let mut app = App::new(worker, fonts, Some(url));
+    let mut app = App::new(worker, fonts, url, Theme::for_system(None));
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("error en el bucle de eventos: {e}"))
@@ -856,6 +1320,11 @@ impl App {
             if viewport != self.viewport() && self.loading.is_none() && self.relayout.is_none() {
                 self.request_relayout();
             }
+        }
+        // Un primer cuadro para que el panel conozca el tiempo de raster.
+        if self.chrome.panel_open && self.panel_raster.is_none() {
+            let _ = self.frame();
+            self.refresh_panel();
         }
     }
 
@@ -889,10 +1358,7 @@ impl App {
             f.rect.y + f.rect.height / 2.0,
         );
         let (sx, sy) = if fixed { (0.0, 0.0) } else { self.scroll };
-        Some((
-            (cx - sx) * self.zoom,
-            (cy - sy) * self.zoom + chrome::HEIGHT,
-        ))
+        Some(((cx - sx) * self.zoom, (cy - sy) * self.zoom + BAR))
     }
 
     fn state_line(&self) -> String {
@@ -905,20 +1371,22 @@ impl App {
             .as_ref()
             .and_then(|l| l.title())
             .unwrap_or_default();
-        let focus = if self.toolbar.field.focused {
+        let focus = if self.chrome.field.focused {
             " (con foco)"
         } else {
             ""
         };
         format!(
-            "url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus} estado={:?}",
+            "url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus} estado={:?} panel={} cajas={}",
             self.scroll.0,
             self.scroll.1,
             self.index + 1,
             self.history.len(),
             self.zoom,
-            self.toolbar.field.text,
-            self.toolbar.status,
+            self.chrome.field.text,
+            self.chrome.status_left,
+            self.chrome.panel_open,
+            self.overlay,
         )
     }
 
@@ -990,6 +1458,7 @@ impl App {
                     "space" => Some(NamedKey::Space),
                     "f5" => Some(NamedKey::F5),
                     "f6" => Some(NamedKey::F6),
+                    "f12" => Some(NamedKey::F12),
                     _ => None,
                 };
                 self.modifiers = modifiers;
@@ -1010,16 +1479,20 @@ impl App {
     }
 }
 
-/// `browser-freedom session <url> <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
-/// una (1024×768, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
-/// completo (barra y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`, `link:texto`
-/// (clic en el enlace con ese texto), `type:texto`, `key:[ctrl+|alt+|shift+]tecla`,
-/// `resize:W,H` y `wait`.
+/// `browser-freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
+/// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
+/// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
+/// `link:texto` (clic en el enlace con ese texto), `type:texto`,
+/// `key:[ctrl+|alt+|shift+]tecla`, `resize:W,H` y `wait`.
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     let fonts = FontDb::system();
     let worker = Worker::spawn(fonts.clone(), || {});
-    let mut app = App::new(worker, fonts, None);
+    let mut app = App::new(worker, fonts, None, Theme::for_system(None));
+    app.headless = Size {
+        width: 1180.0,
+        height: 800.0,
+    };
     let save = |app: &App, n: usize| -> Result<(), String> {
         let path = format!("{out}-{n:02}.png");
         app.frame()
@@ -1058,6 +1531,11 @@ mod tests {
             href("data:text/html,hi").as_deref(),
             Some("data:text/html,hi")
         );
+        assert_eq!(href("about:home").as_deref(), Some("about:home"));
+        assert_eq!(
+            href("motor de navegador").as_deref(),
+            Some("https://www.google.com/search?q=motor+de+navegador")
+        );
         assert!(
             href("C:\\Windows\\x.html")
                 .unwrap()
@@ -1073,5 +1551,12 @@ mod tests {
         let c = Url::parse("https://a.test/p?r#x", None).unwrap();
         assert!(same_document(&a, &b));
         assert!(!same_document(&a, &c));
+    }
+
+    #[test]
+    fn timestamp_format() {
+        let t = timestamp();
+        assert_eq!(t.len(), 15);
+        assert_eq!(&t[8..9], "-");
     }
 }

@@ -1,2 +1,3 @@
 target/
 tests/wpt/
+tests/test262/

@@ -14,7 +14,7 @@ use tiny_skia::{
     SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use crate::display_list::{DisplayItem, DisplayList, Radii};
+use crate::display_list::{DisplayItem, DisplayList, PathOp, Radii};
 
 /// Constante de Bézier para aproximar un cuarto de elipse.
 const KAPPA: f32 = 0.552_284_8;
@@ -862,6 +862,26 @@ pub fn render_scrolled(
                 widget,
                 color,
             } => canvas.widget(rect, *widget, *color),
+            DisplayItem::Path { ops, fill, stroke } => {
+                let mut pb = PathBuilder::new();
+                for op in ops {
+                    match *op {
+                        PathOp::MoveTo(x, y) => pb.move_to(x, y),
+                        PathOp::LineTo(x, y) => pb.line_to(x, y),
+                        PathOp::QuadTo(x1, y1, x, y) => pb.quad_to(x1, y1, x, y),
+                        PathOp::CubicTo(x1, y1, x2, y2, x, y) => pb.cubic_to(x1, y1, x2, y2, x, y),
+                        PathOp::Close => pb.close(),
+                    }
+                }
+                if let Some(path) = pb.finish() {
+                    if let Some(c) = fill {
+                        canvas.fill(&path, *c, true, FillRule::Winding);
+                    }
+                    if let Some((w, c)) = stroke {
+                        canvas.stroke(&path, *c, *w);
+                    }
+                }
+            }
             DisplayItem::BackgroundImage {
                 area,
                 radii,
