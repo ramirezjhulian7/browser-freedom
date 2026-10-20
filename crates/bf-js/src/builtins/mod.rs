@@ -204,6 +204,10 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     reflect::init(agent, realm);
     math::init(agent, realm);
     global::init_functions(agent, realm);
+    // %BigInt.prototype% (el constructor y sus métodos son del paso 4).
+    let bp = agent.new_object(Some(object_prototype));
+    to_string_tag(agent, bp, "BigInt");
+    agent.realms[realm].intrinsics.bigint_prototype = bp;
     // E3
     promise::init(agent, realm);
     r#async::init(agent, realm);
@@ -213,8 +217,4 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     typed_array::init(agent, realm);
     dataview::init(agent, realm);
     atomics::init(agent, realm);
-    // %BigInt.prototype% (el constructor y sus métodos son del paso 4).
-    let bp = agent.new_object(Some(object_prototype));
-    to_string_tag(agent, bp, "BigInt");
-    agent.realms[realm].intrinsics.bigint_prototype = bp;
 }
