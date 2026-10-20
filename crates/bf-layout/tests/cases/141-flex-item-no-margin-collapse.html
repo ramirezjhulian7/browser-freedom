@@ -1,0 +1,13 @@
+<!DOCTYPE html><style>body{margin:0} .bar{display:flex} .btn{display:block;width:28px;height:28px} .icon{display:block;width:16px;height:16px;margin:7px}</style>
+<div class=bar><div class=btn><div class=icon></div></div></div>
+<div style="display:grid"><div class=btn><div class=icon></div></div></div>
+<!-- expect
+Block <html> 0,0 800×56
+  Block <body> 0,0 800×56
+    Block <div.bar> 0,0 800×28
+      Block <div.btn> 0,0 28×28
+        Block <div.icon> 7,7 16×16
+    Block <div> 0,28 800×28
+      InlineBlock <div.btn> 0,28 28×28
+        Block <div.icon> 7,35 16×16
+-->

@@ -66,6 +66,17 @@ pub struct DeclEnv {
     /// Bindings que agregó un `eval` (siempre `Deletable`).
     pub extra: Vec<(Atom, Option<Value>)>,
     pub function: Option<Box<FunctionEnvData>>,
+    /// Module Environment Record (§9.1.1.5): `this` es `undefined` y los bindings de import
+    /// son indirectos (E1).
+    pub module: Option<Box<ModuleEnvData>>,
+}
+
+/// Lo propio de un Module Environment Record (§9.1.1.5).
+#[derive(Debug, Clone, Default)]
+pub struct ModuleEnvData {
+    /// Por slot: el binding indirecto de CreateImportBinding (§9.1.1.5.5), como (módulo,
+    /// slot en el environment de ese módulo).
+    pub links: Vec<Option<(usize, u32)>>,
 }
 
 /// Global Environment Record (§9.1.1.4).
@@ -110,6 +121,7 @@ impl Env {
                 slots,
                 extra: Vec::new(),
                 function: None,
+                module: None,
             }),
         }
     }

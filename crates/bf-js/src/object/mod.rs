@@ -148,6 +148,8 @@ pub enum ObjectKind {
     IteratorHelper(Box<crate::builtins::iterator_helpers::HelperData>),
     /// %WrapForValidIteratorPrototype% (`[[Iterated]]`).
     WrappedIterator(Box<crate::builtins::iterator_helpers::IterRec>),
+    /// Module Namespace exótico (§10.4.6).
+    ModuleNamespace(Box<crate::builtins::module_namespace::NamespaceData>),
     // E2: RegExp (§22.2), RegExp String Iterator (§22.2.9) y Date (`[[DateValue]]`, §21.4).
     RegExp(Box<crate::builtins::regexp::RegExpData>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpStringIteratorData>),
@@ -244,7 +246,10 @@ impl Trace for Object {
             ObjectKind::BigInt(b) => t.gc(*b),
             ObjectKind::Generator(g) => g.trace(t),
             ObjectKind::ArrayIterator(it) => t.opt(it.object),
-            ObjectKind::StringIterator { .. } | ObjectKind::HtmlDda | ObjectKind::RawJson => {}
+            ObjectKind::StringIterator { .. }
+            | ObjectKind::HtmlDda
+            | ObjectKind::RawJson
+            | ObjectKind::ModuleNamespace(_) => {}
             ObjectKind::Proxy(p) => {
                 t.opt(p.target);
                 t.opt(p.handler);

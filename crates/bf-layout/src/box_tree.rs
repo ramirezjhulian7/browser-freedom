@@ -65,6 +65,9 @@ pub struct LayoutBox {
     pub span: (u32, u32),
     /// La rejilla de una caja de tabla (E4).
     pub table: Option<Box<crate::table::TableGrid>>,
+    /// Ítem flex o grid: establece un contexto de formato independiente (CSS Flexbox §4,
+    /// CSS Grid §6.1), así que sus márgenes no colapsan con los de sus hijos.
+    pub independent: bool,
 }
 
 impl LayoutBox {
@@ -79,6 +82,7 @@ impl LayoutBox {
             fieldset: None,
             span: (1, 1),
             table: None,
+            independent: false,
         }
     }
 
@@ -695,6 +699,9 @@ fn flex_items(items: Vec<Item>, parent_style: &Arc<ComputedStyle>) -> Vec<Layout
         }
     }
     flush(&mut run, &mut out);
+    for item in &mut out {
+        item.independent = true;
+    }
     out
 }
 

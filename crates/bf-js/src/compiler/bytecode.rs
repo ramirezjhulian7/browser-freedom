@@ -18,6 +18,8 @@ pub struct Source {
     pub units: Vec<u16>,
     /// Offset (UTF-16) del comienzo de cada línea.
     pub line_starts: Vec<u32>,
+    /// El módulo de este código ([[ScriptOrModule]], para `import.meta`) (E1).
+    pub module: Option<usize>,
 }
 
 impl Source {
@@ -46,6 +48,7 @@ impl Source {
             name: name.to_owned(),
             units,
             line_starts,
+            module: None,
         }
     }
 
@@ -540,6 +543,9 @@ pub enum Op {
     /// GlobalDeclarationInstantiation/EvalDeclarationInstantiation).
     IsHoisted(u32),
 
+    // --- Módulos (E1) ---
+    /// Empuja `import.meta` del módulo activo (§13.3.12.1).
+    ImportMeta,
     // --- E3: iteración asíncrona ---
     /// [obj] → (): GetIterator(obj, async) (§7.4.3); iterador, next y done en slot..slot+2.
     GetAsyncIterator(u32),

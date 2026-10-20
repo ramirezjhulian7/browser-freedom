@@ -63,6 +63,9 @@ pub enum ScopeKind {
     Global,
     /// El top-level de un `eval`: sus `var` (no estricto) van al varEnv del llamador.
     EvalTop,
+    /// El top-level de un módulo: su Module Environment Record (§9.1.1.5); todos sus
+    /// bindings viven en el environment (otros módulos los importan) (E1).
+    Module,
     FuncName,
     Function,
     Params,
@@ -96,18 +99,28 @@ pub enum BKind {
     BlockFunction,
     Private,
     Using,
+    /// Un binding de import indirecto (CreateImportBinding, §9.1.1.5.5) (E1).
+    Import,
 }
 
 impl BKind {
     pub fn is_lexical(self) -> bool {
         matches!(
             self,
-            BKind::Let | BKind::Const | BKind::Class | BKind::ClassInner | BKind::Using
+            BKind::Let
+                | BKind::Const
+                | BKind::Class
+                | BKind::ClassInner
+                | BKind::Using
+                | BKind::Import
         )
     }
 
     pub fn is_const(self) -> bool {
-        matches!(self, BKind::Const | BKind::ClassInner | BKind::Using)
+        matches!(
+            self,
+            BKind::Const | BKind::ClassInner | BKind::Using | BKind::Import
+        )
     }
 }
 
@@ -224,6 +237,8 @@ pub struct ScopeTree {
     pub annex_b_names: Vec<Atom>,
     /// El código top-level: script o eval (los nombres no resueltos son dinámicos en eval).
     pub is_eval: bool,
+    /// El código top-level es un módulo (E1).
+    pub is_module: bool,
 }
 
 impl ScopeTree {
@@ -1141,6 +1156,9 @@ impl Analyzer {
     }
 
     pub fn stmt(&mut self, s: &Stmt) {
+        if let Stmt::ForOf { is_await: true, .. } = s {
+            self.note_await();
+        }
         match s {
             Stmt::Expression { expression, .. } => self.expr(expression),
             Stmt::Block(b) => self.stmts_in_block(&b.body, key(b.span, Tag::Block)),
@@ -1326,6 +1344,9 @@ impl Analyzer {
     }
 
     fn var_decl(&mut self, d: &VariableDeclaration) {
+        if d.kind == VarKind::AwaitUsing {
+            self.note_await();
+        }
         for dec in &d.declarations {
             self.pattern(&dec.id, true);
             if let Some(init) = &dec.init {
@@ -1489,7 +1510,10 @@ impl Analyzer {
                     self.expr(a);
                 }
             }
-            Expr::Await { argument, .. } => self.expr(argument),
+            Expr::Await { argument, .. } => {
+                self.note_await();
+                self.expr(argument);
+            }
             Expr::MetaProperty { meta, .. } => {
                 if meta.name == "new" {
                     self.use_ctx(1);
@@ -1527,6 +1551,7 @@ impl Analyzer {
             let mut locals = info.num_locals;
             for b in &scope.bindings {
                 let in_env = b.captured
+                    || scope.kind == ScopeKind::Module
                     || scope.contains_eval
                     || (mapped_params && b.kind == BKind::Param)
                     || b.kind == BKind::Private;
@@ -1552,6 +1577,7 @@ impl Analyzer {
             let top = matches!(scope.kind, ScopeKind::Global | ScopeKind::EvalTop);
             let materialized = env_count > 0
                 || scope.kind == ScopeKind::With
+                || scope.kind == ScopeKind::Module
                 || (scope.eval_barrier && !top)
                 || (is_func_scope && info.needs_function_env());
             let scope = &mut self.tree.scopes[sid];
@@ -1713,4 +1739,131 @@ fn block_candidates(body: &[Stmt], lex: &mut Vec<LexLevel>, out: &mut Vec<(NodeK
         annex_b_candidates(s, lex, out, true);
     }
     lex.pop();
+}
+
+// --- Módulos (E1) ---
+
+/// Las declaraciones del top-level de un módulo (§16.2.1.6 VarScopedDeclarations y
+/// LexicallyScopedDeclarations de ModuleItemList): las de las sentencias `export` incluidas.
+/// En un módulo las funciones del top-level son léxicas, pero se instancian (inicializadas)
+/// en InitializeEnvironment.
+pub fn module_decls(body: &[Stmt]) -> (Vec<Atom>, Vec<Atom>, Vec<(Atom, BKind)>) {
+    let mut vars = Vec::new();
+    let mut functions = Vec::new();
+    let mut lexical = Vec::new();
+    let item = |s: &Stmt,
+                vars: &mut Vec<Atom>,
+                functions: &mut Vec<Atom>,
+                lexical: &mut Vec<(Atom, BKind)>| {
+        let d = top_level_decls(std::slice::from_ref(s));
+        vars.extend(d.vars);
+        functions.extend(d.functions);
+        lexical.extend(d.lexical);
+    };
+    for s in body {
+        match s {
+            Stmt::ExportNamed(e) => {
+                if let Some(d) = &e.declaration {
+                    item(d, &mut vars, &mut functions, &mut lexical);
+                }
+            }
+            Stmt::ExportDefault { declaration, .. } => match declaration {
+                ExportDefaultKind::Function(f) => functions.push(
+                    f.id.as_ref()
+                        .map_or_else(|| Atom::new("*default*"), |i| i.name.clone()),
+                ),
+                ExportDefaultKind::Class(c) => lexical.push((
+                    c.id.as_ref()
+                        .map_or_else(|| Atom::new("*default*"), |i| i.name.clone()),
+                    BKind::Class,
+                )),
+                ExportDefaultKind::Expr(_) => lexical.push((Atom::new("*default*"), BKind::Let)),
+            },
+            Stmt::Import(_) | Stmt::ExportAll { .. } => {}
+            other => item(other, &mut vars, &mut functions, &mut lexical),
+        }
+    }
+    (vars, functions, lexical)
+}
+
+impl Analyzer {
+    /// Analiza un módulo (§16.2): código estricto con un único scope top-level (el Module
+    /// Environment Record), donde se declaran también los bindings de import.
+    pub fn analyze_module(program: &Program) -> ScopeTree {
+        let mut a = Analyzer {
+            tree: ScopeTree {
+                is_module: true,
+                ..ScopeTree::default()
+            },
+            cur: 0,
+            func: 0,
+            force_strict: false,
+        };
+        a.tree.funcs.push(FuncInfo {
+            kind: CodeKind::Script,
+            strict: true,
+            is_generator: false,
+            is_async: false,
+            parent: None,
+            this_captured: false,
+            new_target_captured: false,
+            function_captured: false,
+            has_eval: false,
+            sloppy_eval: false,
+            uses_arguments: false,
+            arguments: ArgsMode::None,
+            simple_params: true,
+            has_param_expressions: false,
+            name_scope: None,
+            func_scope: 0,
+            params_scope: 0,
+            vars_scope: 0,
+            lex_scope: 0,
+            num_locals: 0,
+            has_with: false,
+        });
+        let top = a.new_scope(ScopeKind::Module, None);
+        a.tree.scope_of.insert(key(program.span, Tag::Program), top);
+        a.tree.func_of.insert(key(program.span, Tag::Program), 0);
+        a.cur = top;
+        // Los bindings de import (§16.2.1.6.4 InitializeEnvironment, paso 7).
+        for s in &program.body {
+            if let Stmt::Import(i) = s {
+                for spec in &i.specifiers {
+                    match spec {
+                        ImportSpecifier::Namespace { local, .. } => {
+                            a.declare(top, local.name.clone(), BKind::Const);
+                        }
+                        ImportSpecifier::Default { local, .. }
+                        | ImportSpecifier::Named { local, .. } => {
+                            a.declare(top, local.name.clone(), BKind::Import);
+                        }
+                    }
+                }
+            }
+        }
+        let (vars, functions, lexical) = module_decls(&program.body);
+        for n in vars {
+            a.declare(top, n, BKind::Var);
+        }
+        for n in functions {
+            a.declare(top, n, BKind::Function);
+        }
+        for (n, k) in lexical {
+            a.declare(top, n, k);
+        }
+        for s in &program.body {
+            a.stmt(s);
+        }
+        a.finish();
+        a.tree
+    }
+
+    /// `await` en el código propio del top-level de un módulo: HasTLA (§16.2.1.6.1 ParseModule,
+    /// ContainsAwait).
+    fn note_await(&mut self) {
+        if self.tree.is_module && self.func == 0 {
+            self.tree.funcs[0].is_async = true;
+        }
+    }
 }

@@ -235,16 +235,47 @@ impl Lector<'_> {
     }
 }
 
-const SELECTORS_JS: &str = include_str!("../../../tests/wpt/dom/nodes/selectors.js");
-const CONTENT_HTML: &str =
-    include_str!("../../../tests/wpt/dom/nodes/ParentNode-querySelector-All-content.html");
+/// Un archivo de `tests/wpt/dom/nodes/`, leído una vez en tiempo de ejecución (`None` si falta
+/// el checkout de WPT: `tools/fetch-wpt`).
+fn wpt_nodes(nombre: &str) -> Option<&'static str> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<&'static str>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    *cache.entry(nombre.to_owned()).or_insert_with(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/wpt/dom/nodes")
+            .join(nombre);
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| &*Box::leak(s.into_boxed_str()))
+    })
+}
+
+fn selectors_js() -> &'static str {
+    wpt_nodes("selectors.js").expect("selectors.js")
+}
+
+fn content_html() -> &'static str {
+    wpt_nodes("ParentNode-querySelector-All-content.html").expect("content.html")
+}
+
+/// ¿Está `tests/wpt/dom/nodes`? Si no, el test termina con un aviso (como los harness de WPT).
+fn wpt_disponible() -> bool {
+    let ok = wpt_nodes("selectors.js").is_some()
+        && wpt_nodes("ParentNode-querySelector-All-content.html").is_some();
+    if !ok {
+        eprintln!("aviso: falta tests/wpt/dom/nodes (tools/fetch-wpt); se salta");
+    }
+    ok
+}
 
 /// Los objetos del array `var <nombre> = [ ... ];` de selectors.js.
 fn tabla(nombre: &str) -> Vec<Caso> {
-    let inicio = SELECTORS_JS
+    let inicio = selectors_js()
         .find(&format!("var {nombre} = ["))
         .unwrap_or_else(|| panic!("no está {nombre}"));
-    let resto = &SELECTORS_JS[inicio..];
+    let resto = &selectors_js()[inicio..];
     let abre = resto.find('[').unwrap();
     let fin = resto.find("\n];").unwrap();
     let mut l = Lector {
@@ -331,7 +362,7 @@ struct Contextos {
 }
 
 fn contextos() -> Contextos {
-    let mut doc = parse(CONTENT_HTML);
+    let mut doc = parse(content_html());
     let element = por_id(&doc, "root");
     setup_special_elements(&mut doc, element);
     let out_of_scope = doc.clone_node(element, true);
@@ -447,6 +478,9 @@ fn sin_fallos(fallos: Vec<String>) {
 // "Fragment" | "In-document Element" | "Empty Element", invalidSelectors): SyntaxError
 #[test]
 fn qsa_selectores_invalidos_lanzan_syntax_error() {
+    if !wpt_disponible() {
+        return;
+    }
     correr_invalidos(false);
 }
 
@@ -454,6 +488,9 @@ fn qsa_selectores_invalidos_lanzan_syntax_error() {
 // selectors: div,")
 #[test]
 fn qsa_selector_invalido_coma_final() {
+    if !wpt_disponible() {
+        return;
+    }
     correr_invalidos(true);
 }
 
@@ -490,6 +527,9 @@ fn correr_invalidos(bugs: bool) {
 // WPT: ParentNode-querySelector-All.html — runValidSelectorTest("Document", doc, validSelectors)
 #[test]
 fn qsa_selectores_validos_en_document() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     assert!(tabla("validSelectors").len() > 200);
     let mut fallos = Vec::new();
@@ -501,6 +541,9 @@ fn qsa_selectores_validos_en_document() {
 // runValidSelectorTest("Fragment", ...)
 #[test]
 fn qsa_selectores_validos_en_detached_y_fragment() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     let mut fallos = Vec::new();
     correr_validos(&c.doc, c.detached, "detached", false, &mut fallos);
@@ -512,6 +555,9 @@ fn qsa_selectores_validos_en_detached_y_fragment() {
 // (con la copia `outOfScope` agregada al body: ningún clon debe coincidir)
 #[test]
 fn qsa_selectores_validos_en_elemento_del_documento() {
+    if !wpt_disponible() {
+        return;
+    }
     let mut c = contextos();
     let body = c.doc.body().unwrap();
     c.doc.append_child(body, c.out_of_scope).unwrap();
@@ -525,6 +571,9 @@ fn qsa_selectores_validos_en_elemento_del_documento() {
 // convertidos a string) y "querySelectorAll tree order"
 #[test]
 fn qsa_selectores_especiales_y_orden_del_arbol() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     let root = c.doc.root();
     for (tipo, n) in [
@@ -559,6 +608,9 @@ fn qsa_selectores_especiales_y_orden_del_arbol() {
 // WPT: ParentNode-querySelector-All.html — verifyStaticList: "static NodeList" y "new NodeList"
 #[test]
 fn qsa_lista_estatica() {
+    if !wpt_disponible() {
+        return;
+    }
     let mut c = contextos();
     let root = c.doc.root();
     let body = c.doc.body().unwrap();
@@ -583,6 +635,9 @@ fn qsa_lista_estatica() {
 #[test]
 #[ignore = "Selectors 4 (ED) hace ':empty' a un elemento con solo white space; WPT espera lo contrario"]
 fn qsa_selectores_validos_con_bugs() {
+    if !wpt_disponible() {
+        return;
+    }
     let mut c = contextos();
     let mut fallos = Vec::new();
     correr_validos(&c.doc, c.doc.root(), "document", true, &mut fallos);
@@ -601,6 +656,9 @@ fn qsa_selectores_validos_con_bugs() {
 // elemento: Detached Element e In-document Element)
 #[test]
 fn matches_selectores_invalidos_lanzan_syntax_error() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     let mut fallos = Vec::new();
     for caso in tabla("invalidSelectors") {
@@ -619,6 +677,9 @@ fn matches_selectores_invalidos_lanzan_syntax_error() {
 // WPT: Element-matches.html — runMatchesTest("In-document", doc, validSelectors, "html")
 #[test]
 fn matches_selectores_validos_en_document() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     let mut fallos = Vec::new();
     correr_matches(&c.doc, c.doc.root(), "document", false, &mut fallos);
@@ -629,6 +690,9 @@ fn matches_selectores_validos_en_document() {
 // runMatchesTest("Fragment", fragment, ...)
 #[test]
 fn matches_selectores_validos_en_detached_y_fragment() {
+    if !wpt_disponible() {
+        return;
+    }
     let c = contextos();
     let mut fallos = Vec::new();
     correr_matches(&c.doc, c.detached, "detached", false, &mut fallos);
@@ -640,6 +704,9 @@ fn matches_selectores_validos_en_detached_y_fragment() {
 // "NULL Element.matches(null)", "UNDEFINED Element.matches(undefined)" (strings ya convertidos)
 #[test]
 fn matches_null_y_undefined() {
+    if !wpt_disponible() {
+        return;
+    }
     let mut doc = parse("<div id=root></div>");
     let root = por_id(&doc, "root");
     let null = doc.create_element(&s("null")).unwrap();
