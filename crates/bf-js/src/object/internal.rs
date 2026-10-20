@@ -1,6 +1,7 @@
 //! Los métodos internos de los objetos (§6.1.7.2) despachados por [`ObjectKind`]: las
 //! versiones ordinarias siguen §10.1 literalmente; los exóticos de esta etapa son Array
-//! (§10.4.2), String (§10.4.3) y arguments (§10.4.4).
+//! (§10.4.2), String (§10.4.3), arguments (§10.4.4), Module Namespace (§10.4.6) y Proxy
+//! (§10.5).
 
 use crate::heap::Gc;
 use crate::object::{
@@ -96,6 +97,9 @@ impl Agent {
         if self.is_proxy(o) {
             return self.proxy_get_own_property(o, key);
         }
+        if !key.is_symbol() && self.is_module_namespace(o) {
+            return self.namespace_get_own_property(o, key);
+        }
         Ok(self.own_prop(o, key))
     }
 
@@ -163,6 +167,9 @@ impl Agent {
     ) -> JsResult<bool> {
         match &self.heap[o].kind {
             ObjectKind::Proxy(_) => self.proxy_define_own_property(o, key, desc),
+            ObjectKind::ModuleNamespace(_) if !key.is_symbol() => {
+                self.namespace_define_own_property(o, &key, &desc)
+            }
             ObjectKind::Array(_) => self.array_define_own_property(o, key, desc),
             ObjectKind::String(s) => {
                 // §10.4.3.2
@@ -376,6 +383,9 @@ impl Agent {
             if self.is_proxy(cur) {
                 return self.proxy_has(cur, key);
             }
+            if !key.is_symbol() && self.is_module_namespace(cur) {
+                return Ok(self.namespace_has(cur, key));
+            }
             if self.own_prop(cur, key).is_some() {
                 return Ok(true);
             }
@@ -395,6 +405,9 @@ impl Agent {
             }
             if self.is_proxy(cur) {
                 return self.proxy_get(cur, key, receiver);
+            }
+            if !key.is_symbol() && self.is_module_namespace(cur) {
+                return self.namespace_get(cur, key);
             }
             match self.own_prop(cur, key) {
                 Some(d) => {
@@ -437,6 +450,10 @@ impl Agent {
         }
         if self.is_proxy(o) {
             return self.proxy_set(o, key, v, receiver);
+        }
+        // §10.4.6.9: el namespace no se escribe.
+        if self.is_module_namespace(o) {
+            return Ok(false);
         }
         let own = self.own_prop(o, &key);
         self.ordinary_set_with_own_descriptor(o, key, v, receiver, own)
@@ -500,6 +517,9 @@ impl Agent {
         if self.is_proxy(o) {
             return self.proxy_delete(o, key);
         }
+        if !key.is_symbol() && self.is_module_namespace(o) {
+            return Ok(self.namespace_delete(o, key));
+        }
         let Some(d) = self.own_prop(o, key) else {
             return Ok(true);
         };
@@ -542,6 +562,9 @@ impl Agent {
         }
         if self.is_proxy(o) {
             return self.proxy_own_keys(o);
+        }
+        if self.is_module_namespace(o) {
+            return Ok(self.namespace_own_keys(o));
         }
         let obj = &self.heap[o];
         let mut out = Vec::new();

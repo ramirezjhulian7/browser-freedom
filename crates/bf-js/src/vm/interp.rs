@@ -228,7 +228,10 @@ impl Agent {
         };
         match &self.heap[env].kind {
             EnvKind::Declarative(d) => {
-                let fd = d.function.as_ref().expect("Function Environment");
+                // Module Environment Record (§9.1.1.5.3): `this` es `undefined` (E1).
+                let Some(fd) = d.function.as_ref() else {
+                    return Ok(Value::Undefined);
+                };
                 match what {
                     CtxWhat::This => match &fd.this {
                         Some(v) => Ok(v.clone()),
@@ -374,7 +377,11 @@ impl Agent {
                 let e = self.env_at(h);
                 match self.heap[e].decl().expect("declarativo").slots[s as usize].clone() {
                     Some(v) => self.push(v),
-                    None => return self.tdz_error(n),
+                    // Un binding de import indirecto (E1, §9.1.1.5.1).
+                    None => match self.module_link_value(e, s) {
+                        Some(Some(v)) => self.push(v),
+                        _ => return self.tdz_error(n),
+                    },
                 }
             }
             Op::SetEnv(h, s) => {
@@ -397,7 +404,9 @@ impl Agent {
             }
             Op::ConstAssignEnv(h, s, n) => {
                 let e = self.env_at(h);
-                if self.heap[e].decl().expect("declarativo").slots[s as usize].is_none() {
+                if self.heap[e].decl().expect("declarativo").slots[s as usize].is_none()
+                    && !matches!(self.module_link_value(e, s), Some(Some(_)))
+                {
                     return self.tdz_error(n);
                 }
                 let (name, _) = self.name_const(n);
@@ -1766,6 +1775,11 @@ impl Agent {
                     .as_ref()
                     .is_some_and(|s| s.contains(&name));
                 self.push(Value::Boolean(h));
+            }
+            // E1
+            Op::ImportMeta => {
+                let v = self.import_meta()?;
+                self.push(v);
             }
         }
         Ok(Flow::Next)
