@@ -76,11 +76,31 @@ impl Worker {
             .name("bf-carga".into())
             .spawn(move || {
                 let current_viewport = || *shared.lock().unwrap_or_else(|e| e.into_inner());
-                while let Ok(mut job) = rx.recv() {
-                    // Solo importa el último trabajo pendiente.
-                    while let Ok(next) = rx.try_recv() {
-                        job = next;
+                let mut queue: std::collections::VecDeque<Job> = std::collections::VecDeque::new();
+                loop {
+                    if queue.is_empty() {
+                        let Ok(job) = rx.recv() else { break };
+                        queue.push_back(job);
                     }
+                    while let Ok(next) = rx.try_recv() {
+                        queue.push_back(next);
+                    }
+                    // Las cargas se hacen todas (varias pestañas pueden cargar a la vez); de
+                    // los re-layouts solo importa el último pedido.
+                    if let Some(last) = queue
+                        .iter()
+                        .rposition(|j| matches!(j, Job::Relayout { .. }))
+                    {
+                        let mut i = 0;
+                        queue.retain(|j| {
+                            let keep = !matches!(j, Job::Relayout { .. }) || i == last;
+                            i += 1;
+                            keep
+                        });
+                    }
+                    let Some(job) = queue.pop_front() else {
+                        continue;
+                    };
                     let (id, loaded, ctx) = match job {
                         Job::Load(job) => {
                             let LoadJob {
