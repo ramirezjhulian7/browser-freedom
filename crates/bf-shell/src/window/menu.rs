@@ -85,7 +85,7 @@ impl Menu {
         theme: Theme,
     ) -> Menu {
         let doc = Self::build(&items, None, &fonts, &theme);
-        let height = doc.content_height();
+        let height = doc.rect("menu").map_or(0.0, |r| r.bottom());
         let x = at.0.min((window.width - WIDTH - 4.0).max(0.0));
         let y = at.1.min((window.height - height - 4.0).max(0.0));
         Menu {
@@ -130,9 +130,11 @@ impl Menu {
     }
 
     pub fn size(&self) -> Size {
+        // El alto del propio menú (el documento se maqueta con un viewport alto de sobra).
+        let height = self.doc.rect("menu").map_or(0.0, |r| r.bottom());
         Size {
             width: WIDTH,
-            height: self.doc.content_height(),
+            height,
         }
     }
 
