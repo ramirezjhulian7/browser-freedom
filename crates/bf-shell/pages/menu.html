@@ -2,21 +2,25 @@
 <html>
 <style>
 {{theme}}
+/* El documento deja {{pad}} px transparentes alrededor del menú para que entre la sombra. */
 html, body { margin: 0; background: transparent; }
-body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+body { padding: {{pad}}px; font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
 .menu {
   width: 260px;
   box-sizing: border-box;
-  padding: 6px 0;
+  padding: 5px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 11px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32), 0 1px 3px rgba(0, 0, 0, 0.18);
 }
-.item { display: block; padding: 6px 14px; white-space: nowrap; overflow: hidden; }
-.item.hover { background: var(--hover); }
+.item { display: flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 7px; white-space: nowrap; overflow: hidden; }
+.item .l { flex: 1; min-width: 0; overflow: hidden; }
+.item .k { flex: none; margin-left: 16px; color: var(--text2); font-size: 12px; }
+.item.hover { background: var(--accent-soft); }
 .item.off { color: var(--text2); }
-.sep { height: 1px; margin: 5px 8px; background: var(--border); }
+.item.off .k { color: var(--text2); }
+.sep { height: 1px; margin: 5px 6px; background: var(--border); }
 </style>
 <div id="menu" class="menu">{{items}}</div>
 </html>

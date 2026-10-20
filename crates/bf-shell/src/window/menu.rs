@@ -64,10 +64,12 @@ impl MenuItem {
 }
 
 const WIDTH: f32 = 260.0;
+/// Margen transparente alrededor del menú, dentro de su capa, para la sombra.
+const PAD: f32 = 24.0;
 
 pub struct Menu {
     pub items: Vec<MenuItem>,
-    /// Esquina superior izquierda, en px lógicos de la ventana.
+    /// Esquina superior izquierda de la capa (el menú más [`PAD`]), en px lógicos de la ventana.
     pub origin: (f32, f32),
     pub hover: Option<usize>,
     doc: UiDoc,
@@ -85,12 +87,12 @@ impl Menu {
         theme: Theme,
     ) -> Menu {
         let doc = Self::build(&items, None, &fonts, &theme);
-        let height = doc.rect("menu").map_or(0.0, |r| r.bottom());
+        let height = doc.rect("menu").map_or(0.0, |r| r.height);
         let x = at.0.min((window.width - WIDTH - 4.0).max(0.0));
         let y = at.1.min((window.height - height - 4.0).max(0.0));
         Menu {
             items,
-            origin: (x, y),
+            origin: (x - PAD, y - PAD),
             hover: None,
             doc,
             fonts,
@@ -116,14 +118,28 @@ impl Menu {
             } else if hover == Some(i) {
                 class.push_str(" hover");
             }
+            // "Inspeccionar (F12)": el atajo va aparte, alineado a la derecha.
+            let (label, key) = match item
+                .label
+                .strip_suffix(')')
+                .and_then(|l| l.split_once(" ("))
+            {
+                Some((l, k)) => (l, k),
+                None => (item.label, ""),
+            };
             html.push_str(&format!(
-                "<span id=\"mi-{i}\" class=\"{class}\">{}</span>",
-                escape(item.label)
+                "<span id=\"mi-{i}\" class=\"{class}\"><span class=\"l\">{}</span><span class=\"k\">{}</span></span>",
+                escape(label),
+                escape(key)
             ));
         }
-        let vars = [("theme", theme.css_vars()), ("items", html)];
+        let vars = [
+            ("theme", theme.css_vars()),
+            ("pad", PAD.to_string()),
+            ("items", html),
+        ];
         let size = Size {
-            width: WIDTH,
+            width: WIDTH + 2.0 * PAD,
             height: 2000.0,
         };
         UiDoc::build(&fill(internal::MENU, &vars), size, fonts.clone())
@@ -131,9 +147,9 @@ impl Menu {
 
     pub fn size(&self) -> Size {
         // El alto del propio menú (el documento se maqueta con un viewport alto de sobra).
-        let height = self.doc.rect("menu").map_or(0.0, |r| r.bottom());
+        let height = self.doc.rect("menu").map_or(0.0, |r| r.bottom()) + PAD;
         Size {
-            width: WIDTH,
+            width: WIDTH + 2.0 * PAD,
             height,
         }
     }
