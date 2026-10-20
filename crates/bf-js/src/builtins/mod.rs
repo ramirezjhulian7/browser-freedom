@@ -13,6 +13,7 @@ pub mod iterator;
 pub mod iterator_helpers;
 pub mod json;
 pub mod math;
+pub mod module_namespace; // E1
 pub mod number;
 pub mod object;
 pub mod proxy;

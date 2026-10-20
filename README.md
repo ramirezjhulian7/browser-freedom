@@ -25,7 +25,7 @@ historial, scroll y zoom. El plan de las fases siguientes está en
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **77.0%**; total **56.8%** (29 559 / 52 017) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **76.4%** (con los módulos; 97.5% sin lo que espera a Promise); total **56.8%** (29 234 / 51 442) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
@@ -127,7 +127,12 @@ motor JavaScript.
     String (la ruta sin RegExp), Array, Iterator (con los iterator helpers, `concat`, `zip`,
     `chunks`/`windows`), JSON, Reflect, Proxy y las funciones globales (`parseInt`,
     `encodeURI`, `escape` de Annex B…);
-  - `bf-js run archivo.js` ejecuta un script con `print`.
+  - módulos ECMAScript (§16.2): Source Text Module Records, ResolveExport con ciclos y
+    ambigüedad, Link y Evaluate (Tarjan del spec), bindings de import vivos, el namespace
+    exótico, `export * as ns`, módulos JSON (`with { type: "json" }`) e `import.meta`;
+    `import()` y top-level await esperan a Promise;
+  - `bf-js run archivo.js [--module]` ejecuta un script o un módulo (con sus imports desde
+    el sistema de archivos) con `print`.
 
 ## Arquitectura
 

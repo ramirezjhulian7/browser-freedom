@@ -248,7 +248,7 @@ impl<'t> Codegen<'t> {
                 if meta.name == "new" {
                     self.emit_ctx(CtxWhat::NewTarget);
                 } else {
-                    self.unsupported("import.meta (módulos, paso 5)");
+                    self.emit(Op::ImportMeta); // E1
                 }
             }
             Expr::Import {

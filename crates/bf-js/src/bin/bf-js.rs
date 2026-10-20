@@ -1,8 +1,9 @@
 //! `bf-js dump-ast <archivo.js> [--module] [--check] [--no-locations]`: imprime el AST como
 //! JSON ESTree; con `--check` solo valida (código de salida 0 si parsea, 1 si no).
 //!
-//! `bf-js run <archivo.js>`: ejecuta un script con `print` (y `$262`); una excepción no
-//! atrapada se imprime en stderr y sale con código 1.
+//! `bf-js run <archivo.js> [--module]`: ejecuta un script (o, con `--module` o `.mjs`, un
+//! módulo con sus imports desde el sistema de archivos) con `print` (y `$262`); una
+//! excepción no atrapada se imprime en stderr y sale con código 1.
 
 use std::process::ExitCode;
 
@@ -10,7 +11,7 @@ use bf_js::estree::{Options, to_json};
 use bf_js::vm::{Agent, AgentOptions, Throw};
 use bf_js::{ParseOptions, parse_module, parse_script};
 
-const USAGE: &str = "uso: bf-js dump-ast <archivo.js> [--module] [--check] [--no-locations]\n     bf-js run <archivo.js>";
+const USAGE: &str = "uso: bf-js dump-ast <archivo.js> [--module] [--check] [--no-locations]\n     bf-js run <archivo.js> [--module]";
 
 fn main() -> ExitCode {
     // El parser y la VM corren en un hilo con pila grande: el anidamiento permitido depende
@@ -42,11 +43,8 @@ fn run() -> ExitCode {
     match cmd.as_str() {
         "dump-ast" => dump_ast(path, flags),
         "run" => {
-            if flags.iter().any(|f| f == "--module") {
-                eprintln!("--module: los módulos llegan en el paso 5");
-                return ExitCode::FAILURE;
-            }
-            run_script(path)
+            let module = flags.iter().any(|f| f == "--module") || path.ends_with(".mjs");
+            run_script(path, module)
         }
         _ => {
             eprintln!("{USAGE}");
@@ -55,9 +53,14 @@ fn run() -> ExitCode {
     }
 }
 
-fn run_script(path: &str) -> ExitCode {
-    let Some(src) = read(path) else {
-        return ExitCode::FAILURE;
+fn run_script(path: &str, module: bool) -> ExitCode {
+    let src = if module {
+        String::new()
+    } else {
+        match read(path) {
+            Some(s) => s,
+            None => return ExitCode::FAILURE,
+        }
     };
     let mut agent = Agent::new(AgentOptions {
         max_stack: 192 << 20,
@@ -66,7 +69,18 @@ fn run_script(path: &str) -> ExitCode {
     agent.reset_stack_base();
     let realm = agent.current_realm;
     bf_js::builtins::host::install_test262(&mut agent, realm);
-    match agent.eval_script(&src, path) {
+    let result = if module {
+        // E1: módulos ESM con FileModuleLoader.
+        use bf_js::vm::module::FileModuleLoader;
+        agent.set_module_loader(std::rc::Rc::new(FileModuleLoader));
+        let url = FileModuleLoader::path_to_url(std::path::Path::new(path));
+        agent
+            .run_module(&url)
+            .map(|_| bf_js::value::Value::Undefined)
+    } else {
+        agent.eval_script(&src, path)
+    };
+    match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(Throw::Value(v)) => {
             let msg = describe_exception(&mut agent, &v);

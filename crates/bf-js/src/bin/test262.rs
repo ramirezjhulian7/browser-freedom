@@ -4,10 +4,12 @@
 //! Ejecuta cada test según INTERPRETING.md: los includes del frontmatter después de
 //! `assert.js` y `sta.js` (`doneprintHandle.js` si es `async`), un realm nuevo por ejecución
 //! con `$262` y `print`, dos ejecuciones sin flags (no estricta y con `"use strict";`),
-//! `negative` de fase `parse` y `runtime`. Los módulos (`module`, fase `resolution`) son del
-//! paso 5 y se cuentan como `skipped`; las únicas otras omisiones son las propuestas de
-//! `UNSUPPORTED_FEATURES` (las del parsing más `nonextensible-applies-to-private`). Un test pasa a `timeout` si agota el
-//! presupuesto de instrucciones o el tiempo.
+//! `negative` de fase `parse`, `resolution` y `runtime`. Los tests `module` se cargan como
+//! módulo con [`FileModuleLoader`] (sus `_FIXTURE.js` relativos): un error al parsear el test
+//! es de fase `parse`; uno al cargar o enlazar el grafo, de fase `resolution`. Las únicas
+//! omisiones son las propuestas de `UNSUPPORTED_FEATURES` (las del parsing más
+//! `nonextensible-applies-to-private`). Un test pasa a `timeout` si agota el presupuesto de
+//! instrucciones o el tiempo.
 //!
 //! Escribe la sección "Ejecución" de `docs/test262-status.md` (tabla por directorio y los 30
 //! errores más frecuentes) y el detalle por test en `target/test262/results.tsv`.
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use bf_js::compiler::bytecode::FunctionCode;
 use bf_js::value::Value;
+use bf_js::vm::module::FileModuleLoader;
 use bf_js::vm::{Agent, AgentOptions, Throw};
 
 /// Propuestas que todavía no están en ECMA-262 (las mismas del parsing).
@@ -41,6 +44,14 @@ const UNSUPPORTED_FEATURES: &[(&str, &str)] = &[
     (
         "nonextensible-applies-to-private",
         "stage 3: PrivateFieldAdd lanza TypeError en objetos no extensibles; ECMA-262 todavía lo permite y sus tests contradicen el spec vigente",
+    ),
+    (
+        "import-text",
+        "stage 3: módulos de texto (`with { type: \"text\" }`)",
+    ),
+    (
+        "import-bytes",
+        "stage 2.7: módulos de bytes (`with { type: \"bytes\" }`, sobre immutable ArrayBuffer)",
     ),
 ];
 
@@ -174,7 +185,7 @@ fn describe(agent: &mut Agent, v: &Value) -> String {
 }
 
 /// Una ejecución del test en un realm nuevo.
-fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
+fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> Status {
     let output = Rc::new(RefCell::new(String::new()));
     let mut agent = Agent::new(AgentOptions {
         max_stack: 160 << 20,
@@ -227,7 +238,15 @@ fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
         src.to_owned()
     };
     let phase = meta.negative_phase.as_deref();
-    let code = agent.compile_script_text(&text, "test.js");
+    let module = meta.flags.iter().any(|f| f == "module");
+    let code = if module {
+        // ParseModule del test; después la carga del grafo y Link (fase `resolution`).
+        agent.set_module_loader(Rc::new(FileModuleLoader));
+        let url = FileModuleLoader::path_to_url(path);
+        agent.parse_module_record(&url, src).map(Err)
+    } else {
+        agent.compile_script_text(&text, "test.js").map(Ok)
+    };
     let result = match code {
         Err(Throw::Value(v)) => {
             if phase == Some("parse") {
@@ -249,7 +268,33 @@ fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
             if phase == Some("parse") {
                 return Status::Failed("se parseó (negative: parse)".into());
             }
-            agent.script_evaluation(code)
+            match code {
+                Ok(code) => agent.script_evaluation(code),
+                Err(m) => {
+                    let linked = agent
+                        .load_requested_modules(m)
+                        .and_then(|_| agent.link_module(m));
+                    match linked {
+                        Err(Throw::Terminate(_)) => return Status::Timeout,
+                        Err(Throw::Value(v)) => {
+                            let n = thrown_name(&mut agent, &v);
+                            if phase == Some("resolution")
+                                && Some(n.as_str()) == meta.negative_type.as_deref()
+                            {
+                                return Status::Passed;
+                            }
+                            let d = describe(&mut agent, &v);
+                            return Status::Failed(format!("resolution: {d}"));
+                        }
+                        Ok(()) => {
+                            if phase == Some("resolution") {
+                                return Status::Failed("se enlazó (negative: resolution)".into());
+                            }
+                        }
+                    }
+                    agent.evaluate_module(m).map(|_| Value::Undefined)
+                }
+            }
         }
     };
     let internal = agent.internal_errors.first().cloned();
@@ -308,13 +353,9 @@ fn run_test(root: &Path, path: &Path) -> Status {
     {
         return Status::Skipped(format!("feature {f}"));
     }
-    if meta.flags.iter().any(|f| f == "module")
-        || meta.negative_phase.as_deref() == Some("resolution")
-    {
-        return Status::Skipped("module (paso 5)".into());
-    }
     let has = |f: &str| meta.flags.iter().any(|x| x == f);
-    let modes: &[bool] = if has("raw") || has("noStrict") {
+    // Un módulo es código estricto: una sola ejecución.
+    let modes: &[bool] = if has("module") || has("raw") || has("noStrict") {
         &[false]
     } else if has("onlyStrict") {
         &[true]
@@ -323,7 +364,7 @@ fn run_test(root: &Path, path: &Path) -> Status {
     };
     for &strict in modes {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_once(root, &meta, &src, strict)
+            run_once(root, &meta, path, &src, strict)
         }));
         let status = match r {
             Ok(s) => s,
@@ -665,8 +706,10 @@ fn write_section(
          Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.\n\n\
          - Commit de test262: `{}`; fecha: {date}; {n} archivos en {:.0} s.\n\
          - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos \
-         veces (no estricto y con `\"use strict\";`). Pasa solo si pasan todas sus ejecuciones.\n\
-         - `skipped`: módulos (paso 5) y las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que \
+         veces (no estricto y con `\"use strict\";`). Pasa solo si pasan todas sus ejecuciones. Los \
+         `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o \
+         enlazar el grafo es de fase `resolution`.\n\
+         - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que \
          falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: \
          presupuesto de instrucciones o 10 s. Las propuestas omitidas:\n\
          {features}\
