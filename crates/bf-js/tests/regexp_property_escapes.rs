@@ -270,7 +270,7 @@ fn run_file(path: &std::path::Path) -> Vec<String> {
                 }
             }
             let save = src.i;
-            let end = src.find("});").then_some(src.i).unwrap_or(src.s.len());
+            let end = if src.find("});") { src.i } else { src.s.len() };
             src.i = save;
             if src.find("nonMatchStrings:") && src.i < end {
                 // Como regExpUtils.js: solo si el string concatenado coincide se revisa
