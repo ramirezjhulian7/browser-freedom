@@ -30,6 +30,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bf_dom::NodeId;
 use bf_font::FontDb;
 use bf_infra::Url;
 use bf_layout::fragment::Rect;
