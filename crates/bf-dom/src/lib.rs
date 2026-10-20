@@ -40,7 +40,7 @@ use std::sync::Mutex;
 
 pub use bf_infra::{Atom, DomString, Namespace, Url};
 pub use document::{HtmlElementKind, html_element_kind};
-pub use element::{DomTokenList, TokenListError};
+pub use element::{DomTokenList, NodeOrString, TokenListError};
 pub use exception::DomException;
 pub use node::{NodeType, document_position};
 pub use serialize::test_serialize;

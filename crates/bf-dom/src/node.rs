@@ -317,6 +317,36 @@ impl Document {
         copy
     }
 
+    /// Copia (profunda) en este documento el nodo `node` de otro documento `other`, con su
+    /// template contents: es el "clone" con otro node document que usan los algoritmos de
+    /// parseo de fragmentos (que parsean en un documento aparte).
+    pub fn import_from(&mut self, other: &Document, node: NodeId) -> NodeId {
+        let mut data = other.get(node).data.clone();
+        let template_source = match &mut data {
+            NodeData::Element(e) => e.template_contents.take(),
+            NodeData::Attr(a) => {
+                a.owner = None;
+                None
+            }
+            _ => None,
+        };
+        let copy = self.create(data);
+        if let (Some(source), Some(target)) = (
+            template_source,
+            self.element(copy).and_then(|e| e.template_contents),
+        ) {
+            for child in other.children(source) {
+                let c = self.import_from(other, child);
+                self.link(target, c, None);
+            }
+        }
+        for child in other.children(node) {
+            let c = self.import_from(other, child);
+            self.link(copy, c, None);
+        }
+        copy
+    }
+
     /// `Node.cloneNode(subtree)`.
     pub fn clone_node_checked(&mut self, id: NodeId, subtree: bool) -> Result<NodeId, DomException> {
         Ok(self.clone_node(id, subtree))
