@@ -756,20 +756,23 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     i.promise_prototype = proto;
 }
 
-/// Las propiedades globales de los constructores de E3.
-pub fn install_e3_globals(agent: &mut Agent, global: Gc<Object>) {
-    let i = agent.intrinsics().clone();
-    let ctor_of = |agent: &Agent, proto: Gc<Object>| -> Value {
-        agent.heap[proto]
+/// Registra los bindings globales de los constructores de E3 (`register_global`).
+pub fn register_e3_globals(agent: &mut Agent, realm: RealmId) {
+    let i = agent.realms[realm].intrinsics.clone();
+    let ctor_of = |agent: &Agent, proto: Gc<Object>| -> Gc<Object> {
+        match agent.heap[proto]
             .props
             .get(&PropertyKey::from("constructor"))
             .and_then(|p| p.to_descriptor().value)
-            .unwrap_or_default()
+        {
+            Some(Value::Object(c)) => c,
+            _ => proto,
+        }
     };
-    let list: Vec<(&str, Value)> = vec![
-        ("Promise", Value::Object(i.promise_ctor)),
-        ("Map", Value::Object(i.map_ctor)),
-        ("Set", Value::Object(i.set_ctor)),
+    let list: Vec<(&'static str, Gc<Object>)> = vec![
+        ("Promise", i.promise_ctor),
+        ("Map", i.map_ctor),
+        ("Set", i.set_ctor),
         ("WeakMap", ctor_of(agent, i.weak_map_prototype)),
         ("WeakSet", ctor_of(agent, i.weak_set_prototype)),
         ("WeakRef", ctor_of(agent, i.weak_ref_prototype)),
@@ -777,31 +780,31 @@ pub fn install_e3_globals(agent: &mut Agent, global: Gc<Object>) {
             "FinalizationRegistry",
             ctor_of(agent, i.finalization_registry_prototype),
         ),
-        ("ArrayBuffer", Value::Object(i.array_buffer_ctor)),
+        ("ArrayBuffer", i.array_buffer_ctor),
         (
             "SharedArrayBuffer",
-            Value::Object(i.shared_array_buffer_ctor),
+            i.shared_array_buffer_ctor,
         ),
         ("DataView", ctor_of(agent, i.data_view_prototype)),
-        ("Atomics", Value::Object(i.atomics)),
-        ("Int8Array", Value::Object(i.int8_array_ctor)),
-        ("Uint8Array", Value::Object(i.uint8_array_ctor)),
+        ("Atomics", i.atomics),
+        ("Int8Array", i.int8_array_ctor),
+        ("Uint8Array", i.uint8_array_ctor),
         (
             "Uint8ClampedArray",
-            Value::Object(i.uint8_clamped_array_ctor),
+            i.uint8_clamped_array_ctor,
         ),
-        ("Int16Array", Value::Object(i.int16_array_ctor)),
-        ("Uint16Array", Value::Object(i.uint16_array_ctor)),
-        ("Int32Array", Value::Object(i.int32_array_ctor)),
-        ("Uint32Array", Value::Object(i.uint32_array_ctor)),
-        ("Float16Array", Value::Object(i.float16_array_ctor)),
-        ("Float32Array", Value::Object(i.float32_array_ctor)),
-        ("Float64Array", Value::Object(i.float64_array_ctor)),
-        ("BigInt64Array", Value::Object(i.bigint64_array_ctor)),
-        ("BigUint64Array", Value::Object(i.biguint64_array_ctor)),
+        ("Int16Array", i.int16_array_ctor),
+        ("Uint16Array", i.uint16_array_ctor),
+        ("Int32Array", i.int32_array_ctor),
+        ("Uint32Array", i.uint32_array_ctor),
+        ("Float16Array", i.float16_array_ctor),
+        ("Float32Array", i.float32_array_ctor),
+        ("Float64Array", i.float64_array_ctor),
+        ("BigInt64Array", i.bigint64_array_ctor),
+        ("BigUint64Array", i.biguint64_array_ctor),
     ];
     for (name, v) in list {
-        agent.put_data(global, PropertyKey::from(name), v, true, false, true);
+        crate::builtins::register_global(agent, realm, name, v);
     }
 }
 

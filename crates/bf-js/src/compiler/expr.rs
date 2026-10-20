@@ -44,16 +44,6 @@ pub(crate) fn strip_parens(e: &Expr) -> &Expr {
     }
 }
 
-/// IsAnonymousFunctionDefinition (§8.4.3).
-pub(crate) fn is_anonymous_fn(e: &Expr) -> bool {
-    match strip_parens(e) {
-        Expr::Function(f) => f.id.is_none(),
-        Expr::Arrow(_) => true,
-        Expr::Class(c) => c.id.is_none(),
-        _ => false,
-    }
-}
-
 fn binary_op(op: &str) -> Option<Op> {
     Some(match op {
         "+" => Op::Add,
@@ -350,7 +340,6 @@ impl<'t> Codegen<'t> {
             None => (JsString::default(), FnName::Code),
             Some(NameSource::Const(s)) => (s.clone(), FnName::Code),
             Some(NameSource::Stack(p)) => (JsString::default(), FnName::Stack(*p)),
-            Some(NameSource::Local(slot)) => (JsString::default(), FnName::Local(*slot)),
             Some(NameSource::FieldName) => {
                 self.emit(Op::FieldName);
                 (JsString::default(), FnName::Stack(NamePrefix::None))
@@ -1018,13 +1007,17 @@ impl<'t> Codegen<'t> {
                     self.emit(Op::CopyDataProperties);
                 }
                 ObjectMember::Property {
+                    span,
                     key: k,
                     value,
                     kind,
                     method,
                     shorthand,
-                    ..
                 } => {
+                    // El texto de un método es su MethodDefinition entera (§20.2.3.5).
+                    if matches!(value, PropValue::Method(_)) {
+                        self.method_src = Some(*span);
+                    }
                     let skey = Self::static_key(k);
                     // `__proto__: v` (B.3.1): no calculada, no shorthand, no método.
                     if let (Some(s), PropKind::Init, false, false, PropValue::Expr(v)) =
@@ -1134,13 +1127,14 @@ impl<'t> Codegen<'t> {
     pub(crate) fn method_closure(&mut self, f: &Function, name: Option<NameSource>, home: u8) {
         let (static_name, fname) = self.closure_name(&name);
         let fid = self.tree.func(key(f.span, Tag::Function));
+        let src = self.method_src.take().unwrap_or(f.span);
         let code = self.compile_function_body(
             fid,
             crate::compiler::bytecode::CodeKind::Method,
             &f.params,
             FnBodyRef::Block(&f.body.body),
             static_name,
-            f.span,
+            src,
         );
         let idx = self.add_const(Constant::Function(code));
         self.emit(Op::Closure {

@@ -83,7 +83,6 @@ intrinsics!(
     async_generator_function,
     async_generator_function_prototype,
     async_generator_prototype,
-    async_iterator_prototype,
     async_from_sync_iterator_prototype,
     map_ctor,
     map_prototype,
@@ -127,6 +126,13 @@ intrinsics!(
     biguint64_array_ctor,
     biguint64_array_prototype,
     atomics,
+    // E1
+    parse_float,
+    parse_int,
+    iterator_ctor,
+    iterator_helper_prototype,
+    wrap_for_valid_iterator_prototype,
+    async_iterator_prototype,
 );
 
 pub struct Realm {
@@ -135,6 +141,9 @@ pub struct Realm {
     pub global_env: Gc<Env>,
     /// `[[TemplateMap]]`: sitio → objeto template.
     pub template_map: HashMap<u64, Gc<Object>>,
+    // E1: los bindings del objeto global que registra cada módulo de built-ins
+    // (`builtins::register_global`).
+    pub globals: Vec<(&'static str, Gc<Object>)>,
 }
 
 impl Trace for Realm {
@@ -143,6 +152,9 @@ impl Trace for Realm {
         t.gc(self.global_object);
         t.gc(self.global_env);
         for o in self.template_map.values() {
+            t.gc(*o);
+        }
+        for (_, o) in &self.globals {
             t.gc(*o);
         }
     }
@@ -170,6 +182,7 @@ impl Agent {
             global_object: object_prototype,
             global_env,
             template_map: HashMap::new(),
+            globals: Vec::new(),
         });
         let saved = self.current_realm;
         self.current_realm = id;

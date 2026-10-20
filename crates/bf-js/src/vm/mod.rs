@@ -69,10 +69,13 @@ pub struct WellKnown {
     pub to_primitive: Gc<Symbol>,
     pub to_string_tag: Gc<Symbol>,
     pub unscopables: Gc<Symbol>,
+    // E1: explicit-resource-management.
+    pub async_dispose: Gc<Symbol>,
+    pub dispose: Gc<Symbol>,
 }
 
 impl WellKnown {
-    pub fn all(&self) -> [(&'static str, Gc<Symbol>); 13] {
+    pub fn all(&self) -> [(&'static str, Gc<Symbol>); 15] {
         [
             ("asyncIterator", self.async_iterator),
             ("hasInstance", self.has_instance),
@@ -87,6 +90,8 @@ impl WellKnown {
             ("toPrimitive", self.to_primitive),
             ("toStringTag", self.to_string_tag),
             ("unscopables", self.unscopables),
+            ("asyncDispose", self.async_dispose),
+            ("dispose", self.dispose),
         ]
     }
 }
@@ -235,6 +240,8 @@ impl Agent {
             to_primitive: sym("Symbol.toPrimitive"),
             to_string_tag: sym("Symbol.toStringTag"),
             unscopables: sym("Symbol.unscopables"),
+            async_dispose: sym("Symbol.asyncDispose"),
+            dispose: sym("Symbol.dispose"),
         };
         let mut agent = Agent {
             heap,

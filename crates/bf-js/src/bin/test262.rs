@@ -6,7 +6,7 @@
 //! con `$262` y `print`, dos ejecuciones sin flags (no estricta y con `"use strict";`),
 //! `negative` de fase `parse` y `runtime`. Los módulos (`module`, fase `resolution`) son del
 //! paso 5 y se cuentan como `skipped`; las únicas otras omisiones son las propuestas de
-//! `UNSUPPORTED_FEATURES` (las mismas del parsing). Un test pasa a `timeout` si agota el
+//! `UNSUPPORTED_FEATURES` (las del parsing más `nonextensible-applies-to-private`). Un test pasa a `timeout` si agota el
 //! presupuesto de instrucciones o el tiempo.
 //!
 //! Escribe la sección "Ejecución" de `docs/test262-status.md` (tabla por directorio y los 30
@@ -25,12 +25,23 @@ use bf_js::value::Value;
 use bf_js::vm::{Agent, AgentOptions, Throw};
 
 /// Propuestas que todavía no están en ECMA-262 (las mismas del parsing).
-const UNSUPPORTED_FEATURES: &[&str] = &[
-    "decorators",
-    "source-phase-imports",
-    "source-phase-imports-module-source",
-    "import-defer",
-    "export-defer",
+const UNSUPPORTED_FEATURES: &[(&str, &str)] = &[
+    ("decorators", "stage 3: `@dec` en clases"),
+    ("source-phase-imports", "stage 3: `import source x from`"),
+    (
+        "source-phase-imports-module-source",
+        "stage 3: `import source`",
+    ),
+    ("import-defer", "stage 3: `import defer * as ns from`"),
+    ("export-defer", "stage 2.7: `export defer`"),
+    (
+        "error-stack-accessor",
+        "stage 3: `Error.prototype.stack` como accessor; el motor usa la propiedad propia no estándar `stack` de los errores",
+    ),
+    (
+        "nonextensible-applies-to-private",
+        "stage 3: PrivateFieldAdd lanza TypeError en objetos no extensibles; ECMA-262 todavía lo permite y sus tests contradicen el spec vigente",
+    ),
 ];
 
 /// Presupuesto de instrucciones por ejecución.
@@ -75,7 +86,10 @@ fn metadata(src: &str) -> Meta {
     let Some(end) = src[start..].find("---*/") else {
         return meta;
     };
-    let yaml = &src[start + 5..start + end];
+    // Los terminadores de línea pueden ser CR solos (tests de normalización).
+    let yaml = src[start + 5..start + end]
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
     let lines: Vec<&str> = yaml.lines().collect();
     let mut in_negative = false;
     for (i, line) in lines.iter().enumerate() {
@@ -294,7 +308,7 @@ fn run_test(root: &Path, path: &Path) -> Status {
     if let Some(f) = meta
         .features
         .iter()
-        .find(|f| UNSUPPORTED_FEATURES.contains(&f.as_str()))
+        .find(|f| UNSUPPORTED_FEATURES.iter().any(|(u, _)| u == f))
     {
         return Status::Skipped(format!("feature {f}"));
     }
@@ -503,7 +517,7 @@ fn main() {
                         let status = run_test(&root, &files[idx]);
                         results.lock().unwrap().push((idx, status));
                         let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        if d % 2000 == 0 {
+                        if d.is_multiple_of(2000) {
                             eprintln!(
                                 "{d}/{} ({:.0} s)",
                                 selected.len(),
@@ -620,16 +634,36 @@ fn main() {
         elapsed.as_secs_f64()
     );
     if let Some(doc) = out_doc {
-        write_section(&doc, &root, &table, &top_md, elapsed, results.len());
+        write_section(
+            &doc,
+            &root,
+            &table,
+            &top_md,
+            elapsed,
+            results.len(),
+            language.pct(),
+        );
     }
 }
 
 /// Reemplaza (o agrega) la sección "Ejecución" del documento de estado.
-fn write_section(doc: &Path, root: &Path, table: &str, top: &str, elapsed: Duration, n: usize) {
+fn write_section(
+    doc: &Path,
+    root: &Path,
+    table: &str,
+    top: &str,
+    elapsed: Duration,
+    n: usize,
+    language: f64,
+) {
     let commit = fs::read_to_string(root.join("../../tools/test262-commit.txt"))
         .or_else(|_| fs::read_to_string("tools/test262-commit.txt"))
         .unwrap_or_default();
     let date = today();
+    let features: String = UNSUPPORTED_FEATURES
+        .iter()
+        .map(|(f, why)| format!("  - `{f}`: {why}.\n"))
+        .collect();
     let section = format!(
         "## Ejecución\n\n\
          Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.\n\n\
@@ -637,9 +671,11 @@ fn write_section(doc: &Path, root: &Path, table: &str, top: &str, elapsed: Durat
          - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos \
          veces (no estricto y con `\"use strict\";`). Pasa solo si pasan todas sus ejecuciones.\n\
          - `skipped`: módulos (paso 5) y las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que \
-         falla cuenta como `failed`, incluidos los built-ins de los pasos 3–4 y lo asíncrono \
-         (Promise, paso 4); `timeout`: presupuesto de instrucciones o 10 s.\n\
-         - Detalle por test: `target/test262/results.tsv`.\n\n\
+         falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: \
+         presupuesto de instrucciones o 10 s. Las propuestas omitidas:\n\
+         {features}\
+         - Detalle por test: `target/test262/results.tsv`.\n\
+         - `language/` (referencia de regresión de `tests/test262_run.rs`): {language:.2}%\n\n\
          {table}\n\
          ### Los 30 errores más frecuentes\n\n\
          {top}",
@@ -651,25 +687,19 @@ fn write_section(doc: &Path, root: &Path, table: &str, top: &str, elapsed: Durat
     let _ = fs::write(doc, new);
 }
 
-/// Reemplaza la sección que empieza con `heading` (hasta la próxima `## `) o la agrega.
+/// Reemplaza la sección que empieza con `heading` (hasta la próxima `## `) o la agrega al
+/// final; las demás secciones (la "Parsing" de `test262_parse`) quedan como estaban.
 fn replace_section(doc: &str, heading: &str, section: &str) -> String {
+    let section = format!("{}\n", section.trim_end_matches('\n'));
     match doc.find(heading) {
         Some(start) => {
-            let rest = &doc[start + heading.len()..];
-            let end = rest
-                .find("\n## ")
-                .map_or(doc.len(), |e| start + heading.len() + e + 1);
-            format!(
-                "{}{}{}",
-                &doc[..start],
-                section.trim_end_matches('\n').to_owned() + "\n",
-                &doc[end..]
-            )
+            let after = start + heading.len();
+            match doc[after..].find("\n## ") {
+                Some(e) => format!("{}{section}\n{}", &doc[..start], &doc[after + e + 1..]),
+                None => format!("{}{section}", &doc[..start]),
+            }
         }
-        None => format!(
-            "{}\n{section}",
-            doc.trim_end_matches('\n').to_owned() + "\n"
-        ),
+        None => format!("{}\n\n{section}", doc.trim_end_matches('\n')),
     }
 }
 

@@ -22,7 +22,12 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     to_string_tag(agent, sp, "String Iterator");
     let fp = agent.new_object(Some(ip));
     method(agent, fp, "next", 0, for_in_iterator_next);
+    // %AsyncIteratorPrototype% (§27.1.5): solo `@@asyncIterator`; lo demás es de async.
+    let aip = agent.new_object(Some(op));
+    let ai = agent.well_known.async_iterator;
+    method_sym(agent, aip, ai, "[Symbol.asyncIterator]", 0, iterator_self);
     let i = &mut agent.realms[realm].intrinsics;
+    i.async_iterator_prototype = aip;
     i.iterator_prototype = ip;
     i.array_iterator_prototype = ap;
     i.string_iterator_prototype = sp;

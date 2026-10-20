@@ -71,7 +71,6 @@ pub(crate) enum Control {
     AsyncIter(u32),
     Finally {
         kind_slot: u32,
-        value_slot: u32,
         entry: Label,
         exits: Vec<(u32, JumpExit)>,
     },
@@ -91,7 +90,6 @@ pub(crate) enum NameSource {
     Const(JsString),
     /// La clave en el tope de la pila.
     Stack(NamePrefix),
-    Local(u32),
     /// `[[ClassFieldInitializerName]]` de la función activa.
     FieldName,
 }
@@ -132,6 +130,8 @@ pub struct Codegen<'t> {
     pub(crate) tree: &'t ScopeTree,
     pub(crate) source: Rc<Source>,
     pub(crate) fs: Vec<FnState>,
+    /// El texto fuente del próximo método (su MethodDefinition, para `toString`).
+    pub(crate) method_src: Option<Span>,
 }
 
 /// Contexto de un `eval` directo (lo que PerformEval pasa al parser y al compilador).
@@ -178,6 +178,7 @@ pub fn compile_script(program: &Program, source: Rc<Source>, strict: bool) -> Rc
         tree: &tree,
         source,
         fs: Vec::new(),
+        method_src: None,
     };
     cg.top_level(program, CodeKind::Script)
 }
@@ -195,6 +196,7 @@ pub fn compile_eval(program: &Program, source: Rc<Source>, strict: bool) -> Rc<F
         tree: &tree,
         source,
         fs: Vec::new(),
+        method_src: None,
     };
     cg.top_level(program, CodeKind::Eval)
 }
@@ -213,6 +215,7 @@ pub fn compile_dynamic_function(program: &Program, source: Rc<Source>) -> Option
         tree: &tree,
         source,
         fs: Vec::new(),
+        method_src: None,
     };
     let f = match program.body.first()? {
         Stmt::Expression { expression, .. } => match expression {
@@ -475,6 +478,38 @@ impl<'t> Codegen<'t> {
         }
     }
 
+    /// El span de la MethodDefinition de un elemento de clase: sin el `static` inicial
+    /// (ClassElement : static MethodDefinition), saltando espacios y comentarios.
+    pub(crate) fn method_definition_span(&self, element: Span, is_static: bool) -> Span {
+        if !is_static {
+            return element;
+        }
+        let u = &self.source.units;
+        let mut i = element.start as usize + "static".len();
+        let end = element.end as usize;
+        while i < end {
+            let c = u[i];
+            if c == u16::from(b'/') && u.get(i + 1) == Some(&u16::from(b'*')) {
+                i += 2;
+                while i + 1 < end && !(u[i] == u16::from(b'*') && u[i + 1] == u16::from(b'/')) {
+                    i += 1;
+                }
+                i += 2;
+            } else if c == u16::from(b'/') && u.get(i + 1) == Some(&u16::from(b'/')) {
+                while i < end && !matches!(u[i], 0x0A | 0x0D | 0x2028 | 0x2029) {
+                    i += 1;
+                }
+            } else if char::from_u32(u32::from(c)).is_some_and(|ch| {
+                crate::lexer::is_whitespace(ch) || crate::lexer::is_line_terminator(ch)
+            }) {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        Span::new(i.min(end) as u32, element.end)
+    }
+
     /// Sale del scope `id` (volviendo a `parent`).
     pub(crate) fn exit_scope(&mut self, id: ScopeId, parent: ScopeId) {
         if self.tree.scopes[id].materialized {
@@ -657,18 +692,6 @@ impl<'t> Codegen<'t> {
                 self.emit(Op::InitGlobalLex(n));
             }
             t => self.emit_init(&t),
-        }
-    }
-
-    /// Inicializa el binding de la declaración `name` según su clase (var: PutValue con la
-    /// referencia ya preparada; léxico: InitializeBinding). Saca el valor.
-    pub(crate) fn emit_declare_store(&mut self, name: &str, var: bool, t: &Target) {
-        if var {
-            self.emit_set(t);
-            self.emit(Op::Pop);
-        } else {
-            let _ = t;
-            self.emit_init_lexical(name);
         }
     }
 

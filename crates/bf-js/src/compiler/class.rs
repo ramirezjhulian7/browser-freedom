@@ -41,7 +41,6 @@ impl<'t> Codegen<'t> {
                 self.emit(Op::InitLocal(t));
                 (JsString::default(), FnName::Local(t))
             }
-            (None, Some(NameSource::Local(t))) => (JsString::default(), FnName::Local(t)),
             (None, Some(NameSource::FieldName)) => {
                 let t = self.alloc_temp();
                 self.emit(Op::FieldName);
@@ -109,7 +108,8 @@ impl<'t> Codegen<'t> {
         });
         // [F proto]
         let mut statics: Vec<StaticElem> = Vec::new();
-        let mut static_privates: Vec<(&Ident, &Function, crate::ast::MethodKind)> = Vec::new();
+        let mut static_privates: Vec<(&Ident, &Function, crate::ast::MethodKind, Span)> =
+            Vec::new();
         for e in &c.body {
             match e {
                 ClassElement::Method {
@@ -117,12 +117,13 @@ impl<'t> Codegen<'t> {
                     ..
                 } => {}
                 ClassElement::Method {
+                    span,
                     key: k,
                     value,
                     kind,
                     is_static,
-                    ..
                 } => {
+                    let src = self.method_definition_span(*span, *is_static);
                     let mk = match kind {
                         crate::ast::MethodKind::Get => bytecode::MethodKind::Getter,
                         crate::ast::MethodKind::Set => bytecode::MethodKind::Setter,
@@ -130,11 +131,12 @@ impl<'t> Codegen<'t> {
                     };
                     if let PropKey::Private(id) = k {
                         if *is_static {
-                            static_privates.push((id, value, *kind));
+                            static_privates.push((id, value, *kind, src));
                             continue;
                         }
                         self.private_name(&id.name);
                         let n = prefixed(kind, &format!("#{}", id.name));
+                        self.method_src = Some(src);
                         self.method_closure(value, Some(NameSource::Const(n)), 2);
                         self.emit(Op::AddPrivateMethod(mk));
                         continue;
@@ -143,6 +145,7 @@ impl<'t> Codegen<'t> {
                         Some(s) if s.to_str().is_some() => {
                             let n = self.name(&s.to_string_lossy());
                             let full = prefixed_js(kind, &s);
+                            self.method_src = Some(src);
                             self.method_closure(
                                 value,
                                 Some(NameSource::Const(full)),
@@ -173,6 +176,7 @@ impl<'t> Codegen<'t> {
                                 crate::ast::MethodKind::Set => NamePrefix::Set,
                                 _ => NamePrefix::None,
                             };
+                            self.method_src = Some(src);
                             self.method_closure(
                                 value,
                                 Some(NameSource::Stack(prefix)),
@@ -276,7 +280,7 @@ impl<'t> Codegen<'t> {
             self.emit_init(&t);
         }
         // Métodos privados estáticos (paso 30).
-        for (id, f, kind) in static_privates {
+        for (id, f, kind, src) in static_privates {
             let mk = match kind {
                 crate::ast::MethodKind::Get => bytecode::MethodKind::Getter,
                 crate::ast::MethodKind::Set => bytecode::MethodKind::Setter,
@@ -285,6 +289,7 @@ impl<'t> Codegen<'t> {
             self.emit(Op::Over);
             self.private_name(&id.name);
             let n = prefixed(&kind, &format!("#{}", id.name));
+            self.method_src = Some(src);
             self.method_closure(f, Some(NameSource::Const(n)), 2);
             self.emit(Op::AddPrivateMethodTo(mk));
             self.emit(Op::Pop);

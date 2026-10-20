@@ -490,3 +490,81 @@ impl<T: HeapData> IndexMut<Gc<T>> for Heap {
         T::arena_mut(self).get_mut(gc)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::{Agent, AgentOptions};
+
+    #[test]
+    fn handle_scope_keeps_values_alive() {
+        let mut heap = Heap::default();
+        let scope = heap.open_scope();
+        let inside = heap.alloc(Object::ordinary(None));
+        heap.root(Value::Object(inside));
+        let outside = heap.alloc(Object::ordinary(None));
+        heap.collect(Tracer::default());
+        assert!(heap.is_alive(inside), "el valor enraizado sobrevive");
+        assert!(!heap.is_alive(outside), "el valor sin raíz se libera");
+        heap.close_scope(scope);
+        heap.collect(Tracer::default());
+        assert!(
+            !heap.is_alive(inside),
+            "al cerrar el scope deja de estar enraizado"
+        );
+        // El slot liberado se reutiliza con otra generación: el Gc viejo no lo confunde.
+        let reused = heap.alloc(Object::ordinary(None));
+        assert!(heap.is_alive(reused));
+        assert!(!heap.is_alive(inside) && !heap.is_alive(outside));
+    }
+
+    #[test]
+    fn reachable_through_properties_survive() {
+        let mut heap = Heap::default();
+        let scope = heap.open_scope();
+        let parent = heap.alloc(Object::ordinary(None));
+        let child = heap.alloc(Object::ordinary(None));
+        heap[parent].props.insert(
+            crate::value::PropertyKey::from("c"),
+            crate::object::Prop::data(Value::Object(child), true, true, true),
+        );
+        heap.root(Value::Object(parent));
+        heap.collect(Tracer::default());
+        assert!(heap.is_alive(child));
+        heap.close_scope(scope);
+    }
+
+    #[test]
+    fn load_with_low_threshold() {
+        let mut agent = Agent::new(AgentOptions::default());
+        agent.heap.set_threshold(1000);
+        let r = agent.eval_script(
+            "var keep = []; var sum = 0;\n\
+             for (var i = 0; i < 100000; i++) {\n\
+               var o = { a: i, b: [i, { c: i }] };\n\
+               if (i % 1000 === 0) keep.push(o);\n\
+               sum += o.b[1].c;\n\
+             }\n\
+             var check = 0;\n\
+             for (var j = 0; j < keep.length; j++) check += keep[j].b[1].c;\n\
+             sum + ':' + check;",
+            "carga.js",
+        );
+        let v = match r {
+            Ok(Value::String(s)) => s.to_string_lossy(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(v, "4999950000:4950000");
+        let stats = agent.gc_stats();
+        assert!(
+            stats.collections > 10,
+            "recolecciones: {}",
+            stats.collections
+        );
+        assert!(
+            stats.freed_total > 200_000,
+            "liberados: {}",
+            stats.freed_total
+        );
+    }
+}

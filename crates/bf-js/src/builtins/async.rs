@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 
 use crate::builtins::promise::{Capability, Handler};
-use crate::builtins::{FnEntry, method_sym, methods, to_string_tag};
+use crate::builtins::{FnEntry, methods, to_string_tag};
 use crate::heap::{Gc, Trace, Tracer};
 use crate::object::{Object, ObjectKind};
 use crate::value::{PropertyKey, Value};
@@ -699,10 +699,8 @@ fn async_from_sync_continuation(
 
 pub fn init(agent: &mut Agent, realm: RealmId) {
     let i = agent.realms[realm].intrinsics.clone();
-    // %AsyncIteratorPrototype% (§27.1.3).
-    let aip = agent.new_object(Some(i.object_prototype));
-    let ai = agent.well_known.async_iterator;
-    method_sym(agent, aip, ai, "[Symbol.asyncIterator]", 0, return_this);
+    // %AsyncIteratorPrototype% (§27.1.3) lo crea `iterator::init`.
+    let aip = i.async_iterator_prototype;
     // %AsyncFromSyncIteratorPrototype% (§27.1.6.2).
     let afs = agent.new_object(Some(aip));
     const FROM_SYNC: &[FnEntry] = &[
@@ -744,17 +742,12 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     agent.put_data(agf, kp, Value::Object(agfp), false, false, false);
     agent.put_data(agfp, kc, Value::Object(agf), false, false, true);
     let ints = &mut agent.realms[realm].intrinsics;
-    ints.async_iterator_prototype = aip;
     ints.async_from_sync_iterator_prototype = afs;
     ints.async_function = af;
     ints.async_function_prototype = afp;
     ints.async_generator_prototype = agp;
     ints.async_generator_function = agf;
     ints.async_generator_function_prototype = agfp;
-}
-
-fn return_this(_: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(a.this.clone())
 }
 
 /// AsyncFunction ( ...parameterArgs, bodyArg ) (§27.7.1.1).
