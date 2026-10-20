@@ -40,6 +40,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+S", "Guardar un PNG de la ventana"),
     ("Ctrl+Shift+D", "Volcar el layout"),
     ("Ctrl+H", "Inicio"),
+    ("Ctrl+T · Ctrl+W", "Pestaña nueva y cerrar pestaña"),
+    ("Ctrl+Tab · Ctrl+1…9", "Cambiar de pestaña"),
+    (
+        "Clic central · Ctrl+clic",
+        "Abrir un enlace en otra pestaña",
+    ),
     ("Espacio · Mayús+Espacio", "Página abajo y arriba"),
 ];
 
