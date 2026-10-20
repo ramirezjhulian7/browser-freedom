@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
         let (parent, _, scope) = self.stack.pop().expect("recién apilado");
         let node = self.doc.create(NodeData::Element(Element {
             ns,
+            prefix: (!prefix.is_empty()).then(|| prefix.as_str().into()),
             name: local.into(),
             attrs,
             template_contents: None,
@@ -309,12 +310,28 @@ impl<'a> Parser<'a> {
             } else if rest.starts_with("<![CDATA[") {
                 self.pos += 9;
                 let text = self.take_until("]]>").to_owned();
-                self.append_text(text);
+                let node = self.doc.create(NodeData::CdataSection(text.into()));
+                let parent = self.current();
+                self.doc.append(parent, node);
             } else if rest.starts_with("<!DOCTYPE") {
                 self.doctype();
             } else if rest.starts_with("<?") {
                 self.pos += 2;
-                self.take_until("?>");
+                let body = self.take_until("?>").to_owned();
+                // La XML declaration no es una processing instruction.
+                let target_end = body
+                    .find(|c: char| c.is_ascii_whitespace())
+                    .unwrap_or(body.len());
+                let target = &body[..target_end];
+                if !target.eq_ignore_ascii_case("xml") {
+                    let data = body[target_end..].trim_start();
+                    let node = self.doc.create(NodeData::ProcessingInstruction {
+                        target: target.into(),
+                        data: data.into(),
+                    });
+                    let parent = self.current();
+                    self.doc.append(parent, node);
+                }
             } else if rest.starts_with("</") {
                 self.end_tag();
             } else if rest.starts_with('<')

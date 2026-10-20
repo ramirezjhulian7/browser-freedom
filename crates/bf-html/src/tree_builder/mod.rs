@@ -229,6 +229,7 @@ impl TreeBuilder {
     fn setup_fragment(&mut self, context: FragmentContext<'_>) {
         let context_el = self.create_element(Element {
             ns: context.ns,
+            prefix: None,
             name: context.name.into(),
             attrs: Vec::new(),
             template_contents: None,
@@ -249,6 +250,7 @@ impl TreeBuilder {
         }
         let root = self.create_element(Element {
             ns: Namespace::Html,
+            prefix: None,
             name: "html".into(),
             attrs: Vec::new(),
             template_contents: None,
@@ -654,6 +656,7 @@ impl TreeBuilder {
     fn create_element_for_token(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
         self.create_element(Element {
             ns,
+            prefix: None,
             name: tag.name.clone(),
             attrs: tag.attrs.clone(),
             template_contents: None,

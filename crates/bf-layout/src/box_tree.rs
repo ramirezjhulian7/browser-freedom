@@ -493,7 +493,7 @@ impl<'a> Builder<'a> {
         let children: Vec<NodeId> = self.doc.children(node).collect();
         for child in children {
             match &self.doc.get(child).data {
-                NodeData::Text(t) => {
+                NodeData::Text(t) | NodeData::CdataSection(t) => {
                     out.push(Item::Inline(LayoutBox::new(
                         BoxKind::Text(t.to_string()),
                         style.clone(),

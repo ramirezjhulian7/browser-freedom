@@ -73,7 +73,21 @@ fn parse_list(values: &[ComponentValue], ns: &NamespaceMap, ctx: Ctx) -> Result<
     if values.iter().all(ComponentValue::is_whitespace) {
         return Err(SelectorError);
     }
-    split_comma_separated(values)
+    let groups = split_comma_separated(values);
+    // `a,` o `a,,b`: un elemento vacío invalida la lista (también tras la última coma).
+    let trailing_comma = values
+        .iter()
+        .rev()
+        .find(|v| !v.is_whitespace())
+        .is_some_and(|v| matches!(v.token(), Some(crate::syntax::TokenKind::Comma)));
+    if trailing_comma
+        || groups
+            .iter()
+            .any(|g| g.iter().all(ComponentValue::is_whitespace))
+    {
+        return Err(SelectorError);
+    }
+    groups
         .iter()
         .map(|group| parse_complex(group, ns, ctx))
         .collect::<Result<Vec<_>>>()

@@ -37,7 +37,7 @@ fn is_css_type(t: Option<&str>) -> bool {
 fn text_content(doc: &Document, node: NodeId) -> String {
     doc.children(node)
         .filter_map(|c| match &doc.get(c).data {
-            NodeData::Text(t) => Some(t.as_lossy_str()),
+            NodeData::Text(t) | NodeData::CdataSection(t) => Some(t.as_lossy_str()),
             _ => None,
         })
         .collect()

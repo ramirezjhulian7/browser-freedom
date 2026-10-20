@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dom; // E4: serialización HTML, innerHTML/outerHTML/insertAdjacentHTML
 pub mod tokenizer;
 pub mod tree_builder;
 pub mod xml;
