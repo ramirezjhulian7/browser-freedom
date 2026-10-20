@@ -185,6 +185,7 @@ impl Agent {
         }
         match &self.heap[fo].kind {
             ObjectKind::Function(_) => self.call_closure(fo, this, args.to_vec(), None),
+            ObjectKind::HtmlDda => Ok(Value::Null),
             ObjectKind::Builtin(b) => {
                 let (func, realm) = (b.func, b.realm);
                 let saved = self.current_realm;

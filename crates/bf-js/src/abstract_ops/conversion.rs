@@ -22,7 +22,9 @@ pub fn to_boolean(agent: &Agent, v: &Value) -> bool {
         Value::Boolean(b) => *b,
         Value::Number(n) => !(*n == 0.0 || n.is_nan()),
         Value::String(s) => !s.is_empty(),
-        Value::Symbol(_) | Value::Object(_) => true,
+        Value::Symbol(_) => true,
+        // B.3.6.1: los objetos con [[IsHTMLDDA]] son falsy.
+        Value::Object(o) => !matches!(agent.heap[*o].kind, ObjectKind::HtmlDda),
         Value::BigInt(b) => !agent.heap[*b].is_zero(),
     }
 }
@@ -390,7 +392,10 @@ impl Agent {
             Value::Symbol(_) => "symbol",
             Value::BigInt(_) => "bigint",
             Value::Object(o) => {
-                if self.heap[*o].is_callable() {
+                if matches!(self.heap[*o].kind, ObjectKind::HtmlDda) {
+                    // B.3.6.3
+                    "undefined"
+                } else if self.heap[*o].is_callable() {
                     "function"
                 } else {
                     "object"

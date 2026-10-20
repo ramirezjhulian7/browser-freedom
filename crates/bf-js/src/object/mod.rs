@@ -111,6 +111,8 @@ pub enum ObjectKind {
         position: usize,
     },
     ForIn(Box<ForInData>),
+    /// Un objeto con `[[IsHTMLDDA]]` (B.3.6, `$262.IsHTMLDDA`): llamable, devuelve null.
+    HtmlDda,
 }
 
 #[derive(Debug)]
@@ -142,7 +144,10 @@ impl Object {
     pub fn is_callable(&self) -> bool {
         matches!(
             self.kind,
-            ObjectKind::Function(_) | ObjectKind::Builtin(_) | ObjectKind::Bound(_)
+            ObjectKind::Function(_)
+                | ObjectKind::Builtin(_)
+                | ObjectKind::Bound(_)
+                | ObjectKind::HtmlDda
         )
     }
 
@@ -197,7 +202,7 @@ impl Trace for Object {
             ObjectKind::BigInt(b) => t.gc(*b),
             ObjectKind::Generator(g) => g.trace(t),
             ObjectKind::ArrayIterator(it) => t.opt(it.object),
-            ObjectKind::StringIterator { .. } => {}
+            ObjectKind::StringIterator { .. } | ObjectKind::HtmlDda => {}
             ObjectKind::ForIn(f) => {
                 t.opt(f.object);
                 for k in f.visited.iter().chain(f.remaining.iter()) {

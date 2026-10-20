@@ -41,6 +41,9 @@ pub fn install_test262(agent: &mut Agent, realm: RealmId) -> Gc<Object> {
     method(agent, o, "gc", 0, gc);
     method(agent, o, "detachArrayBuffer", 1, detach_array_buffer);
     value_prop(agent, o, "global", Value::Object(g));
+    let op = agent.intrinsics().object_prototype;
+    let dda = agent.alloc(Object::new(Some(op), crate::object::ObjectKind::HtmlDda));
+    value_prop(agent, o, "IsHTMLDDA", Value::Object(dda));
     agent.put_data(
         g,
         PropertyKey::from("$262"),

@@ -96,6 +96,11 @@ impl Agent {
 
     /// IsLooselyEqual (§7.2.15).
     pub fn is_loosely_equal(&mut self, x: &Value, y: &Value) -> JsResult<bool> {
+        // B.3.6.2: [[IsHTMLDDA]] == undefined/null.
+        let dda = |v: &Value| matches!(v, Value::Object(o) if matches!(self.heap[*o].kind, ObjectKind::HtmlDda));
+        if (dda(x) && y.is_nullish()) || (dda(y) && x.is_nullish()) {
+            return Ok(true);
+        }
         match (x, y) {
             (Value::Number(_), Value::Number(_))
             | (Value::String(_), Value::String(_))

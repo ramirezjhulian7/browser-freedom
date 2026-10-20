@@ -169,6 +169,12 @@ fn run_once(root: &Path, meta: &Meta, src: &str, strict: bool) -> Status {
         deadline: Some(Instant::now() + TIME_LIMIT),
     });
     agent.reset_stack_base();
+    if let Some(t) = std::env::var("BF_GC_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        agent.heap.set_threshold(t);
+    }
     let out2 = output.clone();
     agent.printer = Box::new(move |s| {
         let mut o = out2.borrow_mut();

@@ -268,6 +268,7 @@ pub struct Heap {
     threshold: usize,
     collections: usize,
     freed_total: usize,
+    min_threshold: usize,
 }
 
 /// Umbral mínimo de asignaciones entre recolecciones.
@@ -285,6 +286,7 @@ impl Default for Heap {
             threshold: MIN_THRESHOLD,
             collections: 0,
             freed_total: 0,
+            min_threshold: MIN_THRESHOLD,
         }
     }
 }
@@ -304,8 +306,11 @@ impl Heap {
         self.allocated_since_gc >= self.threshold
     }
 
+    /// Fija el umbral mínimo de asignaciones entre recolecciones (un valor bajo sirve
+    /// para probar el enraizado: recolecta muy seguido).
     pub fn set_threshold(&mut self, threshold: usize) {
         self.threshold = threshold.max(1);
+        self.min_threshold = threshold.max(1);
     }
 
     pub fn stats(&self) -> GcStats {
@@ -366,7 +371,11 @@ impl Heap {
         self.collections += 1;
         self.allocated_since_gc = 0;
         let live = self.stats().live;
-        self.threshold = MIN_THRESHOLD.max(live);
+        self.threshold = if self.min_threshold < MIN_THRESHOLD {
+            self.min_threshold
+        } else {
+            self.min_threshold.max(live)
+        };
     }
 }
 

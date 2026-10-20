@@ -630,7 +630,12 @@ impl Analyzer {
             let top_lex: HashSet<Atom> = decls.lexical.iter().map(|(n, _)| n.clone()).collect();
             let mut found = Vec::new();
             for s in &program.body {
-                annex_b_candidates(s, &mut vec![top_lex.clone()], &mut found, false);
+                annex_b_candidates(
+                    s,
+                    &mut vec![LexLevel::plain(top_lex.clone())],
+                    &mut found,
+                    false,
+                );
             }
             for (k, name) in found {
                 a.tree.dynamic_hoist.insert(k);
@@ -928,7 +933,12 @@ impl Analyzer {
             let top_lex: HashSet<Atom> = decls.lexical.iter().map(|(n, _)| n.clone()).collect();
             let mut found = Vec::new();
             for s in body_stmts {
-                annex_b_candidates(s, &mut vec![top_lex.clone()], &mut found, false);
+                annex_b_candidates(
+                    s,
+                    &mut vec![LexLevel::plain(top_lex.clone())],
+                    &mut found,
+                    false,
+                );
             }
             for (k, name) in found {
                 if param_names.contains(&name) {
@@ -1426,10 +1436,14 @@ impl Analyzer {
                 self.expr(alternate);
             }
             Expr::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                optional,
+                ..
             } => {
                 if let Expr::Ident(i) = &**callee
                     && i.name == "eval"
+                    && !*optional
                 {
                     self.direct_eval();
                 }
@@ -1551,21 +1565,48 @@ impl Analyzer {
     }
 }
 
+/// Los nombres léxicos de un scope que encierra a una función de bloque: `all` (todos, para
+/// los scopes externos) y `own` (sin las funciones de bloque, para el bloque de la propia
+/// función, que puede repetirlas por B.3.2.4).
+#[derive(Clone, Default)]
+struct LexLevel {
+    all: HashSet<Atom>,
+    own: HashSet<Atom>,
+}
+
+impl LexLevel {
+    fn plain(names: HashSet<Atom>) -> LexLevel {
+        LexLevel {
+            all: names.clone(),
+            own: names,
+        }
+    }
+}
+
 /// Busca funciones de bloque candidatas a B.3.2: `lex` es la pila de nombres léxicos de los
-/// scopes que encierran la posición (sin contar las funciones de bloque del mismo bloque).
+/// scopes que encierran la posición.
 fn annex_b_candidates(
     s: &Stmt,
-    lex: &mut Vec<HashSet<Atom>>,
+    lex: &mut Vec<LexLevel>,
     out: &mut Vec<(NodeKey, Atom)>,
     in_block: bool,
 ) {
-    let conflicts =
-        |lex: &Vec<HashSet<Atom>>, name: &Atom| lex.iter().any(|set| set.contains(name));
+    let conflicts = |lex: &Vec<LexLevel>, name: &Atom| {
+        let n = lex.len();
+        lex.iter().enumerate().any(|(i, l)| {
+            if i + 1 == n {
+                l.own.contains(name)
+            } else {
+                l.all.contains(name)
+            }
+        })
+    };
     match s {
         Stmt::Function(f) if in_block => {
             if let Some(id) = &f.id
                 && !f.is_generator
                 && !f.is_async
+                && id.name != "arguments"
                 && !conflicts(lex, &id.name)
             {
                 out.push((key(f.span, Tag::Function), id.name.clone()));
@@ -1579,7 +1620,10 @@ fn annex_b_candidates(
         } => {
             for c in std::iter::once(&**consequent).chain(alternate.as_deref()) {
                 if let Stmt::Function(_) = c {
+                    // B.3.3: como si estuviera en un bloque propio.
+                    lex.push(LexLevel::default());
                     annex_b_candidates(c, lex, out, true);
+                    lex.pop();
                 } else {
                     annex_b_candidates(c, lex, out, false);
                 }
@@ -1596,7 +1640,7 @@ fn annex_b_candidates(
             {
                 names.extend(decl_bound_names(d));
             }
-            lex.push(names);
+            lex.push(LexLevel::plain(names));
             annex_b_candidates(body, lex, out, false);
             lex.pop();
         }
@@ -1607,7 +1651,7 @@ fn annex_b_candidates(
             {
                 names.extend(decl_bound_names(d));
             }
-            lex.push(names);
+            lex.push(LexLevel::plain(names));
             annex_b_candidates(body, lex, out, false);
             lex.pop();
         }
@@ -1627,7 +1671,7 @@ fn annex_b_candidates(
                     bound_names(p, &mut v);
                     names.extend(v);
                 }
-                lex.push(names);
+                lex.push(LexLevel::plain(names));
                 block_candidates(&h.body.body, lex, out);
                 lex.pop();
             }
@@ -1636,18 +1680,14 @@ fn annex_b_candidates(
             }
         }
         Stmt::Switch { cases, .. } => {
-            let mut names = HashSet::new();
-            let mut all = Vec::new();
+            let mut all_stmts = Vec::new();
+            let mut decls = Vec::new();
             for c in cases {
-                for (n, k) in block_decls(&c.consequent) {
-                    if k != BKind::BlockFunction {
-                        names.insert(n);
-                    }
-                }
-                all.extend(c.consequent.iter());
+                decls.extend(block_decls(&c.consequent));
+                all_stmts.extend(c.consequent.iter());
             }
-            lex.push(names);
-            for s in all {
+            lex.push(level_of(decls));
+            for s in all_stmts {
                 annex_b_candidates(s, lex, out, true);
             }
             lex.pop();
@@ -1656,14 +1696,19 @@ fn annex_b_candidates(
     }
 }
 
-fn block_candidates(body: &[Stmt], lex: &mut Vec<HashSet<Atom>>, out: &mut Vec<(NodeKey, Atom)>) {
-    let mut names = HashSet::new();
-    for (n, k) in block_decls(body) {
+fn level_of(decls: Vec<(Atom, BKind)>) -> LexLevel {
+    let mut l = LexLevel::default();
+    for (n, k) in decls {
         if k != BKind::BlockFunction {
-            names.insert(n);
+            l.own.insert(n.clone());
         }
+        l.all.insert(n);
     }
-    lex.push(names);
+    l
+}
+
+fn block_candidates(body: &[Stmt], lex: &mut Vec<LexLevel>, out: &mut Vec<(NodeKey, Atom)>) {
+    lex.push(level_of(block_decls(body)));
     for s in body {
         annex_b_candidates(s, lex, out, true);
     }

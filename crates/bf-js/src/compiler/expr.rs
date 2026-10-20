@@ -947,7 +947,8 @@ impl<'t> Codegen<'t> {
             self.emit(Op::SuperCallFinish(loc));
             return;
         }
-        let direct_eval = matches!(callee, Expr::Ident(i) if i.name == "eval");
+        // `eval?.(x)` no es un eval directo (§13.3.6.1).
+        let direct_eval = !optional && matches!(callee, Expr::Ident(i) if i.name == "eval");
         self.callee(callee);
         if optional {
             self.optional_check(1);

@@ -84,10 +84,10 @@ impl Agent {
         env: Gc<Env>,
         d: &Declarations,
     ) -> JsResult<HashSet<Atom>> {
+        // §16.1.7 paso 3 (ES2025 ya no tiene [[VarNames]]: un `var` creado por `eval` es
+        // configurable y no impide la declaración léxica).
         for (name, _) in &d.lex_names {
-            if self.global_has_var_declaration(env, name)
-                || self.global_has_lexical_declaration(env, name)
-            {
+            if self.global_has_lexical_declaration(env, name) {
                 return self
                     .syntax_error(&format!("Identifier '{name}' has already been declared"));
             }
