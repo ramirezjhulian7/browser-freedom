@@ -117,7 +117,7 @@ impl Tokenizer {
                     self.emit_char('\0');
                 }
                 None => self.emit_eof(),
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.2
             S::Rcdata => match self.consume() {
@@ -131,7 +131,7 @@ impl Tokenizer {
                     self.emit_char(REPLACEMENT);
                 }
                 None => self.emit_eof(),
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.3
             S::Rawtext => match self.consume() {
@@ -141,7 +141,7 @@ impl Tokenizer {
                     self.emit_char(REPLACEMENT);
                 }
                 None => self.emit_eof(),
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.4
             S::ScriptData => match self.consume() {
@@ -151,7 +151,7 @@ impl Tokenizer {
                     self.emit_char(REPLACEMENT);
                 }
                 None => self.emit_eof(),
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.5
             S::Plaintext => match self.consume() {
@@ -160,7 +160,7 @@ impl Tokenizer {
                     self.emit_char(REPLACEMENT);
                 }
                 None => self.emit_eof(),
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.6
             S::TagOpen => match self.consume() {
@@ -291,7 +291,7 @@ impl Tokenizer {
                     self.error("eof-in-script-html-comment-like-text");
                     self.emit_eof();
                 }
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.21
             S::ScriptDataEscapedDash => match self.consume() {
@@ -311,7 +311,7 @@ impl Tokenizer {
                 }
                 Some(c) => {
                     self.state = S::ScriptDataEscaped;
-                    self.emit_char(c);
+                    self.emit_current(c);
                 }
             },
             // 13.2.5.22
@@ -333,7 +333,7 @@ impl Tokenizer {
                 }
                 Some(c) => {
                     self.state = S::ScriptDataEscaped;
-                    self.emit_char(c);
+                    self.emit_current(c);
                 }
             },
             // 13.2.5.23
@@ -380,7 +380,7 @@ impl Tokenizer {
                     self.error("eof-in-script-html-comment-like-text");
                     self.emit_eof();
                 }
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.28
             S::ScriptDataDoubleEscapedDash => match self.consume() {
@@ -403,7 +403,7 @@ impl Tokenizer {
                 }
                 Some(c) => {
                     self.state = S::ScriptDataDoubleEscaped;
-                    self.emit_char(c);
+                    self.emit_current(c);
                 }
             },
             // 13.2.5.29
@@ -428,7 +428,7 @@ impl Tokenizer {
                 }
                 Some(c) => {
                     self.state = S::ScriptDataDoubleEscaped;
-                    self.emit_char(c);
+                    self.emit_current(c);
                 }
             },
             // 13.2.5.30
@@ -998,7 +998,7 @@ impl Tokenizer {
                     self.error("eof-in-cdata");
                     self.emit_eof();
                 }
-                Some(c) => self.emit_char(c),
+                Some(c) => self.emit_current(c),
             },
             // 13.2.5.70
             S::CdataSectionBracket => match self.consume() {
@@ -1130,7 +1130,9 @@ impl Tokenizer {
                         let next = self.input.get(self.pos).copied();
                         if self.char_ref_in_attribute()
                             && !last_is_semicolon
-                            && next.is_some_and(|c| c == '=' || c.is_ascii_alphanumeric())
+                            && next
+                                .and_then(char::from_u32)
+                                .is_some_and(|c| c == '=' || c.is_ascii_alphanumeric())
                         {
                             // Por razones históricas.
                             self.flush_char_ref();
@@ -1157,7 +1159,7 @@ impl Tokenizer {
                     if self.char_ref_in_attribute() {
                         self.attr_value.push(c);
                     } else {
-                        self.emit_char(c);
+                        self.emit_current(c);
                     }
                 }
                 Some(';') => {
@@ -1334,15 +1336,15 @@ impl Tokenizer {
                 } else {
                     otherwise
                 };
-                self.emit_char(c);
+                self.emit_current(c);
             }
             Some(c) if c.is_ascii_uppercase() => {
                 self.temp.push(c.to_ascii_lowercase());
-                self.emit_char(c);
+                self.emit_current(c);
             }
             Some(c) if c.is_ascii_lowercase() => {
                 self.temp.push(c);
-                self.emit_char(c);
+                self.emit_current(c);
             }
             _ => self.reconsume_in(otherwise),
         }

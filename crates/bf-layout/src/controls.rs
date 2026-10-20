@@ -264,7 +264,7 @@ pub(crate) fn control_box(
     let native = style.appearance != Appearance::None;
     let pre = Some(WhiteSpace::Pre);
     let mut children = Vec::new();
-    let control = match el.name.as_str() {
+    let control = match el.name.as_lossy_str() {
         "input" => {
             let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
             match ty.as_str() {

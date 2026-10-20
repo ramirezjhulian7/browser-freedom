@@ -449,7 +449,7 @@ impl Document {
         let mut out = String::new();
         for n in self.inclusive_descendants(node) {
             if let crate::NodeData::Text(t) = &self.get(n).data {
-                out.push_str(t);
+                out.push_str(&t.to_string_lossy());
             }
         }
         out

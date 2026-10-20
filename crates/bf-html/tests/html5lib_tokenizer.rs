@@ -49,8 +49,6 @@ struct Stats {
     passed: usize,
     /// Tests de `UPSTREAM_STALE` (fallan como se espera).
     stale: usize,
-    /// Tests con surrogates sueltos, que no son representables en un `&str` de Rust.
-    unrepresentable: usize,
     failed: usize,
 }
 
@@ -78,8 +76,8 @@ fn html5lib_tokenizer() {
     let mut failures = Vec::new();
     let mut total = Stats::default();
     println!(
-        "{:<30} {:>7} {:>6} {:>16} {:>7}",
-        "archivo", "passed", "stale", "unrepresentable", "failed"
+        "{:<30} {:>7} {:>6} {:>7}",
+        "archivo", "passed", "stale", "failed"
     );
     for path in &files {
         let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -94,17 +92,16 @@ fn html5lib_tokenizer() {
             run_test(file_name, test, &mut stats, &mut failures);
         }
         println!(
-            "{file_name:<30} {:>7} {:>6} {:>16} {:>7}",
-            stats.passed, stats.stale, stats.unrepresentable, stats.failed
+            "{file_name:<30} {:>7} {:>6} {:>7}",
+            stats.passed, stats.stale, stats.failed
         );
         total.passed += stats.passed;
         total.stale += stats.stale;
-        total.unrepresentable += stats.unrepresentable;
         total.failed += stats.failed;
     }
     println!(
-        "{:<30} {:>7} {:>6} {:>16} {:>7}",
-        "TOTAL", total.passed, total.stale, total.unrepresentable, total.failed
+        "{:<30} {:>7} {:>6} {:>7}",
+        "TOTAL", total.passed, total.stale, total.failed
     );
 
     for failure in failures.iter().take(50) {
@@ -124,13 +121,13 @@ fn run_test(file: &str, test: &Value, stats: &mut Stats, failures: &mut Vec<Stri
     let stale = UPSTREAM_STALE
         .iter()
         .any(|&(f, d, _)| f == file && d == description);
-    let (Some(input), Some(expected)) = (
-        unescape_if(double_escaped, raw_input),
-        normalize_expected(&test["output"], double_escaped),
-    ) else {
-        stats.unrepresentable += 1;
-        return;
+    // La entrada en code points: puede tener surrogates sueltos (13.2.3.5).
+    let input = if double_escaped {
+        unescape_code_points(raw_input)
+    } else {
+        raw_input.chars().map(u32::from).collect()
     };
+    let expected = normalize_expected(&test["output"], double_escaped);
 
     let mut expected_errors: Option<Vec<String>> = test.get("errors").map(|errors| {
         errors
@@ -192,8 +189,12 @@ fn parse_state(name: &str) -> State {
     }
 }
 
-fn tokenize(input: &str, state: State, last_start_tag: Option<&str>) -> (Vec<Value>, Vec<String>) {
-    let mut tokenizer = Tokenizer::new(input);
+fn tokenize(
+    input: &[u32],
+    state: State,
+    last_start_tag: Option<&str>,
+) -> (Vec<Value>, Vec<String>) {
+    let mut tokenizer = Tokenizer::from_code_points(input.iter().copied());
     tokenizer.set_state(state);
     if let Some(name) = last_start_tag {
         tokenizer.set_last_start_tag(name);
@@ -204,6 +205,10 @@ fn tokenize(input: &str, state: State, last_start_tag: Option<&str>) -> (Vec<Val
             Token::Character(c) => {
                 Value::from(vec![Value::from("Character"), Value::from(c.to_string())])
             }
+            Token::LoneSurrogate(u) => Value::from(vec![
+                Value::from("Character"),
+                Value::from(surrogate_marker(u)),
+            ]),
             Token::Doctype(d) => Value::from(vec![
                 Value::from("DOCTYPE"),
                 Value::from(d.name),
@@ -246,9 +251,13 @@ fn tokenize(input: &str, state: State, last_start_tag: Option<&str>) -> (Vec<Val
     (coalesce_characters(out), errors)
 }
 
-/// Des-escapa el output esperado (si aplica) y concatena los `Character` adyacentes.
-/// Devuelve `None` si contiene surrogates sueltos.
-fn normalize_expected(output: &Value, double_escaped: bool) -> Option<Vec<Value>> {
+/// Des-escapa el output esperado (si aplica) y concatena los `Character` adyacentes. Un
+/// surrogate suelto (que un `String` no admite) se representa con [`surrogate_marker`].
+fn normalize_expected(output: &Value, double_escaped: bool) -> Vec<Value> {
+    normalize(output, double_escaped).expect("output representable")
+}
+
+fn normalize(output: &Value, double_escaped: bool) -> Option<Vec<Value>> {
     fn unescape_value(v: &Value, double_escaped: bool) -> Option<Value> {
         Some(match v {
             Value::String(s) => Value::String(unescape_if(double_escaped, s)?),
@@ -307,9 +316,8 @@ fn unescape_if(double_escaped: bool, s: &str) -> Option<String> {
     }
 }
 
-/// Convierte cada secuencia `\uHHHH` en su code point; combina pares de surrogates.
-/// Devuelve `None` si hay un surrogate suelto.
-fn unescape(s: &str) -> Option<String> {
+/// Code units UTF-16 de un string con secuencias `\uHHHH`.
+fn unescape_units(s: &str) -> Vec<u16> {
     let mut units: Vec<u16> = Vec::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find("\\u") {
@@ -319,5 +327,30 @@ fn unescape(s: &str) -> Option<String> {
         rest = &rest[i + 6..];
     }
     units.extend(rest.encode_utf16());
-    String::from_utf16(&units).ok()
+    units
+}
+
+/// Code points de un string con secuencias `\uHHHH` (pares combinados, sueltos conservados).
+fn unescape_code_points(s: &str) -> Vec<u32> {
+    char::decode_utf16(unescape_units(s))
+        .map(|r| r.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
+        .collect()
+}
+
+/// Convierte cada secuencia `\uHHHH` en su code point; un surrogate suelto queda como
+/// [`surrogate_marker`].
+fn unescape(s: &str) -> Option<String> {
+    Some(
+        char::decode_utf16(unescape_units(s))
+            .map(|r| match r {
+                Ok(c) => c.to_string(),
+                Err(e) => surrogate_marker(e.unpaired_surrogate()),
+            })
+            .collect(),
+    )
+}
+
+/// Representación de un surrogate suelto en los strings comparados.
+fn surrogate_marker(u: u16) -> String {
+    format!("\\u{{{u:x}}}")
 }

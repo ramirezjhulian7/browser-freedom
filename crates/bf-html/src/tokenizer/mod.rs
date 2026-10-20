@@ -15,6 +15,9 @@ pub use error::ParseError;
 pub use states::State;
 pub use token::{Doctype, ProcessingInstruction, Tag, Token};
 
+/// U+FFFD REPLACEMENT CHARACTER.
+const REPLACEMENT_CHAR: char = '\u{FFFD}';
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TagKind {
     Start,
@@ -22,12 +25,17 @@ enum TagKind {
 }
 
 pub struct Tokenizer {
-    /// Flujo de entrada ya preprocesado (newlines normalizados).
-    input: Vec<char>,
+    /// Flujo de entrada ya preprocesado (newlines normalizados), en code points: puede tener
+    /// surrogates sueltos (`document.write` con strings de JavaScript).
+    input: Vec<u32>,
     /// Índice del *next input character*.
     pos: usize,
-    /// El *current input character*; `None` representa EOF.
+    /// El *current input character*; `None` representa EOF. Un surrogate suelto aparece aquí
+    /// como U+FFFD (todos los estados lo tratan como "anything else"); su valor real queda en
+    /// `current_raw`.
     current: Option<char>,
+    /// El code point real del *current input character*.
+    current_raw: Option<u32>,
     /// Si es `true`, el próximo consumo devuelve `current` sin avanzar.
     reconsume: bool,
     /// Primer índice que aún no pasó por la validación de 13.2.3.5.
@@ -59,11 +67,16 @@ pub struct Tokenizer {
 
 impl Tokenizer {
     pub fn new(input: &str) -> Self {
-        // TODO(bf-dom): input como code points para soportar surrogates de document.write
+        Self::from_code_points(input.chars().map(u32::from))
+    }
+
+    /// Tokenizador sobre code points arbitrarios, surrogates sueltos incluidos (13.2.3.5).
+    pub fn from_code_points(input: impl IntoIterator<Item = u32>) -> Self {
         Tokenizer {
             input: preprocess(input),
             pos: 0,
             current: None,
+            current_raw: None,
             reconsume: false,
             checked: 0,
             state: State::Data,
@@ -133,15 +146,17 @@ impl Tokenizer {
             self.reconsume = false;
             return self.current;
         }
-        let c = self.input.get(self.pos).copied();
-        if let Some(ch) = c {
+        let raw = self.input.get(self.pos).copied();
+        if let Some(cp) = raw {
             if self.pos >= self.checked {
                 self.checked = self.pos + 1;
-                self.check_input_character(ch, self.pos);
+                self.check_input_character(cp, self.pos);
             }
             self.pos += 1;
         }
+        let c = raw.map(|cp| char::from_u32(cp).unwrap_or(REPLACEMENT_CHAR));
         self.current = c;
+        self.current_raw = raw;
         c
     }
 
@@ -161,8 +176,11 @@ impl Tokenizer {
         (start..)
             .zip(s.chars())
             .all(|(i, expected)| match self.input.get(i) {
-                Some(&c) => {
-                    c == expected || (ignore_ascii_case && c.eq_ignore_ascii_case(&expected))
+                Some(&cp) => {
+                    cp == u32::from(expected)
+                        || (ignore_ascii_case
+                            && char::from_u32(cp)
+                                .is_some_and(|c| c.eq_ignore_ascii_case(&expected)))
                 }
                 None => false,
             })
@@ -175,12 +193,17 @@ impl Tokenizer {
     }
 
     /// Validaciones de 13.2.3.5 "Preprocessing the input stream".
-    fn check_input_character(&mut self, c: char, offset: usize) {
-        let cp = u32::from(c);
-        // Los surrogates no son representables en `char`, así que nunca aparecen aquí.
+    fn check_input_character(&mut self, cp: u32, offset: usize) {
+        if (0xD800..=0xDFFF).contains(&cp) {
+            self.errors.push(ParseError {
+                code: "surrogate-in-input-stream",
+                offset,
+            });
+            return;
+        }
         let is_control = cp <= 0x1F || (0x7F..=0x9F).contains(&cp);
-        let is_ascii_whitespace = matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ');
-        if is_control && !is_ascii_whitespace && c != '\0' {
+        let is_ascii_whitespace = matches!(cp, 0x09 | 0x0A | 0x0C | 0x0D | 0x20);
+        if is_control && !is_ascii_whitespace && cp != 0 {
             self.errors.push(ParseError {
                 code: "control-character-in-input-stream",
                 offset,
@@ -213,6 +236,17 @@ impl Tokenizer {
 
     fn emit_char(&mut self, c: char) {
         self.emit(Token::Character(c));
+    }
+
+    /// Emite el *current input character* `c`: si en la entrada era un surrogate suelto, como
+    /// [`Token::LoneSurrogate`] con su valor real.
+    fn emit_current(&mut self, c: char) {
+        match self.current_raw {
+            Some(cp) if c == REPLACEMENT_CHAR && (0xD800..=0xDFFF).contains(&cp) => {
+                self.emit(Token::LoneSurrogate(cp as u16));
+            }
+            _ => self.emit_char(c),
+        }
     }
 
     fn emit_eof(&mut self) {
@@ -349,15 +383,15 @@ impl Tokenizer {
 }
 
 /// Normaliza newlines: CRLF y CR sueltos se convierten en LF (13.2.3.5).
-fn preprocess(input: &str) -> Vec<char> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+fn preprocess(input: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut chars = input.into_iter().peekable();
     while let Some(c) = chars.next() {
-        if c == '\r' {
-            if chars.peek() == Some(&'\n') {
+        if c == 0x0D {
+            if chars.peek() == Some(&0x0A) {
                 chars.next();
             }
-            out.push('\n');
+            out.push(0x0A);
         } else {
             out.push(c);
         }
@@ -370,7 +404,7 @@ fn preprocess(input: &str) -> Vec<char> {
 ///
 /// La tabla está ordenada, así que se mantiene el rango `[lo, hi)` de entradas que comparten el
 /// prefijo leído hasta ahora y se estrecha carácter a carácter: O(len · log n).
-fn match_named_entity(input: &[char]) -> Option<(usize, &'static str)> {
+fn match_named_entity(input: &[u32]) -> Option<(usize, &'static str)> {
     let table = named_entities::NAMED_ENTITIES;
     let (mut lo, mut hi) = (0, table.len());
     let mut best = None;

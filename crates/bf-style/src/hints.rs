@@ -104,7 +104,7 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
         return h.0;
     }
     let attr = |name: &str| el.attr(name);
-    let name = el.name.as_str();
+    let name = el.name.as_lossy_str();
 
     // §15.3.2: márgenes del body (8px por defecto) y colores.
     if name == "body" {
