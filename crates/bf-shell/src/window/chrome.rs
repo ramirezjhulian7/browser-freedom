@@ -392,7 +392,13 @@ impl Chrome {
         let vars = [
             ("theme", self.theme.css_vars()),
             ("tabs", tabs),
-            ("brand", "<span class=\"brand\">bf</span>".to_owned()),
+            (
+                "brand",
+                format!(
+                    "<img class=\"brand\" src=\"{}\">",
+                    internal::logo_data_url(internal::LOGO_64)
+                ),
+            ),
             ("back", button("back", self.can_back, Region::Back, false)),
             (
                 "forward",

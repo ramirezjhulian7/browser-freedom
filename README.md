@@ -1,5 +1,7 @@
 # browser-freedom
 
+<img src="crates/bf-shell/assets/logo-256.png" width="96" alt="logo de browser-freedom" align="right">
+
 Un navegador web con un motor 100% propio, escrito en Rust.
 
 browser-freedom no usa Chromium, WebKit, Gecko ni Servo: HTML, DOM, CSS, layout, pintura,

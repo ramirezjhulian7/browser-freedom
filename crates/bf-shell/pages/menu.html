@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<style>
+{{theme}}
+html, body { margin: 0; background: transparent; }
+body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+.menu {
+  width: 260px;
+  box-sizing: border-box;
+  padding: 6px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.item { display: block; padding: 6px 14px; white-space: nowrap; overflow: hidden; }
+.item.hover { background: var(--hover); }
+.item.off { color: var(--text2); }
+.sep { height: 1px; margin: 5px 8px; background: var(--border); }
+</style>
+<div class="menu">{{items}}</div>
+</html>

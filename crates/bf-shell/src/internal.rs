@@ -17,6 +17,30 @@ use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, Meta, fetch_documen
 use crate::theme::Theme;
 
 pub const STYLE: &str = include_str!("../pages/style.css");
+/// El logo (ver `assets/browser-freedom.png`), recortado a 256 y 64 px.
+pub const LOGO_256: &[u8] = include_bytes!("../assets/logo-256.png");
+pub const LOGO_64: &[u8] = include_bytes!("../assets/logo-64.png");
+
+/// Una URL `data:image/png;base64,…` con `png`, para incrustar el logo en las páginas internas.
+pub fn logo_data_url(png: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(png.len() / 3 * 4 + 30);
+    out.push_str("data:image/png;base64,");
+    for chunk in png.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, &b)| acc | (u32::from(b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
 const HOME: &str = include_str!("../pages/home.html");
 const ERROR: &str = include_str!("../pages/error.html");
 const ENGINE: &str = include_str!("../pages/engine.html");
@@ -24,6 +48,8 @@ pub const PANEL: &str = include_str!("../pages/panel.html");
 const WPT: &str = include_str!("../pages/wpt.html");
 const ABOUT: &str = include_str!("../pages/about.html");
 pub const BAR: &str = include_str!("../pages/bar.html");
+pub const MENU: &str = include_str!("../pages/menu.html");
+pub const SOURCE: &str = include_str!("../pages/source.html");
 pub const STATUS: &str = include_str!("../pages/status.html");
 /// El estado de compatibilidad al compilar (lo regenera la corrida de reftests).
 const WPT_STATUS: &str = include_str!("../../../docs/wpt-status.md");
@@ -97,6 +123,7 @@ pub fn page(url: &Url, ctx: &LoadContext) -> Loaded {
         "home" | "newtab" => home(ctx),
         "wpt" => wpt(&ctx.theme),
         "engine" => engine(url, ctx),
+        "source" => source(url, ctx),
         "error" => {
             // Vista previa: `about:error` o `about:error?dns|tls|timeout|404|...`.
             let err = sample_error(url.query.as_deref().unwrap_or(""));
@@ -111,6 +138,43 @@ pub fn page(url: &Url, ctx: &LoadContext) -> Loaded {
         }
     };
     Loaded::generated(url, &html, ctx.net.clone(), Meta::default())
+}
+
+/// `about:source?<url>`: el código fuente de esa URL, con números de línea.
+fn source(url: &Url, ctx: &LoadContext) -> String {
+    let target = url.query.as_deref().and_then(|q| Url::parse(q, None).ok());
+    let (title, body) = match target {
+        Some(t) => match bf_infra::ResourceLoader::load(&*ctx.net, &t) {
+            Some(res) => {
+                let (text, _) =
+                    bf_infra::encoding::decode(&res.bytes, bf_infra::encoding::Encoding::Utf8);
+                let mut lines = String::new();
+                for (i, line) in text.lines().enumerate() {
+                    let _ = write!(
+                        lines,
+                        "<span class=\"n\">{}</span>{}
+",
+                        i + 1,
+                        escape(line)
+                    );
+                }
+                (format!("Código fuente de {}", t.href()), lines)
+            }
+            None => (
+                format!("Código fuente de {}", t.href()),
+                "No se pudo cargar.".to_owned(),
+            ),
+        },
+        None => (
+            "Código fuente".to_owned(),
+            "Falta la URL: about:source?https://…".to_owned(),
+        ),
+    };
+    themed(
+        SOURCE,
+        &ctx.theme,
+        &[("title", escape(&title)), ("lines", body)],
+    )
 }
 
 fn home(ctx: &LoadContext) -> String {
@@ -149,7 +213,15 @@ fn home(ctx: &LoadContext) -> String {
     themed(
         HOME,
         &ctx.theme,
-        &[("tiles", tiles), ("recent", recent), ("shortcuts", keys)],
+        &[
+            (
+                "mark",
+                format!("<img class=\"mark\" src=\"{}\">", logo_data_url(LOGO_256)),
+            ),
+            ("tiles", tiles),
+            ("recent", recent),
+            ("shortcuts", keys),
+        ],
     )
 }
 
