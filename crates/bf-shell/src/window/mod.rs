@@ -832,10 +832,12 @@ impl App {
                 changed = true;
             }
             Key::Named(NamedKey::ArrowLeft) => {
-                moved(&mut caret, &mut anchor, caret.saturating_sub(1));
+                let to = caret.saturating_sub(1);
+                moved(&mut caret, &mut anchor, to);
             }
             Key::Named(NamedKey::ArrowRight) => {
-                moved(&mut caret, &mut anchor, (caret + 1).min(len));
+                let to = (caret + 1).min(len);
+                moved(&mut caret, &mut anchor, to);
             }
             Key::Named(NamedKey::Home) => moved(&mut caret, &mut anchor, 0),
             Key::Named(NamedKey::End) => moved(&mut caret, &mut anchor, len),
