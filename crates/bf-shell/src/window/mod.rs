@@ -337,7 +337,7 @@ fn submit_button_at(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
             && el.ns == bf_infra::Namespace::Html
         {
             let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
-            match el.name.as_str() {
+            match el.name.as_str().unwrap_or("") {
                 "input" if matches!(ty.as_str(), "submit" | "image") => return Some(n),
                 "button" if matches!(ty.as_str(), "" | "submit") => return Some(n),
                 "a" | "input" | "button" | "textarea" | "select" | "label" => return None,
@@ -365,7 +365,7 @@ fn form_data(
             continue;
         };
         let pair = |v: &str| (name.to_owned(), v.to_owned());
-        match el.name.as_str() {
+        match el.name.as_str().unwrap_or("") {
             "input" => {
                 let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
                 match ty.as_str() {

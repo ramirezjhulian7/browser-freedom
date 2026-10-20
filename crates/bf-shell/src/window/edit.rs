@@ -47,11 +47,11 @@ pub fn editable_at(doc: &Document, node: NodeId) -> Option<(NodeId, Editable)> {
         if let Some(el) = doc.element(n)
             && el.ns == bf_infra::Namespace::Html
         {
-            if el.name.as_str() == "textarea" {
+            if el.name.as_str().unwrap_or("") == "textarea" {
                 return (el.attr("disabled").is_none() && el.attr("readonly").is_none())
                     .then_some((n, Editable::TextArea));
             }
-            if el.name.as_str() == "input" {
+            if el.name.as_str().unwrap_or("") == "input" {
                 let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
                 return (text_type(&ty)
                     && el.attr("disabled").is_none()
@@ -81,7 +81,11 @@ pub fn set_value(doc: &mut Document, node: NodeId, kind: Editable, text: &str) {
     match kind {
         Editable::Input => {
             if let Some(el) = doc.get_mut(node).element_mut() {
-                if let Some(a) = el.attrs.iter_mut().find(|a| a.name.as_str() == "value") {
+                if let Some(a) = el
+                    .attrs
+                    .iter_mut()
+                    .find(|a| a.name.as_str() == Some("value"))
+                {
                     a.value = text.into();
                 } else {
                     el.attrs.push(bf_dom::Attribute::new("value", text));
