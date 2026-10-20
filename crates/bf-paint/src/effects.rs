@@ -461,10 +461,19 @@ impl GradientSampler {
 }
 
 /// Un píxel premultiplicado de 8 bits (los canales nunca superan el alfa).
+///
+/// El alfa se cuantiza primero y los canales se calculan contra ese alfa ya cuantizado: si se
+/// redondean por separado, sus errores se cruzan y un gradiente semitransparente sale con
+/// saltos no monótonos (anillos) al componerse.
 pub fn to_u8(c: &Premul) -> [u8; 4] {
-    let a = (c[3].clamp(0.0, 1.0) * 255.0).round();
-    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round().min(a) as u8;
-    [ch(c[0]), ch(c[1]), ch(c[2]), a as u8]
+    let a = c[3].clamp(0.0, 1.0);
+    let aq = (a * 255.0).round();
+    if aq <= 0.0 {
+        return [0; 4];
+    }
+    // El color sin premultiplicar, vuelto a premultiplicar con el alfa de 8 bits.
+    let ch = |v: f32| ((v / a).clamp(0.0, 1.0) * aq).round().min(aq) as u8;
+    [ch(c[0]), ch(c[1]), ch(c[2]), aq as u8]
 }
 
 // --- Desenfoque ---
