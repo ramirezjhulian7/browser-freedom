@@ -1,73 +1,212 @@
-//! Validación de la sintaxis de los patrones de RegExp (ECMA-262 §22.2.1 *Patterns* y sus
-//! early errors, más la gramática extendida de Annex B.1.2 para los patrones sin `u`/`v`). Solo
-//! la gramática: la compilación y la ejecución del regex son de otra etapa.
+//! Parser de los patrones de RegExp (ECMA-262 §22.2.1 *Patterns* con sus early errors y la
+//! gramática extendida de Annex B.1.2 para los patrones sin `u`/`v`). Produce el árbol que
+//! compila [`super::compiler`]; los CharSet de las clases se evalúan aquí (CompileToCharSet,
+//! §22.2.2.9) con los flags vigentes en cada punto (los modificadores `(?i:…)` cambian
+//! IgnoreCase, Multiline y DotAll para su Disjunction).
 //!
 //! Sin `u`/`v` el patrón se interpreta como code units UTF-16 (un carácter astral son dos
 //! unidades, lo que importa en los rangos de clases); con `u`/`v`, como code points.
 
-use crate::lexer::unicode_tables::{BINARY_PROPERTIES, GENERAL_CATEGORY_VALUES, SCRIPT_VALUES};
+use super::unicode::{
+    CharSet, ClassSet, Property, character_complement, digits, is_string_property, lookup_property,
+    maybe_simple_case_folding, white_space, word_characters,
+};
 use crate::lexer::{is_id_part, is_id_start};
 
-/// Propiedades de strings (§22.2.2.9, tabla "Binary Unicode properties of strings"): solo con
-/// `v`.
-const STRING_PROPERTIES: &[&str] = &[
-    "Basic_Emoji",
-    "Emoji_Keycap_Sequence",
-    "RGI_Emoji_Modifier_Sequence",
-    "RGI_Emoji_Flag_Sequence",
-    "RGI_Emoji_Tag_Sequence",
-    "RGI_Emoji_ZWJ_Sequence",
-    "RGI_Emoji",
-];
+/// Los flags de un RegExp (§22.2.3.1 RegExpInitialize).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flags {
+    pub has_indices: bool,
+    pub global: bool,
+    pub ignore_case: bool,
+    pub multiline: bool,
+    pub dot_all: bool,
+    pub unicode: bool,
+    pub unicode_sets: bool,
+    pub sticky: bool,
+}
+
+impl Flags {
+    /// HasEitherUnicodeFlag.
+    pub fn either_unicode(&self) -> bool {
+        self.unicode || self.unicode_sets
+    }
+}
 
 /// Valida las flags (§13.2.7.1 y §22.2.3.1): solo `dgimsuvy`, sin repetir, y no `u` con `v`.
-pub fn validate_flags(flags: &str) -> Result<(), String> {
-    let mut seen = String::new();
+pub fn parse_flags(flags: &str) -> Result<Flags, String> {
+    let mut f = Flags::default();
+    let err = || format!("Invalid regular expression flags '{flags}'");
     for c in flags.chars() {
-        if !"dgimsuvy".contains(c) || seen.contains(c) {
-            return Err(format!("Invalid regular expression flags '{flags}'"));
+        let slot = match c {
+            'd' => &mut f.has_indices,
+            'g' => &mut f.global,
+            'i' => &mut f.ignore_case,
+            'm' => &mut f.multiline,
+            's' => &mut f.dot_all,
+            'u' => &mut f.unicode,
+            'v' => &mut f.unicode_sets,
+            'y' => &mut f.sticky,
+            _ => return Err(err()),
+        };
+        if *slot {
+            return Err(err());
         }
-        seen.push(c);
+        *slot = true;
     }
-    if seen.contains('u') && seen.contains('v') {
-        return Err(format!("Invalid regular expression flags '{flags}'"));
+    if f.unicode && f.unicode_sets {
+        return Err(err());
     }
-    Ok(())
+    Ok(f)
+}
+
+/// Valida las flags de un literal.
+pub fn validate_flags(flags: &str) -> Result<(), String> {
+    parse_flags(flags).map(|_| ())
 }
 
 /// Valida un patrón con sus flags (`IsValidRegularExpressionLiteral`, §13.2.7.2).
 pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
-    validate_flags(flags)?;
-    let u = flags.contains('u');
-    let v = flags.contains('v');
-    let unicode = u || v;
+    let f = parse_flags(flags)?;
+    let units: Vec<u16> = pattern.encode_utf16().collect();
+    parse(&units, f)
+        .map(|_| ())
+        .map_err(|m| format!("Invalid regular expression: /{pattern}/{flags}: {m}"))
+}
+
+/// Un nodo del patrón. Los flags que afectan a cada nodo (IgnoreCase, Multiline, DotAll) van
+/// en el propio nodo.
+#[derive(Debug, Clone)]
+pub enum Node {
+    Empty,
+    /// Un carácter (PatternCharacter o un escape de un carácter).
+    Char {
+        c: u32,
+        ic: bool,
+    },
+    /// `.`
+    Dot {
+        dot_all: bool,
+    },
+    /// Una clase o un escape de clase: con `invert`, CharacterSetMatcher invertido; en modo
+    /// `v` puede tener strings.
+    Set {
+        set: ClassSet,
+        invert: bool,
+        ic: bool,
+    },
+    Seq(Vec<Node>),
+    Alt(Vec<Node>),
+    /// Grupo de captura con su índice (desde 1).
+    Capture {
+        index: u32,
+        body: Box<Node>,
+    },
+    /// `^`
+    Start {
+        multiline: bool,
+    },
+    /// `$`
+    End {
+        multiline: bool,
+    },
+    /// `\b` (`negate`: `\B`).
+    WordBoundary {
+        negate: bool,
+        ic: bool,
+    },
+    /// Lookahead / lookbehind.
+    Look {
+        behind: bool,
+        negate: bool,
+        body: Box<Node>,
+    },
+    /// Backreference a los grupos `groups` (varios si el nombre está duplicado).
+    BackRef {
+        groups: Vec<u32>,
+        ic: bool,
+    },
+    /// Un átomo cuantificado; `first_group`/`group_count` son parenIndex y parenCount.
+    Repeat {
+        body: Box<Node>,
+        min: u64,
+        max: Option<u64>,
+        greedy: bool,
+        first_group: u32,
+        group_count: u32,
+    },
+}
+
+/// Un patrón analizado.
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub node: Node,
+    /// Cantidad de grupos de captura (sin contar el 0).
+    pub group_count: u32,
+    /// Nombre de cada grupo (índice 0 = grupo 1).
+    pub group_names: Vec<Option<String>>,
+}
+
+/// ParsePattern (§22.2.3.4): analiza `pattern` (code units) con `flags`. El error es el
+/// mensaje sin el patrón.
+pub fn parse(pattern: &[u16], flags: Flags) -> Result<Pattern, String> {
+    let unicode = flags.either_unicode();
     let src: Vec<u32> = if unicode {
-        pattern.chars().map(|c| c as u32).collect()
+        decode_code_points(pattern)
     } else {
-        pattern.encode_utf16().map(u32::from).collect()
+        pattern.iter().map(|&u| u32::from(u)).collect()
     };
+    let total_groups = count_groups(&src, flags.unicode_sets);
     let mut p = Parser {
         s: src,
         i: 0,
         unicode,
-        v,
+        v: flags.unicode_sets,
         named: unicode,
+        ic: flags.ignore_case,
+        multiline: flags.multiline,
+        dot_all: flags.dot_all,
         groups: 0,
+        total_groups,
         names: Vec::new(),
-        backref_names: Vec::new(),
+        group_names: Vec::new(),
+        backrefs: Vec::new(),
         max_backref: 0,
         path: Vec::new(),
         next_disjunction: 0,
         stack_base: crate::parser::stack_position(),
-        last_property_strings: false,
     };
     // Sin `u`, la gramática se reinterpreta con [+NamedCaptureGroups] si el patrón tiene un
     // GroupName (§22.2.3.4, ParsePattern).
     if !unicode {
         p.named = has_group_name(&p.s);
     }
-    p.pattern()
-        .map_err(|m| format!("Invalid regular expression: /{pattern}/{flags}: {m}"))
+    let node = p.pattern()?;
+    Ok(Pattern {
+        node,
+        group_count: p.groups,
+        group_names: p.group_names,
+    })
+}
+
+/// Los code points de un string UTF-16 (los surrogates sueltos quedan como están).
+pub fn decode_code_points(units: &[u16]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        let u = u32::from(units[i]);
+        if (0xD800..0xDC00).contains(&u)
+            && let Some(&t) = units.get(i + 1)
+            && (0xDC00..0xE000).contains(&u32::from(t))
+        {
+            out.push(0x10000 + ((u - 0xD800) << 10) + (u32::from(t) - 0xDC00));
+            i += 2;
+            continue;
+        }
+        out.push(u);
+        i += 1;
+    }
+    out
 }
 
 /// ¿El patrón (sin `u`) tiene un `(?<nombre>`?
@@ -76,20 +215,20 @@ fn has_group_name(s: &[u32]) -> bool {
     let mut in_class = false;
     while i < s.len() {
         let c = s[i];
-        if c == '\\' as u32 {
+        if c == ch('\\') {
             i += 2;
             continue;
         }
         if in_class {
-            if c == ']' as u32 {
+            if c == ch(']') {
                 in_class = false;
             }
-        } else if c == '[' as u32 {
+        } else if c == ch('[') {
             in_class = true;
-        } else if c == '(' as u32
-            && s.get(i + 1) == Some(&('?' as u32))
-            && s.get(i + 2) == Some(&('<' as u32))
-            && !matches!(s.get(i + 3), Some(&c) if c == '=' as u32 || c == '!' as u32)
+        } else if c == ch('(')
+            && s.get(i + 1) == Some(&ch('?'))
+            && s.get(i + 2) == Some(&ch('<'))
+            && !matches!(s.get(i + 3), Some(&c) if c == ch('=') || c == ch('!'))
         {
             return true;
         }
@@ -98,11 +237,36 @@ fn has_group_name(s: &[u32]) -> bool {
     false
 }
 
-/// Un elemento de una clase sin `v`: un carácter o una clase de caracteres (`\d`).
-#[derive(Clone, Copy, PartialEq)]
-enum ClassAtom {
-    Char(u32),
-    Class,
+/// CountLeftCapturingParensWithin: los `(` de grupos de captura fuera de clases y escapes
+/// (con `v` las clases se anidan).
+fn count_groups(s: &[u32], v: bool) -> u32 {
+    let mut i = 0;
+    let mut depth = 0u32;
+    let mut n = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c == ch('\\') {
+            i += 2;
+            continue;
+        }
+        if depth > 0 {
+            if c == ch(']') {
+                depth -= 1;
+            } else if c == ch('[') && v {
+                depth += 1;
+            }
+        } else if c == ch('[') {
+            depth = 1;
+        } else if c == ch('(')
+            && (s.get(i + 1) != Some(&ch('?'))
+                || (s.get(i + 2) == Some(&ch('<'))
+                    && !matches!(s.get(i + 3), Some(&c) if c == ch('=') || c == ch('!'))))
+        {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
 }
 
 struct Parser {
@@ -114,17 +278,22 @@ struct Parser {
     v: bool,
     /// NamedCaptureGroups.
     named: bool,
+    /// Flags vigentes (cambian con los modificadores).
+    ic: bool,
+    multiline: bool,
+    dot_all: bool,
     groups: u32,
+    total_groups: u32,
     /// Grupos con nombre y su "camino" de alternativas (para MightBothParticipate).
     names: Vec<(String, Vec<(u32, u32)>)>,
-    backref_names: Vec<String>,
+    group_names: Vec<Option<String>>,
+    /// Los nombres de las referencias `\k<…>`, en orden de aparición.
+    backrefs: Vec<String>,
     max_backref: u32,
     /// Alternativas en curso: (disyunción, índice de la alternativa).
     path: Vec<(u32, u32)>,
     next_disjunction: u32,
     stack_base: usize,
-    /// El último `\p{…}` era de una propiedad de strings.
-    last_property_strings: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -133,6 +302,19 @@ const SYNTAX: &str = "^$\\.*+?()[]{}|";
 
 fn ch(c: char) -> u32 {
     c as u32
+}
+
+/// Un elemento de una clase sin `v`: un carácter o una clase de caracteres (`\d`).
+enum ClassAtom {
+    Char(u32),
+    Class(CharSet),
+}
+
+/// Un ClassSetOperand: un ClassSetCharacter (que puede empezar un rango) o un conjunto con
+/// su MayContainStrings.
+enum SetOperand {
+    Char(u32),
+    Set(ClassSet, bool),
 }
 
 impl Parser {
@@ -163,8 +345,20 @@ impl Parser {
             .all(|(k, c)| self.peek_at(k) == Some(ch(c)))
     }
 
-    fn pattern(&mut self) -> R<()> {
-        self.disjunction()?;
+    fn check_depth(&self) -> R<()> {
+        // Anidamiento de grupos y clases: el mismo límite de pila que el parser.
+        if self
+            .stack_base
+            .saturating_sub(crate::parser::stack_position())
+            > 256 * 1024
+        {
+            return Err("Maximum nesting depth exceeded".into());
+        }
+        Ok(())
+    }
+
+    fn pattern(&mut self) -> R<Node> {
+        let mut node = self.disjunction()?;
         if self.i < self.s.len() {
             return Err(if self.is(')') {
                 "Unmatched ')'".into()
@@ -173,7 +367,7 @@ impl Parser {
             });
         }
         // Early errors de Pattern (§22.2.1.1).
-        for name in &self.backref_names {
+        for name in &self.backrefs {
             if !self.names.iter().any(|(n, _)| n == name) {
                 return Err("Invalid named capture referenced".into());
             }
@@ -188,74 +382,138 @@ impl Parser {
                 }
             }
         }
-        Ok(())
+        let mut k = 0;
+        self.fix_named(&mut node, &mut k);
+        Ok(node)
     }
 
-    fn disjunction(&mut self) -> R<()> {
-        // Anidamiento de grupos y clases: el mismo límite de pila que el parser.
-        if self
-            .stack_base
-            .saturating_sub(crate::parser::stack_position())
-            > 256 * 1024
-        {
-            return Err("Maximum nesting depth exceeded".into());
+    /// Las referencias `\k<nombre>` se crean con `groups` vacío (el grupo puede venir
+    /// después); aquí se completan con todos los grupos de ese nombre.
+    fn fix_named(&self, node: &mut Node, k: &mut usize) {
+        match node {
+            Node::BackRef { groups, .. } if groups.is_empty() => {
+                let name = &self.backrefs[*k];
+                *k += 1;
+                for (i, n) in self.group_names.iter().enumerate() {
+                    if n.as_deref() == Some(name.as_str()) {
+                        groups.push(i as u32 + 1);
+                    }
+                }
+            }
+            Node::Seq(v) | Node::Alt(v) => {
+                for n in v {
+                    self.fix_named(n, k);
+                }
+            }
+            Node::Capture { body, .. } | Node::Look { body, .. } | Node::Repeat { body, .. } => {
+                self.fix_named(body, k)
+            }
+            _ => {}
         }
+    }
+
+    fn disjunction(&mut self) -> R<Node> {
+        self.check_depth()?;
         let id = self.next_disjunction;
         self.next_disjunction += 1;
         let mut alt = 0;
+        let mut alts = Vec::new();
         loop {
             self.path.push((id, alt));
             let r = self.alternative();
             self.path.pop();
-            r?;
+            alts.push(r?);
             if !self.eat('|') {
-                return Ok(());
+                break;
             }
             alt += 1;
         }
+        Ok(if alts.len() == 1 {
+            alts.pop().unwrap_or(Node::Empty)
+        } else {
+            Node::Alt(alts)
+        })
     }
 
-    fn alternative(&mut self) -> R<()> {
+    fn alternative(&mut self) -> R<Node> {
+        let mut terms = Vec::new();
         while let Some(c) = self.peek() {
             if c == ch('|') || c == ch(')') {
                 break;
             }
-            self.term()?;
+            if let Some(t) = self.term()? {
+                terms.push(t);
+            }
         }
-        Ok(())
+        Ok(match terms.len() {
+            0 => Node::Empty,
+            1 => terms.pop().unwrap_or(Node::Empty),
+            _ => Node::Seq(terms),
+        })
     }
 
-    fn term(&mut self) -> R<()> {
+    fn term(&mut self) -> R<Option<Node>> {
         // Aserciones.
-        if self.eat('^') || self.eat('$') {
-            return self.no_quantifier();
+        if self.eat('^') {
+            self.no_quantifier()?;
+            return Ok(Some(Node::Start {
+                multiline: self.multiline,
+            }));
+        }
+        if self.eat('$') {
+            self.no_quantifier()?;
+            return Ok(Some(Node::End {
+                multiline: self.multiline,
+            }));
         }
         if self.looking_at("\\b") || self.looking_at("\\B") {
+            let negate = self.peek_at(1) == Some(ch('B'));
             self.i += 2;
-            return self.no_quantifier();
+            self.no_quantifier()?;
+            return Ok(Some(Node::WordBoundary {
+                negate,
+                ic: self.ic,
+            }));
         }
         if self.looking_at("(?=") || self.looking_at("(?!") {
+            let negate = self.peek_at(2) == Some(ch('!'));
             self.i += 3;
-            self.disjunction()?;
+            let first_group = self.groups;
+            let body = self.disjunction()?;
             if !self.eat(')') {
                 return Err("Unterminated group".into());
             }
+            let node = Node::Look {
+                behind: false,
+                negate,
+                body: Box::new(body),
+            };
             // QuantifiableAssertion solo sin `u` (B.1.2).
             if self.unicode {
-                return self.no_quantifier();
+                self.no_quantifier()?;
+                return Ok(Some(node));
             }
-            return self.quantifier();
+            return self.quantifier(node, first_group).map(Some);
         }
         if self.looking_at("(?<=") || self.looking_at("(?<!") {
+            let negate = self.peek_at(3) == Some(ch('!'));
             self.i += 4;
-            self.disjunction()?;
+            let body = self.disjunction()?;
             if !self.eat(')') {
                 return Err("Unterminated group".into());
             }
-            return self.no_quantifier();
+            self.no_quantifier()?;
+            return Ok(Some(Node::Look {
+                behind: true,
+                negate,
+                body: Box::new(body),
+            }));
         }
-        self.atom()?;
-        self.quantifier()
+        let first_group = self.groups;
+        let Some(atom) = self.atom()? else {
+            return Ok(None);
+        };
+        self.quantifier(atom, first_group).map(Some)
     }
 
     /// Tras algo no cuantificable: un cuantificador es un error.
@@ -305,11 +563,20 @@ impl Parser {
         Some((k + 1 - self.i, min, max))
     }
 
-    fn quantifier(&mut self) -> R<()> {
-        let q = match self.peek() {
-            Some(c) if c == ch('*') || c == ch('+') || c == ch('?') => {
+    /// El cuantificador opcional de `atom` (cuyos grupos empiezan después de `first_group`).
+    fn quantifier(&mut self, atom: Node, first_group: u32) -> R<Node> {
+        let (min, max) = match self.peek() {
+            Some(c) if c == ch('*') => {
                 self.i += 1;
-                true
+                (0, None)
+            }
+            Some(c) if c == ch('+') => {
+                self.i += 1;
+                (1, None)
+            }
+            Some(c) if c == ch('?') => {
+                self.i += 1;
+                (0, Some(1))
             }
             Some(c) if c == ch('{') => match self.braced_quantifier_len() {
                 Some((len, min, max)) => {
@@ -317,43 +584,63 @@ impl Parser {
                         return Err("numbers out of order in {} quantifier".into());
                     }
                     self.i += len;
-                    true
+                    (min, max)
                 }
                 None if self.unicode => return Err("Incomplete quantifier".into()),
                 // Sin `u`, un `{` que no forma un cuantificador es un carácter.
-                None => false,
+                None => return Ok(atom),
             },
-            _ => false,
+            _ => return Ok(atom),
         };
-        if q {
-            self.eat('?');
-            self.no_quantifier()?;
-        }
-        Ok(())
+        let greedy = !self.eat('?');
+        self.no_quantifier()?;
+        Ok(Node::Repeat {
+            body: Box::new(atom),
+            min,
+            max,
+            greedy,
+            first_group,
+            group_count: self.groups - first_group,
+        })
     }
 
-    fn atom(&mut self) -> R<()> {
+    fn char_node(&self, c: u32) -> Node {
+        Node::Char { c, ic: self.ic }
+    }
+
+    fn set_node(&self, set: ClassSet, invert: bool) -> Node {
+        Node::Set {
+            set,
+            invert,
+            ic: self.ic,
+        }
+    }
+
+    fn atom(&mut self) -> R<Option<Node>> {
         let Some(c) = self.peek() else {
-            return Ok(());
+            return Ok(None);
         };
         match char::from_u32(c).unwrap_or('\0') {
             '.' => {
                 self.i += 1;
-                Ok(())
+                Ok(Some(Node::Dot {
+                    dot_all: self.dot_all,
+                }))
             }
-            '(' => self.group(),
+            '(' => self.group().map(Some),
             '[' => {
                 self.i += 1;
                 if self.v {
-                    self.class_v_body()?;
+                    let (set, _) = self.class_v_body()?;
+                    Ok(Some(self.set_node(set, false)))
                 } else {
-                    self.class_body()?;
+                    let (set, invert) = self.class_body()?;
+                    Ok(Some(self.set_node(ClassSet::from_chars(set), invert)))
                 }
-                Ok(())
             }
             '\\' => {
                 self.i += 1;
-                self.atom_escape()
+                self.atom_escape().map(Some)
             }
             '*' | '+' | '?' => Err("Nothing to repeat".into()),
             '{' => {
@@ -365,41 +652,79 @@ impl Parser {
                     return Err("Nothing to repeat".into());
                 }
                 self.i += 1;
-                Ok(())
+                Ok(Some(self.char_node(c)))
             }
             '}' | ']' if self.unicode => Err("Lone quantifier brackets".into()),
-            ')' | '|' => Ok(()),
+            ')' | '|' => Ok(None),
             _ => {
                 self.i += 1;
-                Ok(())
+                Ok(Some(self.char_node(c)))
             }
         }
     }
 
-    fn group(&mut self) -> R<()> {
+    fn group(&mut self) -> R<Node> {
         self.i += 1;
         if self.eat('?') {
             if self.eat(':') {
-            } else if self.is('<') {
+                let body = self.disjunction()?;
+                if !self.eat(')') {
+                    return Err("Unterminated group".into());
+                }
+                return Ok(body);
+            }
+            if self.is('<') {
                 self.i += 1;
                 let name = self.group_name()?;
                 self.groups += 1;
-                self.names.push((name, self.path.clone()));
-            } else {
-                self.modifiers()?;
+                let index = self.groups;
+                self.names.push((name.clone(), self.path.clone()));
+                self.group_names.push(Some(name));
+                let body = self.disjunction()?;
+                if !self.eat(')') {
+                    return Err("Unterminated group".into());
+                }
+                return Ok(Node::Capture {
+                    index,
+                    body: Box::new(body),
+                });
             }
-        } else {
-            self.groups += 1;
+            let (add, remove) = self.modifiers()?;
+            let saved = (self.ic, self.multiline, self.dot_all);
+            for (set, on) in [(&add, true), (&remove, false)] {
+                if set.contains('i') {
+                    self.ic = on;
+                }
+                if set.contains('m') {
+                    self.multiline = on;
+                }
+                if set.contains('s') {
+                    self.dot_all = on;
+                }
+            }
+            let body = self.disjunction();
+            (self.ic, self.multiline, self.dot_all) = saved;
+            let body = body?;
+            if !self.eat(')') {
+                return Err("Unterminated group".into());
+            }
+            return Ok(body);
         }
-        self.disjunction()?;
+        self.groups += 1;
+        let index = self.groups;
+        self.group_names.push(None);
+        let body = self.disjunction()?;
         if !self.eat(')') {
             return Err("Unterminated group".into());
         }
-        Ok(())
+        Ok(Node::Capture {
+            index,
+            body: Box::new(body),
+        })
     }
 
-    /// `(?ims-ims:` (RegExp modifiers, §22.2.1.1).
-    fn modifiers(&mut self) -> R<()> {
+    /// `(?ims-ims:` (RegExp modifiers, §22.2.1.1): los flags agregados y quitados.
+    fn modifiers(&mut self) -> R<(String, String)> {
         let mut add = String::new();
         let mut remove = String::new();
         let mut removing = false;
@@ -430,7 +755,7 @@ impl Parser {
         if !removing && add.is_empty() {
             return Err("Invalid group".into());
         }
-        Ok(())
+        Ok((add, remove))
     }
 
     /// `GroupName :: < RegExpIdentifierName >` (después de `<`).
@@ -522,7 +847,7 @@ impl Parser {
     }
 
     /// Lo que sigue a `\` fuera de una clase.
-    fn atom_escape(&mut self) -> R<()> {
+    fn atom_escape(&mut self) -> R<Node> {
         let Some(c) = self.peek() else {
             return Err("\\ at end of pattern".into());
         };
@@ -534,58 +859,77 @@ impl Parser {
                 n = n.saturating_mul(10).saturating_add(d - ch('0'));
                 self.i += 1;
             }
-            if self.unicode {
+            // Sin `u`, si el patrón no tiene tantos grupos es un escape octal o de identidad
+            // (B.1.2).
+            if self.unicode || n <= self.total_groups {
                 self.max_backref = self.max_backref.max(n);
-                return Ok(());
+                return Ok(Node::BackRef {
+                    groups: vec![n],
+                    ic: self.ic,
+                });
             }
-            // Sin `u`: si no hay tantos grupos, es un escape octal o de identidad (B.1.2).
-            // Los grupos se cuentan al final; aquí se acepta siempre.
-            let _ = start;
-            return Ok(());
+            self.i = start;
+            let c = self.character_escape(false)?;
+            return Ok(self.char_node(c));
         }
-        if c == ch('k') {
+        if c == ch('k') && self.named {
             self.i += 1;
-            if self.named {
-                if !self.eat('<') {
-                    return Err("Invalid named reference".into());
-                }
-                let name = self.group_name()?;
-                self.backref_names.push(name);
+            if !self.eat('<') {
+                return Err("Invalid named reference".into());
             }
-            return Ok(());
+            let name = self.group_name()?;
+            self.backrefs.push(name);
+            return Ok(Node::BackRef {
+                groups: Vec::new(),
+                ic: self.ic,
+            });
         }
-        if self.class_escape_class()? {
-            return Ok(());
+        if let Some((set, _)) = self.class_escape_class()? {
+            return Ok(self.set_node(set, false));
         }
-        self.character_escape(false).map(|_| ())
+        let c = self.character_escape(false)?;
+        Ok(self.char_node(c))
     }
 
-    /// `\d \D \s \S \w \W \p{…} \P{…}` (después de `\`). Devuelve si lo era; con `v`, si
-    /// `\p` es de una propiedad de strings, el error si no corresponde lo da quien llama.
-    fn class_escape_class(&mut self) -> R<bool> {
+    /// `\d \D \s \S \w \W \p{…} \P{…}` (después de `\`): CompileToCharSet de
+    /// CharacterClassEscape, con MayContainStrings. Una propiedad de strings fuera del modo
+    /// `v` o con `\P` es un error.
+    fn class_escape_class(&mut self) -> R<Option<(ClassSet, bool)>> {
         let Some(c) = self.peek().and_then(char::from_u32) else {
-            return Ok(false);
+            return Ok(None);
         };
-        match c {
-            'd' | 'D' | 's' | 'S' | 'w' | 'W' => {
-                self.i += 1;
-                Ok(true)
-            }
+        let (u, v, ic) = (self.unicode, self.v, self.ic);
+        let complement = |s: &CharSet| character_complement(s, u, v, ic);
+        let word =
+            || maybe_simple_case_folding(ClassSet::from_chars(word_characters(u, ic)), v, ic);
+        let set = match c {
+            'd' => digits(),
+            'D' => complement(&digits()),
+            's' => white_space(),
+            'S' => complement(&white_space()),
+            'w' => word().chars,
+            'W' => complement(&word().chars),
             'p' | 'P' if self.unicode => {
                 self.i += 1;
-                let strings = self.property_escape()?;
+                let (prop, strings) = self.property_escape()?;
                 if strings && (c == 'P' || !self.v) {
                     return Err("Invalid property name".into());
                 }
-                self.last_property_strings = strings;
-                Ok(true)
+                let set = maybe_simple_case_folding(prop, v, ic);
+                if c == 'P' {
+                    return Ok(Some((ClassSet::from_chars(complement(&set.chars)), false)));
+                }
+                return Ok(Some((set, strings)));
             }
-            _ => Ok(false),
-        }
+            _ => return Ok(None),
+        };
+        self.i += 1;
+        Ok(Some((ClassSet::from_chars(set), false)))
     }
 
-    /// `{Name}` o `{Name=Value}` (después de `\p`). Devuelve si es una propiedad de strings.
-    fn property_escape(&mut self) -> R<bool> {
+    /// `{Name}` o `{Name=Value}` (después de `\p`): el conjunto y si es una propiedad de
+    /// strings.
+    fn property_escape(&mut self) -> R<(ClassSet, bool)> {
         if !self.eat('{') {
             return Err("Invalid property name".into());
         }
@@ -606,31 +950,13 @@ impl Parser {
                 _ => return Err("Invalid property name".into()),
             }
         }
-        match value {
-            Some(v) => {
-                let ok = match name.as_str() {
-                    "General_Category" | "gc" => GENERAL_CATEGORY_VALUES.contains(&v.as_str()),
-                    "Script" | "sc" | "Script_Extensions" | "scx" => {
-                        SCRIPT_VALUES.contains(&v.as_str())
-                    }
-                    _ => false,
-                };
-                if !ok {
-                    return Err("Invalid property name".into());
-                }
-                Ok(false)
-            }
-            None => {
-                if GENERAL_CATEGORY_VALUES.contains(&name.as_str())
-                    || BINARY_PROPERTIES.contains(&name.as_str())
-                {
-                    Ok(false)
-                } else if STRING_PROPERTIES.contains(&name.as_str()) {
-                    Ok(true)
-                } else {
-                    Err("Invalid property name".into())
-                }
-            }
+        // Los nombres de propiedades de strings se reconocen aunque no haya `v`: el error lo
+        // da quien llama.
+        let strings_ok = value.is_none() && is_string_property(&name);
+        match lookup_property(&name, value.as_deref(), strings_ok) {
+            Some(Property::Chars(c)) => Ok((ClassSet::from_chars(c), false)),
+            Some(Property::Strings(s)) => Ok((s, true)),
+            None => Err("Invalid property name".into()),
         }
     }
 
@@ -724,14 +1050,16 @@ impl Parser {
 
     // --- Clases sin `v` ---
 
-    fn class_body(&mut self) -> R<()> {
-        self.eat('^');
+    /// Después de `[`: el CharSet y si está invertida (CompileCharacterClass).
+    fn class_body(&mut self) -> R<(CharSet, bool)> {
+        let invert = self.eat('^');
+        let mut set = CharSet::new();
         loop {
             match self.peek() {
                 None => return Err("Unterminated character class".into()),
                 Some(c) if c == ch(']') => {
                     self.i += 1;
-                    return Ok(());
+                    return Ok((set, invert));
                 }
                 _ => {}
             }
@@ -744,11 +1072,25 @@ impl Parser {
                         if x > y {
                             return Err("Range out of order in character class".into());
                         }
+                        set.add_range(x, y);
                     }
                     // `[\d-a]`: error con `u`; sin `u`, `-` es un carácter (B.1.2).
                     _ if self.unicode => return Err("Invalid character class".into()),
-                    _ => {}
+                    (a, b) => {
+                        for atom in [a, b] {
+                            match atom {
+                                ClassAtom::Char(x) => set.add(x),
+                                ClassAtom::Class(c) => set.add_set(&c),
+                            }
+                        }
+                        set.add(ch('-'));
+                    }
                 }
+                continue;
+            }
+            match a {
+                ClassAtom::Char(x) => set.add(x),
+                ClassAtom::Class(c) => set.add_set(&c),
             }
         }
     }
@@ -762,8 +1104,8 @@ impl Parser {
         let Some(n) = self.peek() else {
             return Err("\\ at end of pattern".into());
         };
-        if self.class_escape_class()? {
-            return Ok(ClassAtom::Class);
+        if let Some((set, _)) = self.class_escape_class()? {
+            return Ok(ClassAtom::Class(set.chars));
         }
         // `\1` dentro de una clase: error con `u`; sin `u`, octal (B.1.2).
         if self.unicode && (ch('1')..=ch('9')).contains(&n) {
@@ -778,24 +1120,28 @@ impl Parser {
 
     // --- Clases con `v` (ClassSetExpression) ---
 
-    /// Después de `[`. Devuelve si la clase puede contener strings (MayContainStrings).
-    fn class_v_body(&mut self) -> R<bool> {
-        if self
-            .stack_base
-            .saturating_sub(crate::parser::stack_position())
-            > 256 * 1024
-        {
-            return Err("Maximum nesting depth exceeded".into());
-        }
+    /// MaybeSimpleCaseFolding con los flags vigentes.
+    fn fold(&self, set: ClassSet) -> ClassSet {
+        maybe_simple_case_folding(set, self.v, self.ic)
+    }
+
+    /// Después de `[` (CharacterClass o NestedClass con `v`): el conjunto (ya complementado
+    /// si es `[^…]`, CompileCharacterClass con UnicodeSets) y MayContainStrings.
+    fn class_v_body(&mut self) -> R<(ClassSet, bool)> {
+        self.check_depth()?;
         let negated = self.eat('^');
-        let strings = self.class_set_expression()?;
+        let (set, strings) = self.class_set_expression()?;
         if !self.eat(']') {
             return Err("Unterminated character class".into());
         }
-        if negated && strings {
-            return Err("Negated character class may contain strings".into());
+        if negated {
+            if strings {
+                return Err("Negated character class may contain strings".into());
+            }
+            let c = character_complement(&set.chars, true, true, self.ic);
+            return Ok((ClassSet::from_chars(c), false));
         }
-        Ok(strings)
+        Ok((set, strings))
     }
 
     fn reserved_double(&self) -> bool {
@@ -806,39 +1152,44 @@ impl Parser {
     }
 
     /// ClassUnion, ClassIntersection o ClassSubtraction.
-    fn class_set_expression(&mut self) -> R<bool> {
+    fn class_set_expression(&mut self) -> R<(ClassSet, bool)> {
         if self.is(']') {
-            return Ok(false);
+            return Ok((ClassSet::default(), false));
         }
         let (first, first_is_range, first_strings) = self.class_set_operand_or_range()?;
-        let _ = first;
         if self.looking_at("&&") || self.looking_at("--") {
             if first_is_range {
                 return Err("Invalid set operation in character class".into());
             }
-            let op = if self.looking_at("&&") { "&&" } else { "--" };
+            let intersection = self.looking_at("&&");
+            let op = if intersection { "&&" } else { "--" };
+            let mut acc = first;
             let mut strings = first_strings;
             while self.looking_at(op) {
                 self.i += 2;
-                if op == "&&" && self.is('&') {
+                if intersection && self.is('&') {
                     return Err("Invalid set operation in character class".into());
                 }
-                let (_, range, s) = self.class_set_operand_or_range()?;
+                let (b, range, s) = self.class_set_operand_or_range()?;
                 if range {
                     return Err("Invalid set operation in character class".into());
                 }
-                // Intersección: puede tener strings si todos los operandos pueden;
-                // resta: si el primero puede.
-                if op == "&&" {
+                // Intersección: puede tener strings si todos los operandos pueden; resta: si
+                // el primero puede.
+                if intersection {
+                    acc = acc.intersect(&b);
                     strings = strings && s;
+                } else {
+                    acc = acc.subtract(&b);
                 }
             }
             if !self.is(']') {
                 return Err("Invalid set operation in character class".into());
             }
-            return Ok(strings);
+            return Ok((acc, strings));
         }
         // Unión.
+        let mut acc = first;
         let mut strings = first_strings;
         while !self.is(']') {
             if self.peek().is_none() {
@@ -847,66 +1198,55 @@ impl Parser {
             if self.looking_at("&&") || self.looking_at("--") {
                 return Err("Invalid set operation in character class".into());
             }
-            let (_, _, s) = self.class_set_operand_or_range()?;
+            let (b, _, s) = self.class_set_operand_or_range()?;
+            acc = acc.union(&b);
             strings |= s;
         }
-        Ok(strings)
+        Ok((acc, strings))
     }
 
-    /// Un ClassSetOperand o un ClassSetRange: (carácter si lo es, si es rango, si puede tener
-    /// strings).
-    fn class_set_operand_or_range(&mut self) -> R<(Option<u32>, bool, bool)> {
-        let (c, strings) = self.class_set_operand()?;
-        if let Some(a) = c
-            && self.is('-')
-            && self.peek_at(1) != Some(ch('-'))
-        {
-            self.i += 1;
-            let (b, _) = self.class_set_operand()?;
-            let Some(b) = b else {
-                return Err("Invalid character class".into());
-            };
-            if a > b {
-                return Err("Range out of order in character class".into());
+    /// Un ClassSetOperand o un ClassSetRange: (conjunto, si es rango, MayContainStrings).
+    fn class_set_operand_or_range(&mut self) -> R<(ClassSet, bool, bool)> {
+        match self.class_set_operand()? {
+            SetOperand::Char(a) => {
+                if self.is('-') && self.peek_at(1) != Some(ch('-')) {
+                    self.i += 1;
+                    let SetOperand::Char(b) = self.class_set_operand()? else {
+                        return Err("Invalid character class".into());
+                    };
+                    if a > b {
+                        return Err("Range out of order in character class".into());
+                    }
+                    let set = self.fold(ClassSet::from_chars(CharSet::range(a, b)));
+                    return Ok((set, true, false));
+                }
+                let set = self.fold(ClassSet::from_chars(CharSet::single(a)));
+                Ok((set, false, false))
             }
-            return Ok((None, true, false));
+            SetOperand::Set(s, strings) => Ok((s, false, strings)),
         }
-        Ok((c, false, strings))
     }
 
-    /// ClassSetOperand: (el carácter si es un ClassSetCharacter, si puede tener strings).
-    fn class_set_operand(&mut self) -> R<(Option<u32>, bool)> {
+    fn class_set_operand(&mut self) -> R<SetOperand> {
         let Some(c) = self.peek() else {
             return Err("Unterminated character class".into());
         };
         if c == ch('[') {
             self.i += 1;
-            let s = self.class_v_body()?;
-            return Ok((None, s));
+            let (s, strings) = self.class_v_body()?;
+            return Ok(SetOperand::Set(s, strings));
         }
         if c == ch('\\') {
             self.i += 1;
             if self.looking_at("q{") {
                 self.i += 2;
-                return Ok((None, self.class_string_disjunction()?));
+                let (s, strings) = self.class_string_disjunction()?;
+                return Ok(SetOperand::Set(s, strings));
             }
-            self.last_property_strings = false;
-            if self.class_escape_class()? {
-                return Ok((None, self.last_property_strings));
+            if let Some((s, strings)) = self.class_escape_class()? {
+                return Ok(SetOperand::Set(s, strings));
             }
-            let Some(n) = self.peek().and_then(char::from_u32) else {
-                return Err("\\ at end of pattern".into());
-            };
-            // ClassSetReservedPunctuator escapado y `\b`.
-            if "&-!#%,:;<=>@`~".contains(n) {
-                self.i += 1;
-                return Ok((Some(n as u32), false));
-            }
-            if n == 'b' {
-                self.i += 1;
-                return Ok((Some(0x08), false));
-            }
-            return Ok((Some(self.character_escape(false)?), false));
+            return Ok(SetOperand::Char(self.class_set_escaped_char()?));
         }
         if self.reserved_double() {
             return Err("Invalid set operation in character class".into());
@@ -916,43 +1256,50 @@ impl Parser {
             return Err("Invalid character in character class".into());
         }
         self.i += 1;
-        Ok((Some(c), false))
+        Ok(SetOperand::Char(c))
     }
 
-    /// `\q{a|bc|}` (después de `{`). Devuelve si algún ClassString no tiene exactamente un
-    /// carácter (MayContainStrings).
-    fn class_string_disjunction(&mut self) -> R<bool> {
+    /// Después de `\` en un ClassSetCharacter: ClassSetReservedPunctuator, `\b` o
+    /// CharacterEscape.
+    fn class_set_escaped_char(&mut self) -> R<u32> {
+        let Some(n) = self.peek().and_then(char::from_u32) else {
+            return Err("\\ at end of pattern".into());
+        };
+        if "&-!#%,:;<=>@`~".contains(n) {
+            self.i += 1;
+            return Ok(n as u32);
+        }
+        if n == 'b' {
+            self.i += 1;
+            return Ok(0x08);
+        }
+        self.character_escape(false)
+    }
+
+    /// `\q{a|bc|}` (después de `{`): el conjunto (MaybeSimpleCaseFolding) y si algún
+    /// ClassString no tiene exactamente un carácter (MayContainStrings).
+    fn class_string_disjunction(&mut self) -> R<(ClassSet, bool)> {
+        let mut set = ClassSet::default();
         let mut strings = false;
-        let mut len = 0;
+        let mut cur: Vec<u32> = Vec::new();
         loop {
             let Some(c) = self.peek() else {
                 return Err("Unterminated class string disjunction".into());
             };
-            if c == ch('}') {
+            if c == ch('}') || c == ch('|') {
                 self.i += 1;
-                if len != 1 {
+                if cur.len() != 1 {
                     strings = true;
                 }
-                return Ok(strings);
-            }
-            if c == ch('|') {
-                self.i += 1;
-                if len != 1 {
-                    strings = true;
+                set.add_string(std::mem::take(&mut cur));
+                if c == ch('}') {
+                    return Ok((self.fold(set), strings));
                 }
-                len = 0;
                 continue;
             }
             if c == ch('\\') {
                 self.i += 1;
-                let Some(n) = self.peek().and_then(char::from_u32) else {
-                    return Err("\\ at end of pattern".into());
-                };
-                if "&-!#%,:;<=>@`~".contains(n) || n == 'b' {
-                    self.i += 1;
-                } else {
-                    self.character_escape(false)?;
-                }
+                cur.push(self.class_set_escaped_char()?);
             } else {
                 if self.reserved_double() {
                     return Err("Invalid set operation in character class".into());
@@ -962,8 +1309,8 @@ impl Parser {
                     return Err("Invalid character in character class".into());
                 }
                 self.i += 1;
+                cur.push(c);
             }
-            len += 1;
         }
     }
 }
@@ -1005,6 +1352,8 @@ mod tests {
             ("[\\c1]", ""),
             ("\\u{1F600}", "u"),
             ("(?<𝒜>.)", ""),
+            ("[^\\q{a}]", "v"),
+            ("[^[\\p{RGI_Emoji}&&a]]", "v"),
         ] {
             assert!(validate(p, f).is_ok(), "/{p}/{f}: {:?}", validate(p, f));
         }
@@ -1027,6 +1376,7 @@ mod tests {
             ("\\p{Nope}", "u"),
             ("[^\\p{RGI_Emoji}]", "v"),
             ("\\P{RGI_Emoji}", "v"),
+            ("\\p{RGI_Emoji}", "u"),
             ("[a-z&&b]", "v"),
             ("[(]", "v"),
             ("[a&&&b]", "v"),
@@ -1039,8 +1389,25 @@ mod tests {
             ("(", ""),
             (")", ""),
             ("[", ""),
+            ("[^\\q{ab}]", "v"),
+            ("[^\\q{}]", "v"),
+            ("[^[\\p{RGI_Emoji}--\\p{RGI_Emoji}]]", "v"),
         ] {
             assert!(validate(p, f).is_err(), "/{p}/{f} debería fallar");
         }
+    }
+
+    #[test]
+    fn legacy_backreferences() {
+        let f = Flags::default();
+        let units = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        // `\2` con un solo grupo: octal.
+        let p = parse(&units("(a)\\2"), f).unwrap();
+        let Node::Seq(v) = p.node else { panic!() };
+        assert!(matches!(v[1], Node::Char { c: 2, .. }));
+        // `\1` antes del grupo: backreference.
+        let p = parse(&units("\\1(a)"), f).unwrap();
+        let Node::Seq(v) = p.node else { panic!() };
+        assert!(matches!(&v[0], Node::BackRef { groups, .. } if groups == &[1]));
     }
 }

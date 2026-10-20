@@ -133,6 +133,13 @@ intrinsics!(
     iterator_helper_prototype,
     wrap_for_valid_iterator_prototype,
     async_iterator_prototype,
+    // E2
+    regexp_ctor,
+    regexp_prototype,
+    regexp_string_iterator_prototype,
+    bigint_ctor,
+    date_ctor,
+    date_prototype,
 );
 
 pub struct Realm {

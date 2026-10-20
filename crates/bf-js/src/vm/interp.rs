@@ -321,7 +321,15 @@ impl Agent {
                 let g = self.heap.alloc(b);
                 self.push(Value::BigInt(g));
             }
-            Op::RegExp(_) => return self.internal_error("RegExp (built-in del paso 3)"),
+            // E2: RegExpCreate para el literal (§13.2.7.3).
+            Op::RegExp(i) => {
+                let (pattern, flags) = match &frame!(self).code.consts[i as usize] {
+                    Constant::RegExp { pattern, flags } => (pattern.clone(), flags.clone()),
+                    _ => unreachable!("regexp"),
+                };
+                let v = crate::builtins::regexp::regexp_create_literal(self, &pattern, &flags)?;
+                self.push(v);
+            }
 
             // --- Bindings ---
             Op::GetLocal(s) => {
@@ -727,7 +735,12 @@ impl Agent {
                 let v = self.pop();
                 match self.to_numeric(&v)? {
                     Value::Number(n) => self.push(Value::Number(-n)),
-                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                    // E2
+                    Value::BigInt(b) => {
+                        let r = crate::builtins::bigint::unary_minus(self, b);
+                        self.push(r);
+                    }
+                    _ => unreachable!("ToNumeric"),
                 }
             }
             Op::Plus => {
@@ -747,7 +760,12 @@ impl Agent {
                         let i = crate::abstract_ops::conversion::to_int32(n);
                         self.push(Value::Number(f64::from(!i)));
                     }
-                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                    // E2
+                    Value::BigInt(b) => {
+                        let r = crate::builtins::bigint::bitwise_not(self, b);
+                        self.push(r);
+                    }
+                    _ => unreachable!("ToNumeric"),
                 }
             }
             Op::Typeof => {
@@ -766,7 +784,16 @@ impl Agent {
                     Value::Number(n) => {
                         self.push(Value::Number(if op == Op::Inc { n + 1.0 } else { n - 1.0 }))
                     }
-                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                    // E2
+                    Value::BigInt(b) => {
+                        let r = crate::builtins::bigint::increment(
+                            self,
+                            b,
+                            if op == Op::Inc { 1 } else { -1 },
+                        );
+                        self.push(r);
+                    }
+                    _ => return self.internal_error("++/-- sobre un valor no numérico"),
                 }
             }
             Op::ToPropertyKey => {
