@@ -66,7 +66,11 @@ fn run_script(path: &str) -> ExitCode {
     agent.reset_stack_base();
     let realm = agent.current_realm;
     bf_js::builtins::host::install_test262(&mut agent, realm);
-    match agent.eval_script(&src, path) {
+    // E3: RunJobs al terminar el script.
+    match agent
+        .eval_script(&src, path)
+        .and_then(|v| agent.run_jobs().map(|_| v))
+    {
         Ok(_) => ExitCode::SUCCESS,
         Err(Throw::Value(v)) => {
             let msg = describe_exception(&mut agent, &v);

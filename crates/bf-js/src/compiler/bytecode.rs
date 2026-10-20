@@ -539,6 +539,49 @@ pub enum Op {
     /// Empuja si la función de bloque `name` se elevó (B.3.2.2/B.3.2.3, decidido en
     /// GlobalDeclarationInstantiation/EvalDeclarationInstantiation).
     IsHoisted(u32),
+
+    // --- E3: iteración asíncrona ---
+    /// [obj] → (): GetIterator(obj, async) (§7.4.3); iterador, next y done en slot..slot+2.
+    GetAsyncIterator(u32),
+    /// [] → [Call(next, iterador)] (`for await`, §14.7.5.7 paso 6.a).
+    AsyncIterNext(u32),
+    /// [resultado esperado] → [IteratorValue], o salta a `done` marcando el iterador
+    /// terminado (§14.7.5.7 pasos 6.c–f).
+    AsyncIterResult {
+        slot: u32,
+        done: u32,
+    },
+    /// AsyncIteratorClose (§7.4.13) hasta el `Await`: [] → [Call(return, iterador)], o salta
+    /// a `skip` si no hay `return`. `kind_slot` es la completion que se propaga
+    /// (`u32::MAX`: normal); con una throw completion los errores se ignoran.
+    AsyncIterClose {
+        slot: u32,
+        kind_slot: u32,
+        skip: u32,
+    },
+    /// AsyncIteratorClose después del `Await`: [resultado] → () (TypeError si no es un
+    /// objeto, salvo con una throw completion).
+    AsyncIterCloseCheck {
+        kind_slot: u32,
+    },
+    /// El rechazo del `Await` de AsyncIteratorClose: [error] → () si la completion es throw
+    /// (se ignora), si no lo relanza.
+    AsyncIterCloseCatch {
+        kind_slot: u32,
+    },
+    /// `yield*` asíncrono (§15.5.5), la llamada según la completion recibida en
+    /// `kind`/`value`: [] → [modo, valor a esperar].
+    AsyncYieldStarCall {
+        slot: u32,
+        kind_slot: u32,
+        value_slot: u32,
+    },
+    /// `yield*` asíncrono después del `Await`: [modo, resultado] → [valor a ceder], o salta
+    /// a `done` con el valor final, o retorna.
+    AsyncYieldStarResult {
+        slot: u32,
+        done: u32,
+    },
 }
 
 /// Una función compilada.

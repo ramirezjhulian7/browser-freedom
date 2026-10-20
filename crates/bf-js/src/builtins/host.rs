@@ -44,6 +44,7 @@ pub fn install_test262(agent: &mut Agent, realm: RealmId) -> Gc<Object> {
     let op = agent.intrinsics().object_prototype;
     let dda = agent.alloc(Object::new(Some(op), crate::object::ObjectKind::HtmlDda));
     value_prop(agent, o, "IsHTMLDDA", Value::Object(dda));
+    crate::builtins::atomics::install_agent_hooks(agent, o); // E3
     agent.put_data(
         g,
         PropertyKey::from("$262"),
@@ -73,6 +74,8 @@ fn gc(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn detach_array_buffer(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    agent.internal_error("ArrayBuffer (paso 4)")
+/// `$262.detachArrayBuffer(buffer)`: DetachArrayBuffer (§25.1.3.5). (E3)
+fn detach_array_buffer(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    crate::builtins::array_buffer::detach_array_buffer(agent, &a.arg(0))?;
+    Ok(Value::Undefined)
 }
