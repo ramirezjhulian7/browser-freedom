@@ -42,6 +42,19 @@ const UNSUPPORTED_FEATURES: &[(&str, &str)] = &[
         "nonextensible-applies-to-private",
         "stage 3: PrivateFieldAdd lanza TypeError en objetos no extensibles; ECMA-262 todavía lo permite y sus tests contradicen el spec vigente",
     ),
+    // E3
+    (
+        "await-dictionary",
+        "propuesta: `Promise.allKeyed` y `Promise.allSettledKeyed`",
+    ),
+    (
+        "immutable-arraybuffer",
+        "propuesta: `transferToImmutable`, `sliceToImmutable` y `ArrayBuffer.prototype.immutable`",
+    ),
+    (
+        "upsert",
+        "propuesta: `Map`/`WeakMap.prototype.getOrInsert` y `getOrInsertComputed`",
+    ),
 ];
 
 /// Presupuesto de instrucciones por ejecución.
