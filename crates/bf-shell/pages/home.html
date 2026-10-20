@@ -5,74 +5,67 @@
 <style>
 {{theme}}
 {{style}}
-.hero { display: flex; align-items: center; margin: 24px 0 28px; }
-.hero .text { margin-left: 18px; }
+body { padding-top: 8px; }
+/* Un resplandor ámbar tenue detrás de la marca, como luz que entra por la esquina abierta. */
+.hero { text-align: center; padding: 48px 0 32px; background: radial-gradient(closest-side, var(--glow), var(--chrome)); }
+.hero img { display: block; width: 76px; height: 76px; margin: 0 auto 14px; }
+.hero h1 { font-size: 32px; letter-spacing: -0.01em; margin-bottom: 4px; }
 .search {
   display: flex;
   align-items: center;
   height: 52px;
-  padding: 0 22px;
-  border-radius: 26px;
+  padding: 0 14px 0 20px;
+  box-sizing: border-box;
+  border-radius: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text2);
   font-size: 16px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
 }
-.search .caret { display: block; width: 2px; height: 22px; background: var(--accent); margin-right: 12px; }
-.tiles { display: flex; margin: 22px -6px 0; }
+.search .caret { flex: none; display: block; width: 2px; height: 22px; border-radius: 1px; background: var(--accent); margin-right: 12px; }
+.search .text { flex: 1; min-width: 0; }
+.search .kbd { margin: 0 0 0 4px; }
+.tiles { display: flex; margin: 16px -6px 0; }
 .tile {
+  --under: var(--surface);
   display: block;
   flex: 1;
+  min-width: 0;
   margin: 0 6px;
-  padding: 14px;
-  border-radius: 10px;
+  padding: 16px;
+  border-radius: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
 }
-.tile .letter {
-  display: block;
-  width: 32px;
-  height: 32px;
-  line-height: 32px;
-  text-align: center;
-  border-radius: 8px;
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  font-weight: 700;
-  margin-bottom: 10px;
-}
-.tile .host { display: block; color: var(--text2); font-size: 12px; }
-.recent a { display: block; padding: 4px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-.keys { display: flex; flex-wrap: wrap; padding: 8px 18px; }
-.key { display: flex; width: 50%; padding: 5px 0; }
+.tile .frame { margin-bottom: 14px; }
+.tile .name { display: block; font-weight: 600; overflow: hidden; white-space: nowrap; }
+.tile .host { display: block; color: var(--text2); font-size: 12px; overflow: hidden; white-space: nowrap; }
+.recent { padding: 4px 0; }
+.recent a { display: flex; padding: 9px 18px; border-top: 1px solid var(--border); color: var(--text); }
+.recent a:first-child { border-top: 0; }
+.recent .t { flex: none; max-width: 50%; overflow: hidden; white-space: nowrap; margin-right: 12px; }
+.recent .u { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--text2); text-align: right; }
+.recent .empty { padding: 9px 18px; margin: 0; color: var(--text2); }
+.keys { display: flex; flex-wrap: wrap; padding: 12px 18px 8px; }
+.key { display: flex; align-items: flex-start; width: 50%; padding: 4px 12px 4px 0; box-sizing: border-box; }
 .key .k { width: 176px; flex: none; }
-.key .k span {
-  font-family: monospace;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  padding: 0 5px;
-  background: var(--chrome);
-}
-.key .d { color: var(--text2); }
-.foot { margin-top: 28px; }
+.key .d { flex: 1; min-width: 0; color: var(--text2); font-size: 13px; line-height: 22px; }
+.foot { margin-top: 32px; text-align: center; font-size: 13px; }
 </style>
 <main>
   <div class="hero">
     {{mark}}
-    <div class="text">
-      <h1>browser-freedom</h1>
-      <p class="muted">Un navegador con motor propio: HTML, CSS, layout y pintura escritos desde cero.</p>
-    </div>
+    <h1>browser-<span class="accent">freedom</span></h1>
+    <p class="muted">Un navegador con motor propio: HTML, CSS, layout y pintura escritos desde cero.</p>
   </div>
-  <a class="search" href="bf:focus-url"><span class="caret"></span>Busca en Google o escribe una dirección</a>
+  <a class="search" href="bf:focus-url"><span class="caret"></span><span class="text">Busca en Google o escribe una dirección</span><span class="kbd">Ctrl</span><span class="kbd">L</span></a>
   <div class="tiles">{{tiles}}</div>
   <h2>Recientes</h2>
-  <div class="recent">{{recent}}</div>
+  <div class="card recent">{{recent}}</div>
   <h2>Atajos</h2>
   <div class="card keys">{{shortcuts}}</div>
-  <p class="foot muted">Páginas internas: <a href="about:">about:</a> · <a href="about:engine">about:engine</a> · <a href="about:wpt">about:wpt</a></p>
+  <p class="foot muted"><a href="about:">about:</a> · <a href="about:engine">about:engine</a> · <a href="about:wpt">about:wpt</a></p>
 </main>
 </html>

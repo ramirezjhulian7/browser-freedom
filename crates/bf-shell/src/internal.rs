@@ -17,9 +17,11 @@ use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, Meta, fetch_documen
 use crate::theme::Theme;
 
 pub const STYLE: &str = include_str!("../pages/style.css");
-/// El logo (ver `assets/browser-freedom.png`), recortado a 256 y 64 px.
-pub const LOGO_256: &[u8] = include_bytes!("../assets/logo-256.png");
+/// El logo (ver `assets/browser-freedom.png`) recortado a 64 px, con su fondo: el icono de la
+/// ventana.
 pub const LOGO_64: &[u8] = include_bytes!("../assets/logo-64.png");
+/// La marca sola, ámbar sobre transparente (256 px), para las páginas internas de los dos temas.
+pub const MARK_256: &[u8] = include_bytes!("../assets/mark-256.png");
 
 /// Una URL `data:image/png;base64,…` con `png`, para incrustar el logo en las páginas internas.
 pub fn logo_data_url(png: &[u8]) -> String {
@@ -62,7 +64,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+R · F5", "Recargar"),
     ("Esc", "Detener la carga o volver a la página"),
     ("Alt+← · Alt+→", "Atrás y adelante"),
-    ("Ctrl + · − · 0", "Zoom"),
+    ("Ctrl++ · Ctrl+− · Ctrl+0", "Zoom"),
     ("Ctrl+S", "Guardar un PNG de la ventana"),
     ("Ctrl+Shift+D", "Volcar el layout"),
     ("Ctrl+H", "Inicio"),
@@ -174,33 +176,36 @@ fn source(url: &Url, ctx: &LoadContext) -> String {
 fn home(ctx: &LoadContext) -> String {
     let mut tiles = String::new();
     for (name, href, host) in TILES {
-        let letter = name.chars().next().unwrap_or('?');
+        let letter = name.chars().next().unwrap_or('?').to_uppercase();
         let _ = write!(
             tiles,
-            "<a class=\"tile\" href=\"{href}\"><span class=\"letter\">{letter}</span>{name}\
-             <span class=\"host\">{host}</span></a>"
+            "<a class=\"tile\" href=\"{href}\"><span class=\"frame\">{letter}<span class=\"gap\">\
+             </span></span><span class=\"name\">{name}</span><span class=\"host\">{host}</span></a>"
         );
     }
     let mut recent = String::new();
     for (title, href) in ctx.recent.iter().take(8) {
         let _ = write!(
             recent,
-            "<a href=\"{h}\">{t} <span class=\"muted\">· {u}</span></a>",
+            "<a href=\"{h}\"><span class=\"t\">{t}</span><span class=\"u\">{h}</span></a>",
             h = escape(href),
             t = escape(title),
-            u = escape(href),
         );
     }
     if recent.is_empty() {
         recent =
-            "<p class=\"muted\">Todavía no visitaste ninguna página en esta sesión.</p>".into();
+            "<p class=\"empty\">Todavía no visitaste ninguna página en esta sesión.</p>".into();
     }
     let mut keys = String::new();
     for (k, d) in SHORTCUTS {
+        // Cada combinación en su tecla: "Ctrl+R · F5" son dos.
+        let chips: String = k
+            .split(" · ")
+            .map(|c| format!("<span class=\"kbd\">{}</span>", escape(c)))
+            .collect();
         let _ = write!(
             keys,
-            "<div class=\"key\"><span class=\"k\"><span>{}</span></span><span class=\"d\">{}</span></div>",
-            escape(k),
+            "<div class=\"key\"><span class=\"k\">{chips}</span><span class=\"d\">{}</span></div>",
             escape(d)
         );
     }
@@ -210,7 +215,7 @@ fn home(ctx: &LoadContext) -> String {
         &[
             (
                 "mark",
-                format!("<img class=\"mark\" src=\"{}\">", logo_data_url(LOGO_256)),
+                format!("<img src=\"{}\" alt=\"\">", logo_data_url(MARK_256)),
             ),
             ("tiles", tiles),
             ("recent", recent),
