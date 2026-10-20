@@ -219,9 +219,7 @@ impl Document {
     pub fn set_text_content(&mut self, n: NodeId, value: Option<DomString>) {
         let value = value.unwrap_or_default();
         match &self.get(n).data {
-            NodeData::DocumentFragment | NodeData::Element(_) => {
-                self.string_replace_all(&value, n)
-            }
+            NodeData::DocumentFragment | NodeData::Element(_) => self.string_replace_all(&value, n),
             NodeData::Attr(_) => self.set_attr_value(n, value),
             d if crate::mutation::is_character_data(d) => {
                 let len = self.node_length(n);
@@ -348,13 +346,18 @@ impl Document {
     }
 
     /// `Node.cloneNode(subtree)`.
-    pub fn clone_node_checked(&mut self, id: NodeId, subtree: bool) -> Result<NodeId, DomException> {
+    pub fn clone_node_checked(
+        &mut self,
+        id: NodeId,
+        subtree: bool,
+    ) -> Result<NodeId, DomException> {
         Ok(self.clone_node(id, subtree))
     }
 
     /// "Equals" (§4.4, `isEqualNode`).
     pub fn is_equal_node(&self, a: NodeId, b: NodeId) -> bool {
-        let attr_eq = |x: &Attribute, y: &Attribute| x.ns == y.ns && x.name == y.name && x.value == y.value;
+        let attr_eq =
+            |x: &Attribute, y: &Attribute| x.ns == y.ns && x.name == y.name && x.value == y.value;
         let same = match (&self.get(a).data, &self.get(b).data) {
             (
                 NodeData::Doctype {
@@ -380,7 +383,9 @@ impl Document {
             }
             (NodeData::Attr(_), NodeData::Attr(_)) => {
                 let (x, y) = (self.attr_data(a), self.attr_data(b));
-                x.ns == y.ns && x.local_name == y.local_name && self.attr_value(a) == self.attr_value(b)
+                x.ns == y.ns
+                    && x.local_name == y.local_name
+                    && self.attr_value(a) == self.attr_value(b)
             }
             (
                 NodeData::ProcessingInstruction {
@@ -417,7 +422,10 @@ impl Document {
         let pa = self.inclusive_ancestors(a);
         let pb = self.inclusive_ancestors(b);
         // Rutas desde la raíz.
-        let (pa, pb): (Vec<_>, Vec<_>) = (pa.into_iter().rev().collect(), pb.into_iter().rev().collect());
+        let (pa, pb): (Vec<_>, Vec<_>) = (
+            pa.into_iter().rev().collect(),
+            pb.into_iter().rev().collect(),
+        );
         let common = pa.iter().zip(&pb).take_while(|(x, y)| x == y).count();
         if common == pa.len() {
             // `a` es ancestro de `b`.
@@ -466,7 +474,9 @@ impl Document {
             }
         }
         let (Some(n1), Some(n2)) = (node1, node2) else {
-            return DISCONNECTED | IMPLEMENTATION_SPECIFIC | if other < this { PRECEDING } else { FOLLOWING };
+            return DISCONNECTED
+                | IMPLEMENTATION_SPECIFIC
+                | if other < this { PRECEDING } else { FOLLOWING };
         };
         if self.tree_root(n1) != self.tree_root(n2) {
             // Orden consistente: por índice en la arena de las raíces.
@@ -514,9 +524,11 @@ impl Document {
         if e.ns.uri() == namespace && e.prefix.is_some() {
             return e.prefix.clone();
         }
-        if let Some(a) = e.attrs.iter().find(|a| {
-            a.prefix.as_ref().is_some_and(|p| *p == "xmlns") && a.value == namespace
-        }) {
+        if let Some(a) = e
+            .attrs
+            .iter()
+            .find(|a| a.prefix.as_ref().is_some_and(|p| *p == "xmlns") && a.value == namespace)
+        {
             return Some(a.name.clone());
         }
         self.parent_element(element)
@@ -537,7 +549,8 @@ impl Document {
             Some("xmlns") => return Some(Namespace::XmlNs.uri().into()),
             _ => {}
         }
-        if e.ns != Namespace::Null && e.prefix.as_ref().map(|p| p.to_string()).as_deref() == prefix {
+        if e.ns != Namespace::Null && e.prefix.as_ref().map(|p| p.to_string()).as_deref() == prefix
+        {
             return Some(e.ns.uri().into());
         }
         let found = e.attrs.iter().find(|a| {
@@ -621,7 +634,10 @@ impl Document {
         let a = self.attr_data(n);
         if let Some(owner) = a.owner
             && let Some(e) = self.element(owner)
-            && let Some(attr) = e.attrs.iter().find(|x| x.ns == a.ns && x.name == a.local_name)
+            && let Some(attr) = e
+                .attrs
+                .iter()
+                .find(|x| x.ns == a.ns && x.name == a.local_name)
         {
             return attr.value.clone();
         }

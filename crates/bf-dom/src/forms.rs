@@ -21,7 +21,10 @@ pub(crate) enum ElementState {
         disabled: bool,
     },
     /// `input`: checkedness y dirty checkedness (HTML §4.10.5).
-    Input { checked: bool, dirty: bool },
+    Input {
+        checked: bool,
+        dirty: bool,
+    },
 }
 
 /// Microtasks encolados por los removing steps de `option`.
@@ -81,6 +84,16 @@ impl Document {
             *s = selectedness;
             *d = dirtiness;
         }
+        // Cloning steps de `input`: checkedness y dirty checkedness.
+        if let ElementState::Input { checked, dirty } = self.get(from).state
+            && let ElementState::Input {
+                checked: c,
+                dirty: d,
+            } = &mut self.get_mut(to).state
+        {
+            *c = checked;
+            *d = dirty;
+        }
     }
 
     fn has_steps(&self, id: NodeId) -> bool {
@@ -88,6 +101,27 @@ impl Document {
             self.get(id).state,
             ElementState::Option { .. } | ElementState::SelectedContent { .. }
         )
+    }
+
+    /// "Attribute change steps" de `input` (`checked`) y `option` (`selected`): si el estado
+    /// no está *dirty*, sigue a la presencia del atributo (HTML §4.10.5 y §4.10.10).
+    pub(crate) fn attribute_changed(&mut self, el: NodeId, local: &bf_infra::DomString) {
+        let present = |doc: &Self, name: &str| doc.has_attr(el, name);
+        match self.get(el).state {
+            ElementState::Input { dirty: false, .. } if *local == "checked" => {
+                let value = present(self, "checked");
+                if let ElementState::Input { checked, .. } = &mut self.get_mut(el).state {
+                    *checked = value;
+                }
+            }
+            ElementState::Option {
+                dirtiness: false, ..
+            } if *local == "selected" => {
+                let value = present(self, "selected");
+                self.set_option_selectedness(el, value);
+            }
+            _ => {}
+        }
     }
 
     /// Checkedness de un `input` (`false` si no lo es).
@@ -124,13 +158,17 @@ impl Document {
         let is_radio = |n: NodeId| {
             self.element(n).is_some_and(|e| {
                 e.is_html("input")
-                    && e.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                    && e.attr("type")
+                        .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
             })
         };
         if !is_radio(input) {
             return Vec::new();
         }
-        let Some(name) = self.element(input).and_then(|e| e.attr("name")).filter(|n| !n.is_empty())
+        let Some(name) = self
+            .element(input)
+            .and_then(|e| e.attr("name"))
+            .filter(|n| !n.is_empty())
         else {
             return vec![input];
         };
@@ -510,7 +548,7 @@ impl Document {
     pub fn text_content(&self, node: NodeId) -> String {
         let mut out = String::new();
         for n in self.inclusive_descendants(node) {
-            if let crate::NodeData::Text(t) = &self.get(n).data {
+            if let crate::NodeData::Text(t) | crate::NodeData::CdataSection(t) = &self.get(n).data {
                 out.push_str(&t.to_string_lossy());
             }
         }

@@ -10,7 +10,8 @@ fn is_ascii_whitespace(c: u32) -> bool {
 }
 
 fn is_ascii_alpha(c: u32) -> bool {
-    (u32::from(b'a')..=u32::from(b'z')).contains(&c) || (u32::from(b'A')..=u32::from(b'Z')).contains(&c)
+    (u32::from(b'a')..=u32::from(b'z')).contains(&c)
+        || (u32::from(b'A')..=u32::from(b'Z')).contains(&c)
 }
 
 fn is_ascii_digit(c: u32) -> bool {
@@ -176,7 +177,11 @@ mod tests {
             Err(DomException::NamespaceError)
         );
         assert_eq!(
-            validate_and_extract(Some("urn:x"), &DomString::from("xmlns"), NameContext::Attribute),
+            validate_and_extract(
+                Some("urn:x"),
+                &DomString::from("xmlns"),
+                NameContext::Attribute
+            ),
             Err(DomException::NamespaceError)
         );
     }

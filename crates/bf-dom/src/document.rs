@@ -186,12 +186,12 @@ pub fn html_element_kind(local_name: &str) -> HtmlElementKind {
         // Obsoletos sin interfaz (HTML §16.2): HTMLUnknownElement.
         "applet" | "bgsound" | "blink" | "isindex" | "keygen" | "multicol" | "nextid"
         | "spacer" => K::Unknown,
-        "abbr" | "acronym" | "address" | "article" | "aside" | "b" | "basefont" | "bdi"
-        | "bdo" | "big" | "center" | "cite" | "code" | "dd" | "dfn" | "dt" | "em"
-        | "figcaption" | "figure" | "footer" | "header" | "hgroup" | "i" | "kbd" | "main"
-        | "mark" | "nav" | "nobr" | "noembed" | "noframes" | "noscript" | "plaintext" | "rb"
-        | "rp" | "rt" | "rtc" | "ruby" | "s" | "samp" | "section" | "small" | "strike"
-        | "strong" | "sub" | "summary" | "sup" | "tt" | "u" | "var" | "wbr" => K::Element,
+        "abbr" | "acronym" | "address" | "article" | "aside" | "b" | "basefont" | "bdi" | "bdo"
+        | "big" | "center" | "cite" | "code" | "dd" | "dfn" | "dt" | "em" | "figcaption"
+        | "figure" | "footer" | "header" | "hgroup" | "i" | "kbd" | "main" | "mark" | "nav"
+        | "nobr" | "noembed" | "noframes" | "noscript" | "plaintext" | "rb" | "rp" | "rt"
+        | "rtc" | "ruby" | "s" | "samp" | "section" | "small" | "strike" | "strong" | "sub"
+        | "summary" | "sup" | "tt" | "u" | "var" | "wbr" => K::Element,
         "search" => K::Element,
         name if is_valid_custom_element_name(name) => K::Element,
         _ => K::Unknown,
@@ -364,7 +364,8 @@ impl Document {
 
     /// `Document.documentElement`.
     pub fn document_element(&self) -> Option<NodeId> {
-        self.children(self.root()).find(|&c| self.element(c).is_some())
+        self.children(self.root())
+            .find(|&c| self.element(c).is_some())
     }
 
     /// `Document.doctype`.
@@ -404,9 +405,10 @@ impl Document {
 
     /// Getter de `Document.title` (HTML §3.1.3).
     pub fn title(&self) -> DomString {
-        let svg_root = self
-            .document_element()
-            .filter(|&e| self.element(e).is_some_and(|x| x.ns == Namespace::Svg && x.name == "svg"));
+        let svg_root = self.document_element().filter(|&e| {
+            self.element(e)
+                .is_some_and(|x| x.ns == Namespace::Svg && x.name == "svg")
+        });
         let value = match svg_root {
             Some(svg) => self
                 .children(svg)

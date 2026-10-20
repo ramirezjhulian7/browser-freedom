@@ -168,11 +168,10 @@ impl Document {
         };
         // 7. Si ya estaba registrado en `target`, se reemplazan las opciones y se quitan los
         // transitorios que salieron de ese registro.
-        let already = self
-            .observers
-            .registered
-            .get(&target)
-            .is_some_and(|regs| regs.iter().any(|r| r.observer == observer && r.source.is_none()));
+        let already = self.observers.registered.get(&target).is_some_and(|regs| {
+            regs.iter()
+                .any(|r| r.observer == observer && r.source.is_none())
+        });
         if already {
             let nodes = self.observers.observers[observer.0 as usize].nodes.clone();
             for node in nodes {
@@ -200,7 +199,9 @@ impl Document {
                 options,
                 source: None,
             });
-        self.observers.observers[observer.0 as usize].nodes.push(target);
+        self.observers.observers[observer.0 as usize]
+            .nodes
+            .push(target);
         Ok(())
     }
 

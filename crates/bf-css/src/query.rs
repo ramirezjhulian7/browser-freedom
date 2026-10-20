@@ -3,7 +3,9 @@
 
 use bf_dom::{Document, DomException, NodeId};
 
-use crate::selectors::{MatchContext, NamespaceMap, SelectorList, matches_list, parse_selector_list};
+use crate::selectors::{
+    MatchContext, NamespaceMap, SelectorList, matches_list, parse_selector_list,
+};
 
 /// "Parse a selector": `SyntaxError` si es inválido.
 fn parse(selectors: &str) -> Result<SelectorList, DomException> {
@@ -24,7 +26,11 @@ pub fn element_matches(doc: &Document, el: NodeId, selectors: &str) -> Result<bo
 }
 
 /// `Element.closest(selectors)`: el primer ancestro inclusivo que coincide.
-pub fn closest(doc: &Document, el: NodeId, selectors: &str) -> Result<Option<NodeId>, DomException> {
+pub fn closest(
+    doc: &Document,
+    el: NodeId,
+    selectors: &str,
+) -> Result<Option<NodeId>, DomException> {
     let list = parse(selectors)?;
     let ctx = context(doc, el);
     Ok(doc

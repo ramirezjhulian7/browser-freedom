@@ -467,7 +467,7 @@ const DEFAULT_MARGINS: &[&str] = &[
 fn is_substantial(doc: &Document, node: NodeId) -> bool {
     match &doc.get(node).data {
         NodeData::Element(_) => true,
-        NodeData::Text(t) => !t
+        NodeData::Text(t) | NodeData::CdataSection(t) => !t
             .chars()
             .all(|c| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')),
         _ => false,

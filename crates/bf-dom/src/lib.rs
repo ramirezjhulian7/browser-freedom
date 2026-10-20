@@ -8,12 +8,12 @@
 //! `Result<_, DomException>`.
 //!
 //! Organización:
-//! - [`mutation`]: §4.2.3 (pre-insert, insert, replace, remove, adopt) y los hooks.
+//! - [`mutation`], §4.2.3 (pre-insert, insert, replace, remove, adopt) y los hooks.
 //! - `node`, `element`, `document`, `character_data`: las interfaces.
-//! - [`collections`]: `HTMLCollection` viva y `NodeList`.
-//! - [`events`]: `Event`, `EventTarget` y el dispatch de §2.9.
-//! - [`observer`]: `MutationObserver`.
-//! - [`abort`]: `AbortController` y `AbortSignal`.
+//! - [`collections`], `HTMLCollection` viva y `NodeList`.
+//! - [`events`], `Event`, `EventTarget` y el dispatch de §2.9.
+//! - [`observer`], `MutationObserver`.
+//! - [`abort`], `AbortController` y `AbortSignal`.
 //!
 //! `matches`/`closest`/`querySelector` están en `bf_css::query` y la serialización HTML
 //! (`innerHTML`, `outerHTML`, `insertAdjacentHTML`) en `bf_html::dom`, porque esos crates

@@ -278,8 +278,8 @@ impl Matcher<'_> {
     fn ns_matches(ns: &NsConstraint, el: &Element) -> bool {
         match ns {
             NsConstraint::Any => true,
-            // Todos los elementos de bf-dom tienen namespace.
-            NsConstraint::None => false,
+            // `|E`: elementos sin namespace.
+            NsConstraint::None => el.ns == Namespace::Null,
             NsConstraint::Url(url) => el.ns.uri() == url,
         }
     }
@@ -457,7 +457,9 @@ impl Matcher<'_> {
                 .all(|c| match &self.doc.get(c).data {
                     NodeData::Element(_) => false,
                     // Selectors 4: se ignoran los nodos de texto con solo document white space.
-                    NodeData::Text(t) => t.chars().all(is_document_whitespace),
+                    NodeData::Text(t) | NodeData::CdataSection(t) => {
+                        t.chars().all(is_document_whitespace)
+                    }
                     _ => true,
                 }),
             PseudoClass::AnyLink => is_link(el),

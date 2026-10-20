@@ -99,7 +99,13 @@ impl Document {
         for a in algorithms {
             a(self);
         }
-        self.fire_event(signal, "abort", EventInit::default(), EventKind::Event, host);
+        self.fire_event(
+            signal,
+            "abort",
+            EventInit::default(),
+            EventKind::Event,
+            host,
+        );
     }
 
     /// `AbortSignal.abort(reason)`: un signal ya abortado.

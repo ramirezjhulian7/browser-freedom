@@ -43,9 +43,10 @@ impl Document {
         if !matches!(self.get(fragment).data, NodeData::DocumentFragment) {
             return None;
         }
-        (0..self.node_count() as u32)
-            .map(NodeId)
-            .find(|&n| self.element(n).is_some_and(|e| e.template_contents == Some(fragment)))
+        (0..self.node_count() as u32).map(NodeId).find(|&n| {
+            self.element(n)
+                .is_some_and(|e| e.template_contents == Some(fragment))
+        })
     }
 
     /// ¿`a` es un *host-including inclusive ancestor* de `b`?
@@ -63,19 +64,22 @@ impl Document {
         }
     }
 
-    fn has_element_child(&self, parent: NodeId) -> bool {
-        self.children(parent).any(|c| self.is_element(c))
+    /// ¿`parent` tiene un hijo elemento (sin contar los excluidos)?
+    fn has_element_child(&self, parent: NodeId, excluded: &[NodeId]) -> bool {
+        self.children(parent)
+            .any(|c| !excluded.contains(&c) && self.is_element(c))
     }
 
-    fn has_doctype_child(&self, parent: NodeId) -> bool {
-        self.children(parent).any(|c| self.is_doctype(c))
+    fn has_doctype_child(&self, parent: NodeId, excluded: &[NodeId]) -> bool {
+        self.children(parent)
+            .any(|c| !excluded.contains(&c) && self.is_doctype(c))
     }
 
-    /// ¿Hay un doctype después de `child` entre sus hermanos?
-    fn doctype_following(&self, child: NodeId) -> bool {
+    /// ¿Hay un doctype (no excluido) después de `child` entre sus hermanos?
+    fn doctype_following(&self, child: NodeId, excluded: &[NodeId]) -> bool {
         let mut n = self.get(child).next_sibling();
         while let Some(s) = n {
-            if self.is_doctype(s) {
+            if !excluded.contains(&s) && self.is_doctype(s) {
                 return true;
             }
             n = self.get(s).next_sibling();
@@ -83,11 +87,11 @@ impl Document {
         false
     }
 
-    /// ¿Hay un elemento antes de `child` entre sus hermanos?
-    fn element_preceding(&self, child: NodeId) -> bool {
+    /// ¿Hay un elemento (no excluido) antes de `child` entre sus hermanos?
+    fn element_preceding(&self, child: NodeId, excluded: &[NodeId]) -> bool {
         let mut n = self.get(child).prev_sibling();
         while let Some(s) = n {
-            if self.is_element(s) {
+            if !excluded.contains(&s) && self.is_element(s) {
                 return true;
             }
             n = self.get(s).prev_sibling();
@@ -95,8 +99,16 @@ impl Document {
         false
     }
 
-    /// Pasos 1, 2, 4 y 5 compartidos por *ensure pre-insertion validity* y *replace*.
-    fn check_hierarchy(&self, node: NodeId, parent: NodeId) -> Result<(), DomException> {
+    /// "Ensure pre-insert validity" de `node` en `parent` antes de `child`, con los hijos
+    /// `excluded` como si no estuvieran (`replace` excluye el hijo reemplazado y
+    /// `replaceChildren` todos).
+    pub fn ensure_pre_insert_validity_excluding(
+        &self,
+        node: NodeId,
+        parent: NodeId,
+        child: Option<NodeId>,
+        excluded: &[NodeId],
+    ) -> Result<(), DomException> {
         // 1.
         if !matches!(
             self.get(parent).data,
@@ -108,10 +120,12 @@ impl Document {
         if self.is_host_including_inclusive_ancestor(node, parent) {
             return Err(DomException::HierarchyRequestError);
         }
-        Ok(())
-    }
-
-    fn check_node_kind(&self, node: NodeId, parent: NodeId) -> Result<(), DomException> {
+        // 3.
+        if let Some(c) = child
+            && self.parent(c) != Some(parent)
+        {
+            return Err(DomException::NotFoundError);
+        }
         let data = &self.get(node).data;
         // 4.
         if !(matches!(
@@ -126,46 +140,29 @@ impl Document {
         if (is_text(data) && parent_is_doc) || (self.is_doctype(node) && !parent_is_doc) {
             return Err(DomException::HierarchyRequestError);
         }
-        Ok(())
-    }
-
-    /// "Ensure pre-insertion validity" de `node` en `parent` antes de `child`.
-    pub fn ensure_pre_insertion_validity(
-        &self,
-        node: NodeId,
-        parent: NodeId,
-        child: Option<NodeId>,
-    ) -> Result<(), DomException> {
-        self.check_hierarchy(node, parent)?;
-        // 3.
-        if let Some(c) = child
-            && self.parent(c) != Some(parent)
-        {
-            return Err(DomException::NotFoundError);
-        }
-        self.check_node_kind(node, parent)?;
         // 6.
-        if self.is_document(parent) {
-            let bad = match &self.get(node).data {
+        if parent_is_doc {
+            let child_is_doctype =
+                child.is_some_and(|c| !excluded.contains(&c) && self.is_doctype(c));
+            let doctype_after = child.is_some_and(|c| self.doctype_following(c, excluded));
+            let bad = match data {
                 NodeData::DocumentFragment => {
                     let elements = self.children(node).filter(|&c| self.is_element(c)).count();
                     let has_text = self.children(node).any(|c| is_text(&self.get(c).data));
                     elements > 1
                         || has_text
                         || (elements == 1
-                            && (self.has_element_child(parent)
-                                || child.is_some_and(|c| self.is_doctype(c))
-                                || child.is_some_and(|c| self.doctype_following(c))))
+                            && (self.has_element_child(parent, excluded)
+                                || child_is_doctype
+                                || doctype_after))
                 }
                 NodeData::Element(_) => {
-                    self.has_element_child(parent)
-                        || child.is_some_and(|c| self.is_doctype(c))
-                        || child.is_some_and(|c| self.doctype_following(c))
+                    self.has_element_child(parent, excluded) || child_is_doctype || doctype_after
                 }
                 NodeData::Doctype { .. } => {
-                    self.has_doctype_child(parent)
-                        || child.is_some_and(|c| self.element_preceding(c))
-                        || (child.is_none() && self.has_element_child(parent))
+                    self.has_doctype_child(parent, excluded)
+                        || child.is_some_and(|c| self.element_preceding(c, excluded))
+                        || (child.is_none() && self.has_element_child(parent, excluded))
                 }
                 _ => false,
             };
@@ -174,6 +171,16 @@ impl Document {
             }
         }
         Ok(())
+    }
+
+    /// "Ensure pre-insert validity" de `node` en `parent` antes de `child`.
+    pub fn ensure_pre_insertion_validity(
+        &self,
+        node: NodeId,
+        parent: NodeId,
+        child: Option<NodeId>,
+    ) -> Result<(), DomException> {
+        self.ensure_pre_insert_validity_excluding(node, parent, child, &[])
     }
 
     /// "Pre-insert" `node` en `parent` antes de `child`; devuelve `node`.
@@ -252,58 +259,31 @@ impl Document {
         node: NodeId,
         parent: NodeId,
     ) -> Result<NodeId, DomException> {
-        self.check_hierarchy(node, parent)?;
-        // 3.
-        if self.parent(child) != Some(parent) {
-            return Err(DomException::NotFoundError);
-        }
-        self.check_node_kind(node, parent)?;
-        // 6.
-        if self.is_document(parent) {
-            let other_element = |this: &Self| {
-                this.children(parent)
-                    .any(|c| c != child && this.is_element(c))
-            };
-            let bad = match &self.get(node).data {
-                NodeData::DocumentFragment => {
-                    let elements = self.children(node).filter(|&c| self.is_element(c)).count();
-                    let has_text = self.children(node).any(|c| is_text(&self.get(c).data));
-                    elements > 1
-                        || has_text
-                        || (elements == 1 && (other_element(self) || self.doctype_following(child)))
-                }
-                NodeData::Element(_) => other_element(self) || self.doctype_following(child),
-                NodeData::Doctype { .. } => {
-                    self.children(parent)
-                        .any(|c| c != child && self.is_doctype(c))
-                        || self.element_preceding(child)
-                }
-                _ => false,
-            };
-            if bad {
-                return Err(DomException::HierarchyRequestError);
-            }
-        }
-        // 7-8.
+        // 1. Validez con `child` excluido.
+        self.ensure_pre_insert_validity_excluding(node, parent, Some(child), &[child])?;
+        // 2.
         let mut reference = self.get(child).next_sibling();
         if reference == Some(node) {
             reference = self.get(node).next_sibling();
         }
-        // 9-11.
+        // 3.
         let previous = self.get(child).prev_sibling();
+        // 4. Adopt `node` (lo quita de su padre, con su record) antes de quitar `child`.
+        self.adopt(node);
+        // 5.
         let mut removed = Vec::new();
         if self.parent(child).is_some() {
             removed.push(child);
             self.remove_node(child, true);
         }
-        // 12-13.
+        // 6-7.
         let nodes: Vec<NodeId> = if matches!(self.get(node).data, NodeData::DocumentFragment) {
             self.children(node).collect()
         } else {
             vec![node]
         };
         self.insert(node, parent, reference, true);
-        // 14.
+        // 8.
         if !nodes.is_empty() || !removed.is_empty() {
             self.queue_tree_mutation_record(parent, &nodes, &removed, previous, reference);
         }

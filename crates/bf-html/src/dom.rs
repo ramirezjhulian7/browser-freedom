@@ -96,13 +96,24 @@ fn serialize_node(doc: &Document, child: NodeId, scripting: bool, out: &mut DomS
             out.push('>');
         }
         NodeData::Text(t) | NodeData::CdataSection(t) => {
-            let raw = doc.parent(child).and_then(|p| doc.element(p)).is_some_and(|p| {
-                p.ns == Namespace::Html
-                    && (["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"]
+            let raw = doc
+                .parent(child)
+                .and_then(|p| doc.element(p))
+                .is_some_and(|p| {
+                    p.ns == Namespace::Html
+                        && ([
+                            "style",
+                            "script",
+                            "xmp",
+                            "iframe",
+                            "noembed",
+                            "noframes",
+                            "plaintext",
+                        ]
                         .iter()
                         .any(|n| p.name == *n)
-                        || (scripting && p.name == "noscript"))
-            });
+                            || (scripting && p.name == "noscript"))
+                });
             if raw {
                 out.push_dom_str(t);
             } else {
@@ -119,7 +130,7 @@ fn serialize_node(doc: &Document, child: NodeId, scripting: bool, out: &mut DomS
             out.push_dom_str(target);
             out.push(' ');
             out.push_dom_str(data);
-            out.push('>');
+            out.push_str("?>");
         }
         NodeData::Doctype { name, .. } => {
             out.push_str("<!DOCTYPE ");
@@ -163,7 +174,10 @@ pub fn parse_fragment_into(doc: &mut Document, context: NodeId, markup: &DomStri
     );
     let fragment = doc.create(NodeData::DocumentFragment);
     // El resultado del parser: un documento con un `html` raíz cuyos hijos son el fragmento.
-    if let Some(root) = parsed.children(parsed.root()).find(|&c| parsed.element(c).is_some()) {
+    if let Some(root) = parsed
+        .children(parsed.root())
+        .find(|&c| parsed.element(c).is_some())
+    {
         for child in parsed.children(root) {
             let copy = doc.import_from(&parsed, child);
             doc.append(fragment, copy);
@@ -184,7 +198,11 @@ pub fn set_inner_html(doc: &mut Document, el: NodeId, markup: &DomString) {
 }
 
 /// Setter de `outerHTML`.
-pub fn set_outer_html(doc: &mut Document, el: NodeId, markup: &DomString) -> Result<(), DomException> {
+pub fn set_outer_html(
+    doc: &mut Document,
+    el: NodeId,
+    markup: &DomString,
+) -> Result<(), DomException> {
     let Some(parent) = doc.parent(el) else {
         return Ok(());
     };

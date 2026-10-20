@@ -144,8 +144,15 @@ impl Document {
     }
 
     /// `getElementsByTagName(qualifiedName)`.
-    pub fn get_elements_by_tag_name(&self, root: NodeId, qualified_name: &DomString) -> HtmlCollection {
-        HtmlCollection::new(root, CollectionFilter::QualifiedName(qualified_name.clone()))
+    pub fn get_elements_by_tag_name(
+        &self,
+        root: NodeId,
+        qualified_name: &DomString,
+    ) -> HtmlCollection {
+        HtmlCollection::new(
+            root,
+            CollectionFilter::QualifiedName(qualified_name.clone()),
+        )
     }
 
     /// `getElementsByTagNameNS(namespace, localName)` (`"*"` es comodín en ambos).
@@ -165,7 +172,11 @@ impl Document {
     }
 
     /// `getElementsByClassName(classNames)`.
-    pub fn get_elements_by_class_name(&self, root: NodeId, class_names: &DomString) -> HtmlCollection {
+    pub fn get_elements_by_class_name(
+        &self,
+        root: NodeId,
+        class_names: &DomString,
+    ) -> HtmlCollection {
         HtmlCollection::new(root, CollectionFilter::ClassNames(ordered_set(class_names)))
     }
 }

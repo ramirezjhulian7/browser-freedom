@@ -85,13 +85,19 @@ pub enum EventKind {
     #[default]
     Event,
     /// `CustomEvent`: `detail` es un valor de script (handle) o nulo.
-    Custom { detail: Option<u64> },
+    Custom {
+        detail: Option<u64>,
+    },
     /// `UIEvent`.
-    Ui { detail: i32 },
+    Ui {
+        detail: i32,
+    },
     Mouse(MouseEventData),
     Keyboard(KeyboardEventData),
     /// `FocusEvent`.
-    Focus { related_target: Option<EventTarget> },
+    Focus {
+        related_target: Option<EventTarget>,
+    },
     Input(InputEventData),
 }
 
@@ -328,17 +334,16 @@ pub enum Activation {
 
 /// Ejecuta los listeners de script.
 pub trait ScriptHost {
-    /// Llama al callback `handle` con `event`; `Err` si lanzó una excepción.
-    fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event)
-    -> Result<(), ()>;
+    /// Llama al callback `handle` con `event`; devuelve `true` si lanzó una excepción.
+    fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool;
 }
 
 /// Sin motor de script: los listeners de script no hacen nada.
 pub struct NoScript;
 
 impl ScriptHost for NoScript {
-    fn call_listener(&mut self, _: &mut Document, _: u64, _: &mut Event) -> Result<(), ()> {
-        Ok(())
+    fn call_listener(&mut self, _: &mut Document, _: u64, _: &mut Event) -> bool {
+        false
     }
 }
 
@@ -379,9 +384,10 @@ impl Document {
             .passive
             .unwrap_or_else(|| self.default_passive(&type_, target));
         let list = self.listeners.map.entry(target).or_default();
-        if list.iter().any(|l| {
-            l.type_ == type_ && l.capture == options.capture && l.callback.same(&callback)
-        }) {
+        if list
+            .iter()
+            .any(|l| l.type_ == type_ && l.capture == options.capture && l.callback.same(&callback))
+        {
             return;
         }
         list.push(ListenerEntry {
@@ -465,7 +471,12 @@ impl Document {
     }
 
     /// "Dispatch" (§2.9). Devuelve `false` si el evento se canceló.
-    pub fn dispatch(&mut self, target: EventTarget, event: &mut Event, host: &mut dyn ScriptHost) -> bool {
+    pub fn dispatch(
+        &mut self,
+        target: EventTarget,
+        event: &mut Event,
+        host: &mut dyn ScriptHost,
+    ) -> bool {
         // 1.
         event.dispatch = true;
         // 3.
@@ -520,8 +531,8 @@ impl Document {
             self.invoke(i, event, Phase::Capturing, host);
         }
         // 5.13: burbujeo.
-        for i in 0..path.len() {
-            if path[i].shadow_adjusted_target.is_some() {
+        for (i, entry) in path.iter().enumerate() {
+            if entry.shadow_adjusted_target.is_some() {
                 event.event_phase = EventPhase::AtTarget;
             } else {
                 if !event.bubbles {
@@ -563,7 +574,12 @@ impl Document {
         // 5-6.
         let current = event.path[i].invocation_target;
         event.current_target = Some(current);
-        let listeners = self.listeners.map.get(&current).cloned().unwrap_or_default();
+        let listeners = self
+            .listeners
+            .map
+            .get(&current)
+            .cloned()
+            .unwrap_or_default();
         // 7.
         let found = self.inner_invoke(event, &listeners, phase, host);
         // 8. Tipos heredados con prefijo `webkit` para eventos de confianza.
@@ -645,6 +661,35 @@ impl Document {
         e.is_html("button")
     }
 
+    /// "Actually disabled" (HTML §4.10.18.5): atributo `disabled` o un `fieldset` deshabilitado
+    /// ancestro (salvo dentro de su primera `legend`).
+    pub fn is_disabled(&self, n: NodeId) -> bool {
+        if self
+            .element(n)
+            .is_some_and(|e| e.attr("disabled").is_some())
+        {
+            return true;
+        }
+        let mut child = n;
+        let mut cur = self.parent(n);
+        while let Some(p) = cur {
+            if let Some(e) = self.element(p)
+                && e.is_html("fieldset")
+                && e.attr("disabled").is_some()
+            {
+                let first_legend = self
+                    .children(p)
+                    .find(|&c| self.element(c).is_some_and(|x| x.is_html("legend")));
+                if first_legend != Some(child) {
+                    return true;
+                }
+            }
+            child = p;
+            cur = self.parent(p);
+        }
+        false
+    }
+
     fn input_type(&self, n: NodeId) -> String {
         self.element(n)
             .and_then(|e| e.attr("type"))
@@ -666,7 +711,10 @@ impl Document {
             }
             "radio" => {
                 let old = self.checkedness(n);
-                let previous = self.radio_group(n).into_iter().find(|&r| self.checkedness(r));
+                let previous = self
+                    .radio_group(n)
+                    .into_iter()
+                    .find(|&r| self.checkedness(r));
                 self.set_checkedness(n, true);
                 Some((old, previous))
             }
@@ -696,12 +744,20 @@ impl Document {
         };
         if e.is_html("a") || e.is_html("area") {
             if e.attr("href").is_some() {
-                self.listeners.activations.push(Activation::FollowHyperlink(n));
+                self.listeners
+                    .activations
+                    .push(Activation::FollowHyperlink(n));
             }
             return;
         }
         if e.is_html("input") {
-            match self.input_type(n).as_str() {
+            let kind = self.input_type(n);
+            // "If element is not mutable and is not in the Checkbox state and is not in the
+            // Radio state, then return."
+            if !matches!(kind.as_str(), "checkbox" | "radio") && self.is_disabled(n) {
+                return;
+            }
+            match kind.as_str() {
                 "checkbox" | "radio" => {
                     // Si está conectado: `input` y `change` (HTML §4.10.5.1.15/16).
                     if self.is_connected(n) {
@@ -710,12 +766,24 @@ impl Document {
                             cancelable: false,
                             composed: true,
                         };
-                        self.fire_event(EventTarget::Node(n), "input", init, EventKind::Event, host);
+                        self.fire_event(
+                            EventTarget::Node(n),
+                            "input",
+                            init,
+                            EventKind::Event,
+                            host,
+                        );
                         let init = EventInit {
                             bubbles: true,
                             ..EventInit::default()
                         };
-                        self.fire_event(EventTarget::Node(n), "change", init, EventKind::Event, host);
+                        self.fire_event(
+                            EventTarget::Node(n),
+                            "change",
+                            init,
+                            EventKind::Event,
+                            host,
+                        );
                     }
                 }
                 "submit" | "image" => self.listeners.activations.push(Activation::Submit(n)),
@@ -725,6 +793,10 @@ impl Document {
             return;
         }
         if e.is_html("button") {
+            if self.is_disabled(n) {
+                return;
+            }
+            let e = self.element(n).expect("elemento");
             match e.attr("type").map(str::to_ascii_lowercase).as_deref() {
                 Some("reset") => self.listeners.activations.push(Activation::Reset(n)),
                 Some("button") => {}

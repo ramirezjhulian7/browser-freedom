@@ -72,14 +72,14 @@ impl DomException {
             DomException::InUseAttributeError => "The attribute is in use by another element.",
             DomException::InvalidStateError => "The object is in an invalid state.",
             DomException::SyntaxError => "The string did not match the expected pattern.",
-            DomException::InvalidModificationError => {
-                "The object can not be modified in this way."
-            }
+            DomException::InvalidModificationError => "The object can not be modified in this way.",
             DomException::NamespaceError => "The operation is not allowed by Namespaces in XML.",
             DomException::InvalidAccessError => {
                 "The object does not support the operation or argument."
             }
-            DomException::TypeMismatchError => "The type of the object does not match the expected type.",
+            DomException::TypeMismatchError => {
+                "The type of the object does not match the expected type."
+            }
             DomException::SecurityError => "The operation is insecure.",
             DomException::AbortError => "The operation was aborted.",
             DomException::TimeoutError => "The operation timed out.",

@@ -4,9 +4,7 @@
 
 use bf_infra::{DomString, Namespace};
 
-use crate::names::{
-    NameContext, valid_attribute_local_name, validate_and_extract,
-};
+use crate::names::{NameContext, valid_attribute_local_name, validate_and_extract};
 use crate::observer::{Mutation, MutationType};
 use crate::{AttrData, Attribute, Document, DomException, NodeData, NodeId};
 
@@ -97,6 +95,10 @@ impl Document {
             next: None,
         });
         self.bump_version();
+        // Attribute change steps de HTML.
+        if ns.is_none() {
+            self.attribute_changed(el, local);
+        }
     }
 
     /// "Change an attribute" (por namespace y local name) a `value`.
@@ -374,7 +376,8 @@ impl Document {
                     a.owner = None;
                     a.value = old_value.clone();
                 }
-                self.attr_nodes.remove(&(el, data.ns, data.local_name.clone()));
+                self.attr_nodes
+                    .remove(&(el, data.ns, data.local_name.clone()));
                 self.element_mut(el).expect("elemento").attrs[i] = Attribute {
                     ns: data.ns,
                     prefix: data.prefix.clone(),
@@ -404,7 +407,11 @@ impl Document {
     }
 
     /// `Element.removeAttributeNode(attr)` / `NamedNodeMap.removeNamedItem*`.
-    pub fn remove_attribute_node(&mut self, el: NodeId, attr: NodeId) -> Result<NodeId, DomException> {
+    pub fn remove_attribute_node(
+        &mut self,
+        el: NodeId,
+        attr: NodeId,
+    ) -> Result<NodeId, DomException> {
         let data = self.attr_data(attr).clone();
         if data.owner != Some(el) {
             return Err(DomException::NotFoundError);
@@ -417,7 +424,11 @@ impl Document {
     }
 
     /// `NamedNodeMap.removeNamedItem(qualifiedName)`.
-    pub fn remove_named_item(&mut self, el: NodeId, name: &DomString) -> Result<NodeId, DomException> {
+    pub fn remove_named_item(
+        &mut self,
+        el: NodeId,
+        name: &DomString,
+    ) -> Result<NodeId, DomException> {
         let node = self
             .get_attribute_node(el, name)
             .ok_or(DomException::NotFoundError)?;
@@ -433,7 +444,8 @@ impl Document {
 
     /// `Element.id`.
     pub fn id(&self, el: NodeId) -> DomString {
-        self.get_attribute_ns(el, None, &"id".into()).unwrap_or_default()
+        self.get_attribute_ns(el, None, &"id".into())
+            .unwrap_or_default()
     }
 
     pub fn set_id(&mut self, el: NodeId, value: DomString) {
@@ -462,7 +474,9 @@ impl Document {
 
     /// Hijos elemento de `n` (`ParentNode.children`, instantánea).
     pub fn element_children(&self, n: NodeId) -> Vec<NodeId> {
-        self.children(n).filter(|&c| self.element(c).is_some()).collect()
+        self.children(n)
+            .filter(|&c| self.element(c).is_some())
+            .collect()
     }
 
     pub fn first_element_child(&self, n: NodeId) -> Option<NodeId> {
@@ -481,7 +495,9 @@ impl Document {
     }
 
     pub fn child_element_count(&self, n: NodeId) -> usize {
-        self.children(n).filter(|&c| self.element(c).is_some()).count()
+        self.children(n)
+            .filter(|&c| self.element(c).is_some())
+            .count()
     }
 
     pub fn previous_element_sibling(&self, n: NodeId) -> Option<NodeId> {
@@ -532,7 +548,11 @@ impl Document {
     }
 
     /// `ParentNode.prepend(...nodes)`.
-    pub fn prepend(&mut self, parent: NodeId, nodes: Vec<NodeOrString>) -> Result<(), DomException> {
+    pub fn prepend(
+        &mut self,
+        parent: NodeId,
+        nodes: Vec<NodeOrString>,
+    ) -> Result<(), DomException> {
         let node = self.convert_nodes_into_node(nodes)?;
         let first = self.get(parent).first_child();
         self.pre_insert(node, parent, first).map(|_| ())
@@ -555,7 +575,9 @@ impl Document {
         nodes: Vec<NodeOrString>,
     ) -> Result<(), DomException> {
         let node = self.convert_nodes_into_node(nodes)?;
-        self.ensure_pre_insertion_validity(node, parent, None)?;
+        // "Ensure pre-insert validity" con todos los hijos de `parent` excluidos.
+        let children: Vec<NodeId> = self.children(parent).collect();
+        self.ensure_pre_insert_validity_excluding(node, parent, None, &children)?;
         self.replace_all(Some(node), parent);
         Ok(())
     }
@@ -607,7 +629,11 @@ impl Document {
     }
 
     /// `ChildNode.replaceWith(...nodes)`.
-    pub fn replace_with(&mut self, this: NodeId, nodes: Vec<NodeOrString>) -> Result<(), DomException> {
+    pub fn replace_with(
+        &mut self,
+        this: NodeId,
+        nodes: Vec<NodeOrString>,
+    ) -> Result<(), DomException> {
         let Some(parent) = self.parent(this) else {
             return Ok(());
         };
@@ -746,7 +772,9 @@ impl DomTokenList {
 
     /// El token set.
     pub fn tokens(&self, doc: &Document) -> Vec<DomString> {
-        self.attr_value(doc).map(|v| ordered_set(&v)).unwrap_or_default()
+        self.attr_value(doc)
+            .map(|v| ordered_set(&v))
+            .unwrap_or_default()
     }
 
     /// "Update steps".
@@ -829,6 +857,9 @@ impl DomTokenList {
         token: &DomString,
         new_token: &DomString,
     ) -> Result<bool, DomException> {
+        if token.is_empty() || new_token.is_empty() {
+            return Err(DomException::SyntaxError);
+        }
         validate_token(token)?;
         validate_token(new_token)?;
         let mut set = self.tokens(doc);

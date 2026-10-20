@@ -112,7 +112,12 @@ impl Document {
     }
 
     /// `CharacterData.deleteData(offset, count)`.
-    pub fn delete_data(&mut self, n: NodeId, offset: usize, count: usize) -> Result<(), DomException> {
+    pub fn delete_data(
+        &mut self,
+        n: NodeId,
+        offset: usize,
+        count: usize,
+    ) -> Result<(), DomException> {
         self.replace_data(n, offset, count, &DomString::new())
     }
 
