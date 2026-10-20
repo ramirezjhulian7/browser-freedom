@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
         let (parent, _, scope) = self.stack.pop().expect("recién apilado");
         let node = self.doc.create(NodeData::Element(Element {
             ns,
+            prefix: (!prefix.is_empty()).then(|| prefix.as_str().into()),
             name: local.into(),
             attrs,
             template_contents: None,

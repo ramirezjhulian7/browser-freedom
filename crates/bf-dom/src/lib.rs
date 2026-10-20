@@ -1,14 +1,48 @@
-//! Árbol DOM conforme al DOM Living Standard: nodos, documentos, eventos y mutaciones.
+//! Árbol DOM conforme al DOM Living Standard (<https://dom.spec.whatwg.org>): nodos,
+//! documentos, algoritmos de mutación (§4.2), la interfaz `Node` y sus subclases, eventos
+//! (§2), `MutationObserver` (§4.3) y `AbortController` (§3).
 //!
 //! Los nodos viven en una arena (`Document::nodes`) y se referencian con índices [`NodeId`].
-//! En esta etapa la arena nunca libera nodos: `remove` solo los desvincula del árbol.
+//! La arena nunca libera nodos: `remove` solo los desvincula del árbol. Los métodos siguen los
+//! nombres de las interfaces del spec en `snake_case`; los que pueden lanzar devuelven
+//! `Result<_, DomException>`.
+//!
+//! Organización:
+//! - [`mutation`]: §4.2.3 (pre-insert, insert, replace, remove, adopt) y los hooks.
+//! - `node`, `element`, `document`, `character_data`: las interfaces.
+//! - [`collections`]: `HTMLCollection` viva y `NodeList`.
+//! - [`events`]: `Event`, `EventTarget` y el dispatch de §2.9.
+//! - [`observer`]: `MutationObserver`.
+//! - [`abort`]: `AbortController` y `AbortSignal`.
+//!
+//! `matches`/`closest`/`querySelector` están en `bf_css::query` y la serialización HTML
+//! (`innerHTML`, `outerHTML`, `insertAdjacentHTML`) en `bf_html::dom`, porque esos crates
+//! dependen de este.
 
 #![forbid(unsafe_code)]
 
+pub mod abort;
+mod character_data;
+pub mod collections;
+mod document;
+mod element;
+pub mod events;
+mod exception;
 mod forms;
+pub mod mutation;
+mod names;
+mod node;
+pub mod observer;
 mod serialize;
 
-pub use bf_infra::{DomString, Namespace};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub use bf_infra::{Atom, DomString, Namespace, Url};
+pub use document::{HtmlElementKind, html_element_kind};
+pub use element::{DomTokenList, TokenListError};
+pub use exception::DomException;
+pub use node::{NodeType, document_position};
 pub use serialize::test_serialize;
 
 /// Índice de un nodo en la arena de su [`Document`].
@@ -30,6 +64,18 @@ pub enum QuirksMode {
     LimitedQuirks,
 }
 
+/// Datos de un nodo `Attr` (§4.9.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrData {
+    pub ns: Option<Namespace>,
+    pub prefix: Option<DomString>,
+    pub local_name: DomString,
+    /// Valor propio; mientras tiene elemento, el valor vigente es el del elemento.
+    pub value: DomString,
+    /// El elemento al que pertenece.
+    pub owner: Option<NodeId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeData {
     Document,
@@ -40,7 +86,9 @@ pub enum NodeData {
         system_id: DomString,
     },
     Element(Element),
+    Attr(AttrData),
     Text(DomString),
+    CdataSection(DomString),
     Comment(DomString),
     ProcessingInstruction {
         target: DomString,
@@ -50,7 +98,10 @@ pub enum NodeData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element {
+    /// Namespace (`Namespace::Null` para los elementos sin namespace).
     pub ns: Namespace,
+    /// Namespace prefix.
+    pub prefix: Option<DomString>,
     /// Local name.
     pub name: DomString,
     pub attrs: Vec<Attribute>,
@@ -59,17 +110,46 @@ pub struct Element {
 }
 
 impl Element {
+    /// Elemento sin atributos ni prefijo.
+    pub fn new(ns: Namespace, name: impl Into<DomString>) -> Self {
+        Element {
+            ns,
+            prefix: None,
+            name: name.into(),
+            attrs: Vec::new(),
+            template_contents: None,
+        }
+    }
+
     /// ¿Es un elemento del namespace HTML con este local name?
     pub fn is_html(&self, name: &str) -> bool {
         self.ns == Namespace::Html && self.name == name
     }
 
-    /// Valor del atributo sin namespace llamado `name`.
+    /// Valor del atributo sin namespace llamado `name`, como `&str`. Un valor con surrogates
+    /// sueltos no se ve por aquí (ver [`Document::get_attribute`]).
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
             .find(|a| a.ns.is_none() && a.name == name)
             .and_then(|a| a.value.as_str())
+    }
+
+    /// Qualified name (prefijo `:` local name).
+    pub fn qualified_name(&self) -> DomString {
+        qualified(self.prefix.as_ref(), &self.name)
+    }
+}
+
+pub(crate) fn qualified(prefix: Option<&DomString>, local: &DomString) -> DomString {
+    match prefix {
+        Some(p) => {
+            let mut q = p.clone();
+            q.push(':');
+            q.push_dom_str(local);
+            q
+        }
+        None => local.clone(),
     }
 }
 
@@ -91,6 +171,11 @@ impl Attribute {
             name: name.into(),
             value: value.into(),
         }
+    }
+
+    /// Qualified name.
+    pub fn qualified_name(&self) -> DomString {
+        qualified(self.prefix.as_ref(), &self.name)
     }
 }
 
@@ -138,11 +223,29 @@ impl Node {
     }
 }
 
+/// Un documento y la arena de todos sus nodos (también de los que creó y no insertó).
 #[derive(Debug, Clone)]
 pub struct Document {
     nodes: Vec<Node>,
     pub mode: QuirksMode,
     microtasks: Vec<forms::Microtask>,
+    /// URL del documento (`about:blank` por defecto).
+    pub url: Url,
+    /// Content type (`text/html` para documentos HTML).
+    pub content_type: DomString,
+    /// Encoding del documento (nombre canónico).
+    pub character_set: DomString,
+    /// ¿Documento HTML (y no XML)?
+    pub is_html: bool,
+    /// Contador de mutaciones del árbol y de atributos: invalida las colecciones vivas.
+    version: u64,
+    /// Mapa id → primer elemento en tree order, reconstruido cuando cambia `version`.
+    id_cache: IdCache,
+    /// Nodos `Attr` ya creados por elemento y (namespace, local name).
+    attr_nodes: HashMap<(NodeId, Option<Namespace>, DomString), NodeId>,
+    pub(crate) observers: observer::Observers,
+    pub(crate) listeners: events::Listeners,
+    pub(crate) aborts: abort::AbortState,
 }
 
 impl Default for Document {
@@ -152,19 +255,42 @@ impl Default for Document {
 }
 
 impl Document {
-    /// Documento vacío: solo el nodo `Document` raíz.
+    /// Documento HTML vacío: solo el nodo `Document` raíz.
     pub fn new() -> Self {
         let mut doc = Document {
             nodes: Vec::new(),
             mode: QuirksMode::NoQuirks,
             microtasks: Vec::new(),
+            url: Url::parse("about:blank", None).expect("about:blank es una URL válida"),
+            content_type: "text/html".into(),
+            character_set: "UTF-8".into(),
+            is_html: true,
+            version: 0,
+            id_cache: IdCache::default(),
+            attr_nodes: HashMap::new(),
+            observers: observer::Observers::default(),
+            listeners: events::Listeners::default(),
+            aborts: abort::AbortState::default(),
         };
-        doc.create(NodeData::Document);
+        doc.push(NodeData::Document);
+        doc
+    }
+
+    /// Documento XML vacío (`application/xml`).
+    pub fn new_xml() -> Self {
+        let mut doc = Document::new();
+        doc.is_html = false;
+        doc.content_type = "application/xml".into();
         doc
     }
 
     pub fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// Cantidad de nodos de la arena.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     /// Crea un nodo desvinculado. Un `template` HTML recibe su template contents.
@@ -178,36 +304,6 @@ impl Document {
         let id = self.push(data);
         self.init_element_state(id);
         id
-    }
-
-    /// Clona `id` (y su subárbol si `deep`), como el algoritmo *clone a node* del DOM.
-    pub fn clone_node(&mut self, id: NodeId, deep: bool) -> NodeId {
-        let mut data = self.get(id).data.clone();
-        let template_source = match &mut data {
-            NodeData::Element(e) => e.template_contents.take(),
-            _ => None,
-        };
-        let copy = self.create(data);
-        self.clone_element_state(id, copy);
-        if deep {
-            // Cloning steps de template: copiar también el template contents.
-            if let (Some(source), Some(target)) = (
-                template_source,
-                self.element(copy).and_then(|e| e.template_contents),
-            ) {
-                let children: Vec<_> = self.children(source).collect();
-                for child in children {
-                    let child_copy = self.clone_node(child, true);
-                    self.append(target, child_copy);
-                }
-            }
-            let children: Vec<_> = self.children(id).collect();
-            for child in children {
-                let child_copy = self.clone_node(child, true);
-                self.append(copy, child_copy);
-            }
-        }
-        copy
     }
 
     fn push(&mut self, data: NodeData) -> NodeId {
@@ -240,6 +336,10 @@ impl Document {
         self.get(id).element()
     }
 
+    pub fn element_mut(&mut self, id: NodeId) -> Option<&mut Element> {
+        self.get_mut(id).element_mut()
+    }
+
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children {
             doc: self,
@@ -259,21 +359,44 @@ impl Document {
         false
     }
 
+    /// Ancestros inclusivos de `id`, del propio nodo a la raíz.
+    pub fn inclusive_ancestors(&self, id: NodeId) -> Vec<NodeId> {
+        let mut out = vec![id];
+        let mut current = id;
+        while let Some(p) = self.parent(current) {
+            out.push(p);
+            current = p;
+        }
+        out
+    }
+
+    /// La raíz del árbol de `id`.
+    pub fn tree_root(&self, id: NodeId) -> NodeId {
+        let mut current = id;
+        while let Some(p) = self.parent(current) {
+            current = p;
+        }
+        current
+    }
+
     /// Agrega `child` como último hijo de `parent` (desvinculándolo antes si tenía padre).
+    /// Es el *append* sin validación que usa el parser; corre el *insert* del spec.
     pub fn append(&mut self, parent: NodeId, child: NodeId) {
         self.insert_before(parent, child, None);
     }
 
-    /// Inserta `child` en `parent` antes de `reference` (al final si es `None`), corriendo los
-    /// insertion steps y post-connection steps de los elementos insertados.
+    /// Inserta `child` en `parent` antes de `reference` (al final si es `None`) con el
+    /// algoritmo *insert* (§4.2.3), sin la validación de *pre-insert* (la garantiza quien
+    /// llama, como el parser).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, reference: Option<NodeId>) {
         debug_assert!(reference.is_none_or(|r| self.parent(r) == Some(parent)));
-        self.remove(child);
-        self.link(parent, child, reference);
-        self.run_insertion_steps(child);
+        if self.parent(child).is_some() {
+            self.remove(child);
+        }
+        self.insert(child, parent, reference, false);
     }
 
-    fn link(&mut self, parent: NodeId, child: NodeId, reference: Option<NodeId>) {
+    pub(crate) fn link(&mut self, parent: NodeId, child: NodeId, reference: Option<NodeId>) {
         let prev = match reference {
             Some(r) => self.get(r).prev_sibling,
             None => self.get(parent).last_child,
@@ -294,15 +417,8 @@ impl Document {
         }
     }
 
-    /// Desvincula `child` de su padre (corriendo los removing steps). No libera el nodo.
-    pub fn remove(&mut self, child: NodeId) {
-        if self.unlink(child) {
-            self.run_removing_steps(child);
-        }
-    }
-
     /// Desvincula `child`; devuelve si tenía padre.
-    fn unlink(&mut self, child: NodeId) -> bool {
+    pub(crate) fn unlink(&mut self, child: NodeId) -> bool {
         let Some(parent) = self.get(child).parent else {
             return false;
         };
@@ -327,11 +443,7 @@ impl Document {
 
     /// ¿El nodo está conectado (su raíz es el nodo `Document`)?
     pub fn is_connected(&self, id: NodeId) -> bool {
-        let mut current = id;
-        while let Some(parent) = self.parent(current) {
-            current = parent;
-        }
-        current == self.root()
+        self.tree_root(id) == self.root()
     }
 
     /// Descendientes inclusivos de `id` en tree order (sin entrar a template contents).
@@ -340,20 +452,51 @@ impl Document {
         let mut node = Some(id);
         while let Some(n) = node {
             out.push(n);
-            node = self.get(n).first_child;
-            if node.is_none() {
-                // Siguiente nodo en preorden sin salir del subárbol de `id`.
-                let mut up = n;
-                while up != id {
-                    if let Some(next) = self.get(up).next_sibling {
-                        node = Some(next);
-                        break;
-                    }
-                    up = self.parent(up).expect("dentro del subárbol");
-                }
-            }
+            node = self.following_within(n, id);
         }
         out
+    }
+
+    /// Descendientes de `id` en tree order.
+    pub fn descendants(&self, id: NodeId) -> Vec<NodeId> {
+        let mut v = self.inclusive_descendants(id);
+        v.remove(0);
+        v
+    }
+
+    /// El siguiente nodo en preorden dentro del subárbol de `root`.
+    pub fn following_within(&self, n: NodeId, root: NodeId) -> Option<NodeId> {
+        if let Some(c) = self.get(n).first_child {
+            return Some(c);
+        }
+        let mut up = n;
+        while up != root {
+            if let Some(next) = self.get(up).next_sibling {
+                return Some(next);
+            }
+            up = self.parent(up)?;
+        }
+        None
+    }
+
+    /// Contador de mutaciones (cambia con cada inserción, remoción o cambio de atributo o
+    /// de datos).
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub(crate) fn bump_version(&mut self) {
+        self.version += 1;
+    }
+}
+
+/// Caché de `getElementById`: (versión, id → elemento). Clonar un documento la vacía.
+#[derive(Debug, Default)]
+pub(crate) struct IdCache(pub(crate) Mutex<Option<(u64, HashMap<DomString, NodeId>)>>);
+
+impl Clone for IdCache {
+    fn clone(&self) -> Self {
+        IdCache::default()
     }
 }
 
@@ -415,12 +558,7 @@ mod tests {
     #[test]
     fn template_gets_contents() {
         let mut doc = Document::new();
-        let t = doc.create(NodeData::Element(Element {
-            ns: Namespace::Html,
-            name: "template".into(),
-            attrs: vec![],
-            template_contents: None,
-        }));
+        let t = doc.create(NodeData::Element(Element::new(Namespace::Html, "template")));
         let contents = doc.element(t).unwrap().template_contents.unwrap();
         assert_eq!(doc.get(contents).data, NodeData::DocumentFragment);
     }

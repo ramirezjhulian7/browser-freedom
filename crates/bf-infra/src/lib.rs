@@ -20,6 +20,9 @@ pub enum Namespace {
     Xml,
     XmlNs,
     Other(Atom),
+    /// Sin namespace: solo para `Element.ns` (los elementos de `createElementNS(null, ...)`
+    /// o `createElement` en un documento XML); los atributos usan `Option<Namespace>`.
+    Null,
 }
 
 impl Namespace {
@@ -32,6 +35,7 @@ impl Namespace {
             Namespace::Xml => "http://www.w3.org/XML/1998/namespace",
             Namespace::XmlNs => "http://www.w3.org/2000/xmlns/",
             Namespace::Other(a) => a.as_str(),
+            Namespace::Null => "",
         }
     }
 
