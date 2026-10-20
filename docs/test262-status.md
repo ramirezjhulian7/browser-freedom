@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-20; 52017 archivos en 21 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-20; 52017 archivos en 133 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones.
 - `skipped`: módulos (paso 5) y las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
