@@ -69,7 +69,7 @@ impl Element {
         self.attrs
             .iter()
             .find(|a| a.ns.is_none() && a.name == name)
-            .map(|a| a.value.as_str())
+            .and_then(|a| a.value.as_str())
     }
 }
 
@@ -384,7 +384,7 @@ mod tests {
     fn texts(doc: &Document, parent: NodeId) -> Vec<String> {
         doc.children(parent)
             .map(|c| match &doc.get(c).data {
-                NodeData::Text(t) => t.clone(),
+                NodeData::Text(t) => t.to_string(),
                 _ => unreachable!(),
             })
             .collect()

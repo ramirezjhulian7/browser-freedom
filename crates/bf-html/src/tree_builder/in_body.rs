@@ -57,7 +57,7 @@ impl TreeBuilder {
     }
 
     fn in_body_start(&mut self, mut tag: TagToken) -> Flow {
-        match tag.name.as_str() {
+        match tag.name.as_lossy_str() {
             "html" => {
                 self.error();
                 if !self.stack_has_template() {
@@ -378,7 +378,7 @@ impl TreeBuilder {
     }
 
     fn in_body_end(&mut self, tag: TagToken) -> Flow {
-        match tag.name.as_str() {
+        match tag.name.as_lossy_str() {
             "template" => return self.in_head(Tok::End(tag)),
             "body" | "html" => {
                 if !self.has_in_scope("body", Scope::Default) {

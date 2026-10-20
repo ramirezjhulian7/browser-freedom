@@ -108,7 +108,7 @@ impl TagToken {
         self.attrs
             .iter()
             .find(|a| a.ns.is_none() && a.name == name)
-            .map(|a| a.value.as_str())
+            .map(|a| a.value.as_lossy_str())
     }
 }
 
@@ -126,7 +126,7 @@ enum Tok {
 impl Tok {
     fn from_token(token: Token) -> Tok {
         let tag = |t: tokenizer::Tag| TagToken {
-            name: t.name,
+            name: t.name.into(),
             self_closing: t.self_closing,
             attrs: t
                 .attrs
@@ -138,9 +138,11 @@ impl Tok {
             Token::Doctype(d) => Tok::Doctype(d),
             Token::StartTag(t) => Tok::Start(tag(t)),
             Token::EndTag(t) => Tok::End(tag(t)),
-            Token::Comment(c) => Tok::Comment(c),
+            Token::Comment(c) => Tok::Comment(c.into()),
             Token::ProcessingInstruction(pi) => Tok::Pi(pi),
             Token::Character(c) => Tok::Char(c),
+            // El surrogate real queda en `TreeBuilder::surrogate` (ver `run`).
+            Token::LoneSurrogate(_) => Tok::Char('\u{FFFD}'),
             Token::Eof => Tok::Eof,
         }
     }
@@ -173,6 +175,8 @@ const TREE_ERROR: &str = "tree-construction-error";
 
 struct TreeBuilder {
     tokenizer: Tokenizer,
+    /// El surrogate suelto del token de carácter en curso (llega a los modos como U+FFFD).
+    surrogate: Option<u16>,
     doc: Document,
     mode: Mode,
     original_mode: Mode,
@@ -214,6 +218,7 @@ impl TreeBuilder {
             context: None,
             pending_table_chars: String::new(),
             skip_next_lf: false,
+            surrogate: None,
             template_hosts: HashMap::new(),
             stopped: false,
             errors: Vec::new(),
@@ -270,6 +275,10 @@ impl TreeBuilder {
             self.tokenizer.set_cdata_allowed(cdata);
             let Some(token) = self.tokenizer.next_token() else {
                 break;
+            };
+            self.surrogate = match token {
+                Token::LoneSurrogate(u) => Some(u),
+                _ => None,
             };
             let tok = Tok::from_token(token);
             if std::mem::take(&mut self.skip_next_lf) && tok == Tok::Char('\n') {
@@ -378,7 +387,7 @@ impl TreeBuilder {
     fn is_html_one_of(&self, id: NodeId, names: &[&str]) -> bool {
         self.doc
             .element(id)
-            .is_some_and(|e| e.ns == Namespace::Html && names.contains(&e.name.as_str()))
+            .is_some_and(|e| e.ns == Namespace::Html && names.contains(&e.name.as_lossy_str()))
     }
 
     fn current(&self) -> NodeId {
@@ -482,8 +491,8 @@ impl TreeBuilder {
         while let Some(&node) = self.open.last() {
             let el = self.elem(node);
             if el.ns == Namespace::Html
-                && IMPLIED.contains(&el.name.as_str())
-                && except != Some(el.name.as_str())
+                && IMPLIED.contains(&el.name.as_lossy_str())
+                && except != Some(el.name.as_lossy_str())
             {
                 self.pop();
             } else {
@@ -514,7 +523,7 @@ impl TreeBuilder {
             }
             let el = self.elem(node);
             if el.ns == Namespace::Html {
-                let mode = match el.name.as_str() {
+                let mode = match el.name.as_lossy_str() {
                     "td" | "th" if !last => Some(Mode::InCell),
                     "tr" => Some(Mode::InRow),
                     "tbody" | "thead" | "tfoot" => Some(Mode::InTableBody),
@@ -765,8 +774,35 @@ impl TreeBuilder {
     }
 
     fn insert_char(&mut self, c: char) {
+        // Un surrogate suelto de la entrada llega como U+FFFD: se inserta su valor real.
+        if c == '\u{FFFD}'
+            && let Some(u) = self.surrogate.take()
+        {
+            self.insert_code_unit(u);
+            return;
+        }
         let mut buf = [0; 4];
         self.insert_chars(c.encode_utf8(&mut buf));
+    }
+
+    /// Insert a character, para un surrogate suelto.
+    fn insert_code_unit(&mut self, u: u16) {
+        let loc = self.appropriate_place(None);
+        if matches!(self.doc.get(loc.parent).data, NodeData::Document) {
+            return;
+        }
+        let previous = match loc.before {
+            Some(before) => self.doc.get(before).prev_sibling(),
+            None => self.doc.get(loc.parent).last_child(),
+        };
+        if let Some(prev) = previous
+            && let NodeData::Text(text) = &mut self.doc.get_mut(prev).data
+        {
+            text.push_code_unit(u);
+            return;
+        }
+        let text = self.doc.create(NodeData::Text(DomString::from_utf16(&[u])));
+        self.doc.insert_before(loc.parent, text, loc.before);
     }
 
     fn insert_comment(&mut self, data: DomString, location: Option<Loc>) {
@@ -778,8 +814,8 @@ impl TreeBuilder {
     fn insert_processing_instruction(&mut self, pi: ProcessingInstruction, location: Option<Loc>) {
         let loc = location.unwrap_or_else(|| self.appropriate_place(None));
         let node = self.doc.create(NodeData::ProcessingInstruction {
-            target: pi.target,
-            data: pi.data,
+            target: pi.target.into(),
+            data: pi.data.into(),
         });
         self.doc.insert_before(loc.parent, node, loc.before);
     }
@@ -816,18 +852,19 @@ enum Scope {
 
 impl Scope {
     fn is_boundary(self, el: &Element) -> bool {
-        let html = |names: &[&str]| el.ns == Namespace::Html && names.contains(&el.name.as_str());
+        let html =
+            |names: &[&str]| el.ns == Namespace::Html && names.contains(&el.name.as_lossy_str());
         let default = || {
             html(&[
                 "applet", "caption", "html", "table", "td", "th", "marquee", "object", "select",
                 "template",
             ]) || (el.ns == Namespace::MathMl
                 && matches!(
-                    el.name.as_str(),
+                    el.name.as_lossy_str(),
                     "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"
                 ))
                 || (el.ns == Namespace::Svg
-                    && matches!(el.name.as_str(), "foreignObject" | "desc" | "title"))
+                    && matches!(el.name.as_lossy_str(), "foreignObject" | "desc" | "title"))
         };
         match self {
             Scope::Default => default(),
@@ -842,7 +879,7 @@ impl Scope {
 fn is_special(el: &Element) -> bool {
     match el.ns {
         Namespace::Html => matches!(
-            el.name.as_str(),
+            el.name.as_lossy_str(),
             "address"
                 | "applet"
                 | "area"
@@ -928,17 +965,18 @@ fn is_special(el: &Element) -> bool {
                 | "xmp"
         ),
         Namespace::MathMl => matches!(
-            el.name.as_str(),
+            el.name.as_lossy_str(),
             "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"
         ),
-        Namespace::Svg => matches!(el.name.as_str(), "foreignObject" | "desc" | "title"),
+        Namespace::Svg => matches!(el.name.as_lossy_str(), "foreignObject" | "desc" | "title"),
         _ => false,
     }
 }
 
 /// MathML text integration point (13.2.6).
 fn is_mathml_text_integration_point(el: &Element) -> bool {
-    el.ns == Namespace::MathMl && matches!(el.name.as_str(), "mi" | "mo" | "mn" | "ms" | "mtext")
+    el.ns == Namespace::MathMl
+        && matches!(el.name.as_lossy_str(), "mi" | "mo" | "mn" | "ms" | "mtext")
 }
 
 /// HTML integration point (13.2.6). Los atributos del elemento son los de su start tag.
@@ -947,7 +985,7 @@ fn is_html_integration_point(el: &Element) -> bool {
         Namespace::MathMl if el.name == "annotation-xml" => el.attr("encoding").is_some_and(|v| {
             v.eq_ignore_ascii_case("text/html") || v.eq_ignore_ascii_case("application/xhtml+xml")
         }),
-        Namespace::Svg => matches!(el.name.as_str(), "foreignObject" | "desc" | "title"),
+        Namespace::Svg => matches!(el.name.as_lossy_str(), "foreignObject" | "desc" | "title"),
         _ => false,
     }
 }

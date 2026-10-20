@@ -350,7 +350,7 @@ impl Matcher<'_> {
             let (actual, expected) = if insensitive {
                 (attr.value.to_ascii_lowercase(), value.to_ascii_lowercase())
             } else {
-                (attr.value.clone(), value.clone())
+                (attr.value.to_string(), value.clone())
             };
             match op {
                 AttrOp::Equals => actual == expected,
@@ -483,7 +483,7 @@ impl Matcher<'_> {
             PseudoClass::Disabled => self.is_disabled(node, el),
             PseudoClass::Enabled => {
                 html && matches!(
-                    el.name.as_str(),
+                    el.name.as_lossy_str(),
                     "button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset"
                 ) && !self.is_disabled(node, el)
             }
@@ -510,7 +510,7 @@ impl Matcher<'_> {
             // definidos; el resto de los elementos sí.
             PseudoClass::Defined => !(html && el.name.contains('-')),
             PseudoClass::Heading(levels) => {
-                let level = match el.name.as_str() {
+                let level = match el.name.as_lossy_str() {
                     "h1" => 1,
                     "h2" => 2,
                     "h3" => 3,
@@ -529,7 +529,7 @@ impl Matcher<'_> {
         if el.ns != Namespace::Html {
             return false;
         }
-        match el.name.as_str() {
+        match el.name.as_lossy_str() {
             "button" | "input" | "select" | "textarea" | "fieldset" => {
                 el.attr("disabled").is_some() || self.in_disabled_fieldset(node)
             }
@@ -615,7 +615,7 @@ impl Matcher<'_> {
                     .iter()
                     .find(|a| a.ns == Some(Namespace::Xml) && a.name == "lang")
                 {
-                    return Some(attr.value.clone());
+                    return Some(attr.value.to_string());
                 }
                 if el.ns == Namespace::Html
                     && let Some(v) = el.attr("lang")
