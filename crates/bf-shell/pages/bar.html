@@ -2,96 +2,89 @@
 <html>
 <style>
 {{theme}}
-html, body { margin: 0; height: 72px; overflow: hidden; background: var(--chrome); }
+/* La barra: franja de pestañas (34 px, sobre el marco) y barra de herramientas (38 px, del
+   color de la pestaña activa, que se une a ella). Formas de cuadrado redondeado, como el
+   marco del logo; los iconos los dibuja chrome.rs en los huecos .icon. */
+html, body { margin: 0; height: 72px; overflow: hidden; background: var(--frame); }
+body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+
 .tabs {
   display: flex;
   align-items: flex-end;
-  height: 32px;
-  padding: 4px 8px 0;
+  height: 34px;
+  padding: 6px 8px 0;
   box-sizing: border-box;
 }
 .tab {
+  position: relative;
   flex: 1;
   min-width: 0;
-  max-width: 220px;
+  max-width: 232px;
   display: flex;
   align-items: center;
   height: 28px;
-  padding: 0 6px 0 12px;
+  padding: 0 5px 0 10px;
   box-sizing: border-box;
-  margin-right: 2px;
-  border-radius: 8px 8px 0 0;
+  border-radius: 9px 9px 0 0;
   color: var(--text2);
   overflow: hidden;
   white-space: nowrap;
 }
-.tab.hover { background: var(--hover); }
-.tab.active { background: var(--surface); color: var(--text); }
+.tab.hover { background: var(--chrome); height: 24px; margin-bottom: 3px; border-radius: 8px; color: var(--text); }
+.tab.active { background: var(--chrome); color: var(--text); height: 28px; margin-bottom: 0; border-radius: 9px 9px 0 0; }
+/* El borde superior de la pestaña activa: un trazo ámbar que no llega a la esquina derecha,
+   la esquina abierta del logo. */
+.tab .edge { position: absolute; top: 0; left: 10px; right: 26px; height: 2px; border-radius: 0 0 2px 2px; background: var(--accent); }
+.tab .ticon { flex: none; display: block; width: 16px; height: 16px; margin-right: 8px; }
 .tab .title { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
-.tab .spin { flex: none; width: 7px; height: 7px; border-radius: 4px; background: var(--accent); margin-right: 8px; }
-.tab .close {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  line-height: 18px;
-  text-align: center;
-  border-radius: 9px;
-  margin-left: 6px;
-  font-size: 13px;
-  color: var(--text2);
-}
-.tab .close.hover { background: var(--hover); color: var(--text); }
-.newtab {
-  flex: none;
-  width: 24px;
-  height: 24px;
-  line-height: 24px;
-  text-align: center;
-  border-radius: 6px;
-  margin: 0 0 2px 2px;
-  font-size: 16px;
-  color: var(--text2);
-}
-.newtab.hover { background: var(--hover); color: var(--text); }
-body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+.tab .close { flex: none; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; margin-left: 4px; }
+.tab .close.hover { background: var(--hover); }
+.tab .x { display: block; width: 12px; height: 12px; }
+.divider { flex: none; width: 1px; height: 14px; margin: 0 0 7px; background: var(--border); }
+.divider.hidden { background: transparent; }
+.newtab { flex: none; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; margin: 0 0 1px 4px; }
+.newtab.hover { background: var(--chrome); }
+
 .bar {
   display: flex;
   align-items: center;
-  height: 40px;
-  padding: 0 8px;
+  height: 38px;
+  padding: 0 6px;
   box-sizing: border-box;
+  background: var(--chrome);
   border-bottom: 1px solid var(--border);
 }
-.brand {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  margin-right: 8px;
-}
-.btn { flex: none; display: block; position: relative; width: 28px; height: 28px; border-radius: 6px; margin-right: 2px; }
-.btn.hover, .btn.on { background: var(--hover); }
-.icon { display: block; width: 16px; height: 16px; margin: 6px; }
+/* Los botones centran su icono con flex: el margen de un hijo no debe colapsar a través de un
+   ítem flex, pero el motor todavía lo hace. */
+.brand, .btn, .newtab, .tab .close { box-sizing: border-box; }
+.brand { flex: none; display: flex; align-items: center; justify-content: center; width: 32px; height: 30px; margin-right: 2px; }
+.brand .icon { width: 20px; height: 20px; }
+.btn { flex: none; display: flex; align-items: center; justify-content: center; position: relative; width: 30px; height: 30px; border-radius: 8px; margin-right: 1px; }
+.btn.hover { background: var(--hover); }
+.btn.on { background: var(--accent-soft); }
+.icon { flex: none; display: block; width: 16px; height: 16px; }
 #field {
   flex: 1;
   display: flex;
   align-items: center;
-  height: 28px;
-  margin: 0 8px;
-  padding: 0 12px;
-  border-radius: 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  height: 30px;
+  margin: 0 6px 0 8px;
+  padding: 0 12px 0 10px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--frame);
+  border: 1px solid var(--frame);
   white-space: pre;
   overflow: hidden;
 }
-#field.focus { border-color: var(--accent); }
-#field .icon { width: 14px; height: 14px; margin: 0 6px 0 0; flex: none; }
+#field.hover { border-color: var(--border); }
+#field.focus { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#field .icon { width: 14px; height: 14px; margin: 0 8px 0 0; flex: none; }
 #text { flex: none; }
 .sec { color: var(--text2); }
 .sel { background: var(--selection); }
-#caret { display: inline-block; width: 1px; height: 16px; background: var(--accent); vertical-align: -3px; margin-right: -1px; }
-.dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 4px; background: var(--accent); }
+#caret { display: inline-block; width: 2px; height: 16px; border-radius: 1px; background: var(--accent); vertical-align: -3px; margin-right: -2px; }
+.dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 5px; background: var(--accent); border: 2px solid var(--chrome); }
 </style>
 <div class="tabs">{{tabs}}</div><div class="bar">{{brand}}{{back}}{{forward}}{{reload}}<div id="field" class="{{field_class}}">{{lock}}<span id="text" style="margin-left: {{scroll}}px">{{text}}</span></div>{{engine}}</div>
 </html>

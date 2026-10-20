@@ -232,8 +232,9 @@ bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"
 - **Menú contextual** (clic derecho): abrir enlaces o imágenes en otra pestaña, copiar sus
   direcciones, guardar una imagen o la página con un diálogo del sistema, cortar/copiar/pegar
   en un campo, ver el código fuente (`about:source?<url>`) e inspeccionar las cajas.
-- **Logo**: `assets/browser-freedom.png`; las versiones recortadas de `crates/bf-shell/assets/`
-  son el icono de la ventana, la marca de la barra y la de `about:home`.
+- **Logo**: `assets/browser-freedom.png`. `crates/bf-shell/assets/logo-64.png` es el icono de la
+  ventana y `mark-256.png` la marca sobre transparente de `about:home`; en la barra y las
+  pestañas la marca es el logo vectorizado (`Icon::Brand`), nítido a cualquier escala.
 
 ## La interfaz (detalle)
 
@@ -241,21 +242,31 @@ La interfaz muestra lo que el motor hace con cada página, en lugar de imitar el
 navegadores. La dibujan el propio motor y el propio rasterizador. La barra, la línea de estado,
 el panel y las páginas internas son HTML generado con plantillas de `crates/bf-shell/pages/`.
 Los iconos son paths. Todos los colores salen de un único `Theme`
-(`crates/bf-shell/src/theme.rs`):
+(`crates/bf-shell/src/theme.rs`), y la identidad sale del logo — un marco con la esquina
+superior derecha abierta por donde escapa un pájaro:
 
-- **Paleta oscura:** pizarra `#14171F`, superficie `#1E2330`, texto `#E6E8EE`/`#8A92A6` y un
-  único acento ámbar `#F5A524`.
-- **Paleta clara:** `#F7F7F9`/`#FFFFFF`/`#1A1D26`/`#6B7280`, con el mismo ámbar.
+- **Paleta oscura («tinta»):** marco `#0E1117` (franja de pestañas y línea de estado), cromo
+  `#161A22` (barra, pestaña activa, páginas internas), superficie `#1D222C`, texto
+  `#ECEEF3`/`#8D94A6` y un único acento, el ámbar del logo `#F5A524`.
+- **Paleta clara («papel»):** marco `#E8EAEF`, cromo `#F7F8FA`, superficie `#FFFFFF`, texto
+  `#171A21`/`#5E6574`; el mismo ámbar, y como texto (enlaces) un ámbar tostado `#9A5B00` que
+  cumple contraste AA.
+- **Formas:** cuadrados redondeados como el marco del logo (botones, campo de URL, tarjetas).
+- **El marco abierto:** el motivo del logo repetido en la interfaz — el trazo ámbar de la
+  pestaña activa no llega a su esquina derecha, y los monogramas de `about:home` y la marca de
+  `about:error` son marcos ámbar sin la esquina superior derecha (`.frame` en `style.css`).
 - **Elección del tema:** sigue al del sistema; `BF_THEME=light|dark` lo fuerza.
 - **Tipografía:** `system-ui`, 13 px en el cromo y 12 px en la línea de estado.
 
 Sus partes:
 
-- **Barra superior** (40 px):
-  - el monograma `bf`, ← → y ↻ (que pasa a ✕ mientras carga);
-  - el campo de URL: sin foco, formateado (candado en `https`, host destacado, esquema y
-    ruta en gris); con foco, editable;
-  - una línea de progreso ámbar mientras carga;
+- **Barra superior** (72 px: franja de pestañas de 34 y barra de herramientas de 38):
+  - las pestañas: la activa se une a la barra; cada una lleva la marca (páginas `about:`), un
+    globo (las demás) o un indicador ámbar que gira mientras carga;
+  - la marca, ← → y ↻ (que pasa a ✕ mientras carga);
+  - el campo de URL: sin foco, formateado (candado en `https`, aviso en `http`, la marca en
+    `about:`, host destacado, esquema y ruta en gris); con foco, una lupa, borde ámbar y halo;
+  - una línea de progreso ámbar a todo el ancho mientras carga;
   - el botón del **panel del motor**, con un punto ámbar si la página usó algo que el motor
     aún no soporta.
 - **Panel del motor** (320 px, `Ctrl+I`):
@@ -271,6 +282,8 @@ Sus partes:
   - botones para guardar PNG, volcar el layout y volcar el DOM (junto al ejecutable).
 - **Línea de estado** (24 px): el destino del enlace bajo el puntero; zoom, viewport en px CSS
   y tiempo total de carga.
+- **Menú contextual**: tarjeta con sombra, resaltado ámbar tenue y el atajo de cada acción a la
+  derecha.
 - **Superposición de cajas** (`F12`):
   - los fragmentos sobre la página: bloques en ámbar, inline en verde, texto en gris;
   - el fragmento bajo el puntero, resaltado y descrito como `<tag.class> tipo x,y w×h`.

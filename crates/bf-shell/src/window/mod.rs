@@ -445,6 +445,17 @@ fn set_clipboard(text: &str) -> bool {
         .is_ok()
 }
 
+/// El nombre de una página sin título: el archivo, la página interna o el host.
+fn short_name(url: &Url) -> String {
+    match &url.path {
+        bf_url::Path::List(segments) if url.scheme == "file" => {
+            segments.last().cloned().unwrap_or_default()
+        }
+        _ if url.scheme == "about" => url.href(),
+        _ => url.host_string(),
+    }
+}
+
 fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
     frame.draw_pixmap(
         x.round() as i32,
@@ -575,13 +586,7 @@ impl App {
             return "Cargando…".to_owned();
         }
         self.current.as_ref().map_or_else(String::new, |l| {
-            l.title().unwrap_or_else(|| match &l.url.path {
-                bf_url::Path::List(segments) if l.url.scheme == "file" => {
-                    segments.last().cloned().unwrap_or_default()
-                }
-                _ if l.url.scheme == "about" => l.url.href(),
-                _ => l.url.host_string(),
-            })
+            l.title().unwrap_or_else(|| short_name(&l.url))
         })
     }
 
@@ -638,8 +643,8 @@ impl App {
         }
         t.current
             .as_ref()
-            .and_then(|l| l.title())
-            .or_else(|| t.history.get(t.index).map(|e| e.url.href()))
+            .and_then(|l| l.title().or_else(|| Some(short_name(&l.url))))
+            .or_else(|| t.history.get(t.index).map(|e| short_name(&e.url)))
             .unwrap_or_default()
     }
 
@@ -651,6 +656,23 @@ impl App {
             .get(i)
             .and_then(|t| t.as_ref())
             .is_some_and(|t| t.loading.is_some())
+    }
+
+    /// Si la pestaña `i` muestra (o carga) una página interna (`about:`).
+    fn tab_internal(&self, i: usize) -> bool {
+        let (loading, current) = if i == self.active {
+            (&self.loading, &self.current)
+        } else {
+            match self.tabs.get(i).and_then(|t| t.as_ref()) {
+                Some(t) => (&t.loading, &t.current),
+                None => return false,
+            }
+        };
+        loading
+            .as_ref()
+            .map(|l| &l.url)
+            .or_else(|| current.as_ref().map(|l| &l.url))
+            .is_some_and(|u| u.scheme == "about")
     }
 
     fn any_loading(&self) -> bool {
@@ -1014,18 +1036,23 @@ impl App {
                 });
             }
             let has_sel = self.focus.as_ref().is_some_and(|f| f.selection().is_some());
-            items.push(MenuItem::new("Cortar", MenuAction::Cut).disabled(!has_sel));
-            items.push(MenuItem::new("Copiar", MenuAction::Copy).disabled(!has_sel));
+            items.push(MenuItem::new("Cortar (Ctrl+X)", MenuAction::Cut).disabled(!has_sel));
+            items.push(MenuItem::new("Copiar (Ctrl+C)", MenuAction::Copy).disabled(!has_sel));
             let paste = clipboard_text().is_some_and(|t| !t.is_empty());
-            items.push(MenuItem::new("Pegar", MenuAction::Paste).disabled(!paste));
-            items.push(MenuItem::new("Seleccionar todo", MenuAction::SelectAll));
+            items.push(MenuItem::new("Pegar (Ctrl+V)", MenuAction::Paste).disabled(!paste));
+            items.push(MenuItem::new(
+                "Seleccionar todo (Ctrl+A)",
+                MenuAction::SelectAll,
+            ));
             items.push(MenuItem::separator());
         }
-        items.push(MenuItem::new("Atrás", MenuAction::Back).disabled(!self.chrome.can_back));
+        items
+            .push(MenuItem::new("Atrás (Alt+←)", MenuAction::Back).disabled(!self.chrome.can_back));
         items.push(
-            MenuItem::new("Adelante", MenuAction::Forward).disabled(!self.chrome.can_forward),
+            MenuItem::new("Adelante (Alt+→)", MenuAction::Forward)
+                .disabled(!self.chrome.can_forward),
         );
-        items.push(MenuItem::new("Recargar", MenuAction::Reload));
+        items.push(MenuItem::new("Recargar (Ctrl+R)", MenuAction::Reload));
         items.push(MenuItem::separator());
         let page_url = self.current.as_ref().map(|c| c.url.href());
         let no_page = page_url.is_none();
@@ -1158,6 +1185,7 @@ impl App {
             .map(|i| TabInfo {
                 title: self.tab_title(i),
                 loading: self.tab_loading(i),
+                internal: self.tab_internal(i),
             })
             .collect();
         let c = &mut self.chrome;
@@ -2269,8 +2297,9 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // La línea de progreso se anima mientras carga; el aviso se borra al vencer.
-        if self.loading.is_some() {
+        // La línea de progreso y los indicadores de las pestañas se animan mientras algo carga;
+        // el aviso se borra al vencer.
+        if self.any_loading() {
             let next = self.last_progress_frame + PROGRESS_FRAME;
             if Instant::now() >= next {
                 self.last_progress_frame = Instant::now();
