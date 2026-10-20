@@ -110,7 +110,7 @@ mod tests {
     fn counts_what_is_ignored() {
         let sheet = Stylesheet::parse(
             "a { color: red; -webkit-tap-highlight-color: x; zoom: 2; display: flex }
-             @media screen { b { color: nope; grid-template-columns: 1fr } }
+             @media screen { b { color: nope; mask-type: alpha } }
              @container (min-width: 1px) { c { color: red } }
              @keyframes k { from { color: red } }",
             Origin::Author,
@@ -127,7 +127,7 @@ mod tests {
             Some(&1)
         );
         assert_eq!(r.unknown_properties.get("zoom"), Some(&1));
-        assert_eq!(r.unknown_properties.get("grid-template-columns"), Some(&1));
+        assert_eq!(r.unknown_properties.get("mask-type"), Some(&1));
         assert_eq!(r.unknown_properties.get("foo"), Some(&1));
         assert_eq!(r.unsupported_values.get("color"), Some(&1));
         assert_eq!(r.unsupported_at_rules.get("@container"), Some(&1));

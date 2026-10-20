@@ -10,8 +10,8 @@ use bf_dom::{Document, NodeData, NodeId};
 use bf_infra::Namespace;
 use bf_style::StyleMap;
 use bf_style::properties::types::{
-    BorderStyle, Content, ContentItem, Display, Float, LengthPercentageAuto, ListStylePosition,
-    ListStyleType, NonNegative, Position, Quotes,
+    BorderStyle, CaptionSide, Content, ContentItem, Display, Float, LengthPercentageAuto,
+    ListStylePosition, ListStyleType, NonNegative, Position, Quotes,
 };
 use bf_style::properties::{ComputedStyle, LonghandId, PROPERTIES};
 use bf_style::values::LengthPercentage;
@@ -41,6 +41,11 @@ pub enum BoxKind {
     BreakOpportunity,
     /// Marcador de `list-item` con su texto.
     Marker { text: String, outside: bool },
+    /// Caja de tabla (CSS 2.2 §17.4), hija de su caja envoltorio. Sus hijos son grupos de
+    /// columnas y grupos de filas ya normalizados (§17.2.1).
+    Table,
+    /// Grupo de filas, fila, grupo de columnas o columna (según su `display`).
+    TablePart,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +60,11 @@ pub struct LayoutBox {
     /// Para un `<fieldset>`: el índice de su leyenda renderizada entre los hijos, si tiene
     /// (HTML §15.3.13).
     pub fieldset: Option<Option<usize>>,
+    /// Celdas: (colspan, rowspan; 0 = hasta el final del grupo). Columnas y grupos de
+    /// columnas: (span, 1). HTML §4.9.11 y §4.9.4.
+    pub span: (u32, u32),
+    /// La rejilla de una caja de tabla (E4).
+    pub table: Option<Box<crate::table::TableGrid>>,
 }
 
 impl LayoutBox {
@@ -67,6 +77,8 @@ impl LayoutBox {
             children: Vec::new(),
             control: None,
             fieldset: None,
+            span: (1, 1),
+            table: None,
         }
     }
 
@@ -92,8 +104,12 @@ impl LayoutBox {
             return false;
         }
         match self.kind {
-            BoxKind::Block | BoxKind::AnonymousBlock => true,
-            BoxKind::Replaced { .. } => !self.style.display.is_inline_level(),
+            BoxKind::Block | BoxKind::AnonymousBlock | BoxKind::Table => true,
+            // E4: un reemplazado con `display` interno de tabla es inline (CSS Display 3
+            // §2.4: los tipos layout-internal no aplican a reemplazados).
+            BoxKind::Replaced { .. } => {
+                !self.style.display.is_inline_level() && !is_table_part(self.style.display)
+            }
             _ => false,
         }
     }
@@ -126,6 +142,8 @@ enum Item {
     Block(LayoutBox),
     Inline(LayoutBox),
     OutOfFlow(LayoutBox),
+    /// Caja interna de tabla o `table-caption`, antes de las correcciones de §17.2.1.
+    TablePart(LayoutBox),
 }
 
 struct Builder<'a> {
@@ -206,7 +224,7 @@ pub fn build_box_tree_report(
     let mut items = Vec::new();
     builder.element_items(root, &mut items);
     let root = items.into_iter().next().map(|i| match i {
-        Item::Block(b) | Item::OutOfFlow(b) | Item::Inline(b) => b,
+        Item::Block(b) | Item::OutOfFlow(b) | Item::Inline(b) | Item::TablePart(b) => b,
     });
     (root, builder.report)
 }
@@ -435,6 +453,23 @@ impl<'a> Builder<'a> {
         let mut text_box = LayoutBox::new(BoxKind::Text(text), style.clone(), Some(node));
         text_box.pseudo = Some(pseudo);
         let display = style.display;
+        // E4: pseudo-elementos con `display` de tabla.
+        if matches!(display, Display::Table | Display::InlineTable) {
+            let wrapper = make_table(
+                Some((node, Some(pseudo))),
+                &style,
+                vec![Item::Inline(text_box)],
+                display == Display::InlineTable,
+            );
+            out.push(classify(wrapper));
+            return;
+        }
+        if is_table_part(display) {
+            let mut b = table_part_box(style, Some(node), vec![Item::Inline(text_box)]);
+            b.pseudo = Some(pseudo);
+            out.push(Item::TablePart(b));
+            return;
+        }
         let kind = if display.is_inline_level() {
             if display == Display::Inline {
                 BoxKind::Inline
@@ -525,23 +560,7 @@ impl<'a> Builder<'a> {
             out.push(classify(control));
             return;
         }
-        if matches!(
-            style.display,
-            Display::Grid
-                | Display::InlineGrid
-                | Display::Table
-                | Display::InlineTable
-                | Display::TableRowGroup
-                | Display::TableHeaderGroup
-                | Display::TableFooterGroup
-                | Display::TableRow
-                | Display::TableCell
-                | Display::TableColumnGroup
-                | Display::TableColumn
-                | Display::TableCaption
-                | Display::Ruby
-                | Display::RubyText
-        ) {
+        if matches!(style.display, Display::Ruby | Display::RubyText) {
             *self
                 .report
                 .degraded_display
@@ -558,9 +577,31 @@ impl<'a> Builder<'a> {
         }
         // Contenido MathML/SVG interno (salvo `<svg>`, que es reemplazado): como inline.
         let display = style.display;
+        // E4: tablas (CSS 2.2 §17.2 y §17.4).
+        if matches!(display, Display::Table | Display::InlineTable) {
+            let mut items = Vec::new();
+            self.child_items(node, &style, &mut items);
+            let wrapper = make_table(
+                Some((node, None)),
+                &style,
+                items,
+                display == Display::InlineTable,
+            );
+            out.push(classify(wrapper));
+            return;
+        }
+        if is_table_part(display) {
+            let mut items = Vec::new();
+            self.child_items(node, &style, &mut items);
+            let mut b = table_part_box(style.clone(), Some(node), items);
+            b.span = table_span(el, display);
+            out.push(Item::TablePart(b));
+            return;
+        }
         if display == Display::Inline || matches!(display, Display::Ruby | Display::RubyText) {
             let mut inner = Vec::new();
             self.child_items(node, &style, &mut inner);
+            let inner = fixup_table_parts(inner, &style, true);
             split_inline(
                 LayoutBox::new(BoxKind::Inline, style, Some(node)),
                 inner,
@@ -586,7 +627,11 @@ impl<'a> Builder<'a> {
             });
         }
         self.child_items(node, &style, &mut items);
-        let flex = matches!(style.display, Display::Flex | Display::InlineFlex);
+        let items = fixup_table_parts(items, &style, false);
+        let flex = matches!(
+            style.display,
+            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+        );
         container.children = if flex {
             flex_items(items, &style)
         } else {
@@ -634,7 +679,7 @@ fn flex_items(items: Vec<Item>, parent_style: &Arc<ComputedStyle>) -> Vec<Layout
     for item in items {
         match item {
             Item::Inline(b) => run.push(b),
-            Item::Block(b) => {
+            Item::Block(b) | Item::TablePart(b) => {
                 flush(&mut run, &mut out);
                 out.push(b);
             }
@@ -670,7 +715,7 @@ fn split_inline(template: LayoutBox, inner: Vec<Item>, out: &mut Vec<Item>) {
         b.children = inner
             .into_iter()
             .map(|i| match i {
-                Item::Block(b) | Item::Inline(b) | Item::OutOfFlow(b) => b,
+                Item::Block(b) | Item::Inline(b) | Item::OutOfFlow(b) | Item::TablePart(b) => b,
             })
             .collect();
         out.push(Item::Inline(b));
@@ -688,7 +733,7 @@ fn split_inline(template: LayoutBox, inner: Vec<Item>, out: &mut Vec<Item>) {
     };
     for item in inner {
         match item {
-            Item::Block(b) => {
+            Item::Block(b) | Item::TablePart(b) => {
                 flush(&mut part, out, &mut pieces);
                 out.push(Item::Block(b));
             }
@@ -734,7 +779,7 @@ fn assemble(items: Vec<Item>, parent_style: &Arc<ComputedStyle>) -> Vec<LayoutBo
         return items
             .into_iter()
             .map(|i| match i {
-                Item::Block(b) | Item::Inline(b) | Item::OutOfFlow(b) => b,
+                Item::Block(b) | Item::Inline(b) | Item::OutOfFlow(b) | Item::TablePart(b) => b,
             })
             .collect();
     }
@@ -760,7 +805,7 @@ fn assemble(items: Vec<Item>, parent_style: &Arc<ComputedStyle>) -> Vec<LayoutBo
     };
     for item in items {
         match item {
-            Item::Block(b) => {
+            Item::Block(b) | Item::TablePart(b) => {
                 flush(&mut run, &mut out);
                 out.push(b);
             }
@@ -839,4 +884,394 @@ fn collapse_white_space(children: &mut Vec<LayoutBox>, prev_space: &mut bool) {
         }
     }
     children.retain(|c| !matches!(&c.kind, BoxKind::Text(t) if t.is_empty()));
+}
+
+// --- E4: tablas (CSS 2.2 §17.2.1 y §17.4) ---
+
+/// ¿`display` interno de tabla o `table-caption`?
+fn is_table_part(d: Display) -> bool {
+    matches!(
+        d,
+        Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableRow
+            | Display::TableCell
+            | Display::TableColumnGroup
+            | Display::TableColumn
+            | Display::TableCaption
+    )
+}
+
+fn is_row_group(d: Display) -> bool {
+    matches!(
+        d,
+        Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+    )
+}
+
+/// "Proper table child" (§17.2.1): grupos de filas, filas, grupos de columnas, columnas y
+/// títulos.
+fn is_proper_table_child(d: Display) -> bool {
+    is_row_group(d)
+        || matches!(
+            d,
+            Display::TableRow
+                | Display::TableColumnGroup
+                | Display::TableColumn
+                | Display::TableCaption
+        )
+}
+
+fn part_display(item: &Item) -> Option<Display> {
+    match item {
+        Item::TablePart(b) => Some(b.style.display),
+        _ => None,
+    }
+}
+
+fn is_whitespace_item(item: &Item) -> bool {
+    matches!(item, Item::Inline(b) if is_collapsible_whitespace(b))
+}
+
+/// Quita los tramos de white space colapsable cuyos vecinos inmediatos (si los hay) cumplen
+/// `neighbor` (reglas 1.3 y 1.4 de §17.2.1). Con `edges`, un extremo de la lista cuenta como
+/// vecino válido (regla 1.3, hijos de un contenedor tabular).
+fn remove_whitespace(items: Vec<Item>, edges: bool) -> Vec<Item> {
+    let n = items.len();
+    let mut keep = vec![true; n];
+    let mut i = 0;
+    while i < n {
+        if !is_whitespace_item(&items[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && is_whitespace_item(&items[i]) {
+            i += 1;
+        }
+        let ok = |j: Option<usize>| match j {
+            Some(j) => part_display(&items[j]).is_some(),
+            None => edges,
+        };
+        let before = start.checked_sub(1);
+        let after = (i < n).then_some(i);
+        if ok(before) && ok(after) {
+            for k in &mut keep[start..i] {
+                *k = false;
+            }
+        }
+    }
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(it, k)| k.then_some(it))
+        .collect()
+}
+
+/// Estilo de la caja envoltorio de una tabla (§17.4): `position`, `float`, márgenes y
+/// desplazamientos (y, de CSS Tables 3 y los módulos de flex/grid, `clear`, `z-index` y las
+/// propiedades de ítem) de la tabla; el resto, heredado o inicial.
+fn wrapper_style(table: &ComputedStyle) -> Arc<ComputedStyle> {
+    let mut s = (*anonymous_style(table, table.display)).clone();
+    s.position = table.position;
+    s.float = table.float;
+    s.clear = table.clear;
+    s.margin_top = table.margin_top.clone();
+    s.margin_right = table.margin_right.clone();
+    s.margin_bottom = table.margin_bottom.clone();
+    s.margin_left = table.margin_left.clone();
+    s.top = table.top.clone();
+    s.right = table.right.clone();
+    s.bottom = table.bottom.clone();
+    s.left = table.left.clone();
+    s.z_index = table.z_index;
+    s.flex_grow = table.flex_grow;
+    s.flex_shrink = table.flex_shrink;
+    s.flex_basis = table.flex_basis.clone();
+    s.align_self = table.align_self;
+    s.justify_self = table.justify_self;
+    s.order = table.order;
+    s.grid_row_start = table.grid_row_start.clone();
+    s.grid_row_end = table.grid_row_end.clone();
+    s.grid_column_start = table.grid_column_start.clone();
+    s.grid_column_end = table.grid_column_end.clone();
+    s.original_display = table.original_display;
+    Arc::new(s)
+}
+
+/// Estilo de la caja de tabla: el del elemento sin lo que pasó al envoltorio.
+fn table_box_style(table: &ComputedStyle) -> Arc<ComputedStyle> {
+    let mut s = table.clone();
+    let initial = ComputedStyle::initial();
+    s.position = Position::Static;
+    s.float = Float::None;
+    s.clear = initial.clear;
+    let zero = || LengthPercentageAuto::LengthPercentage(LengthPercentage::px(0.0));
+    s.margin_top = zero();
+    s.margin_right = zero();
+    s.margin_bottom = zero();
+    s.margin_left = zero();
+    s.top = LengthPercentageAuto::Auto;
+    s.right = LengthPercentageAuto::Auto;
+    s.bottom = LengthPercentageAuto::Auto;
+    s.left = LengthPercentageAuto::Auto;
+    s.z_index = initial.z_index;
+    s.display = Display::Table;
+    Arc::new(s)
+}
+
+/// Caja anónima de tabla (fila, celda, grupo) con el estilo heredado de `parent`.
+fn anonymous_part(parent: &ComputedStyle, display: Display, kind: BoxKind) -> LayoutBox {
+    LayoutBox::new(kind, anonymous_style(parent, display), None)
+}
+
+/// Fila anónima alrededor de `items` (reglas 2.1 y 2.2).
+fn anonymous_row(items: Vec<Item>, parent: &ComputedStyle) -> LayoutBox {
+    let mut row = anonymous_part(parent, Display::TableRow, BoxKind::TablePart);
+    row.children = row_children(items, &row.style.clone());
+    row
+}
+
+/// Hijos de una fila: cada tramo de hijos que no son celdas va en una celda anónima (regla
+/// 2.3).
+fn row_children(items: Vec<Item>, row: &Arc<ComputedStyle>) -> Vec<LayoutBox> {
+    let items = remove_whitespace(items, true);
+    let mut out = Vec::new();
+    let mut run: Vec<Item> = Vec::new();
+    let flush = |run: &mut Vec<Item>, out: &mut Vec<LayoutBox>| {
+        if run.is_empty() {
+            return;
+        }
+        let mut cell = anonymous_part(row, Display::TableCell, BoxKind::AnonymousBlock);
+        let style = cell.style.clone();
+        let inner = fixup_table_parts(std::mem::take(run), &style, false);
+        cell.children = assemble(inner, &style);
+        finish_container(&mut cell);
+        out.push(cell);
+    };
+    for item in items {
+        match item {
+            Item::TablePart(b) if b.style.display == Display::TableCell => {
+                flush(&mut run, &mut out);
+                out.push(b);
+            }
+            other => run.push(other),
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// Hijos de un grupo de filas: los tramos que no son filas van en filas anónimas (regla 2.2).
+fn group_children(items: Vec<Item>, group: &Arc<ComputedStyle>) -> Vec<LayoutBox> {
+    let items = remove_whitespace(items, true);
+    let mut out = Vec::new();
+    let mut run: Vec<Item> = Vec::new();
+    for item in items {
+        match item {
+            Item::TablePart(b) if b.style.display == Display::TableRow => {
+                if !run.is_empty() {
+                    out.push(anonymous_row(std::mem::take(&mut run), group));
+                }
+                out.push(b);
+            }
+            other => run.push(other),
+        }
+    }
+    if !run.is_empty() {
+        out.push(anonymous_row(run, group));
+    }
+    out
+}
+
+/// La caja de una parte interna de tabla o un título, con sus hijos ya corregidos.
+fn table_part_box(style: Arc<ComputedStyle>, node: Option<NodeId>, items: Vec<Item>) -> LayoutBox {
+    let display = style.display;
+    match display {
+        Display::TableCell | Display::TableCaption => {
+            let items = fixup_table_parts(items, &style, false);
+            let mut b = LayoutBox::new(BoxKind::Block, style.clone(), node);
+            b.children = assemble(items, &style);
+            finish_container(&mut b);
+            b
+        }
+        Display::TableRow => {
+            let mut b = LayoutBox::new(BoxKind::TablePart, style.clone(), node);
+            b.children = row_children(items, &style);
+            b
+        }
+        Display::TableColumnGroup => {
+            // Regla 1.2: solo cuentan las columnas.
+            let mut b = LayoutBox::new(BoxKind::TablePart, style, node);
+            b.children = items
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::TablePart(c) if c.style.display == Display::TableColumn => Some(c),
+                    _ => None,
+                })
+                .collect();
+            b
+        }
+        // Regla 1.1: los hijos de una columna no se muestran.
+        Display::TableColumn => LayoutBox::new(BoxKind::TablePart, style, node),
+        _ => {
+            let mut b = LayoutBox::new(BoxKind::TablePart, style.clone(), node);
+            b.children = group_children(items, &style);
+            b
+        }
+    }
+}
+
+/// `colspan`/`rowspan` de `td`/`th` y `span` de `col`/`colgroup` (HTML §4.9.11 y §4.9.3).
+fn table_span(el: &bf_dom::Element, display: Display) -> (u32, u32) {
+    let attr = |name: &str| {
+        el.attr(name)
+            .and_then(bf_style::hints::parse_non_negative_integer)
+    };
+    match display {
+        Display::TableCell if el.is_html("td") || el.is_html("th") => {
+            let colspan = attr("colspan").filter(|&v| v > 0).unwrap_or(1).min(1000);
+            let rowspan = attr("rowspan").unwrap_or(1).min(65534);
+            (colspan, rowspan)
+        }
+        Display::TableColumn | Display::TableColumnGroup
+            if el.is_html("col") || el.is_html("colgroup") =>
+        {
+            (attr("span").filter(|&v| v > 0).unwrap_or(1).min(1000), 1)
+        }
+        _ => (1, 1),
+    }
+}
+
+/// Hijos de una tabla: los títulos aparte y el resto normalizado en grupos de columnas y
+/// grupos de filas (reglas 1.3 y 2.1; las filas y columnas sueltas se agrupan en grupos
+/// anónimos, que no cambian el layout ni la pintura).
+fn table_children(
+    items: Vec<Item>,
+    table: &Arc<ComputedStyle>,
+) -> (Vec<LayoutBox>, Vec<LayoutBox>) {
+    let items = remove_whitespace(items, true);
+    let mut proper: Vec<LayoutBox> = Vec::new();
+    let mut run: Vec<Item> = Vec::new();
+    for item in items {
+        match item {
+            Item::TablePart(b) if is_proper_table_child(b.style.display) => {
+                if !run.is_empty() {
+                    proper.push(anonymous_row(std::mem::take(&mut run), table));
+                }
+                proper.push(b);
+            }
+            other => run.push(other),
+        }
+    }
+    if !run.is_empty() {
+        proper.push(anonymous_row(run, table));
+    }
+    let mut captions = Vec::new();
+    let mut parts: Vec<LayoutBox> = Vec::new();
+    for b in proper {
+        match b.style.display {
+            Display::TableCaption => captions.push(b),
+            Display::TableRow => match parts.last_mut() {
+                Some(g) if g.node.is_none() && g.style.display == Display::TableRowGroup => {
+                    g.children.push(b)
+                }
+                _ => {
+                    let mut g = anonymous_part(table, Display::TableRowGroup, BoxKind::TablePart);
+                    g.children.push(b);
+                    parts.push(g);
+                }
+            },
+            Display::TableColumn => match parts.last_mut() {
+                Some(g) if g.node.is_none() && g.style.display == Display::TableColumnGroup => {
+                    g.children.push(b)
+                }
+                _ => {
+                    let mut g =
+                        anonymous_part(table, Display::TableColumnGroup, BoxKind::TablePart);
+                    g.children.push(b);
+                    parts.push(g);
+                }
+            },
+            _ => parts.push(b),
+        }
+    }
+    (captions, parts)
+}
+
+/// Caja envoltorio con la caja de tabla y sus títulos. `element` es el elemento (o
+/// pseudo-elemento) de la tabla; `None` para una tabla anónima, cuyo estilo hereda de
+/// `style` (el del padre).
+fn make_table(
+    element: Option<(NodeId, Option<PseudoElement>)>,
+    style: &Arc<ComputedStyle>,
+    items: Vec<Item>,
+    inline: bool,
+) -> LayoutBox {
+    let display = if inline {
+        Display::InlineTable
+    } else {
+        Display::Table
+    };
+    let (wrapper_style, table_style) = match element {
+        Some(_) => (wrapper_style(style), table_box_style(style)),
+        None => {
+            let s = anonymous_style(style, display);
+            let mut t = (*s).clone();
+            t.display = Display::Table;
+            (s, Arc::new(t))
+        }
+    };
+    let node = element.map(|(n, _)| n);
+    let pseudo = element.and_then(|(_, p)| p);
+    let (captions, parts) = table_children(items, &table_style);
+    let mut table = LayoutBox::new(BoxKind::Table, table_style, node);
+    table.pseudo = pseudo;
+    table.children = parts;
+    crate::table::finish_table(&mut table);
+    let kind = if inline {
+        BoxKind::InlineBlock
+    } else if node.is_some() {
+        BoxKind::Block
+    } else {
+        BoxKind::AnonymousBlock
+    };
+    let mut wrapper = LayoutBox::new(kind, wrapper_style, node);
+    wrapper.pseudo = pseudo;
+    let (bottom, top): (Vec<LayoutBox>, Vec<LayoutBox>) = captions
+        .into_iter()
+        .partition(|c| c.style.caption_side == CaptionSide::Bottom);
+    wrapper.children = top;
+    wrapper.children.push(table);
+    wrapper.children.extend(bottom);
+    wrapper
+}
+
+/// Reglas 1.4, 3.1 y 3.2 de §17.2.1 en un padre que no es tabular: las partes de tabla sueltas
+/// (y el white space entre ellas) van en tablas anónimas, `inline-table` si el padre es una
+/// caja inline.
+fn fixup_table_parts(items: Vec<Item>, parent: &Arc<ComputedStyle>, inline: bool) -> Vec<Item> {
+    if !items.iter().any(|i| matches!(i, Item::TablePart(_))) {
+        return items;
+    }
+    let items = remove_whitespace(items, false);
+    let mut out = Vec::new();
+    let mut run: Vec<Item> = Vec::new();
+    for item in items {
+        match item {
+            Item::TablePart(b) => run.push(Item::TablePart(b)),
+            other => {
+                if !run.is_empty() {
+                    let t = make_table(None, parent, std::mem::take(&mut run), inline);
+                    out.push(classify(t));
+                }
+                out.push(other);
+            }
+        }
+    }
+    if !run.is_empty() {
+        out.push(classify(make_table(None, parent, run, inline)));
+    }
+    out
 }

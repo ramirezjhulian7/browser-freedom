@@ -2,7 +2,7 @@
 
 Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture`.
 
-- Fecha: 2026-10-19
+- Fecha: 2026-10-20
 - Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`
 - Condiciones: viewport 800×600, DPR 1, fondo blanco, fuentes del sistema más Ahem (`tests/wpt/fonts/Ahem.ttf`, como si estuviera instalada) y `@font-face`.
 - `.xht`/`.xhtml` se parsean como XML; el resto, como HTML.
@@ -12,20 +12,24 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 
 | Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
 |---|---:|---:|---:|---:|---:|---:|
-| css/CSS2/box-display | 65 | 21 | 53 | 0 | 139 | 75.6% |
-| css/CSS2/margin-padding-clear | 575 | 107 | 57 | 0 | 739 | 84.3% |
-| css/CSS2/normal-flow | 621 | 72 | 162 | 1 | 856 | 89.5% |
-| css/CSS2/floats | 70 | 30 | 25 | 0 | 125 | 70.0% |
-| css/CSS2/floats-clear | 152 | 59 | 36 | 0 | 247 | 72.0% |
+| css/CSS2/box-display | 70 | 16 | 53 | 0 | 139 | 81.4% |
+| css/CSS2/margin-padding-clear | 659 | 23 | 57 | 0 | 739 | 96.6% |
+| css/CSS2/normal-flow | 652 | 42 | 162 | 0 | 856 | 93.9% |
+| css/CSS2/floats | 77 | 23 | 25 | 0 | 125 | 77.0% |
+| css/CSS2/floats-clear | 186 | 25 | 36 | 0 | 247 | 88.2% |
 | css/CSS2/positioning | 459 | 54 | 65 | 0 | 578 | 89.5% |
-| css/CSS2/linebox | 167 | 23 | 53 | 1 | 244 | 87.4% |
-| css/CSS2/text | 335 | 46 | 182 | 0 | 563 | 87.9% |
-| css/CSS2/colors | 11 | 8 | 3 | 0 | 22 | 57.9% |
-| css/CSS2/borders | 425 | 79 | 258 | 0 | 762 | 84.3% |
-| css/css-backgrounds | 259 | 357 | 334 | 1 | 951 | 42.0% |
-| css/css-flexbox | 565 | 384 | 478 | 0 | 1427 | 59.5% |
+| css/CSS2/linebox | 176 | 14 | 53 | 1 | 244 | 92.1% |
+| css/CSS2/text | 350 | 31 | 182 | 0 | 563 | 91.9% |
+| css/CSS2/colors | 19 | 0 | 3 | 0 | 22 | 100.0% |
+| css/CSS2/borders | 498 | 6 | 258 | 0 | 762 | 98.8% |
+| css/css-backgrounds | 321 | 295 | 334 | 1 | 951 | 52.0% |
+| css/css-flexbox | 603 | 346 | 478 | 0 | 1427 | 63.5% |
 | css/selectors | 107 | 13 | 404 | 0 | 524 | 89.2% |
-| **Total** | 3811 | 1253 | 2110 | 3 | 7177 | 75.2% |
+| css/CSS2/tables | 246 | 4 | 889 | 0 | 1139 | 98.4% |
+| css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
+| css/css-grid | 562 | 992 | 913 | 13 | 2480 | 35.9% |
+| css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
+| **Total** | 5162 | 1957 | 5173 | 15 | 12307 | 72.4% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
@@ -46,5 +50,8 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 - Namespaces arbitrarios en el DOM (`Namespace::Other` con la URI): hoy el parser XML mapea
   los namespaces desconocidos o ausentes a HTML, así que `css/selectors/of-type-selectors.xhtml`
   no puede pasar.
+- `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
+  que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
+- `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.

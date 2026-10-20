@@ -1058,6 +1058,9 @@ impl PropValue for BackgroundImages {
             .filter(|v| !v.is_empty())
             .map(BackgroundImages)
     }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        BackgroundImages(self.0.iter().map(|i| i.compute(ctx)).collect())
+    }
     fn to_css(&self) -> String {
         let v: Vec<String> = self.0.iter().map(Image::to_css).collect();
         v.join(", ")
@@ -1410,25 +1413,35 @@ impl PropValue for BackgroundAttachment {
     }
 }
 
-/// `none | <url>` (sin gradientes todavía).
+/// `none | <url> | <gradient>` (CSS Images 3 §2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Image {
     None,
     Url(String),
+    Gradient(Box<Gradient>),
 }
 
 impl PropValue for Image {
     fn parse(input: &[ComponentValue]) -> Option<Self> {
         match trim(input) {
             [v] if is_ident(v, "none") => Some(Image::None),
-            [v] => parse_url(v).map(Image::Url),
+            [v] => parse_url(v)
+                .map(Image::Url)
+                .or_else(|| Gradient::parse(v).map(|g| Image::Gradient(Box::new(g)))),
             _ => None,
+        }
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        match self {
+            Image::Gradient(g) => Image::Gradient(Box::new(g.compute(ctx))),
+            other => other.clone(),
         }
     }
     fn to_css(&self) -> String {
         match self {
             Image::None => "none".into(),
             Image::Url(u) => format!("url({u:?})"),
+            Image::Gradient(g) => g.to_css(),
         }
     }
 }
@@ -1999,3 +2012,339 @@ impl PropValue for Quotes {
         }
     }
 }
+
+// --- Tablas (CSS 2.2 §17) ---
+
+keyword_enum!(
+    /// `border-collapse` (CSS 2.2 §17.6).
+    BorderCollapse {
+        Separate = "separate",
+        Collapse = "collapse",
+    }
+);
+keyword_prop!(BorderCollapse);
+
+keyword_enum!(
+    /// `caption-side` (CSS 2.2 §17.4.1).
+    CaptionSide {
+        Top = "top",
+        Bottom = "bottom",
+    }
+);
+keyword_prop!(CaptionSide);
+
+keyword_enum!(
+    /// `table-layout` (CSS 2.2 §17.5.2).
+    TableLayout {
+        Auto = "auto",
+        Fixed = "fixed",
+    }
+);
+keyword_prop!(TableLayout);
+
+keyword_enum!(
+    /// `empty-cells` (CSS 2.2 §17.6.1.1).
+    EmptyCells {
+        Show = "show",
+        Hide = "hide",
+    }
+);
+keyword_prop!(EmptyCells);
+
+/// Una `<length>` (o `calc()` sin porcentajes).
+pub(crate) fn parse_length_px(v: &ComponentValue) -> Option<LengthPercentage> {
+    parse_length_percentage(v).filter(|lp| !lp.has_percentage())
+}
+
+fn is_negative_length(lp: &LengthPercentage) -> bool {
+    matches!(lp, LengthPercentage::Length(l) if l.value < 0.0)
+}
+
+/// `border-spacing: <length [0,∞]> <length [0,∞]>?` (CSS 2.2 §17.6.1): horizontal y vertical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderSpacing {
+    pub horizontal: LengthPercentage,
+    pub vertical: LengthPercentage,
+}
+
+impl BorderSpacing {
+    /// (horizontal, vertical) en px.
+    pub fn px(&self) -> (f32, f32) {
+        (self.horizontal.resolve(0.0), self.vertical.resolve(0.0))
+    }
+}
+
+impl PropValue for BorderSpacing {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let non_negative =
+            |v: &ComponentValue| parse_length_px(v).filter(|l| !is_negative_length(l));
+        match components(input).as_slice() {
+            [a] => {
+                let a = non_negative(a)?;
+                Some(BorderSpacing {
+                    horizontal: a.clone(),
+                    vertical: a,
+                })
+            }
+            [a, b] => Some(BorderSpacing {
+                horizontal: non_negative(a)?,
+                vertical: non_negative(b)?,
+            }),
+            _ => None,
+        }
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        BorderSpacing {
+            horizontal: self.horizontal.compute(&ctx.len),
+            vertical: self.vertical.compute(&ctx.len),
+        }
+    }
+    fn to_css(&self) -> String {
+        if self.horizontal == self.vertical {
+            self.horizontal.to_string()
+        } else {
+            format!("{} {}", self.horizontal, self.vertical)
+        }
+    }
+}
+
+// --- Outline (CSS UI 4 §5) ---
+
+/// `outline-style`: `auto | <outline-line-style>` (los estilos de borde salvo `hidden`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineStyle {
+    Auto,
+    Style(BorderStyle),
+}
+
+impl OutlineStyle {
+    /// El estilo con que se pinta: `auto` como `solid` (dependiente del UA).
+    pub fn border_style(self) -> BorderStyle {
+        match self {
+            OutlineStyle::Auto => BorderStyle::Solid,
+            OutlineStyle::Style(s) => s,
+        }
+    }
+
+    /// ¿Se pinta? (`none` no).
+    pub fn is_visible(self) -> bool {
+        self != OutlineStyle::Style(BorderStyle::None)
+    }
+}
+
+impl PropValue for OutlineStyle {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let name = single_ident(input)?;
+        if name.eq_ignore_ascii_case("auto") {
+            return Some(OutlineStyle::Auto);
+        }
+        match BorderStyle::from_ident(name)? {
+            BorderStyle::Hidden => None,
+            s => Some(OutlineStyle::Style(s)),
+        }
+    }
+    fn to_css(&self) -> String {
+        match self {
+            OutlineStyle::Auto => "auto".into(),
+            OutlineStyle::Style(s) => s.as_str().into(),
+        }
+    }
+}
+
+/// `outline-color`: `auto | <color>`; `auto` (y el legado `invert`) se pinta como
+/// `currentcolor`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutlineColor(pub Color);
+
+impl PropValue for OutlineColor {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        if let Some(name) = single_ident(input)
+            && (name.eq_ignore_ascii_case("auto") || name.eq_ignore_ascii_case("invert"))
+        {
+            return Some(OutlineColor(Color::CurrentColor));
+        }
+        Color::parse(input).map(OutlineColor)
+    }
+    fn to_css(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+/// `<length>` con signo computada a px (`outline-offset`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LengthPx(pub LengthPercentage);
+
+impl LengthPx {
+    pub fn px(&self) -> f32 {
+        self.0.resolve(0.0)
+    }
+}
+
+impl PropValue for LengthPx {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        match trim(input) {
+            [v] => parse_length_px(v).map(LengthPx),
+            _ => None,
+        }
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        LengthPx(self.0.compute(&ctx.len))
+    }
+    fn to_css(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+// --- Sombras (CSS Backgrounds 3 §7.1, CSS Text Decoration 3 §4) ---
+
+/// Una sombra. Computada, las longitudes están en px.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shadow {
+    pub color: Color,
+    pub x: LengthPercentage,
+    pub y: LengthPercentage,
+    pub blur: LengthPercentage,
+    pub spread: LengthPercentage,
+    pub inset: bool,
+}
+
+impl Shadow {
+    /// (x, y, blur, spread) en px.
+    pub fn px(&self) -> (f32, f32, f32, f32) {
+        (
+            self.x.resolve(0.0),
+            self.y.resolve(0.0),
+            self.blur.resolve(0.0).max(0.0),
+            self.spread.resolve(0.0),
+        )
+    }
+
+    /// `<shadow>`: `<color>? && [<length>{2} <length [0,∞]>? <length>?] && inset?`. Solo
+    /// `box-shadow` admite `inset` y la extensión.
+    fn parse(input: &[ComponentValue], box_shadow: bool) -> Option<Shadow> {
+        let items = components(input);
+        let mut color = None;
+        let mut inset = false;
+        let mut lengths: Vec<LengthPercentage> = Vec::new();
+        // Las longitudes van juntas: una vez cerrado el grupo no puede haber otra.
+        let mut lengths_closed = false;
+        for v in items {
+            if let Some(l) = parse_length_px(v) {
+                if lengths_closed {
+                    return None;
+                }
+                lengths.push(l);
+                continue;
+            }
+            if !lengths.is_empty() {
+                lengths_closed = true;
+            }
+            if box_shadow && !inset && is_ident(v, "inset") {
+                inset = true;
+                continue;
+            }
+            if color.is_none()
+                && let Some(c) = parse_color(v)
+            {
+                color = Some(c);
+                continue;
+            }
+            return None;
+        }
+        let max = if box_shadow { 4 } else { 3 };
+        if lengths.len() < 2 || lengths.len() > max {
+            return None;
+        }
+        // El radio de desenfoque no puede ser negativo.
+        if lengths.get(2).is_some_and(is_negative_length) {
+            return None;
+        }
+        let zero = LengthPercentage::zero;
+        Some(Shadow {
+            color: color.unwrap_or(Color::CurrentColor),
+            x: lengths[0].clone(),
+            y: lengths[1].clone(),
+            blur: lengths.get(2).cloned().unwrap_or_else(zero),
+            spread: lengths.get(3).cloned().unwrap_or_else(zero),
+            inset,
+        })
+    }
+
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Shadow {
+        Shadow {
+            color: self.color,
+            x: self.x.compute(&ctx.len),
+            y: self.y.compute(&ctx.len),
+            blur: self.blur.compute(&ctx.len),
+            spread: self.spread.compute(&ctx.len),
+            inset: self.inset,
+        }
+    }
+
+    fn to_css(&self, box_shadow: bool) -> String {
+        let mut s = String::new();
+        if self.inset {
+            s.push_str("inset ");
+        }
+        let _ = write!(s, "{} {} {} {}", self.color, self.x, self.y, self.blur);
+        if box_shadow {
+            let _ = write!(s, " {}", self.spread);
+        }
+        s
+    }
+}
+
+fn parse_shadows(input: &[ComponentValue], box_shadow: bool) -> Option<Vec<Shadow>> {
+    if single_ident(input).is_some_and(|i| i.eq_ignore_ascii_case("none")) {
+        return Some(Vec::new());
+    }
+    split_comma_separated(input)
+        .iter()
+        .map(|s| Shadow::parse(s, box_shadow))
+        .collect()
+}
+
+fn shadows_css(v: &[Shadow], box_shadow: bool) -> String {
+    if v.is_empty() {
+        return "none".into();
+    }
+    v.iter()
+        .map(|s| s.to_css(box_shadow))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `box-shadow: none | <shadow>#` (la primera de la lista queda arriba).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoxShadow(pub Vec<Shadow>);
+
+impl PropValue for BoxShadow {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        parse_shadows(input, true).map(BoxShadow)
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        BoxShadow(self.0.iter().map(|s| s.compute(ctx)).collect())
+    }
+    fn to_css(&self) -> String {
+        shadows_css(&self.0, true)
+    }
+}
+
+/// `text-shadow: none | <shadow>#` (sin `inset` ni extensión).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextShadow(pub Vec<Shadow>);
+
+impl PropValue for TextShadow {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        parse_shadows(input, false).map(TextShadow)
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        TextShadow(self.0.iter().map(|s| s.compute(ctx)).collect())
+    }
+    fn to_css(&self) -> String {
+        shadows_css(&self.0, false)
+    }
+}
+
+pub use super::gradient::*; // E4
+pub use super::grid::*; // E4

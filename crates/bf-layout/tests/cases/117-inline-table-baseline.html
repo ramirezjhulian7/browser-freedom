@@ -1,0 +1,19 @@
+<!DOCTYPE html><style>body{margin:0}</style>
+<div>x<table style="display:inline-table;border-spacing:0"><tr><td style="padding:0;vertical-align:baseline">a<br>b</td></tr></table>y</div>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <body> 0,0 800×32
+    Block <div> 0,0 800×32
+      Line 0,0 800×32
+        Text "x" 0,0 8×16
+        InlineBlock <table> 8,0 8×32
+          Block <table> 8,0 8×32
+            Block <tbody> 8,0 8×32
+              Block <tr> 8,0 8×32
+                Block <td> 8,0 8×32
+                  Line 8,0 8×16
+                    Text "a" 8,0 8×16
+                  Line 8,16 8×16
+                    Text "b" 8,16 8×16
+        Text "y" 16,0 8×16
+-->

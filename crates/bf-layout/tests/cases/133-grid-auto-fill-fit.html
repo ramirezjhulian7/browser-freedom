@@ -1,0 +1,18 @@
+<!DOCTYPE html><style>body{margin:0} .g{display:grid;width:350px;grid-auto-rows:10px}</style>
+<div class=g style="grid-template-columns:repeat(auto-fill,100px)"><div id=a></div><div id=b></div><div id=c></div><div id=d></div></div>
+<div class=g style="grid-template-columns:repeat(auto-fit,100px);justify-content:center"><div id=e></div><div id=f></div></div>
+<div class=g style="grid-template-columns:repeat(auto-fill,minmax(80px,1fr))"><div id=g></div></div>
+<!-- expect
+Block <html> 0,0 800×40
+  Block <body> 0,0 800×40
+    Block <div.g> 0,0 350×20
+      InlineBlock <div#a> 0,0 100×10
+      InlineBlock <div#b> 100,0 100×10
+      InlineBlock <div#c> 200,0 100×10
+      InlineBlock <div#d> 0,10 100×10
+    Block <div.g> 0,20 350×10
+      InlineBlock <div#e> 75,20 100×10
+      InlineBlock <div#f> 175,20 100×10
+    Block <div.g> 0,30 350×10
+      InlineBlock <div#g> 0,30 87.5×10
+-->

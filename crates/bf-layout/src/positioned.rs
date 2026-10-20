@@ -82,10 +82,20 @@ impl<'a> Layout<'a> {
         let mr = margin_value(&s.margin_right, cb.width);
         let static_left = p.static_x - cb.x;
         let replaced = matches!(b.kind, BoxKind::Replaced { .. });
+        let margins_h = ml.unwrap_or(0.0) + mr.unwrap_or(0.0);
         let width = if replaced {
             Some(self.fit_width(b, cb, 0.0))
+        } else if let Some(w) = self.table_fixed_width(
+            b,
+            (cb.width - margins_h - left.unwrap_or(0.0) - right.unwrap_or(0.0)).max(0.0),
+            cb.width,
+        ) {
+            // E4: el ancho de una tabla lo decide el algoritmo de tablas.
+            Some(w)
         } else {
-            specified_width(s, cb.width, edges_h)
+            specified_width(s, cb.width, edges_h).or_else(|| {
+                self.keyword_width(b, (cb.width - margins_h - edges_h).max(0.0), cb.width)
+            })
         };
         let h = Horizontal {
             cb_width: cb.width,

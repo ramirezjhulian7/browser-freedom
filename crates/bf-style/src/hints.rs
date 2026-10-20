@@ -173,6 +173,10 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
                 let px = parse_non_negative_integer(b).unwrap_or(1);
                 h.push_all(&BORDER_WIDTHS, &format!("{px}px"));
             }
+            // E4: `cellspacing` se mapea a la longitud en px de `border-spacing`.
+            if let Some(v) = attr("cellspacing").and_then(parse_non_negative_integer) {
+                h.push("border-spacing", &format!("{v}px"));
+            }
             if let Some(c) = attr("bordercolor").and_then(color_css) {
                 h.push_all(
                     &[
