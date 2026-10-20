@@ -150,13 +150,7 @@ fn source(url: &Url, ctx: &LoadContext) -> String {
                     bf_infra::encoding::decode(&res.bytes, bf_infra::encoding::Encoding::Utf8);
                 let mut lines = String::new();
                 for (i, line) in text.lines().enumerate() {
-                    let _ = write!(
-                        lines,
-                        "<span class=\"n\">{}</span>{}
-",
-                        i + 1,
-                        escape(line)
-                    );
+                    let _ = writeln!(lines, "<span class=\"n\">{}</span>{}", i + 1, escape(line));
                 }
                 (format!("Código fuente de {}", t.href()), lines)
             }

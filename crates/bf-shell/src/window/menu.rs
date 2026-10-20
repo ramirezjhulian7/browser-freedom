@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use bf_font::FontDb;
 use bf_layout::Size;
-use bf_layout::fragment::Rect;
 use bf_paint::DisplayList;
 
 use super::chrome::UiDoc;
@@ -135,11 +134,6 @@ impl Menu {
             width: WIDTH,
             height: self.doc.content_height(),
         }
-    }
-
-    pub fn rect(&self) -> Rect {
-        let s = self.size();
-        Rect::new(self.origin.0, self.origin.1, s.width, s.height)
     }
 
     /// Entrada habilitada bajo `(x, y)` (px lógicos de la ventana).

@@ -406,10 +406,8 @@ fn form_data(
                     out.push(pair(&v));
                 }
             }
-            "button" => {
-                if submitter == Some(n) {
-                    out.push(pair(el.attr("value").unwrap_or("")));
-                }
+            "button" if submitter == Some(n) => {
+                out.push(pair(el.attr("value").unwrap_or("")));
             }
             _ => {}
         }
