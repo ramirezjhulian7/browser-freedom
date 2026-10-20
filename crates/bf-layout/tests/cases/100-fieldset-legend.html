@@ -1,0 +1,27 @@
+<!DOCTYPE html><style>body{margin:0;font-size:10px} fieldset{margin:0;padding:5px;border:2px solid} legend{padding:0}</style>
+<fieldset><legend>Título</legend><div style="height:20px"></div></fieldset>
+<fieldset style="border-width:20px"><legend>Bajo</legend>texto</fieldset>
+<fieldset><div>sin leyenda</div><legend>otra</legend></fieldset>
+<!-- expect
+Block <html> 0,0 800×134
+  Block <body> 0,0 800×134
+    Block <fieldset> 0,4 800×38
+      Block <legend> 7,0 30×10
+        Line 7,0 30×10
+          Text "Título" 7,0 30×10
+      Block <div> 7,15 786×20
+    Block <fieldset> 0,42 800×60
+      Block <legend> 25,47 20×10
+        Line 25,47 20×10
+          Text "Bajo" 25,47 20×10
+      Block <anonymous> 25,67 750×10
+        Line 25,67 750×10
+          Text "texto" 25,67 25×10
+    Block <fieldset> 0,106 800×28
+      Block <legend> 7,102 20×10
+        Line 7,102 20×10
+          Text "otra" 7,102 20×10
+      Block <div> 7,117 786×10
+        Line 7,117 786×10
+          Text "sin leyenda" 7,117 55×10
+-->

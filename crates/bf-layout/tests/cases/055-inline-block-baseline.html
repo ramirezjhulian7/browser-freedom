@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<style>body{margin:0} span{display:inline-block}</style><div>a<span id=s>b<br>c</span>d</div>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <body> 0,0 800×32
+    Block <div> 0,0 800×32
+      Line 0,0 800×32
+        Text "a" 0,16 8×16
+        InlineBlock <span#s> 8,0 8×32
+          Line 8,0 8×16
+            Text "b" 8,0 8×16
+          Line 8,16 8×16
+            Text "c" 8,16 8×16
+        Text "d" 16,16 8×16
+-->

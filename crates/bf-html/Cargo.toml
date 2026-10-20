@@ -1,0 +1,15 @@
+[package]
+name = "bf-html"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-dom = { path = "../bf-dom" }
+bf-infra = { path = "../bf-infra" }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

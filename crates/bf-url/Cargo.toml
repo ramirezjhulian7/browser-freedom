@@ -1,0 +1,15 @@
+[package]
+name = "bf-url"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+bf-infra = { path = "../bf-infra" }
+serde_json = "1"
+
+[lints]
+workspace = true

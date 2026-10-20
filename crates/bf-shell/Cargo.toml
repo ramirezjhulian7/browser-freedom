@@ -1,0 +1,22 @@
+[package]
+name = "bf-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-font = { path = "../bf-font" }
+bf-infra = { path = "../bf-infra" }
+bf-net = { path = "../bf-net" }
+bf-url = { path = "../bf-url" }
+bf-paint = { path = "../bf-paint" }
+bf-layout = { path = "../bf-layout" }
+bf-style = { path = "../bf-style" }
+bf-css = { path = "../bf-css" }
+softbuffer = "0.4"
+winit = "0.30"
+bf-dom = { path = "../bf-dom" }
+bf-html = { path = "../bf-html" }
+
+[lints]
+workspace = true

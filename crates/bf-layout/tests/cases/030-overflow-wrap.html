@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<style>body{margin:0;width:40px} #a{overflow-wrap:anywhere}</style><div id=a>abcdefghij</div><div id=b>abcdefghij</div>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 40×48
+    Block <div#a> 0,0 40×32
+      Line 0,0 40×16
+        Text "abcde" 0,0 40×16
+      Line 0,16 40×16
+        Text "fghij" 0,16 40×16
+    Block <div#b> 0,32 40×16
+      Line 0,32 40×16
+        Text "abcdefghij" 0,32 80×16
+-->

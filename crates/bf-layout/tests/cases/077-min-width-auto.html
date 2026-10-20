@@ -1,0 +1,13 @@
+<!DOCTYPE html><style>body{margin:0} .c{display:flex;width:100px}</style>
+<div class=c><div style="width:20px">abcdefghij</div><div style="width:100px;min-width:0">x</div></div>
+<!-- expect
+Block <html> 0,0 800×16
+  Block <body> 0,0 800×16
+    Block <div.c> 0,0 100×16
+      Block <div> 0,0 20×16
+        Line 0,0 20×16
+          Text "abcdefghij" 0,0 80×16
+      Block <div> 20,0 80×16
+        Line 20,0 80×16
+          Text "x" 20,0 8×16
+-->

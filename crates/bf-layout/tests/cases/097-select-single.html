@@ -1,0 +1,14 @@
+<!DOCTYPE html><style>body{margin:0} select{font-size:10px}</style>
+<select><option>a<option>larga opción<option>b</select><select><option label="Etiqueta">x</option></select><select></select>
+<!-- expect
+Block <html> 0,0 800×16.8
+  Block <body> 0,0 800×16.8
+    Line 0,0 800×16.8
+      InlineBlock <select> 0,2.8 79×14
+        Line 3,4.8 75×10
+          Text "a" 3,4.8 5×10
+      InlineBlock <select> 79,2.8 59×14
+        Line 82,4.8 55×10
+          Text "Etiqueta" 82,4.8 40×10
+      InlineBlock <select> 138,2.8 19×14
+-->

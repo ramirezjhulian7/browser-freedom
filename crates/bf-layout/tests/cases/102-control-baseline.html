@@ -1,0 +1,20 @@
+<!DOCTYPE html><style>body{margin:0;font-size:20px;line-height:1} input,button{font-size:10px}</style>
+<div>Xx<input value="v">Xx<input>Xx<button style="height:30px">b</button>Xx<input type=checkbox></div>
+<!-- expect
+Block <html> 0,0 800×31
+  Block <body> 0,0 800×31
+    Block <div> 0,0 800×31
+      Line 0,0 800×31
+        Text "Xx" 0,3 20×20
+        InlineBlock <input> 20,8 108×16
+          Line 24,11 100×10
+            Text "v" 24,11 5×10
+        Text "Xx" 128,3 20×20
+        InlineBlock <input> 148,8 108×16
+        Text "Xx" 256,3 20×20
+        InlineBlock <button> 276,1 21×30
+          Line 284,11 5×10
+            Text "b" 284,11 5×10
+        Text "Xx" 297,3 20×20
+        InlineBlock <input> 321,3 13×13
+-->

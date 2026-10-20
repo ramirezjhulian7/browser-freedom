@@ -1,0 +1,22 @@
+<!DOCTYPE html><style>body{margin:0} textarea{font-size:10px}</style>
+<textarea></textarea><br><textarea cols=10 rows=4>uno dos tres cuatro cinco seis</textarea><br><textarea style="width:50px;height:20px;padding:0;border:0">a</textarea>
+<!-- expect
+Block <html> 0,0 800×105.6
+  Block <body> 0,0 800×105.6
+    Line 0,0 800×31.2
+      InlineBlock <textarea> 0,0 108×28
+    Line 0,31.2 800×51.2
+      InlineBlock <textarea> 0,31.2 58×48
+        Line 4,35.2 50×10
+          Text "uno dos" 4,35.2 35×10
+        Line 4,45.2 50×10
+          Text "tres" 4,45.2 20×10
+        Line 4,55.2 50×10
+          Text "cuatro" 4,55.2 30×10
+        Line 4,65.2 50×10
+          Text "cinco seis" 4,65.2 50×10
+    Line 0,82.4 800×23.2
+      InlineBlock <textarea> 0,82.4 50×20
+        Line 0,82.4 50×10
+          Text "a" 0,82.4 5×10
+-->

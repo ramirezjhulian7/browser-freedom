@@ -1,0 +1,16 @@
+<!DOCTYPE html><style>body{margin:0} .c{display:flex;align-items:baseline;width:400px}</style>
+<div class=c><div style="font-size:32px">A</div><div style="font-size:16px;padding-top:4px">b</div><div style="font-size:8px">c</div></div>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <body> 0,0 800×32
+    Block <div.c> 0,0 400×32
+      Block <div> 0,0 16×32
+        Line 0,0 16×32
+          Text "A" 0,0 16×32
+      Block <div> 16,8.8 8×20
+        Line 16,12.8 8×16
+          Text "b" 16,12.8 8×16
+      Block <div> 24,19.2 4×8
+        Line 24,19.2 4×8
+          Text "c" 24,19.2 4×8
+-->

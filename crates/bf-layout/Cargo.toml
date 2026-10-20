@@ -1,0 +1,17 @@
+[package]
+name = "bf-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-css = { path = "../bf-css" }
+bf-dom = { path = "../bf-dom" }
+bf-infra = { path = "../bf-infra" }
+bf-style = { path = "../bf-style" }
+
+[dev-dependencies]
+bf-html = { path = "../bf-html" }
+
+[lints]
+workspace = true

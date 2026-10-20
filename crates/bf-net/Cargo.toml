@@ -1,0 +1,18 @@
+[package]
+name = "bf-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-infra = { path = "../bf-infra" }
+bf-url = { path = "../bf-url" }
+brotli = "8"
+flate2 = "1.1"
+# `ring` como proveedor criptográfico: el de por defecto (aws-lc-rs) necesita CMake y NASM.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+
+[lints]
+workspace = true

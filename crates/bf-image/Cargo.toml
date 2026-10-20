@@ -1,0 +1,13 @@
+[package]
+name = "bf-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gif = "0.14"
+png = "0.17"
+zune-jpeg = "0.4"
+
+[lints]
+workspace = true

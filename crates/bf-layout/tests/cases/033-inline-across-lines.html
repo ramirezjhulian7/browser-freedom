@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<style>body{margin:0;width:80px} span{border-left:2px solid;border-right:2px solid}</style><div>aa <span>bb cc dd</span> ee</div>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <body> 0,0 80×32
+    Block <div> 0,0 80×32
+      Line 0,0 80×16
+        Text "aa " 0,0 24×16
+        Inline <span> 24,0 42×16
+          Text "bb cc" 26,0 40×16
+      Line 0,16 80×16
+        Inline <span> 0,16 18×16
+          Text "dd" 0,16 16×16
+        Text " ee" 18,16 24×16
+-->

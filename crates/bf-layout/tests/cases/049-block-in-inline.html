@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<style>body{margin:0}</style><div><span>a<div id=b>b</div>c</span></div>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 800×48
+    Block <div> 0,0 800×48
+      Block <anonymous> 0,0 800×16
+        Line 0,0 800×16
+          Inline <span> 0,0 8×16
+            Text "a" 0,0 8×16
+      Block <div#b> 0,16 800×16
+        Line 0,16 800×16
+          Text "b" 0,16 8×16
+      Block <anonymous> 0,32 800×16
+        Line 0,32 800×16
+          Inline <span> 0,32 8×16
+            Text "c" 0,32 8×16
+-->

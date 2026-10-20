@@ -1,0 +1,18 @@
+<!DOCTYPE html><style>body{margin:0} input,select{font-size:10px}</style>
+<input style="display:block" size=4><input style="display:block;margin:0 auto" size=4>
+<div style="display:flex"><input size=4><input size=4 style="flex:1"><select><option>abc</select></div>
+<div style="display:flex;flex-direction:column;align-items:flex-start;height:60px"><input size=2 style="flex:1"></div>
+<!-- expect
+Block <html> 0,0 800×108
+  Block <body> 0,0 800×108
+    Block <input> 0,0 28×16
+    Block <input> 386,16 28×16
+    Block <div> 0,32 800×16
+      Block <input> 0,32 28×16
+      Block <input> 28,32 738×16
+      Block <select> 766,32 34×16
+        Line 769,35 30×10
+          Text "abc" 769,35 15×10
+    Block <div> 0,48 800×60
+      Block <input> 0,48 18×60
+-->

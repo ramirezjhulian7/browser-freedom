@@ -1,0 +1,27 @@
+<!DOCTYPE html><style>body{margin:0} select{font-size:10px}</style>
+<select multiple><option>uno<option selected>dos<option>tres</select><select size=2><option>aa<option>bbbb<option>c</select>
+<!-- expect
+Block <html> 0,0 800×47.2
+  Block <body> 0,0 800×47.2
+    Line 0,0 800×47.2
+      InlineBlock <select> 0,0 24×44
+        Block <anonymous> 3,2 20×10
+          Line 3,2 20×10
+            Text "uno" 3,2 15×10
+        Block <anonymous> 3,12 20×10
+          Line 3,12 20×10
+            Text "dos" 3,12 15×10
+        Block <anonymous> 3,22 20×10
+          Line 3,22 20×10
+            Text "tres" 3,22 20×10
+      InlineBlock <select> 24,20 24×24
+        Block <anonymous> 27,22 20×10
+          Line 27,22 20×10
+            Text "aa" 27,22 10×10
+        Block <anonymous> 27,32 20×10
+          Line 27,32 20×10
+            Text "bbbb" 27,32 20×10
+        Block <anonymous> 27,42 20×10
+          Line 27,42 20×10
+            Text "c" 27,42 5×10
+-->

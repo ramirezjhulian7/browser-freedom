@@ -1,0 +1,20 @@
+[package]
+name = "bf-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-css = { path = "../bf-css" }
+bf-dom = { path = "../bf-dom" }
+bf-font = { path = "../bf-font" }
+bf-html = { path = "../bf-html" }
+bf-image = { path = "../bf-image" }
+bf-infra = { path = "../bf-infra" }
+bf-url = { path = "../bf-url" }
+bf-layout = { path = "../bf-layout" }
+bf-style = { path = "../bf-style" }
+tiny-skia = "0.11"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "bf-font"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bf-css = { path = "../bf-css" }
+bf-infra = { path = "../bf-infra" }
+bf-layout = { path = "../bf-layout" }
+bf-style = { path = "../bf-style" }
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+
+[dev-dependencies]
+bf-html = { path = "../bf-html" }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+<!DOCTYPE html><style>body{margin:0} input{font-size:10px}</style>
+<input><br><input size=5 value="abc"><br><input style="width:100px" size=50><br><input size=0 placeholder="x">
+<!-- expect
+Block <html> 0,0 800×71.2
+  Block <body> 0,0 800×71.2
+    Line 0,0 800×17.8
+      InlineBlock <input> 0,1.8 108×16
+    Line 0,17.8 800×17.8
+      InlineBlock <input> 0,19.6 33×16
+        Line 4,22.6 25×10
+          Text "abc" 4,22.6 15×10
+    Line 0,35.6 800×17.8
+      InlineBlock <input> 0,37.4 108×16
+    Line 0,53.4 800×17.8
+      InlineBlock <input> 0,55.2 108×16
+        Line 4,58.2 100×10
+          Text "x" 4,58.2 5×10
+-->

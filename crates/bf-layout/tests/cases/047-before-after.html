@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<style>body{margin:0} p{margin:0} p::before{content:"["} p::after{content:"]"}</style><p>x</p>
+<!-- expect
+Block <html> 0,0 800×16
+  Block <body> 0,0 800×16
+    Block <p> 0,0 800×16
+      Line 0,0 800×16
+        Inline <p::before> 0,0 8×16
+          Text "[" 0,0 8×16
+        Text "x" 8,0 8×16
+        Inline <p::after> 16,0 8×16
+          Text "]" 16,0 8×16
+-->

@@ -1,0 +1,13 @@
+<!DOCTYPE html><style>body{margin:0}</style>
+<div>ab <span style="display:inline-flex"><span style="width:30px;height:10px"></span><span style="width:20px;height:40px"></span></span> cd</div>
+<!-- expect
+Block <html> 0,0 800×42.8
+  Block <body> 0,0 800×42.8
+    Block <div> 0,0 800×42.8
+      Line 0,0 800×42.8
+        Text "ab " 0,0 24×16
+        InlineBlock <span> 24,2.8 50×40
+          Block <span> 24,2.8 30×10
+          Block <span> 54,2.8 20×40
+        Text " cd" 74,0 24×16
+-->

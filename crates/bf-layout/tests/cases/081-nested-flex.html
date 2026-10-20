@@ -1,0 +1,11 @@
+<!DOCTYPE html><style>body{margin:0} .c{display:flex;width:400px} .c>div{height:20px}</style>
+<div class=c><div style="flex:1;display:flex;height:auto"><div style="flex:1;height:10px"></div><div style="width:40px;height:30px"></div></div><div style="width:100px"></div></div>
+<!-- expect
+Block <html> 0,0 800×30
+  Block <body> 0,0 800×30
+    Block <div.c> 0,0 400×30
+      Block <div> 0,0 300×30
+        Block <div> 0,0 260×10
+        Block <div> 260,0 40×30
+      Block <div> 300,0 100×20
+-->

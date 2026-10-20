@@ -1,0 +1,19 @@
+<!DOCTYPE html><style>body{margin:0} button{font-size:10px}</style>
+<button>Hola <b>mundo</b></button><button style="height:40px">Centro</button><button style="display:block;width:100px">Bloque</button>
+<!-- expect
+Block <html> 0,0 800×56
+  Block <body> 0,0 800×56
+    Block <anonymous> 0,0 800×40
+      Line 0,0 800×40
+        InlineBlock <button> 0,12 66×16
+          Line 8,15 50×10
+            Text "Hola " 8,15 25×10
+            Inline <b> 33,15 25×10
+              Text "mundo" 33,15 25×10
+        InlineBlock <button> 66,0 46×40
+          Line 74,15 30×10
+            Text "Centro" 74,15 30×10
+    Block <button> 0,40 100×16
+      Line 8,43 84×10
+        Text "Bloque" 35,43 30×10
+-->
