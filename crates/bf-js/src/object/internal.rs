@@ -18,12 +18,18 @@ impl Agent {
 
     /// `[[GetPrototypeOf]]` (§10.1.1).
     pub fn get_prototype_of(&mut self, o: Gc<Object>) -> JsResult<Option<Gc<Object>>> {
+        if self.is_proxy(o) {
+            return self.proxy_get_prototype_of(o);
+        }
         Ok(self.heap[o].proto)
     }
 
     /// `[[SetPrototypeOf]]` (§10.1.2, OrdinarySetPrototypeOf; %Object.prototype% es
     /// inmutable, §10.4.7).
     pub fn set_prototype_of(&mut self, o: Gc<Object>, v: Option<Gc<Object>>) -> JsResult<bool> {
+        if self.is_proxy(o) {
+            return self.proxy_set_prototype_of(o, v);
+        }
         let current = self.heap[o].proto;
         if current == v {
             return Ok(true);
@@ -44,6 +50,10 @@ impl Agent {
             if pp == o {
                 return Ok(false);
             }
+            // Un Proxy en la cadena corta el chequeo (§10.1.2.1 paso 8.c.i).
+            if self.is_proxy(pp) {
+                break;
+            }
             p = self.heap[pp].proto;
         }
         self.heap[o].proto = v;
@@ -52,11 +62,17 @@ impl Agent {
 
     /// `[[IsExtensible]]` (§10.1.3).
     pub fn is_extensible(&mut self, o: Gc<Object>) -> JsResult<bool> {
+        if self.is_proxy(o) {
+            return self.proxy_is_extensible(o);
+        }
         Ok(self.heap[o].extensible)
     }
 
     /// `[[PreventExtensions]]` (§10.1.4).
     pub fn prevent_extensions(&mut self, o: Gc<Object>) -> JsResult<bool> {
+        if self.is_proxy(o) {
+            return self.proxy_prevent_extensions(o);
+        }
         // Los elementos densos pasan al almacén general (el vector supone extensibilidad).
         self.array_make_sparse(o);
         self.heap[o].extensible = false;
@@ -71,6 +87,9 @@ impl Agent {
         o: Gc<Object>,
         key: &PropertyKey,
     ) -> JsResult<Option<PropertyDescriptor>> {
+        if self.is_proxy(o) {
+            return self.proxy_get_own_property(o, key);
+        }
         Ok(self.own_prop(o, key))
     }
 
@@ -137,6 +156,7 @@ impl Agent {
         desc: PropertyDescriptor,
     ) -> JsResult<bool> {
         match &self.heap[o].kind {
+            ObjectKind::Proxy(_) => self.proxy_define_own_property(o, key, desc),
             ObjectKind::Array(_) => self.array_define_own_property(o, key, desc),
             ObjectKind::String(s) => {
                 // §10.4.3.2
@@ -339,6 +359,9 @@ impl Agent {
     pub fn has_property(&mut self, o: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
         let mut cur = o;
         loop {
+            if self.is_proxy(cur) {
+                return self.proxy_has(cur, key);
+            }
             if self.own_prop(cur, key).is_some() {
                 return Ok(true);
             }
@@ -353,6 +376,9 @@ impl Agent {
     pub fn get(&mut self, o: Gc<Object>, key: &PropertyKey, receiver: Value) -> JsResult<Value> {
         let mut cur = o;
         loop {
+            if self.is_proxy(cur) {
+                return self.proxy_get(cur, key, receiver);
+            }
             match self.own_prop(cur, key) {
                 Some(d) => {
                     if d.is_data() {
@@ -388,6 +414,9 @@ impl Agent {
         {
             *slot = Some(v);
             return Ok(true);
+        }
+        if self.is_proxy(o) {
+            return self.proxy_set(o, key, v, receiver);
         }
         let own = self.own_prop(o, &key);
         self.ordinary_set_with_own_descriptor(o, key, v, receiver, own)
@@ -443,6 +472,9 @@ impl Agent {
 
     /// `[[Delete]]` (§10.1.10, OrdinaryDelete; arguments §10.4.4.5).
     pub fn delete(&mut self, o: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
+        if self.is_proxy(o) {
+            return self.proxy_delete(o, key);
+        }
         let Some(d) = self.own_prop(o, key) else {
             return Ok(true);
         };
@@ -480,6 +512,9 @@ impl Agent {
 
     /// `[[OwnPropertyKeys]]` (§10.1.11, OrdinaryOwnPropertyKeys; Array y String).
     pub fn own_property_keys(&mut self, o: Gc<Object>) -> JsResult<Vec<PropertyKey>> {
+        if self.is_proxy(o) {
+            return self.proxy_own_keys(o);
+        }
         let obj = &self.heap[o];
         let mut out = Vec::new();
         match &obj.kind {

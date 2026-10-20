@@ -15,6 +15,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     value_prop(agent, proto, "name", Value::str("Error"));
     value_prop(agent, proto, "message", Value::str(""));
     method(agent, proto, "toString", 0, error_to_string);
+    method(agent, ctor, "isError", 1, is_error);
     {
         let i = &mut agent.realms[realm].intrinsics;
         i.error_ctor = ctor;
@@ -130,6 +131,13 @@ fn aggregate_error(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         PropertyDescriptor::data(Value::Object(arr), true, false, true),
     )?;
     Ok(Value::Object(o))
+}
+
+/// Error.isError ( arg ) (§20.5.2.1): ¿tiene `[[ErrorData]]`?
+fn is_error(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Boolean(
+        matches!(a.arg(0), Value::Object(o) if agent.is_error_object(o)),
+    ))
 }
 
 /// Error.prototype.toString (§20.5.3.4).

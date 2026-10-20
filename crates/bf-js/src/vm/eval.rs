@@ -357,15 +357,13 @@ impl Agent {
         let end = text.encode_utf16().count() as u32 - 1;
         let ok = program.body.len() == 1
             && match &program.body[0] {
-                crate::ast::Stmt::Expression { expression, .. } => match expression {
-                    crate::ast::Expr::Paren { expression, .. } => match &**expression {
-                        crate::ast::Expr::Function(f) => {
-                            f.body.span.start == body_start
-                                && f.span.end == end
-                                && f.span.start == 1
-                        }
-                        _ => false,
-                    },
+                crate::ast::Stmt::Expression {
+                    expression: crate::ast::Expr::Paren { expression, .. },
+                    ..
+                } => match &**expression {
+                    crate::ast::Expr::Function(f) => {
+                        f.body.span.start == body_start && f.span.end == end && f.span.start == 1
+                    }
                     _ => false,
                 },
                 _ => false,

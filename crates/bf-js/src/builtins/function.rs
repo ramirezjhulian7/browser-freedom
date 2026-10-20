@@ -170,6 +170,10 @@ fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             }
             _ => {}
         }
+        // Cualquier otro objeto llamable (Proxy): NativeFunction (§20.2.3.5 paso 4).
+        if agent.heap[o].is_callable() {
+            return Ok(Value::str("function () { [native code] }"));
+        }
     }
     agent.type_error("Function.prototype.toString requires that 'this' be a Function")
 }
