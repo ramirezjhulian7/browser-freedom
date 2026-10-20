@@ -45,7 +45,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::internal;
 use crate::load::{Loaded, indicated_element};
 use crate::theme::Theme;
-use chrome::{BAR, Chrome, PANEL, Region, STATUS};
+use chrome::{BAR, Chrome, PANEL, Region, STATUS, TabInfo};
 use worker::{Done, Job, LoadJob, Worker};
 
 /// Px CSS por "línea" de rueda y por pulsación de flecha.
@@ -105,8 +105,32 @@ enum Area {
     Page,
 }
 
+/// El estado propio de una pestaña. La pestaña activa vive en los campos de [`App`]; las
+/// demás se guardan aquí y se intercambian al cambiar de pestaña (`swap_state`).
+#[derive(Default)]
+struct TabState {
+    current: Option<Arc<Loaded>>,
+    page: Option<Page>,
+    scroll: (f32, f32),
+    history: Vec<Entry>,
+    index: usize,
+    loading: Option<Loading>,
+    relayout: Option<u64>,
+    hover_link: Option<String>,
+    overlay_hover: Option<(Rect, bool, String)>,
+    page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
+    page_generation: u64,
+    last_layout_request: Option<Size>,
+    load_time: Option<Duration>,
+    raster: Cell<Option<Duration>>,
+    panel_raster: Option<Duration>,
+}
+
 struct App {
     net: Arc<NetLoader>,
+    /// Estado de las pestañas inactivas (`None` en la posición de la activa).
+    tabs: Vec<Option<TabState>>,
+    active: usize,
     worker: Worker,
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
@@ -143,6 +167,8 @@ struct App {
     panel_generation: u64,
     /// Último viewport con el que se pidió layout al hilo de trabajo.
     last_layout_request: Option<Size>,
+    /// Al terminar la carga en curso, dejar el campo de URL enfocado y vacío (pestaña nueva).
+    focus_bar_on_load: bool,
     /// Último cuadro de la animación de progreso: limita el redibujado a ~30 fps mientras
     /// carga (cada `request_redraw` produce un evento inmediato, no espera al temporizador).
     last_progress_frame: Instant,
@@ -275,6 +301,8 @@ impl App {
     fn new(worker: Worker, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
         App {
             net: Arc::new(NetLoader::new()),
+            tabs: vec![None],
+            active: 0,
             worker,
             current: None,
             page: None,
@@ -305,6 +333,7 @@ impl App {
             panel_cache: RefCell::new(None),
             panel_generation: 0,
             last_layout_request: None,
+            focus_bar_on_load: false,
             last_progress_frame: Instant::now(),
             load_time: None,
             notice: None,
@@ -394,6 +423,166 @@ impl App {
         })
     }
 
+    /// Intercambia el estado de la pestaña activa con `t`.
+    fn swap_state(&mut self, t: &mut TabState) {
+        use std::mem::swap;
+        swap(&mut self.current, &mut t.current);
+        swap(&mut self.page, &mut t.page);
+        swap(&mut self.scroll, &mut t.scroll);
+        swap(&mut self.history, &mut t.history);
+        swap(&mut self.index, &mut t.index);
+        swap(&mut self.loading, &mut t.loading);
+        swap(&mut self.relayout, &mut t.relayout);
+        swap(&mut self.hover_link, &mut t.hover_link);
+        swap(&mut self.overlay_hover, &mut t.overlay_hover);
+        swap(&mut self.page_cache, &mut t.page_cache);
+        swap(&mut self.page_generation, &mut t.page_generation);
+        swap(&mut self.last_layout_request, &mut t.last_layout_request);
+        swap(&mut self.load_time, &mut t.load_time);
+        swap(&mut self.raster, &mut t.raster);
+        swap(&mut self.panel_raster, &mut t.panel_raster);
+    }
+
+    /// Ejecuta `f` con la pestaña `i` como activa (sin cambiar la pestaña visible).
+    fn with_tab<R>(&mut self, i: usize, f: impl FnOnce(&mut App) -> R) -> R {
+        if i == self.active || i >= self.tabs.len() {
+            return f(self);
+        }
+        let Some(mut state) = self.tabs[i].take() else {
+            return f(self);
+        };
+        let focused = self.chrome.field.focused;
+        self.swap_state(&mut state);
+        let r = f(self);
+        self.swap_state(&mut state);
+        self.tabs[i] = Some(state);
+        self.chrome.field.focused = focused;
+        self.update_title();
+        self.refresh_chrome();
+        r
+    }
+
+    /// Título de la pestaña `i` para la franja.
+    fn tab_title(&self, i: usize) -> String {
+        if i == self.active {
+            return self.display_name();
+        }
+        let Some(t) = self.tabs.get(i).and_then(|t| t.as_ref()) else {
+            return String::new();
+        };
+        if t.loading.is_some() {
+            return "Cargando…".to_owned();
+        }
+        t.current
+            .as_ref()
+            .and_then(|l| l.title())
+            .or_else(|| t.history.get(t.index).map(|e| e.url.href()))
+            .unwrap_or_default()
+    }
+
+    fn tab_loading(&self, i: usize) -> bool {
+        if i == self.active {
+            return self.loading.is_some();
+        }
+        self.tabs
+            .get(i)
+            .and_then(|t| t.as_ref())
+            .is_some_and(|t| t.loading.is_some())
+    }
+
+    fn any_loading(&self) -> bool {
+        (0..self.tabs.len()).any(|i| self.tab_loading(i))
+    }
+
+    /// La pestaña que espera el trabajo `id` del hilo de carga.
+    fn tab_owning(&self, id: u64) -> Option<usize> {
+        let owns = |loading: &Option<Loading>, relayout: Option<u64>| {
+            loading.as_ref().is_some_and(|l| l.id == id) || relayout == Some(id)
+        };
+        if owns(&self.loading, self.relayout) {
+            return Some(self.active);
+        }
+        self.tabs
+            .iter()
+            .position(|t| t.as_ref().is_some_and(|t| owns(&t.loading, t.relayout)))
+    }
+
+    /// Abre una pestaña a la derecha de la activa. Sin `url`, `about:home` con el campo de
+    /// URL enfocado y vacío; `background` la carga sin mostrarla.
+    fn new_tab(&mut self, url: Option<Url>, background: bool) {
+        let i = (self.active + 1).min(self.tabs.len());
+        self.tabs.insert(i, Some(TabState::default()));
+        let home = url.is_none();
+        let url = url.or_else(|| Url::parse("about:home", None).ok());
+        if background {
+            if let Some(u) = url {
+                self.with_tab(i, |app| app.start_load(u, Navigation::Push));
+            }
+        } else {
+            self.activate_tab(i);
+            if let Some(u) = url {
+                self.start_load(u, Navigation::Push);
+            }
+            if home {
+                self.focus_bar_on_load = true;
+                self.chrome.field.focused = true;
+                self.chrome.field.set_text(String::new());
+            }
+        }
+        self.update_title();
+        self.refresh_chrome();
+    }
+
+    /// Muestra la pestaña `i`.
+    fn activate_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() || i == self.active {
+            return;
+        }
+        let Some(mut incoming) = self.tabs[i].take() else {
+            return;
+        };
+        self.swap_state(&mut incoming);
+        self.tabs[self.active] = Some(incoming);
+        self.active = i;
+        self.chrome.field.focused = false;
+        self.update_title();
+        self.refresh_chrome();
+        self.refresh_panel();
+        self.redraw_later();
+    }
+
+    /// Cierra la pestaña `i`. La última se sustituye por una pestaña nueva.
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            self.new_tab(None, false);
+            return self.close_tab(0);
+        }
+        if i == self.active {
+            let next = if i + 1 < self.tabs.len() {
+                i + 1
+            } else {
+                i - 1
+            };
+            self.activate_tab(next);
+        }
+        self.tabs.remove(i);
+        if self.active > i {
+            self.active -= 1;
+        }
+        self.update_title();
+        self.refresh_chrome();
+    }
+
+    /// Pasa a la pestaña `delta` posiciones a la derecha (cíclico).
+    fn cycle_tab(&mut self, delta: isize) {
+        let n = self.tabs.len() as isize;
+        let i = (self.active as isize + delta).rem_euclid(n) as usize;
+        self.activate_tab(i);
+    }
+
     fn update_title(&self) {
         if let Some(g) = &self.graphics {
             g.window
@@ -404,7 +593,15 @@ impl App {
     /// Vuelve a maquetar la barra y la línea de estado con el estado actual.
     fn refresh_chrome(&mut self) {
         let vp = self.viewport();
+        let tabs: Vec<TabInfo> = (0..self.tabs.len())
+            .map(|i| TabInfo {
+                title: self.tab_title(i),
+                loading: self.tab_loading(i),
+            })
+            .collect();
         let c = &mut self.chrome;
+        c.tabs = tabs;
+        c.active = self.active;
         c.can_back = self.index > 0 && !self.history.is_empty();
         c.can_forward = self.index + 1 < self.history.len();
         c.loading = self.loading.is_some();
@@ -698,11 +895,28 @@ impl App {
     }
 
     /// Resultados del hilo de trabajo.
+    /// Entrega un resultado del hilo de carga a la pestaña que lo pidió. Devuelve el viewport
+    /// usado si era para la pestaña activa.
+    fn deliver(&mut self, done: Done) -> Option<Size> {
+        match self.tab_owning(done.id) {
+            Some(i) if i != self.active => {
+                self.with_tab(i, |app| app.apply(done));
+                None
+            }
+            _ => {
+                let viewport = done.viewport;
+                self.apply(done);
+                Some(viewport)
+            }
+        }
+    }
+
     fn receive(&mut self) {
         let mut laid_out = None;
         while let Ok(done) = self.worker.done.try_recv() {
-            laid_out = Some(done.viewport);
-            self.apply(done);
+            if let Some(v) = self.deliver(done) {
+                laid_out = Some(v);
+            }
         }
         // Si la ventana cambió mientras se maquetaba, se rehace con el viewport actual.
         let viewport = self.viewport();
@@ -783,7 +997,12 @@ impl App {
             Navigation::Reload => {}
         }
         self.clamp_scroll();
-        self.chrome.field.focused = false;
+        if std::mem::take(&mut self.focus_bar_on_load) {
+            self.chrome.field.focused = true;
+            self.chrome.field.set_text(String::new());
+        } else {
+            self.chrome.field.focused = false;
+        }
         self.update_title();
         self.refresh_chrome();
         self.refresh_panel();
@@ -1084,6 +1303,9 @@ impl App {
                 Some(Region::Reload) => self.reload(),
                 Some(Region::Engine) => self.toggle_panel(),
                 Some(Region::Field) if !self.chrome.field.focused => self.focus_bar(),
+                Some(Region::Tab(i)) => self.activate_tab(i),
+                Some(Region::CloseTab(i)) => self.close_tab(i),
+                Some(Region::NewTab) => self.new_tab(None, false),
                 _ => {}
             },
             Area::Status => {}
@@ -1102,19 +1324,45 @@ impl App {
                     self.chrome.field.focused = false;
                     self.refresh_chrome();
                 }
-                let (Some(current), Some(page)) = (&self.current, &self.page) else {
-                    return;
-                };
-                let (px, py) = self.page_point(x, y);
-                let target = hit::hit_test(&page.tree, px, py, self.scroll)
-                    .and_then(|f| f.node)
-                    .and_then(|n| hit::link_at(&current.doc, n))
-                    .and_then(|(_, href)| Url::parse(&href, Some(&current.base)).ok());
-                // `javascript:` necesita el motor de JavaScript (fase 2).
-                if let Some(url) = target.filter(|u| u.scheme != "javascript") {
-                    self.navigate(url);
+                if let Some(url) = self.link_under_mouse() {
+                    if self.modifiers.control_key() {
+                        self.new_tab(Some(url), true);
+                    } else {
+                        self.navigate(url);
+                    }
                 }
             }
+        }
+    }
+
+    /// La URL del enlace bajo el puntero (en la página), sin `javascript:`.
+    fn link_under_mouse(&self) -> Option<Url> {
+        let (x, y) = self.mouse;
+        let (current, page) = (self.current.as_ref()?, self.page.as_ref()?);
+        let (px, py) = self.page_point(x, y);
+        hit::hit_test(&page.tree, px, py, self.scroll)
+            .and_then(|f| f.node)
+            .and_then(|n| hit::link_at(&current.doc, n))
+            .and_then(|(_, href)| Url::parse(&href, Some(&current.base)).ok())
+            // `javascript:` necesita el motor de JavaScript (fase 2).
+            .filter(|u| u.scheme != "javascript")
+    }
+
+    /// Botón central: cierra la pestaña bajo el puntero o abre un enlace en una nueva.
+    fn middle_click(&mut self) {
+        let (x, y) = self.mouse;
+        match self.area_at(x, y) {
+            Area::Bar => {
+                if let Some(Region::Tab(i) | Region::CloseTab(i)) = self.chrome.region_at(x, y) {
+                    self.close_tab(i);
+                }
+            }
+            Area::Page => {
+                if let Some(url) = self.link_under_mouse() {
+                    self.new_tab(Some(url), true);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1186,6 +1434,19 @@ impl App {
         let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
         // Atajos globales.
         match key {
+            Key::Character(c) if ctrl && is(c, "t") => return self.new_tab(None, false),
+            Key::Character(c) if ctrl && is(c, "w") => return self.close_tab(self.active),
+            Key::Named(NamedKey::Tab) if ctrl && shift => return self.cycle_tab(-1),
+            Key::Named(NamedKey::Tab) if ctrl => return self.cycle_tab(1),
+            Key::Named(NamedKey::PageDown) if ctrl => return self.cycle_tab(1),
+            Key::Named(NamedKey::PageUp) if ctrl => return self.cycle_tab(-1),
+            Key::Character(c)
+                if ctrl && c.len() == 1 && c.as_bytes()[0].is_ascii_digit() && c != "0" =>
+            {
+                let d = usize::from(c.as_bytes()[0] - b'0');
+                let last = self.tabs.len() - 1;
+                return self.activate_tab(if d == 9 { last } else { (d - 1).min(last) });
+            }
             Key::Character(c) if ctrl && is(c, "l") => return self.focus_bar(),
             Key::Named(NamedKey::F6) => return self.focus_bar(),
             Key::Character(c) if ctrl && is(c, "i") => return self.toggle_panel(),
@@ -1353,6 +1614,7 @@ impl ApplicationHandler<Wake> for App {
                 ..
             } => match button {
                 MouseButton::Left => self.click(),
+                MouseButton::Middle => self.middle_click(),
                 MouseButton::Back => self.back(),
                 MouseButton::Forward => self.forward(),
                 _ => {}
@@ -1407,7 +1669,7 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
 impl App {
     /// Espera a que el hilo de trabajo termine lo pendiente (sesiones sin ventana).
     fn settle(&mut self) {
-        while self.loading.is_some() || self.relayout.is_some() {
+        while self.any_loading() || self.relayout.is_some() {
             let Ok(done) = self
                 .worker
                 .done
@@ -1415,9 +1677,11 @@ impl App {
             else {
                 break;
             };
-            let viewport = done.viewport;
-            self.apply(done);
-            if viewport != self.viewport() && self.loading.is_none() && self.relayout.is_none() {
+            if let Some(viewport) = self.deliver(done)
+                && viewport != self.viewport()
+                && self.loading.is_none()
+                && self.relayout.is_none()
+            {
                 self.request_relayout();
             }
         }
@@ -1477,7 +1741,9 @@ impl App {
             ""
         };
         format!(
-            "url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus} estado={:?} panel={} cajas={}",
+            "pestaña={}/{} url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus} estado={:?} panel={} cajas={}",
+            self.active + 1,
+            self.tabs.len(),
             self.scroll.0,
             self.scroll.1,
             self.index + 1,
@@ -1500,6 +1766,12 @@ impl App {
         let (verb, arg) = step.split_once(':').unwrap_or((step, ""));
         match verb {
             "wait" => {}
+            "newtab" => self.new_tab(None, false),
+            "closetab" => self.close_tab(self.active),
+            "tab" => {
+                let n: usize = arg.trim().parse().map_err(|_| bad())?;
+                self.activate_tab(n.checked_sub(1).ok_or_else(bad)?);
+            }
             "move" => {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
@@ -1559,6 +1831,7 @@ impl App {
                     "f5" => Some(NamedKey::F5),
                     "f6" => Some(NamedKey::F6),
                     "f12" => Some(NamedKey::F12),
+                    "tab" => Some(NamedKey::Tab),
                     _ => None,
                 };
                 self.modifiers = modifiers;
