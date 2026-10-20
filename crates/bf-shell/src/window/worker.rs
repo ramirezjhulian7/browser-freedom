@@ -23,6 +23,8 @@ pub struct LoadJob {
     pub net: Arc<NetLoader>,
     pub recent: Vec<(String, String)>,
     pub theme: Theme,
+    /// Cuerpo `POST` (formularios).
+    pub post: Option<(Vec<u8>, String)>,
 }
 
 pub enum Job {
@@ -109,6 +111,7 @@ impl Worker {
                                 net,
                                 recent,
                                 theme,
+                                post,
                             } = *job;
                             let ctx = LoadContext {
                                 net,
@@ -116,6 +119,7 @@ impl Worker {
                                 viewport: current_viewport(),
                                 recent,
                                 theme,
+                                post,
                             };
                             let loaded = catch_unwind(AssertUnwindSafe(|| load_with(&url, &ctx)))
                                 .unwrap_or_else(|e| {
@@ -152,6 +156,7 @@ impl Worker {
                                 viewport,
                                 recent: Vec::new(),
                                 theme: Theme::for_system(None),
+                                post: None,
                             });
                             let err = engine_error(message);
                             let shown = Arc::new(internal::error_page(&loaded.url, &err, &ctx));

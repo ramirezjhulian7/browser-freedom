@@ -17,8 +17,10 @@
 //! Los atajos están en [`crate::internal::SHORTCUTS`] (y en `about:home`).
 
 mod chrome;
+mod edit;
 mod hit;
 mod icons;
+mod menu;
 mod overlay;
 mod worker;
 
@@ -28,12 +30,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bf_dom::NodeId;
 use bf_font::FontDb;
 use bf_infra::Url;
 use bf_layout::fragment::Rect;
 use bf_layout::{Fragment, Size};
 use bf_net::NetLoader;
-use bf_paint::{Page, Pixmap, PixmapPaint, Transform, document_extent, render, render_scrolled};
+use bf_paint::{
+    DisplayItem, DisplayList, Page, Pixmap, PixmapPaint, Radii, Transform, document_extent, render,
+    render_scrolled,
+};
 use bf_style::values::color::Rgba;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -46,6 +52,8 @@ use crate::internal;
 use crate::load::{Loaded, indicated_element};
 use crate::theme::Theme;
 use chrome::{BAR, Chrome, PANEL, Region, STATUS, TabInfo};
+use edit::{Editable, Focus};
+use menu::{Menu, MenuAction, MenuItem};
 use worker::{Done, Job, LoadJob, Worker};
 
 /// Px CSS por "línea" de rueda y por pulsación de flecha.
@@ -124,6 +132,7 @@ struct TabState {
     load_time: Option<Duration>,
     raster: Cell<Option<Duration>>,
     panel_raster: Option<Duration>,
+    focus: Option<Focus>,
 }
 
 struct App {
@@ -131,6 +140,11 @@ struct App {
     /// Estado de las pestañas inactivas (`None` en la posición de la activa).
     tabs: Vec<Option<TabState>>,
     active: usize,
+    /// Control de la página con el foco de teclado (campo de texto en edición).
+    focus: Option<Focus>,
+    /// Menú contextual abierto.
+    menu: Option<Menu>,
+    fonts: Arc<FontDb>,
     worker: Worker,
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
@@ -265,6 +279,12 @@ impl RasterKey {
     }
 }
 
+/// El icono de la ventana: el logo a 64 px.
+fn window_icon() -> Option<winit::window::Icon> {
+    let img = bf_image::decode(internal::LOGO_64, Some("image/png")).ok()?;
+    winit::window::Icon::from_rgba(img.rgba, img.width, img.height).ok()
+}
+
 /// Dos viewports se consideran iguales si difieren menos de medio px CSS: evita que un
 /// error de redondeo encadene re-layouts sin fin.
 fn same_viewport(a: Size, b: Size) -> bool {
@@ -286,6 +306,145 @@ fn trace(msg: &str) {
 
 static TRACE_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
+/// El `<form>` dueño de `node`: el del atributo `form` o el ancestro más cercano.
+fn form_of(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
+    if let Some(id) = doc.element(node).and_then(|e| e.attr("form"))
+        && let Some(f) = doc
+            .inclusive_descendants(doc.root())
+            .into_iter()
+            .find(|&n| {
+                doc.element(n)
+                    .is_some_and(|e| e.is_html("form") && e.attr("id") == Some(id))
+            })
+    {
+        return Some(f);
+    }
+    let mut cur = doc.parent(node);
+    while let Some(n) = cur {
+        if doc.element(n).is_some_and(|e| e.is_html("form")) {
+            return Some(n);
+        }
+        cur = doc.parent(n);
+    }
+    None
+}
+
+/// El botón de envío que contiene a `node`, si lo hay.
+fn submit_button_at(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if let Some(el) = doc.element(n)
+            && el.ns == bf_infra::Namespace::Html
+        {
+            let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
+            match el.name.as_str().unwrap_or("") {
+                "input" if matches!(ty.as_str(), "submit" | "image") => return Some(n),
+                "button" if matches!(ty.as_str(), "" | "submit") => return Some(n),
+                "a" | "input" | "button" | "textarea" | "select" | "label" => return None,
+                _ => {}
+            }
+        }
+        cur = doc.parent(n);
+    }
+    None
+}
+
+/// El conjunto de datos de un formulario (HTML §4.10.21.4, sin archivos).
+fn form_data(
+    doc: &bf_dom::Document,
+    form: NodeId,
+    submitter: Option<NodeId>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for n in doc.inclusive_descendants(form) {
+        let Some(el) = doc.element(n) else { continue };
+        if el.ns != bf_infra::Namespace::Html || el.attr("disabled").is_some() {
+            continue;
+        }
+        let Some(name) = el.attr("name").filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let pair = |v: &str| (name.to_owned(), v.to_owned());
+        match el.name.as_str().unwrap_or("") {
+            "input" => {
+                let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
+                match ty.as_str() {
+                    "checkbox" | "radio" => {
+                        if el.attr("checked").is_some() {
+                            out.push(pair(el.attr("value").unwrap_or("on")));
+                        }
+                    }
+                    "submit" | "image" | "reset" | "button" => {
+                        if submitter == Some(n) {
+                            out.push(pair(el.attr("value").unwrap_or("")));
+                        }
+                    }
+                    "file" => {}
+                    _ => out.push(pair(el.attr("value").unwrap_or(""))),
+                }
+            }
+            "textarea" => out.push(pair(&doc.text_content(n))),
+            "select" => {
+                let (mut selected, mut first) = (None, None);
+                for o in doc.inclusive_descendants(n) {
+                    let Some(oe) = doc.element(o) else { continue };
+                    if !oe.is_html("option") {
+                        continue;
+                    }
+                    let v = oe
+                        .attr("value")
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| doc.text_content(o).trim().to_owned());
+                    if first.is_none() {
+                        first = Some(v.clone());
+                    }
+                    if oe.attr("selected").is_some() {
+                        selected = Some(v);
+                    }
+                }
+                if let Some(v) = selected.or(first) {
+                    out.push(pair(&v));
+                }
+            }
+            "button" if submitter == Some(n) => {
+                out.push(pair(el.attr("value").unwrap_or("")));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Extensión de archivo para un `Content-Type` de imagen.
+fn extension_for(content_type: Option<&str>) -> &'static str {
+    match content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+    {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        _ => "bin",
+    }
+}
+
+fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+fn set_clipboard(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text.to_owned()))
+        .is_ok()
+}
+
 fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
     frame.draw_pixmap(
         x.round() as i32,
@@ -303,6 +462,9 @@ impl App {
             net: Arc::new(NetLoader::new()),
             tabs: vec![None],
             active: 0,
+            focus: None,
+            menu: None,
+            fonts: fonts.clone(),
             worker,
             current: None,
             page: None,
@@ -441,6 +603,7 @@ impl App {
         swap(&mut self.load_time, &mut t.load_time);
         swap(&mut self.raster, &mut t.raster);
         swap(&mut self.panel_raster, &mut t.panel_raster);
+        swap(&mut self.focus, &mut t.focus);
     }
 
     /// Ejecuta `f` con la pestaña `i` como activa (sin cambiar la pestaña visible).
@@ -583,6 +746,404 @@ impl App {
         self.activate_tab(i);
     }
 
+    /// Teclas con un campo de la página enfocado. Devuelve si la tecla se consumió.
+    fn edit_key(&mut self, key: &Key, text: Option<&str>) -> bool {
+        let (Some(f), Some(current)) = (self.focus.clone(), self.current.clone()) else {
+            return false;
+        };
+        let ctrl = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+        let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
+        let mut value: Vec<char> = edit::value(&current.doc, f.node, f.kind).chars().collect();
+        let len = value.len();
+        let mut caret = f.caret.min(len);
+        let mut anchor = f.anchor.map(|a| a.min(len));
+        let sel = f.selection().map(|(a, b)| (a.min(len), b.min(len)));
+        let mut changed = false;
+        let kind = f.kind;
+        // Borra la selección (si hay) y deja el caret en su inicio.
+        let delete_sel = |value: &mut Vec<char>, caret: &mut usize| -> bool {
+            match sel {
+                Some((a, b)) if a < b => {
+                    value.drain(a..b);
+                    *caret = a;
+                    true
+                }
+                _ => false,
+            }
+        };
+        let insert = |value: &mut Vec<char>, caret: &mut usize, s: &str, changed: &mut bool| {
+            delete_sel(value, caret);
+            for c in s.chars() {
+                if kind == Editable::Input && (c == char::from(10) || c == char::from(13)) {
+                    continue;
+                }
+                value.insert(*caret, c);
+                *caret += 1;
+            }
+            *changed = true;
+        };
+        // Mover el caret: con Mayús extiende la selección.
+        let moved = |caret: &mut usize, anchor: &mut Option<usize>, to: usize| {
+            if shift {
+                if anchor.is_none() {
+                    *anchor = Some(*caret);
+                }
+            } else {
+                *anchor = None;
+            }
+            *caret = to;
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.focus = None;
+                self.redraw_later();
+                return true;
+            }
+            Key::Named(NamedKey::Tab) => return false,
+            Key::Named(NamedKey::Enter) if kind == Editable::Input => {
+                // Envío implícito (HTML §4.10.21.2).
+                self.focus = None;
+                if let Some(form) = form_of(&current.doc, f.node) {
+                    self.submit_form(form, None);
+                }
+                return true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let nl = String::from(char::from(10));
+                insert(&mut value, &mut caret, &nl, &mut changed);
+                anchor = None;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if !delete_sel(&mut value, &mut caret) && caret > 0 {
+                    value.remove(caret - 1);
+                    caret -= 1;
+                }
+                anchor = None;
+                changed = true;
+            }
+            Key::Named(NamedKey::Delete) => {
+                if !delete_sel(&mut value, &mut caret) && caret < len {
+                    value.remove(caret);
+                }
+                anchor = None;
+                changed = true;
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                let to = caret.saturating_sub(1);
+                moved(&mut caret, &mut anchor, to);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                let to = (caret + 1).min(len);
+                moved(&mut caret, &mut anchor, to);
+            }
+            Key::Named(NamedKey::Home) => moved(&mut caret, &mut anchor, 0),
+            Key::Named(NamedKey::End) => moved(&mut caret, &mut anchor, len),
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                return kind == Editable::TextArea;
+            }
+            Key::Character(c) if ctrl && is(c, "a") => {
+                anchor = Some(0);
+                caret = len;
+            }
+            Key::Character(c) if ctrl && is(c, "c") => {
+                if let Some((a, b)) = sel {
+                    set_clipboard(&value[a..b].iter().collect::<String>());
+                }
+                return true;
+            }
+            Key::Character(c) if ctrl && is(c, "x") => {
+                if let Some((a, b)) = sel {
+                    set_clipboard(&value[a..b].iter().collect::<String>());
+                    delete_sel(&mut value, &mut caret);
+                    anchor = None;
+                    changed = true;
+                }
+            }
+            Key::Character(c) if ctrl && is(c, "v") => {
+                if let Some(t) = clipboard_text() {
+                    insert(&mut value, &mut caret, &t, &mut changed);
+                    anchor = None;
+                }
+            }
+            Key::Character(_) if ctrl => return false,
+            Key::Named(NamedKey::Space) => {
+                insert(&mut value, &mut caret, " ", &mut changed);
+                anchor = None;
+            }
+            _ => match text {
+                Some(t) if !t.is_empty() && !t.chars().any(char::is_control) => {
+                    insert(&mut value, &mut caret, t, &mut changed);
+                    anchor = None;
+                }
+                _ => return false,
+            },
+        }
+        if changed {
+            self.set_field_value(f.node, kind, value.iter().collect());
+        }
+        if let Some(fo) = &mut self.focus {
+            fo.caret = caret;
+            fo.anchor = anchor;
+        }
+        self.redraw_later();
+        true
+    }
+
+    /// Escribe el valor de un control en el DOM y vuelve a maquetar.
+    fn set_field_value(&mut self, node: NodeId, kind: Editable, text: String) {
+        let Some(cur) = &self.current else {
+            return;
+        };
+        let mut l: Loaded = (**cur).clone();
+        edit::set_value(&mut l.doc, node, kind, &text);
+        self.current = Some(Arc::new(l));
+        self.request_relayout();
+    }
+
+    /// Envía el formulario del botón `button`.
+    fn submit(&mut self, button: NodeId) {
+        let Some(cur) = self.current.clone() else {
+            return;
+        };
+        if let Some(form) = form_of(&cur.doc, button) {
+            self.submit_form(form, Some(button));
+        }
+    }
+
+    /// Envío de un formulario (HTML §4.10.21.3, GET y POST `urlencoded`).
+    fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
+        let Some(cur) = self.current.clone() else {
+            return;
+        };
+        let doc = &cur.doc;
+        let attr = |name: &str| -> Option<String> {
+            submitter
+                .and_then(|s| doc.element(s))
+                .and_then(|e| e.attr(&format!("form{name}")).map(str::to_owned))
+                .or_else(|| {
+                    doc.element(form)
+                        .and_then(|e| e.attr(name).map(str::to_owned))
+                })
+        };
+        let method = attr("method").unwrap_or_default().to_ascii_lowercase();
+        let action = attr("action")
+            .filter(|a| !a.trim().is_empty())
+            .and_then(|a| Url::parse(a.trim(), Some(&cur.base)).ok())
+            .unwrap_or_else(|| cur.url.clone());
+        let data = form_data(doc, form, submitter);
+        let query = bf_url::form::serialize(&data);
+        if method == "post" {
+            let body = (
+                query.into_bytes(),
+                "application/x-www-form-urlencoded".to_owned(),
+            );
+            self.start_load_with(action, Navigation::Push, Some(body));
+        } else {
+            let mut url = action;
+            url.query = Some(query);
+            url.fragment = None;
+            self.navigate(url);
+        }
+    }
+
+    /// La URL de la imagen (`<img>`) bajo el puntero.
+    fn image_under_mouse(&self) -> Option<String> {
+        let (x, y) = self.mouse;
+        let (px, py) = self.page_point(x, y);
+        let page = self.page.as_ref()?;
+        let node = hit::hit_test(&page.tree, px, py, self.scroll)?.node?;
+        page.images.element_url.get(&node).cloned()
+    }
+
+    /// Clic derecho en la página: el menú contextual según lo que hay bajo el puntero.
+    fn context_menu(&mut self) {
+        let (x, y) = self.mouse;
+        if self.area_at(x, y) != Area::Page {
+            return;
+        }
+        let link = self.link_under_mouse().map(|u| u.href());
+        let image = self.image_under_mouse();
+        let field = match (&self.current, &self.page) {
+            (Some(current), Some(page)) => {
+                let (px, py) = self.page_point(x, y);
+                hit::hit_test(&page.tree, px, py, self.scroll)
+                    .and_then(|f| f.node)
+                    .and_then(|n| edit::editable_at(&current.doc, n))
+            }
+            _ => None,
+        };
+        let mut items = Vec::new();
+        if let Some(l) = &link {
+            items.push(MenuItem::new(
+                "Abrir enlace en una pestaña nueva",
+                MenuAction::OpenInTab(l.clone()),
+            ));
+            items.push(MenuItem::new(
+                "Copiar dirección del enlace",
+                MenuAction::CopyText(l.clone()),
+            ));
+            items.push(MenuItem::separator());
+        }
+        if let Some(i) = &image {
+            items.push(MenuItem::new(
+                "Guardar imagen como…",
+                MenuAction::SaveResource(i.clone()),
+            ));
+            items.push(MenuItem::new(
+                "Copiar dirección de la imagen",
+                MenuAction::CopyText(i.clone()),
+            ));
+            items.push(MenuItem::new(
+                "Abrir imagen en una pestaña nueva",
+                MenuAction::OpenInTab(i.clone()),
+            ));
+            items.push(MenuItem::separator());
+        }
+        if let Some((node, kind)) = field {
+            if self.focus.as_ref().map(|f| f.node) != Some(node) {
+                let len = self
+                    .current
+                    .as_ref()
+                    .map_or(0, |c| edit::value(&c.doc, node, kind).chars().count());
+                self.focus = Some(Focus {
+                    node,
+                    kind,
+                    caret: len,
+                    anchor: None,
+                });
+            }
+            let has_sel = self.focus.as_ref().is_some_and(|f| f.selection().is_some());
+            items.push(MenuItem::new("Cortar", MenuAction::Cut).disabled(!has_sel));
+            items.push(MenuItem::new("Copiar", MenuAction::Copy).disabled(!has_sel));
+            let paste = clipboard_text().is_some_and(|t| !t.is_empty());
+            items.push(MenuItem::new("Pegar", MenuAction::Paste).disabled(!paste));
+            items.push(MenuItem::new("Seleccionar todo", MenuAction::SelectAll));
+            items.push(MenuItem::separator());
+        }
+        items.push(MenuItem::new("Atrás", MenuAction::Back).disabled(!self.chrome.can_back));
+        items.push(
+            MenuItem::new("Adelante", MenuAction::Forward).disabled(!self.chrome.can_forward),
+        );
+        items.push(MenuItem::new("Recargar", MenuAction::Reload));
+        items.push(MenuItem::separator());
+        let page_url = self.current.as_ref().map(|c| c.url.href());
+        let no_page = page_url.is_none();
+        items.push(MenuItem::new("Guardar página como…", MenuAction::SavePage).disabled(no_page));
+        items.push(
+            MenuItem::new(
+                "Copiar dirección de la página",
+                MenuAction::CopyText(page_url.unwrap_or_default()),
+            )
+            .disabled(no_page),
+        );
+        items.push(MenuItem::new("Ver código fuente", MenuAction::ViewSource).disabled(no_page));
+        items.push(MenuItem::new("Inspeccionar (F12)", MenuAction::Inspect));
+        self.menu = Some(Menu::new(
+            items,
+            (x, y),
+            self.logical_size(),
+            self.fonts.clone(),
+            self.chrome.theme,
+        ));
+        self.redraw_later();
+    }
+
+    /// Ejecuta un atajo de edición (`x`, `c`, `v`, `a`) sobre el campo enfocado.
+    fn edit_shortcut(&mut self, letter: &str) {
+        let saved = self.modifiers;
+        self.modifiers = ModifiersState::CONTROL;
+        self.edit_key(&Key::Character(SmolStr::new(letter)), None);
+        self.modifiers = saved;
+    }
+
+    fn menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Back => self.back(),
+            MenuAction::Forward => self.forward(),
+            MenuAction::Reload => self.reload(),
+            MenuAction::OpenInTab(u) => {
+                if let Ok(u) = Url::parse(&u, None) {
+                    self.new_tab(Some(u), true);
+                }
+            }
+            MenuAction::CopyText(t) => {
+                let message = if set_clipboard(&t) {
+                    "Copiado"
+                } else {
+                    "No se pudo copiar"
+                };
+                self.set_notice(message.to_owned());
+            }
+            MenuAction::SaveResource(u) => self.save_resource(&u),
+            MenuAction::SavePage => self.save_page(),
+            MenuAction::ViewSource => {
+                if let Some(c) = &self.current
+                    && let Ok(u) = Url::parse(&format!("about:source?{}", c.url.href()), None)
+                {
+                    self.new_tab(Some(u), false);
+                }
+            }
+            MenuAction::Inspect => self.toggle_overlay(),
+            MenuAction::Cut => self.edit_shortcut("x"),
+            MenuAction::Copy => self.edit_shortcut("c"),
+            MenuAction::Paste => self.edit_shortcut("v"),
+            MenuAction::SelectAll => self.edit_shortcut("a"),
+        }
+    }
+
+    /// Descarga `url` y la guarda donde el usuario elija.
+    fn save_resource(&mut self, url: &str) {
+        let Ok(u) = Url::parse(url, None) else {
+            return;
+        };
+        let Some(res) = bf_infra::ResourceLoader::load(&*self.net, &u) else {
+            self.set_notice("No se pudo descargar la imagen".to_owned());
+            return;
+        };
+        let name = u
+            .path_string()
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("imagen")
+            .to_owned();
+        let name = if name.contains('.') {
+            name
+        } else {
+            format!("{name}.{}", extension_for(res.content_type.as_deref()))
+        };
+        self.save_bytes(&name, &res.bytes);
+    }
+
+    /// Guarda el HTML original de la página donde el usuario elija.
+    fn save_page(&mut self) {
+        let Some(cur) = self.current.clone() else {
+            return;
+        };
+        let Some(res) = bf_infra::ResourceLoader::load(&*cur.loader, &cur.url) else {
+            self.set_notice("No se pudo obtener la página".to_owned());
+            return;
+        };
+        let mut name = cur.title().unwrap_or_else(|| cur.url.host_string());
+        name.retain(|c| {
+            !matches!(c, '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && c != char::from(92)
+        });
+        let name = format!("{}.html", name.trim());
+        self.save_bytes(&name, &res.bytes);
+    }
+
+    fn save_bytes(&mut self, name: &str, bytes: &[u8]) {
+        let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() else {
+            return;
+        };
+        let message = match std::fs::write(&path, bytes) {
+            Ok(()) => format!("Guardado {}", path.display()),
+            Err(e) => format!("No se pudo guardar {}: {e}", path.display()),
+        };
+        self.set_notice(message);
+    }
+
     fn update_title(&self) {
         if let Some(g) = &self.graphics {
             g.window
@@ -678,6 +1239,11 @@ impl App {
     // --- Navegación ---
 
     fn start_load(&mut self, url: Url, nav: Navigation) {
+        self.start_load_with(url, nav, None);
+    }
+
+    /// Como [`Self::start_load`], con un cuerpo `POST` `(bytes, Content-Type)`.
+    fn start_load_with(&mut self, url: Url, nav: Navigation, post: Option<(Vec<u8>, String)>) {
         // El scroll de la entrada actual, para volver a él.
         if let Some(e) = self.history.get_mut(self.index) {
             e.scroll = self.scroll;
@@ -698,6 +1264,7 @@ impl App {
             net: self.net.clone(),
             recent,
             theme: self.chrome.theme,
+            post,
         })));
         self.loading = Some(Loading {
             id,
@@ -969,6 +1536,7 @@ impl App {
         self.raster.set(None);
         self.hover_link = None;
         self.overlay_hover = None;
+        self.focus = None;
         match nav {
             Navigation::Push => {
                 self.history.truncate(self.index + 1);
@@ -1156,6 +1724,42 @@ impl App {
                 );
                 blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
+            if let (Some(f), Some(root), Some(current)) =
+                (&self.focus, p.tree.root.as_ref(), &self.current)
+            {
+                let has_value = !edit::value(&current.doc, f.node, f.kind).is_empty();
+                let mut list = DisplayList::default();
+                if let Some((a, b)) = f.selection()
+                    && let (Some(ra), Some(rb)) = (
+                        edit::caret_rect(root, f.node, a, has_value),
+                        edit::caret_rect(root, f.node, b, has_value),
+                    )
+                    && (ra.y - rb.y).abs() < 0.5
+                {
+                    list.push(DisplayItem::Rect {
+                        rect: Rect::new(ra.x, ra.y, rb.x - ra.x, ra.height),
+                        color: Theme::with_alpha(theme.accent, 0.35),
+                        radii: Radii::default(),
+                    });
+                }
+                if let Some(r) = edit::caret_rect(root, f.node, f.caret, has_value) {
+                    list.push(DisplayItem::Rect {
+                        rect: r,
+                        color: theme.accent,
+                        radii: Radii::default(),
+                    });
+                }
+                if !list.items.is_empty() {
+                    let layer = render_scrolled(
+                        &list,
+                        viewport,
+                        dpi * self.zoom,
+                        Rgba::TRANSPARENT,
+                        self.scroll,
+                    );
+                    blit(&mut frame, &layer, 0.0, area.y * dpi);
+                }
+            }
         }
         if let Some(panel) = self.chrome.panel() {
             let scroll = (0.0, self.chrome.panel_scroll);
@@ -1182,6 +1786,10 @@ impl App {
                 theme.chrome,
             );
             blit(&mut frame, &layer, 0.0, (logical.height - STATUS) * dpi);
+        }
+        if let Some(menu) = &self.menu {
+            let layer = render(menu.display_list(), menu.size(), dpi, Rgba::TRANSPARENT);
+            blit(&mut frame, &layer, menu.origin.0 * dpi, menu.origin.1 * dpi);
         }
         frame
     }
@@ -1235,6 +1843,14 @@ impl App {
 
     fn mouse_moved(&mut self) {
         let (x, y) = self.mouse;
+        if let Some(menu) = &mut self.menu {
+            let item = menu.item_at(x, y);
+            if menu.set_hover(item) {
+                self.redraw_later();
+            }
+            self.set_cursor(CursorIcon::Default);
+            return;
+        }
         let mut cursor = CursorIcon::Default;
         let mut link = None;
         let mut bar_hover = None;
@@ -1295,6 +1911,17 @@ impl App {
 
     fn click(&mut self) {
         let (x, y) = self.mouse;
+        if let Some(menu) = &self.menu {
+            let action = menu
+                .item_at(x, y)
+                .and_then(|i| menu.items[i].action.clone());
+            self.menu = None;
+            self.redraw_later();
+            if let Some(action) = action {
+                self.menu_action(action);
+            }
+            return;
+        }
         match self.area_at(x, y) {
             Area::Bar => match self.chrome.region_at(x, y) {
                 Some(Region::Back) => self.back(),
@@ -1319,17 +1946,79 @@ impl App {
                     self.navigate(url);
                 }
             }
-            Area::Page => {
-                if self.chrome.field.focused {
-                    self.chrome.field.focused = false;
-                    self.refresh_chrome();
-                }
-                if let Some(url) = self.link_under_mouse() {
-                    if self.modifiers.control_key() {
-                        self.new_tab(Some(url), true);
-                    } else {
-                        self.navigate(url);
+            Area::Page => self.page_click(),
+        }
+    }
+
+    /// Clic en la página: enlaces, campos de texto (foco y caret) y botones de envío.
+    fn page_click(&mut self) {
+        if self.chrome.field.focused {
+            self.chrome.field.focused = false;
+            self.refresh_chrome();
+        }
+        if let Some(url) = self.link_under_mouse() {
+            if self.modifiers.control_key() {
+                self.new_tab(Some(url), true);
+            } else {
+                self.navigate(url);
+            }
+            return;
+        }
+        enum Hit {
+            Field(NodeId, Editable, usize),
+            Submit(NodeId),
+            Nothing,
+        }
+        let (x, y) = self.mouse;
+        let (px, py) = self.page_point(x, y);
+        let hit = match (&self.current, &self.page) {
+            (Some(current), Some(page)) => {
+                let node = hit::hit_test(&page.tree, px, py, self.scroll).and_then(|f| f.node);
+                match node {
+                    Some(n) => {
+                        if let Some((node, kind)) = edit::editable_at(&current.doc, n) {
+                            let caret = page.tree.root.as_ref().map_or(0, |r| {
+                                edit::caret_from_point(
+                                    r,
+                                    node,
+                                    px + self.scroll.0,
+                                    py + self.scroll.1,
+                                )
+                            });
+                            Hit::Field(node, kind, caret)
+                        } else if let Some(b) = submit_button_at(&current.doc, n) {
+                            Hit::Submit(b)
+                        } else {
+                            Hit::Nothing
+                        }
                     }
+                    None => Hit::Nothing,
+                }
+            }
+            _ => Hit::Nothing,
+        };
+        match hit {
+            Hit::Field(node, kind, caret) => {
+                let shift = self.modifiers.shift_key();
+                let anchor = match &self.focus {
+                    Some(f) if f.node == node && shift => Some(f.anchor.unwrap_or(f.caret)),
+                    _ => None,
+                };
+                self.focus = Some(Focus {
+                    node,
+                    kind,
+                    caret,
+                    anchor,
+                });
+                self.redraw_later();
+            }
+            Hit::Submit(button) => {
+                self.focus = None;
+                self.submit(button);
+            }
+            Hit::Nothing => {
+                if self.focus.take().is_some() {
+                    self.redraw_later();
                 }
             }
         }
@@ -1432,6 +2121,12 @@ impl App {
         let alt = self.modifiers.alt_key();
         let shift = self.modifiers.shift_key();
         let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
+        if self.menu.take().is_some() {
+            self.redraw_later();
+            if matches!(key, Key::Named(NamedKey::Escape)) {
+                return;
+            }
+        }
         // Atajos globales.
         match key {
             Key::Character(c) if ctrl && is(c, "t") => return self.new_tab(None, false),
@@ -1467,6 +2162,9 @@ impl App {
             _ => {}
         }
         if self.chrome.field.focused && self.field_key(key, text) {
+            return;
+        }
+        if self.focus.is_some() && self.edit_key(key, text) {
             return;
         }
         // En `about:home`, escribir va al campo de URL.
@@ -1524,6 +2222,7 @@ impl ApplicationHandler<Wake> for App {
             return;
         }
         let attributes = Window::default_attributes()
+            .with_window_icon(window_icon())
             .with_title("«Cargando…» — browser-freedom")
             .with_inner_size(LogicalSize::new(1180.0, 800.0));
         let window = match event_loop.create_window(attributes) {
@@ -1615,6 +2314,7 @@ impl ApplicationHandler<Wake> for App {
             } => match button {
                 MouseButton::Left => self.click(),
                 MouseButton::Middle => self.middle_click(),
+                MouseButton::Right => self.context_menu(),
                 MouseButton::Back => self.back(),
                 MouseButton::Forward => self.forward(),
                 _ => {}
@@ -1740,8 +2440,16 @@ impl App {
         } else {
             ""
         };
+        let field = match (&self.focus, &self.current) {
+            (Some(f), Some(c)) => format!(
+                " campo={:?}@{}",
+                edit::value(&c.doc, f.node, f.kind),
+                f.caret
+            ),
+            _ => String::new(),
+        };
         format!(
-            "pestaña={}/{} url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus} estado={:?} panel={} cajas={}",
+            "pestaña={}/{} url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus}{field} estado={:?} panel={} cajas={}",
             self.active + 1,
             self.tabs.len(),
             self.scroll.0,
@@ -1767,6 +2475,35 @@ impl App {
         match verb {
             "wait" => {}
             "newtab" => self.new_tab(None, false),
+            "field" => {
+                let Some(cur) = self.current.clone() else {
+                    return Err(bad());
+                };
+                let node = cur
+                    .doc
+                    .inclusive_descendants(cur.doc.root())
+                    .into_iter()
+                    .find(|&n| {
+                        cur.doc
+                            .element(n)
+                            .is_some_and(|e| e.attr("name") == Some(arg))
+                    })
+                    .ok_or_else(|| format!("no hay un campo con name={arg:?}"))?;
+                let (node, kind) = edit::editable_at(&cur.doc, node)
+                    .ok_or_else(|| format!("{arg:?} no es un campo editable"))?;
+                let caret = edit::value(&cur.doc, node, kind).chars().count();
+                self.focus = Some(Focus {
+                    node,
+                    kind,
+                    caret,
+                    anchor: None,
+                });
+            }
+            "rightclick" => {
+                self.mouse = point(arg).ok_or_else(bad)?;
+                self.mouse_moved();
+                self.context_menu();
+            }
             "closetab" => self.close_tab(self.active),
             "tab" => {
                 let n: usize = arg.trim().parse().map_err(|_| bad())?;

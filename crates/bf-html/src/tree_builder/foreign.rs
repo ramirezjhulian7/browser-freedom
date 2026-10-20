@@ -72,7 +72,7 @@ impl TreeBuilder {
             Tok::Pi(pi) => self.insert_processing_instruction(pi, None),
             Tok::Doctype(_) => self.error(),
             Tok::Start(ref t)
-                if BREAKOUT.contains(&t.name.as_str())
+                if BREAKOUT.contains(&t.name.as_lossy_str())
                     || (t.name == "font"
                         && ["color", "face", "size"]
                             .iter()
@@ -179,7 +179,7 @@ pub(super) fn adjust_foreign_attributes(tag: &mut TagToken) {
         if attr.ns.is_some() {
             continue;
         }
-        let adjusted = match attr.name.as_str() {
+        let adjusted = match attr.name.as_lossy_str() {
             "xlink:actuate" => Some((Some("xlink"), "actuate", Namespace::XLink)),
             "xlink:arcrole" => Some((Some("xlink"), "arcrole", Namespace::XLink)),
             "xlink:href" => Some((Some("xlink"), "href", Namespace::XLink)),

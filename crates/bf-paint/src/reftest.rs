@@ -203,7 +203,7 @@ fn meta(doc: &Document) -> Meta {
         let NodeData::Element(el) = &doc.get(node).data else {
             continue;
         };
-        if el.name.as_str() == "script" {
+        if el.name.as_lossy_str() == "script" {
             m.has_script = true;
         }
         if el.is_html("link") {

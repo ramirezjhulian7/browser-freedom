@@ -18,7 +18,9 @@ const VIEWPORT: Size = Size {
 };
 
 fn paint(html: &str) -> Pixmap {
-    let (doc, _) = parse_document(html, &ParseOptions::default());
+    // Sin depender de cómo git extrajo el archivo (`core.autocrlf`).
+    let html = html.replace("\r\n", "\n");
+    let (doc, _) = parse_document(&html, &ParseOptions::default());
     let media = MediaContext {
         width: f64::from(VIEWPORT.width),
         height: f64::from(VIEWPORT.height),

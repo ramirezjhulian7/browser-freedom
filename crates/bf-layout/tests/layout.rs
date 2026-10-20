@@ -47,7 +47,8 @@ fn layout_cases() {
     let mut count = 0;
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let content = fs::read_to_string(path).unwrap();
+        // Sin depender de cómo git extrajo el caso (`core.autocrlf`).
+        let content = fs::read_to_string(path).unwrap().replace("\r\n", "\n");
         let actual = layout(&content);
         if print {
             println!("===== {name}\n{actual}");

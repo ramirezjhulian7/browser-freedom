@@ -12,11 +12,11 @@ fn is_ws(tok: &Tok) -> bool {
 }
 
 fn is_start(tok: &Tok, names: &[&str]) -> bool {
-    matches!(tok, Tok::Start(t) if names.contains(&t.name.as_str()))
+    matches!(tok, Tok::Start(t) if names.contains(&t.name.as_lossy_str()))
 }
 
 fn is_end(tok: &Tok, names: &[&str]) -> bool {
-    matches!(tok, Tok::End(t) if names.contains(&t.name.as_str()))
+    matches!(tok, Tok::End(t) if names.contains(&t.name.as_lossy_str()))
 }
 
 impl TreeBuilder {
@@ -43,9 +43,9 @@ impl TreeBuilder {
                     )
                 });
                 let node = self.doc.create(NodeData::Doctype {
-                    name: d.name.clone().unwrap_or_default(),
-                    public_id: d.public_id.clone().unwrap_or_default(),
-                    system_id: d.system_id.clone().unwrap_or_default(),
+                    name: d.name.clone().unwrap_or_default().into(),
+                    public_id: d.public_id.clone().unwrap_or_default().into(),
+                    system_id: d.system_id.clone().unwrap_or_default().into(),
                 });
                 if !has_doctype_or_element {
                     self.doc.append(root, node);
@@ -80,7 +80,9 @@ impl TreeBuilder {
                 self.open.push(html);
                 self.mode = Mode::BeforeHead;
             }
-            Tok::End(ref t) if !matches!(t.name.as_str(), "head" | "body" | "html" | "br") => {
+            Tok::End(ref t)
+                if !matches!(t.name.as_lossy_str(), "head" | "body" | "html" | "br") =>
+            {
                 self.error();
             }
             _ => {
@@ -108,7 +110,9 @@ impl TreeBuilder {
                 self.head = Some(head);
                 self.mode = Mode::InHead;
             }
-            Tok::End(ref t) if !matches!(t.name.as_str(), "head" | "body" | "html" | "br") => {
+            Tok::End(ref t)
+                if !matches!(t.name.as_lossy_str(), "head" | "body" | "html" | "br") =>
+            {
                 self.error();
             }
             _ => {
@@ -131,7 +135,7 @@ impl TreeBuilder {
             Tok::Start(ref t) if t.name == "html" => return self.in_body(tok),
             Tok::Start(ref t)
                 if matches!(
-                    t.name.as_str(),
+                    t.name.as_lossy_str(),
                     "base" | "basefont" | "bgsound" | "link" | "meta"
                 ) =>
             {
@@ -142,7 +146,7 @@ impl TreeBuilder {
             Tok::Start(ref t) if t.name == "title" => self.generic_text_element(t, State::Rcdata),
             Tok::Start(ref t)
                 if (t.name == "noscript" && self.scripting)
-                    || matches!(t.name.as_str(), "noframes" | "style") =>
+                    || matches!(t.name.as_lossy_str(), "noframes" | "style") =>
             {
                 self.generic_text_element(t, State::Rawtext);
             }
@@ -187,7 +191,9 @@ impl TreeBuilder {
                 }
             }
             Tok::Start(ref t) if t.name == "head" => self.error(),
-            Tok::End(ref t) if !matches!(t.name.as_str(), "body" | "html" | "br") => self.error(),
+            Tok::End(ref t) if !matches!(t.name.as_lossy_str(), "body" | "html" | "br") => {
+                self.error()
+            }
             _ => {
                 self.pop();
                 self.mode = Mode::AfterHead;
@@ -215,7 +221,9 @@ impl TreeBuilder {
             {
                 return self.in_head(tok);
             }
-            Tok::Start(ref t) if matches!(t.name.as_str(), "head" | "noscript") => self.error(),
+            Tok::Start(ref t) if matches!(t.name.as_lossy_str(), "head" | "noscript") => {
+                self.error()
+            }
             Tok::End(ref t) if t.name != "br" => self.error(),
             _ => {
                 self.error();
@@ -261,7 +269,9 @@ impl TreeBuilder {
             }
             Tok::End(ref t) if t.name == "template" => return self.in_head(tok),
             Tok::Start(ref t) if t.name == "head" => self.error(),
-            Tok::End(ref t) if !matches!(t.name.as_str(), "body" | "html" | "br") => self.error(),
+            Tok::End(ref t) if !matches!(t.name.as_lossy_str(), "body" | "html" | "br") => {
+                self.error()
+            }
             _ => {
                 self.insert_html(&TagToken::named("body"));
                 self.frameset_ok = true;
@@ -326,12 +336,12 @@ impl TreeBuilder {
                 self.mode = Mode::InColumnGroup;
                 return Flow::Reprocess(tok);
             }
-            Tok::Start(ref t) if matches!(t.name.as_str(), "tbody" | "tfoot" | "thead") => {
+            Tok::Start(ref t) if matches!(t.name.as_lossy_str(), "tbody" | "tfoot" | "thead") => {
                 self.clear_stack_to_table_context();
                 self.insert_html(t);
                 self.mode = Mode::InTableBody;
             }
-            Tok::Start(ref t) if matches!(t.name.as_str(), "td" | "th" | "tr") => {
+            Tok::Start(ref t) if matches!(t.name.as_lossy_str(), "td" | "th" | "tr") => {
                 self.clear_stack_to_table_context();
                 self.insert_html(&TagToken::named("tbody"));
                 self.mode = Mode::InTableBody;
@@ -516,14 +526,14 @@ impl TreeBuilder {
                 self.insert_html(t);
                 self.mode = Mode::InRow;
             }
-            Tok::Start(ref t) if matches!(t.name.as_str(), "th" | "td") => {
+            Tok::Start(ref t) if matches!(t.name.as_lossy_str(), "th" | "td") => {
                 self.error();
                 self.clear_stack_to_table_body_context();
                 self.insert_html(&TagToken::named("tr"));
                 self.mode = Mode::InRow;
                 return Flow::Reprocess(tok);
             }
-            Tok::End(ref t) if matches!(t.name.as_str(), "tbody" | "tfoot" | "thead") => {
+            Tok::End(ref t) if matches!(t.name.as_lossy_str(), "tbody" | "tfoot" | "thead") => {
                 if !self.has_in_scope(&t.name, Scope::Table) {
                     self.error();
                 } else {
@@ -574,7 +584,7 @@ impl TreeBuilder {
     /// 13.2.6.4.14
     pub(super) fn in_row(&mut self, tok: Tok) -> Flow {
         match tok {
-            Tok::Start(ref t) if matches!(t.name.as_str(), "th" | "td") => {
+            Tok::Start(ref t) if matches!(t.name.as_lossy_str(), "th" | "td") => {
                 self.clear_stack_to_table_row_context();
                 self.insert_html(t);
                 self.mode = Mode::InCell;
@@ -605,7 +615,7 @@ impl TreeBuilder {
                     return Flow::Reprocess(tok);
                 }
             }
-            Tok::End(ref t) if matches!(t.name.as_str(), "tbody" | "tfoot" | "thead") => {
+            Tok::End(ref t) if matches!(t.name.as_lossy_str(), "tbody" | "tfoot" | "thead") => {
                 if !self.has_in_scope(&t.name, Scope::Table) {
                     self.error();
                 } else if self.has_in_scope("tr", Scope::Table) {
@@ -637,7 +647,7 @@ impl TreeBuilder {
     /// 13.2.6.4.15
     pub(super) fn in_cell(&mut self, tok: Tok) -> Flow {
         match tok {
-            Tok::End(ref t) if matches!(t.name.as_str(), "td" | "th") => {
+            Tok::End(ref t) if matches!(t.name.as_lossy_str(), "td" | "th") => {
                 if !self.has_in_scope(&t.name, Scope::Table) {
                     self.error();
                 } else {
@@ -666,7 +676,7 @@ impl TreeBuilder {
             _ if is_end(&tok, &["body", "caption", "col", "colgroup", "html"]) => self.error(),
             Tok::End(ref t)
                 if matches!(
-                    t.name.as_str(),
+                    t.name.as_lossy_str(),
                     "table" | "tbody" | "tfoot" | "thead" | "tr"
                 ) =>
             {

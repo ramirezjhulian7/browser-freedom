@@ -53,10 +53,15 @@ fn node(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
         }
         NodeData::Element(element) => {
             let _ = writeln!(out, "<{}{}>", element_prefix(element.ns), element.name);
-            let mut attrs: Vec<(String, &str)> = element
+            let mut attrs: Vec<(String, String)> = element
                 .attrs
                 .iter()
-                .map(|a| (format!("{}{}", attr_prefix(a.ns), a.name), a.value.as_str()))
+                .map(|a| {
+                    (
+                        format!("{}{}", attr_prefix(a.ns), a.name),
+                        a.value.to_string(),
+                    )
+                })
                 .collect();
             attrs.sort_by(|a, b| utf16_cmp(&a.0, &b.0));
             for (name, value) in attrs {

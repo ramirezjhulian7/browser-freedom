@@ -17,16 +17,10 @@ use bf_infra::Namespace;
 
 use crate::tokenizer::named_entities::NAMED_ENTITIES;
 
+/// El namespace de un URI; los desconocidos son `Namespace::Other`. El namespace ausente se
+/// trata como XHTML (los elementos sin namespace todavía no tienen representación propia).
 fn namespace_of(uri: &str) -> Namespace {
-    match uri {
-        "http://www.w3.org/2000/svg" => Namespace::Svg,
-        "http://www.w3.org/1998/Math/MathML" => Namespace::MathMl,
-        "http://www.w3.org/1999/xlink" => Namespace::XLink,
-        "http://www.w3.org/XML/1998/namespace" => Namespace::Xml,
-        "http://www.w3.org/2000/xmlns/" => Namespace::XmlNs,
-        // XHTML y, por robustez, namespaces desconocidos o ausentes.
-        _ => Namespace::Html,
-    }
+    Namespace::from_uri(uri).unwrap_or(Namespace::Html)
 }
 
 fn entity(name: &str) -> Option<String> {
@@ -119,7 +113,7 @@ impl<'a> Parser<'a> {
             t.push_str(&text);
             return;
         }
-        let node = self.doc.create(NodeData::Text(text));
+        let node = self.doc.create(NodeData::Text(text.into()));
         self.doc.append(parent, node);
     }
 
@@ -169,9 +163,13 @@ impl<'a> Parser<'a> {
             (None, quoted.first())
         };
         let node = self.doc.create(NodeData::Doctype {
-            name,
-            public_id: public_id.map_or_else(String::new, |s| (*s).to_owned()),
-            system_id: system_id.map_or_else(String::new, |s| (*s).to_owned()),
+            name: name.into(),
+            public_id: public_id
+                .map_or_else(String::new, |s| (*s).to_owned())
+                .into(),
+            system_id: system_id
+                .map_or_else(String::new, |s| (*s).to_owned())
+                .into(),
         });
         let root = self.doc.root();
         self.doc.append(root, node);
@@ -270,16 +268,16 @@ impl<'a> Parser<'a> {
                 };
                 Attribute {
                     ns,
-                    prefix,
-                    name,
-                    value,
+                    prefix: prefix.map(Into::into),
+                    name: name.into(),
+                    value: value.into(),
                 }
             })
             .collect();
         let (parent, _, scope) = self.stack.pop().expect("recién apilado");
         let node = self.doc.create(NodeData::Element(Element {
             ns,
-            name: local,
+            name: local.into(),
             attrs,
             template_contents: None,
         }));
@@ -305,7 +303,7 @@ impl<'a> Parser<'a> {
             if rest.starts_with("<!--") {
                 self.pos += 4;
                 let text = self.take_until("-->").to_owned();
-                let node = self.doc.create(NodeData::Comment(text));
+                let node = self.doc.create(NodeData::Comment(text.into()));
                 let parent = self.current();
                 self.doc.append(parent, node);
             } else if rest.starts_with("<![CDATA[") {
