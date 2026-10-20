@@ -1,5 +1,5 @@
-//! Array (§23.1): el constructor, `isArray`, `of`, `from` y los métodos de Array.prototype de
-//! esta etapa (el resto llega con los built-ins del paso 3).
+//! Array (§23.1): el constructor, `isArray`, `of`, `from` y Array.prototype completo
+//! (`Array.fromAsync` llega con Promise).
 
 use crate::builtins::iterator::create_array_iterator;
 use crate::builtins::{FnEntry, accessor, constructor, methods};
@@ -37,25 +37,41 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     const PROTO: &[FnEntry] = &[
         ("at", 1, at),
         ("concat", 1, concat),
+        ("copyWithin", 2, copy_within),
         ("entries", 0, entries),
         ("every", 1, every),
+        ("fill", 1, fill),
         ("filter", 1, filter),
         ("find", 1, find),
         ("findIndex", 1, find_index),
+        ("findLast", 1, find_last),
+        ("findLastIndex", 1, find_last_index),
+        ("flat", 0, flat),
+        ("flatMap", 1, flat_map),
         ("forEach", 1, for_each),
         ("includes", 1, includes),
         ("indexOf", 1, index_of),
         ("join", 1, join),
         ("keys", 0, keys),
+        ("lastIndexOf", 1, last_index_of),
         ("map", 1, map),
         ("pop", 0, pop),
         ("push", 1, push),
         ("reduce", 1, reduce),
+        ("reduceRight", 1, reduce_right),
+        ("reverse", 0, reverse),
         ("shift", 0, shift),
         ("slice", 2, slice),
         ("some", 1, some),
+        ("sort", 1, sort),
         ("splice", 2, splice),
+        ("toLocaleString", 0, to_locale_string),
+        ("toReversed", 0, to_reversed),
+        ("toSorted", 1, to_sorted),
+        ("toSpliced", 2, to_spliced),
+        ("toString", 0, to_string),
         ("unshift", 1, unshift),
+        ("with", 2, with),
     ];
     methods(agent, proto, PROTO);
     let values = crate::builtins::method(agent, proto, "values", 0, values);
@@ -805,4 +821,490 @@ fn unshift(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     set_length(agent, o, len + n)?;
     Ok(Value::Number(len + n))
+}
+
+// --- Más de Array.prototype ---
+
+/// Array.prototype.copyWithin (§23.1.3.4).
+fn copy_within(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let mut to = relative(agent, &a.arg(0), len, 0.0)?;
+    let mut from = relative(agent, &a.arg(1), len, 0.0)?;
+    let fin = relative(agent, &a.arg(2), len, len)?;
+    let mut count = (fin - from).min(len - to);
+    let dir = if from < to && to < from + count {
+        from += count - 1.0;
+        to += count - 1.0;
+        -1.0
+    } else {
+        1.0
+    };
+    while count > 0.0 {
+        let fk = key(from);
+        let tk = key(to);
+        if agent.has_property(o, &fk)? {
+            let v = agent.get(o, &fk, Value::Object(o))?;
+            agent.set_or_throw(o, tk, v, true)?;
+        } else {
+            agent.delete_property_or_throw(o, &tk)?;
+        }
+        from += dir;
+        to += dir;
+        count -= 1.0;
+    }
+    Ok(Value::Object(o))
+}
+
+/// Array.prototype.fill (§23.1.3.7).
+fn fill(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let k0 = relative(agent, &a.arg(1), len, 0.0)?;
+    let fin = relative(agent, &a.arg(2), len, len)?;
+    let mut k = k0;
+    while k < fin {
+        agent.set_or_throw(o, key(k), a.arg(0), true)?;
+        k += 1.0;
+    }
+    Ok(Value::Object(o))
+}
+
+/// FindViaPredicate (§23.1.3.12.1) desde el final.
+fn find_last_impl(agent: &mut Agent, a: &CallArgs<'_>, index: bool) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let cb = callback(agent, a, if index { "findLastIndex" } else { "findLast" })?;
+    let this_arg = a.arg(1);
+    let mut k = len - 1.0;
+    while k >= 0.0 {
+        let v = agent.get(o, &key(k), Value::Object(o))?;
+        let r = agent.call(
+            &cb,
+            this_arg.clone(),
+            &[v.clone(), Value::Number(k), Value::Object(o)],
+        )?;
+        if crate::abstract_ops::conversion::to_boolean(agent, &r) {
+            return Ok(if index { Value::Number(k) } else { v });
+        }
+        k -= 1.0;
+    }
+    Ok(if index {
+        Value::Number(-1.0)
+    } else {
+        Value::Undefined
+    })
+}
+
+fn find_last(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    find_last_impl(agent, a, false)
+}
+
+fn find_last_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    find_last_impl(agent, a, true)
+}
+
+/// FlattenIntoArray (§23.1.3.13.1).
+fn flatten_into_array(
+    agent: &mut Agent,
+    target: Gc<Object>,
+    source: Gc<Object>,
+    source_len: f64,
+    start: f64,
+    depth: f64,
+    mapper: Option<(&Value, &Value)>,
+) -> JsResult<f64> {
+    let mut target_index = start;
+    let mut si = 0.0;
+    while si < source_len {
+        let p = key(si);
+        if agent.has_property(source, &p)? {
+            let mut element = agent.get(source, &p, Value::Object(source))?;
+            if let Some((f, this_arg)) = mapper {
+                element = agent.call(
+                    f,
+                    this_arg.clone(),
+                    &[element, Value::Number(si), Value::Object(source)],
+                )?;
+            }
+            let flatten = depth > 0.0 && agent.is_array(&element)?;
+            if flatten {
+                if agent.stack_exhausted() {
+                    return agent.range_error("Maximum call stack size exceeded");
+                }
+                let eo = element.as_object().expect("array");
+                let el = agent.length_of_array_like(eo)?;
+                target_index =
+                    flatten_into_array(agent, target, eo, el, target_index, depth - 1.0, None)?;
+            } else {
+                if target_index >= 9007199254740991.0 {
+                    return agent.type_error("Array too long");
+                }
+                agent.create_data_property_or_throw(target, key(target_index), element)?;
+                target_index += 1.0;
+            }
+        }
+        si += 1.0;
+    }
+    Ok(target_index)
+}
+
+/// Array.prototype.flat (§23.1.3.13).
+fn flat(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let depth = if a.arg(0).is_undefined() {
+        1.0
+    } else {
+        let d = agent.to_integer_or_infinity(&a.arg(0))?;
+        if d < 0.0 { 0.0 } else { d }
+    };
+    let arr = agent.array_species_create(o, 0.0)?;
+    flatten_into_array(agent, arr, o, len, 0.0, depth, None)?;
+    Ok(Value::Object(arr))
+}
+
+/// Array.prototype.flatMap (§23.1.3.14).
+fn flat_map(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let f = callback(agent, a, "flatMap")?;
+    let arr = agent.array_species_create(o, 0.0)?;
+    let this_arg = a.arg(1);
+    flatten_into_array(agent, arr, o, len, 0.0, 1.0, Some((&f, &this_arg)))?;
+    Ok(Value::Object(arr))
+}
+
+/// Array.prototype.lastIndexOf (§23.1.3.20).
+fn last_index_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    if len == 0.0 {
+        return Ok(Value::Number(-1.0));
+    }
+    let n = if a.len() > 1 {
+        agent.to_integer_or_infinity(&a.arg(1))?
+    } else {
+        len - 1.0
+    };
+    if n == f64::NEG_INFINITY {
+        return Ok(Value::Number(-1.0));
+    }
+    let mut k = if n >= 0.0 { n.min(len - 1.0) } else { len + n };
+    let target = a.arg(0);
+    while k >= 0.0 {
+        let p = key(k);
+        if agent.has_property(o, &p)? {
+            let v = agent.get(o, &p, Value::Object(o))?;
+            if agent.is_strictly_equal(&v, &target) {
+                return Ok(Value::Number(k));
+            }
+        }
+        k -= 1.0;
+    }
+    Ok(Value::Number(-1.0))
+}
+
+/// Array.prototype.reduceRight (§23.1.3.25).
+fn reduce_right(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let cb = callback(agent, a, "reduceRight")?;
+    if len == 0.0 && a.len() < 2 {
+        return agent.type_error("Reduce of empty array with no initial value");
+    }
+    let mut k = len - 1.0;
+    let mut acc = if a.len() >= 2 {
+        a.arg(1)
+    } else {
+        let mut found = None;
+        while found.is_none() && k >= 0.0 {
+            let p = key(k);
+            if agent.has_property(o, &p)? {
+                found = Some(agent.get(o, &p, Value::Object(o))?);
+            }
+            k -= 1.0;
+        }
+        match found {
+            Some(v) => v,
+            None => return agent.type_error("Reduce of empty array with no initial value"),
+        }
+    };
+    while k >= 0.0 {
+        let p = key(k);
+        if agent.has_property(o, &p)? {
+            let v = agent.get(o, &p, Value::Object(o))?;
+            acc = agent.call(
+                &cb,
+                Value::Undefined,
+                &[acc, v, Value::Number(k), Value::Object(o)],
+            )?;
+        }
+        k -= 1.0;
+    }
+    Ok(acc)
+}
+
+/// Array.prototype.reverse (§23.1.3.26).
+fn reverse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let middle = (len / 2.0).floor();
+    let mut lower = 0.0;
+    while lower != middle {
+        let upper = len - lower - 1.0;
+        let (lp, up) = (key(lower), key(upper));
+        let lower_exists = agent.has_property(o, &lp)?;
+        let lower_value = if lower_exists {
+            agent.get(o, &lp, Value::Object(o))?
+        } else {
+            Value::Undefined
+        };
+        let upper_exists = agent.has_property(o, &up)?;
+        let upper_value = if upper_exists {
+            agent.get(o, &up, Value::Object(o))?
+        } else {
+            Value::Undefined
+        };
+        match (lower_exists, upper_exists) {
+            (true, true) => {
+                agent.set_or_throw(o, lp, upper_value, true)?;
+                agent.set_or_throw(o, up, lower_value, true)?;
+            }
+            (false, true) => {
+                agent.set_or_throw(o, lp, upper_value, true)?;
+                agent.delete_property_or_throw(o, &up)?;
+            }
+            (true, false) => {
+                agent.delete_property_or_throw(o, &lp)?;
+                agent.set_or_throw(o, up, lower_value, true)?;
+            }
+            (false, false) => {}
+        }
+        lower += 1.0;
+    }
+    Ok(Value::Object(o))
+}
+
+/// CompareArrayElements (§23.1.3.30.2).
+fn compare_elements(
+    agent: &mut Agent,
+    x: &Value,
+    y: &Value,
+    cmp: &Value,
+) -> JsResult<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (x.is_undefined(), y.is_undefined()) {
+        (true, true) => return Ok(Ordering::Equal),
+        (true, false) => return Ok(Ordering::Greater),
+        (false, true) => return Ok(Ordering::Less),
+        _ => {}
+    }
+    if !cmp.is_undefined() {
+        let r = agent.call(cmp, Value::Undefined, &[x.clone(), y.clone()])?;
+        let v = agent.to_number(&r)?;
+        return Ok(if v < 0.0 {
+            Ordering::Less
+        } else if v > 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        });
+    }
+    let xs = agent.to_string(x)?;
+    let ys = agent.to_string(y)?;
+    Ok(xs.units().cmp(ys.units()))
+}
+
+/// Merge sort estable con un comparador que puede lanzar.
+fn merge_sort(agent: &mut Agent, items: Vec<Value>, cmp: &Value) -> JsResult<Vec<Value>> {
+    if items.len() <= 1 {
+        return Ok(items);
+    }
+    let mut items = items;
+    let right = items.split_off(items.len() / 2);
+    let left = merge_sort(agent, items, cmp)?;
+    let right = merge_sort(agent, right, cmp)?;
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        if compare_elements(agent, &right[j], &left[i], cmp)? == std::cmp::Ordering::Less {
+            out.push(right[j].clone());
+            j += 1;
+        } else {
+            out.push(left[i].clone());
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&left[i..]);
+    out.extend_from_slice(&right[j..]);
+    Ok(out)
+}
+
+/// SortIndexedProperties (§23.1.3.30.1): `skip_holes` omite los índices ausentes.
+fn sort_indexed_properties(
+    agent: &mut Agent,
+    o: Gc<Object>,
+    len: f64,
+    cmp: &Value,
+    skip_holes: bool,
+) -> JsResult<Vec<Value>> {
+    let mut items = Vec::new();
+    let mut k = 0.0;
+    while k < len {
+        let p = key(k);
+        if !skip_holes || agent.has_property(o, &p)? {
+            items.push(agent.get(o, &p, Value::Object(o))?);
+        }
+        k += 1.0;
+    }
+    merge_sort(agent, items, cmp)
+}
+
+fn check_comparefn(agent: &mut Agent, cmp: &Value) -> JsResult<()> {
+    if !cmp.is_undefined() && !agent.is_callable(cmp) {
+        return agent.type_error("The comparison function must be either a function or undefined");
+    }
+    Ok(())
+}
+
+/// Array.prototype.sort (§23.1.3.30).
+fn sort(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let cmp = a.arg(0);
+    check_comparefn(agent, &cmp)?;
+    let (o, len) = this_obj(agent, a)?;
+    let sorted = sort_indexed_properties(agent, o, len, &cmp, true)?;
+    let n = sorted.len();
+    for (j, v) in sorted.into_iter().enumerate() {
+        agent.set_or_throw(o, key(j as f64), v, true)?;
+    }
+    let mut j = n as f64;
+    while j < len {
+        agent.delete_property_or_throw(o, &key(j))?;
+        j += 1.0;
+    }
+    Ok(Value::Object(o))
+}
+
+/// Array.prototype.toLocaleString (§23.1.3.32).
+fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let mut out: Vec<u16> = Vec::new();
+    let mut k = 0.0;
+    while k < len {
+        if k > 0.0 {
+            out.push(u16::from(b','));
+        }
+        let e = agent.get(o, &key(k), Value::Object(o))?;
+        if !e.is_nullish() {
+            let r = agent.invoke(&e, &PropertyKey::from("toLocaleString"), &[])?;
+            let s = agent.to_string(&r)?;
+            out.extend_from_slice(s.units());
+        }
+        k += 1.0;
+    }
+    Ok(Value::String(crate::string::JsString::from_units(out)))
+}
+
+fn new_array_checked(agent: &mut Agent, len: f64) -> JsResult<Gc<Object>> {
+    if len > 4294967295.0 {
+        return agent.range_error("Invalid array length");
+    }
+    agent.array_create(len as u64, None)
+}
+
+/// Array.prototype.toReversed (§23.1.3.33).
+fn to_reversed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let arr = new_array_checked(agent, len)?;
+    let mut k = 0.0;
+    while k < len {
+        let v = agent.get(o, &key(len - k - 1.0), Value::Object(o))?;
+        agent.create_data_property_or_throw(arr, key(k), v)?;
+        k += 1.0;
+    }
+    Ok(Value::Object(arr))
+}
+
+/// Array.prototype.toSorted (§23.1.3.34).
+fn to_sorted(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let cmp = a.arg(0);
+    check_comparefn(agent, &cmp)?;
+    let (o, len) = this_obj(agent, a)?;
+    let arr = new_array_checked(agent, len)?;
+    let sorted = sort_indexed_properties(agent, o, len, &cmp, false)?;
+    for (j, v) in sorted.into_iter().enumerate() {
+        agent.create_data_property_or_throw(arr, key(j as f64), v)?;
+    }
+    Ok(Value::Object(arr))
+}
+
+/// Array.prototype.toSpliced (§23.1.3.35).
+fn to_spliced(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let start = relative(agent, &a.arg(0), len, 0.0)?;
+    let items: Vec<Value> = a.args.iter().skip(2).cloned().collect();
+    let skip = if a.is_empty() {
+        0.0
+    } else if a.len() == 1 {
+        len - start
+    } else {
+        let dc = agent.to_integer_or_infinity(&a.arg(1))?;
+        dc.max(0.0).min(len - start)
+    };
+    let new_len = len + items.len() as f64 - skip;
+    if new_len > 9007199254740991.0 {
+        return agent.type_error("Array too long");
+    }
+    let arr = new_array_checked(agent, new_len)?;
+    let mut i = 0.0;
+    let mut r = start + skip;
+    while i < start {
+        let v = agent.get(o, &key(i), Value::Object(o))?;
+        agent.create_data_property_or_throw(arr, key(i), v)?;
+        i += 1.0;
+    }
+    for e in items {
+        agent.create_data_property_or_throw(arr, key(i), e)?;
+        i += 1.0;
+    }
+    while i < new_len {
+        let v = agent.get(o, &key(r), Value::Object(o))?;
+        agent.create_data_property_or_throw(arr, key(i), v)?;
+        i += 1.0;
+        r += 1.0;
+    }
+    Ok(Value::Object(arr))
+}
+
+/// Array.prototype.toString (§23.1.3.36).
+fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let o = agent.to_object(&a.this)?;
+    let f = agent.get_str(o, "join")?;
+    if agent.is_callable(&f) {
+        return agent.call(&f, Value::Object(o), &[]);
+    }
+    crate::builtins::object::to_string(
+        agent,
+        &CallArgs {
+            this: Value::Object(o),
+            args: &[],
+            new_target: None,
+            callee: a.callee,
+        },
+    )
+}
+
+/// Array.prototype.with (§23.1.3.39).
+fn with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (o, len) = this_obj(agent, a)?;
+    let rel = agent.to_integer_or_infinity(&a.arg(0))?;
+    let actual = if rel >= 0.0 { rel } else { len + rel };
+    if actual >= len || actual < 0.0 {
+        return agent.range_error("Invalid index");
+    }
+    let arr = new_array_checked(agent, len)?;
+    let mut k = 0.0;
+    while k < len {
+        let v = if k == actual {
+            a.arg(1)
+        } else {
+            agent.get(o, &key(k), Value::Object(o))?
+        };
+        agent.create_data_property_or_throw(arr, key(k), v)?;
+        k += 1.0;
+    }
+    Ok(Value::Object(arr))
 }

@@ -91,17 +91,6 @@ impl<'t> Codegen<'t> {
         }
     }
 
-    fn set_continue_keep(&mut self, keep: usize) {
-        let st = self.st();
-        // El Breakable más reciente.
-        for c in st.controls.iter_mut().rev() {
-            if let Control::Breakable { continue_keep, .. } = c {
-                *continue_keep = keep;
-                return;
-            }
-        }
-    }
-
     pub(crate) fn stmt(&mut self, s: &Stmt) {
         self.pos(s.span().start);
         match s {
@@ -451,7 +440,6 @@ impl<'t> Codegen<'t> {
         );
         self.st().controls.push(Control::Finally {
             kind_slot: ks,
-            value_slot: vs,
             entry,
             exits: Vec::new(),
         });

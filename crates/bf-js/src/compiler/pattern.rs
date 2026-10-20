@@ -80,7 +80,7 @@ impl<'t> Codegen<'t> {
     }
 
     /// Un destino de asignación simple (identificador o expresión), con su default.
-    fn assign_target<'p>(p: &'p Pat) -> Option<(&'p Pat, Option<&'p Expr>)> {
+    fn assign_target(p: &Pat) -> Option<(&Pat, Option<&Expr>)> {
         match p {
             Pat::Assign { left, right, .. } => match &**left {
                 Pat::Ident(_) | Pat::Expr(_) => Some((left, Some(right))),
