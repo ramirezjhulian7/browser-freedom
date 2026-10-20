@@ -1,0 +1,18 @@
+<!DOCTYPE html><style>body{margin:0}table{border-spacing:0}td{padding:0}</style>
+<table><tr><td>a</td></tr><tr style="visibility:collapse"><td>b</td></tr><tr><td>c</td></tr></table>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <body> 0,0 800×32
+    Block <table> 0,0 8×32
+      Block <table> 0,0 8×32
+        Block <tbody> 0,0 8×32
+          Block <tr> 0,0 8×16
+            Block <td> 0,0 8×16
+              Line 0,0 8×16
+                Text "a" 0,0 8×16
+          Block <tr> 0,16 8×0
+          Block <tr> 0,16 8×16
+            Block <td> 0,16 8×16
+              Line 0,16 8×16
+                Text "c" 0,16 8×16
+-->

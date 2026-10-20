@@ -11,8 +11,10 @@ mod flex;
 pub mod float;
 pub mod font;
 pub mod fragment;
+mod grid; // E4
 mod inline;
 mod positioned;
+mod table; // E4
 
 use bf_dom::Document;
 use bf_style::StyleMap;

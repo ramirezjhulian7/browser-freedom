@@ -1,0 +1,11 @@
+<!DOCTYPE html><style>body{margin:0} .g{display:grid;grid-template-columns:repeat(3,30px);grid-auto-rows:10px}</style>
+<div class=g><div id=a style="order:2"></div><div id=b></div><div id=c style="order:-1"></div><div id=d></div></div>
+<!-- expect
+Block <html> 0,0 800×20
+  Block <body> 0,0 800×20
+    Block <div.g> 0,0 800×20
+      InlineBlock <div#c> 0,0 30×10
+      InlineBlock <div#b> 30,0 30×10
+      InlineBlock <div#d> 60,0 30×10
+      InlineBlock <div#a> 0,10 30×10
+-->

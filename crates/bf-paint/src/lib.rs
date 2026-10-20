@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod display_list;
+mod effects; // E4
 pub mod images;
 pub mod raster;
 pub mod reftest;

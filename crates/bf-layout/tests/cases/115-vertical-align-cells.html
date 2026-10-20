@@ -1,0 +1,25 @@
+<!DOCTYPE html><style>body{margin:0}table{border-spacing:0}td{padding:0;height:48px}</style>
+<table><tr><td style="vertical-align:top">a</td><td style="vertical-align:middle">b</td><td style="vertical-align:bottom">c</td><td style="vertical-align:baseline;font-size:32px">d</td><td style="vertical-align:baseline">e</td></tr></table>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 800×48
+    Block <table> 0,0 48×48
+      Block <table> 0,0 48×48
+        Block <tbody> 0,0 48×48
+          Block <tr> 0,0 48×48
+            Block <td> 0,0 8×48
+              Line 0,0 8×16
+                Text "a" 0,0 8×16
+            Block <td> 8,0 8×48
+              Line 8,16 8×16
+                Text "b" 8,16 8×16
+            Block <td> 16,0 8×48
+              Line 16,32 8×16
+                Text "c" 16,32 8×16
+            Block <td> 24,0 16×48
+              Line 24,0 16×32
+                Text "d" 24,0 16×32
+            Block <td> 40,0 8×48
+              Line 40,12.8 8×16
+                Text "e" 40,12.8 8×16
+-->

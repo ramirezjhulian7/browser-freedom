@@ -1,0 +1,26 @@
+<!DOCTYPE html><style>body{margin:0} .g{display:grid;width:400px;grid-template-columns:auto auto;grid-template-rows:20px}</style>
+<div class=g><div id=a><div style="width:50px"></div></div><div id=b><div style="width:100px"></div></div></div>
+<div class=g style="justify-content:start;grid-template-columns:min-content max-content fit-content(60px)"><div>aa aa</div><div>bb bb</div><div>cc cc cc cc</div></div>
+<!-- expect
+Block <html> 0,0 800×40
+  Block <body> 0,0 800×40
+    Block <div.g> 0,0 400×20
+      InlineBlock <div#a> 0,0 175×20
+        Block <div> 0,0 50×0
+      InlineBlock <div#b> 175,0 225×20
+        Block <div> 175,0 100×0
+    Block <div.g> 0,20 400×20
+      InlineBlock <div> 0,20 16×20
+        Line 0,20 16×16
+          Text "aa" 0,20 16×16
+        Line 0,36 16×16
+          Text "aa" 0,36 16×16
+      InlineBlock <div> 16,20 40×20
+        Line 16,20 40×16
+          Text "bb bb" 16,20 40×16
+      InlineBlock <div> 56,20 60×20
+        Line 56,20 60×16
+          Text "cc cc" 56,20 40×16
+        Line 56,36 60×16
+          Text "cc cc" 56,36 40×16
+-->
