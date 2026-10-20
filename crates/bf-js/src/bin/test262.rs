@@ -45,6 +45,19 @@ const UNSUPPORTED_FEATURES: &[(&str, &str)] = &[
         "nonextensible-applies-to-private",
         "stage 3: PrivateFieldAdd lanza TypeError en objetos no extensibles; ECMA-262 todavía lo permite y sus tests contradicen el spec vigente",
     ),
+    // E3
+    (
+        "await-dictionary",
+        "propuesta: `Promise.allKeyed` y `Promise.allSettledKeyed`",
+    ),
+    (
+        "immutable-arraybuffer",
+        "propuesta: `transferToImmutable`, `sliceToImmutable` y `ArrayBuffer.prototype.immutable`",
+    ),
+    (
+        "upsert",
+        "propuesta: `Map`/`WeakMap.prototype.getOrInsert` y `getOrInsertComputed`",
+    ),
     (
         "import-text",
         "stage 3: módulos de texto (`with { type: \"text\" }`)",
@@ -194,6 +207,7 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
         deadline: Some(Instant::now() + TIME_LIMIT),
     });
     agent.reset_stack_base();
+    agent.can_block = meta.flags.iter().any(|f| f == "CanBlockIsTrue"); // E3: AgentCanSuspend
     if let Some(t) = std::env::var("BF_GC_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -269,7 +283,10 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
                 return Status::Failed("se parseó (negative: parse)".into());
             }
             match code {
-                Ok(code) => agent.script_evaluation(code),
+                // E3: RunJobs al terminar el script (la cola de promesas).
+                Ok(code) => agent
+                    .script_evaluation(code)
+                    .and_then(|v| agent.run_jobs().map(|_| v)),
                 Err(m) => {
                     let linked = agent
                         .load_requested_modules(m)
@@ -292,7 +309,10 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
                             }
                         }
                     }
-                    agent.evaluate_module(m).map(|_| Value::Undefined)
+                    agent
+                        .evaluate_module(m)
+                        .and_then(|_| agent.run_jobs())
+                        .map(|_| Value::Undefined)
                 }
             }
         }

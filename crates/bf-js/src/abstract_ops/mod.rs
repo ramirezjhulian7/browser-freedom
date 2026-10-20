@@ -43,8 +43,9 @@ impl Agent {
         let rn = self.to_numeric(r)?;
         let (a, b) = match (&ln, &rn) {
             (Value::Number(a), Value::Number(b)) => (*a, *b),
-            (Value::BigInt(_), Value::BigInt(_)) => {
-                return self.internal_error("aritmética de BigInt (paso 4)");
+            // E2
+            (Value::BigInt(a), Value::BigInt(b)) => {
+                return crate::builtins::bigint::binary(self, op, *a, *b);
             }
             _ => {
                 return self

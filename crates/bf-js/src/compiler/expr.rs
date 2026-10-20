@@ -235,8 +235,16 @@ impl<'t> Codegen<'t> {
                     None => self.emit(Op::Undefined),
                 }
                 if *delegate {
-                    self.yield_star();
+                    if self.in_async_generator() {
+                        self.async_yield_star();
+                    } else {
+                        self.yield_star();
+                    }
                 } else {
+                    // En un generador async: AsyncGeneratorYield(? Await(value)) (§15.5.5).
+                    if self.in_async_generator() {
+                        self.emit(Op::Await);
+                    }
                     self.emit(Op::Yield);
                 }
             }
@@ -1161,6 +1169,39 @@ impl<'t> Codegen<'t> {
             },
             done,
         );
+        self.emit(Op::YieldRaw {
+            kind_slot: ks,
+            value_slot: vs,
+        });
+        self.jump(top);
+        self.bind(done);
+        self.free_temp(slot);
+    }
+
+    /// `yield*` en un generador async (§15.5.5, generatorKind async): cada llamada al
+    /// iterador interno se espera con `Await` y los valores se ceden con
+    /// AsyncGeneratorYield sin otro `Await` (`YieldRaw`). (E3)
+    fn async_yield_star(&mut self) {
+        let slot = self.alloc_temp();
+        self.alloc_temp();
+        self.alloc_temp();
+        let ks = self.alloc_temp();
+        let vs = self.alloc_temp();
+        self.emit(Op::GetAsyncIterator(slot));
+        self.emit(Op::Int(COMPLETION_NORMAL as i32));
+        self.emit(Op::InitLocal(ks));
+        self.emit(Op::Undefined);
+        self.emit(Op::InitLocal(vs));
+        let top = self.new_label();
+        let done = self.new_label();
+        self.bind(top);
+        self.emit(Op::AsyncYieldStarCall {
+            slot,
+            kind_slot: ks,
+            value_slot: vs,
+        });
+        self.emit(Op::Await);
+        self.emit_to(Op::AsyncYieldStarResult { slot, done: 0 }, done);
         self.emit(Op::YieldRaw {
             kind_slot: ks,
             value_slot: vs,

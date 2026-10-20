@@ -42,7 +42,11 @@ fn node(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
                 let _ = writeln!(out, "<!DOCTYPE {name} \"{public_id}\" \"{system_id}\">");
             }
         }
-        NodeData::Text(text) => {
+        NodeData::Attr(_) => out.push_str(
+            "#attr
+",
+        ),
+        NodeData::Text(text) | NodeData::CdataSection(text) => {
             let _ = writeln!(out, "\"{text}\"");
         }
         NodeData::Comment(data) => {

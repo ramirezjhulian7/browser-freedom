@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod media;
+pub mod query; // E4: matches, closest y querySelector del DOM
 pub mod selectors;
 pub mod stylesheet;
 pub mod syntax;

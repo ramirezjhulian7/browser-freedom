@@ -20,6 +20,11 @@ pub(crate) enum ElementState {
     SelectedContent {
         disabled: bool,
     },
+    /// `input`: checkedness y dirty checkedness (HTML §4.10.5).
+    Input {
+        checked: bool,
+        dirty: bool,
+    },
 }
 
 /// Microtasks encolados por los removing steps de `option`.
@@ -51,6 +56,12 @@ impl Document {
             }
         } else if self.is_html_element(id, "selectedcontent") {
             ElementState::SelectedContent { disabled: false }
+        } else if self.is_html_element(id, "input") {
+            // "The checkedness of an input element ... when created": su atributo `checked`.
+            ElementState::Input {
+                checked: self.has_attr(id, "checked"),
+                dirty: false,
+            }
         } else {
             ElementState::None
         };
@@ -73,10 +84,99 @@ impl Document {
             *s = selectedness;
             *d = dirtiness;
         }
+        // Cloning steps de `input`: checkedness y dirty checkedness.
+        if let ElementState::Input { checked, dirty } = self.get(from).state
+            && let ElementState::Input {
+                checked: c,
+                dirty: d,
+            } = &mut self.get_mut(to).state
+        {
+            *c = checked;
+            *d = dirty;
+        }
     }
 
     fn has_steps(&self, id: NodeId) -> bool {
-        !matches!(self.get(id).state, ElementState::None)
+        matches!(
+            self.get(id).state,
+            ElementState::Option { .. } | ElementState::SelectedContent { .. }
+        )
+    }
+
+    /// "Attribute change steps" de `input` (`checked`) y `option` (`selected`): si el estado
+    /// no está *dirty*, sigue a la presencia del atributo (HTML §4.10.5 y §4.10.10).
+    pub(crate) fn attribute_changed(&mut self, el: NodeId, local: &bf_infra::DomString) {
+        let present = |doc: &Self, name: &str| doc.has_attr(el, name);
+        match self.get(el).state {
+            ElementState::Input { dirty: false, .. } if *local == "checked" => {
+                let value = present(self, "checked");
+                if let ElementState::Input { checked, .. } = &mut self.get_mut(el).state {
+                    *checked = value;
+                }
+            }
+            ElementState::Option {
+                dirtiness: false, ..
+            } if *local == "selected" => {
+                let value = present(self, "selected");
+                self.set_option_selectedness(el, value);
+            }
+            _ => {}
+        }
+    }
+
+    /// Checkedness de un `input` (`false` si no lo es).
+    pub fn checkedness(&self, input: NodeId) -> bool {
+        matches!(
+            self.get(input).state,
+            ElementState::Input { checked: true, .. }
+        )
+    }
+
+    /// Cambia la checkedness (marca dirty); al marcar un radio se desmarca el resto de su
+    /// grupo (HTML §4.10.5.1.16).
+    pub fn set_checkedness(&mut self, input: NodeId, value: bool) {
+        if let ElementState::Input { checked, dirty } = &mut self.get_mut(input).state {
+            *checked = value;
+            *dirty = true;
+        } else {
+            return;
+        }
+        if value {
+            for other in self.radio_group(input) {
+                if other != input
+                    && let ElementState::Input { checked, .. } = &mut self.get_mut(other).state
+                {
+                    *checked = false;
+                }
+            }
+        }
+    }
+
+    /// El "radio button group" de un radio: los `input type=radio` del mismo árbol con el
+    /// mismo `name` no vacío (sin considerar el form owner).
+    pub fn radio_group(&self, input: NodeId) -> Vec<NodeId> {
+        let is_radio = |n: NodeId| {
+            self.element(n).is_some_and(|e| {
+                e.is_html("input")
+                    && e.attr("type")
+                        .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+            })
+        };
+        if !is_radio(input) {
+            return Vec::new();
+        }
+        let Some(name) = self
+            .element(input)
+            .and_then(|e| e.attr("name"))
+            .filter(|n| !n.is_empty())
+        else {
+            return vec![input];
+        };
+        let root = self.tree_root(input);
+        self.inclusive_descendants(root)
+            .into_iter()
+            .filter(|&n| is_radio(n) && self.element(n).and_then(|e| e.attr("name")) == Some(name))
+            .collect()
     }
 
     /// Insertion steps y post-connection steps (DOM "insert", pasos 7.7 y 11).
@@ -95,7 +195,7 @@ impl Document {
                 ElementState::SelectedContent { .. } => {
                     self.recalculate_selectedcontent_disabledness(n);
                 }
-                ElementState::None => {}
+                ElementState::None | ElementState::Input { .. } => {}
             }
         }
         if !self.is_connected(node) {
@@ -113,7 +213,7 @@ impl Document {
                         self.update_selectedcontent(select, n);
                     }
                 }
-                ElementState::None => {}
+                ElementState::None | ElementState::Input { .. } => {}
             }
         }
     }
@@ -448,7 +548,7 @@ impl Document {
     pub fn text_content(&self, node: NodeId) -> String {
         let mut out = String::new();
         for n in self.inclusive_descendants(node) {
-            if let crate::NodeData::Text(t) = &self.get(n).data {
+            if let crate::NodeData::Text(t) | crate::NodeData::CdataSection(t) = &self.get(n).data {
                 out.push_str(&t.to_string_lossy());
             }
         }

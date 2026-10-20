@@ -114,6 +114,32 @@ pub enum ObjectKind {
     ForIn(Box<ForInData>),
     /// Un objeto con `[[IsHTMLDDA]]` (B.3.6, `$262.IsHTMLDDA`): llamable, devuelve null.
     HtmlDda,
+    // --- E3: Promise, async, colecciones, buffers ---
+    /// Instancias de Promise (§27.2.6).
+    Promise(Box<crate::builtins::promise::PromiseData>),
+    /// El estado interno de una función async suspendida en un `await` (no es visible).
+    AsyncFunction(Box<crate::builtins::r#async::AsyncFnData>),
+    /// Instancias de AsyncGenerator (§27.6.2).
+    AsyncGenerator(Box<crate::builtins::r#async::AsyncGenData>),
+    /// %AsyncFromSyncIteratorPrototype% (§27.1.6): `[[SyncIteratorRecord]]`.
+    AsyncFromSyncIterator(Box<crate::builtins::r#async::SyncIteratorRecord>),
+    /// Map y Set (§24.1, §24.2): las entradas con tombstones.
+    Map(Box<crate::builtins::map_set::MapData>),
+    Set(Box<crate::builtins::map_set::MapData>),
+    MapIterator(Box<crate::builtins::map_set::CollectionIterator>),
+    SetIterator(Box<crate::builtins::map_set::CollectionIterator>),
+    /// WeakMap, WeakSet, WeakRef y FinalizationRegistry (§24.3, §24.4, §26): referencias
+    /// débiles (el GC las limpia).
+    WeakMap(Box<crate::builtins::weak::WeakMapData>),
+    WeakSet(Box<crate::builtins::weak::WeakMapData>),
+    WeakRef(Box<crate::builtins::weak::WeakRefData>),
+    FinalizationRegistry(Box<crate::builtins::weak::FinalizationRegistryData>),
+    /// ArrayBuffer y SharedArrayBuffer (§25.1, §25.2).
+    ArrayBuffer(Box<crate::builtins::array_buffer::ArrayBufferData>),
+    /// TypedArray exóticos (§10.4.5).
+    TypedArray(Box<crate::builtins::typed_array::TypedArrayData>),
+    /// DataView (§25.3).
+    DataView(Box<crate::builtins::dataview::DataViewData>),
     /// Un objeto de `JSON.rawJSON` (`[[IsRawJSON]]`).
     RawJson,
     /// Proxy exótico (§10.5).
@@ -124,6 +150,10 @@ pub enum ObjectKind {
     WrappedIterator(Box<crate::builtins::iterator_helpers::IterRec>),
     /// Module Namespace exótico (§10.4.6).
     ModuleNamespace(Box<crate::builtins::module_namespace::NamespaceData>),
+    // E2: RegExp (§22.2), RegExp String Iterator (§22.2.9) y Date (`[[DateValue]]`, §21.4).
+    RegExp(Box<crate::builtins::regexp::RegExpData>),
+    RegExpStringIterator(Box<crate::builtins::regexp::RegExpStringIteratorData>),
+    Date(f64),
 }
 
 #[derive(Debug)]
@@ -232,6 +262,22 @@ impl Trace for Object {
                     }
                 }
             }
+            // E2
+            ObjectKind::RegExp(_) | ObjectKind::Date(_) => {}
+            ObjectKind::RegExpStringIterator(d) => d.trace(t),
+            // E3
+            ObjectKind::Promise(p) => p.trace(t),
+            ObjectKind::AsyncFunction(a) => a.trace(t),
+            ObjectKind::AsyncGenerator(g) => g.trace(t),
+            ObjectKind::AsyncFromSyncIterator(r) => r.trace(t),
+            ObjectKind::Map(m) | ObjectKind::Set(m) => m.trace(t),
+            ObjectKind::MapIterator(i) | ObjectKind::SetIterator(i) => i.trace(t),
+            ObjectKind::WeakMap(w) | ObjectKind::WeakSet(w) => w.trace(t),
+            ObjectKind::WeakRef(w) => w.trace(t),
+            ObjectKind::FinalizationRegistry(f) => f.trace(t),
+            ObjectKind::ArrayBuffer(_) => {}
+            ObjectKind::TypedArray(ta) => t.gc(ta.buffer),
+            ObjectKind::DataView(dv) => t.gc(dv.buffer),
         }
     }
 }

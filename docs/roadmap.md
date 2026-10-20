@@ -45,6 +45,12 @@ Las reglas no cambian:
   - `Map`/`Set`/`WeakMap`/`WeakRef`, `Promise`, `Proxy`/`Reflect` e `Intl` mínimo.
 - `DomString` pasa a WTF-8 (surrogates sueltos): desbloquea los 4 casos irrepresentables del
   tokenizador.
+- **Atomics multi-agente** (pendiente): `$262.agent` completo (`start`, `broadcast`,
+  `receiveBroadcast`, `report`, `getReport`, `leaving`) con un agente por hilo y los Shared
+  Data Blocks compartidos entre hilos sin `unsafe` (`Arc<[AtomicU8]>`); con eso
+  `Atomics.wait`/`notify`/`waitAsync` entre agentes (los 112 tests de test262 que usan
+  `$262.agent`). Hoy hay un solo agente: `Atomics.wait` solo vence por timeout y `notify`
+  despierta solo waiters de `waitAsync` del mismo agente.
 
 **Aceptación**:
 - **test262** como suite oficial, en el commit pineado en `tools/test262-commit.txt` y con

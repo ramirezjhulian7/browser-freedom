@@ -200,6 +200,24 @@ pub struct Agent {
     stack_base: usize,
     /// Los Module Records y el loader del host (§16.2.1) (E1).
     pub modules: module::ModuleHost,
+    // E3
+    /// La cola de jobs (HostEnqueuePromiseJob, §9.5.5; HostEnqueueFinalizationRegistryCleanupJob,
+    /// §9.5.6), en orden FIFO.
+    pub jobs: std::collections::VecDeque<crate::builtins::promise::Job>,
+    /// Los jobs que se están ejecutando (son raíces del GC mientras corren).
+    pub(crate) running_jobs: Vec<crate::builtins::promise::Job>,
+    /// HostPromiseRejectionTracker (§27.2.1.9): los rechazos sin manejar.
+    pub rejections: crate::builtins::promise::RejectionTracker,
+    /// `[[KeptAlive]]` del agente (§9.10, AddToKeptObjects / ClearKeptObjects).
+    pub kept_alive: Vec<Value>,
+    /// Las excepciones que ningún código atrapó dentro de un job (HostReportErrors).
+    pub job_errors: Vec<Value>,
+    /// AgentCanSuspend (§9.7.1): ¿puede bloquearse `Atomics.wait`? (El hilo principal de
+    /// un navegador no puede; el runner de test262 lo activa con `CanBlockIsTrue`.)
+    pub can_block: bool,
+    /// Los waiters de `Atomics.waitAsync` y los timers del host, que RunJobs dispara cuando
+    /// la cola queda vacía.
+    pub(crate) timers: Vec<crate::builtins::atomics::Timer>,
 }
 
 impl Agent {
@@ -244,6 +262,13 @@ impl Agent {
             call_depth: 0,
             stack_base: crate::parser::stack_position(),
             modules: module::ModuleHost::default(), // E1
+            jobs: std::collections::VecDeque::new(),
+            running_jobs: Vec::new(),
+            rejections: crate::builtins::promise::RejectionTracker::default(),
+            kept_alive: Vec::new(),
+            job_errors: Vec::new(),
+            can_block: false,
+            timers: Vec::new(),
         };
         let realm = agent.create_realm();
         agent.current_realm = realm;
@@ -400,12 +425,25 @@ impl Agent {
         let mut t = Tracer::default();
         self.trace_roots(&mut t);
         self.heap.collect(t);
+        // E3: los FinalizationRegistry con celdas vaciadas piden su job de limpieza.
+        crate::builtins::weak::enqueue_cleanup_jobs(self);
         true
     }
 
     fn trace_roots(&self, t: &mut Tracer) {
         for r in &self.realms {
             r.trace(t);
+        }
+        // E3
+        for j in self.jobs.iter().chain(self.running_jobs.iter()) {
+            j.trace(t);
+        }
+        self.rejections.trace(t);
+        for v in self.kept_alive.iter().chain(self.job_errors.iter()) {
+            t.value(v);
+        }
+        for timer in &self.timers {
+            timer.trace(t);
         }
         for f in &self.frames {
             f.trace(t);

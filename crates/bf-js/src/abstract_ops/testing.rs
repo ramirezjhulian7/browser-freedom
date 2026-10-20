@@ -56,7 +56,8 @@ impl Agent {
         if !m.is_undefined() {
             return Ok(crate::abstract_ops::conversion::to_boolean(self, &m));
         }
-        Ok(false)
+        // E2: paso 4, `[[RegExpMatcher]]`.
+        Ok(crate::builtins::regexp::has_regexp_matcher(self, *o))
     }
 
     /// SameValue (§7.2.10).

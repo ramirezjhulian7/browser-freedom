@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-20; 52017 archivos en 16 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-20; 52017 archivos en 231 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -146,74 +146,77 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
   - `export-defer`: stage 2.7: `export defer`.
   - `error-stack-accessor`: stage 3: `Error.prototype.stack` como accessor; el motor usa la propiedad propia no estándar `stack` de los errores.
   - `nonextensible-applies-to-private`: stage 3: PrivateFieldAdd lanza TypeError en objetos no extensibles; ECMA-262 todavía lo permite y sus tests contradicen el spec vigente.
+  - `await-dictionary`: propuesta: `Promise.allKeyed` y `Promise.allSettledKeyed`.
+  - `immutable-arraybuffer`: propuesta: `transferToImmutable`, `sliceToImmutable` y `ArrayBuffer.prototype.immutable`.
+  - `upsert`: propuesta: `Map`/`WeakMap.prototype.getOrInsert` y `getOrInsertComputed`.
   - `import-text`: stage 3: módulos de texto (`with { type: "text" }`).
   - `import-bytes`: stage 2.7: módulos de bytes (`with { type: "bytes" }`, sobre immutable ArrayBuffer).
 - Detalle por test: `target/test262/results.tsv`.
-- `language/` (referencia de regresión de `tests/test262_run.rs`): 76.42%
+- `language/` (referencia de regresión de `tests/test262_run.rs`): 96.44%
 
 | Directorio | passed | failed | skipped | timeout | % |
 |---|---:|---:|---:|---:|---:|
-| annexB/built-ins | 152 | 89 | 0 | 0 | 63.1% |
-| annexB/language | 836 | 9 | 0 | 0 | 98.9% |
+| annexB/built-ins | 239 | 2 | 0 | 0 | 99.2% |
+| annexB/language | 845 | 0 | 0 | 0 | 100.0% |
 | built-ins/AbstractModuleSource | 0 | 0 | 8 | 0 | 100.0% |
 | built-ins/AggregateError | 25 | 0 | 0 | 0 | 100.0% |
-| built-ins/Array | 2851 | 232 | 0 | 0 | 92.5% |
-| built-ins/ArrayBuffer | 0 | 221 | 0 | 0 | 0.0% |
-| built-ins/ArrayIteratorPrototype | 17 | 10 | 0 | 0 | 63.0% |
+| built-ins/Array | 2988 | 95 | 0 | 0 | 96.9% |
+| built-ins/ArrayBuffer | 192 | 0 | 29 | 0 | 100.0% |
+| built-ins/ArrayIteratorPrototype | 27 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncDisposableStack | 0 | 104 | 0 | 0 | 0.0% |
-| built-ins/AsyncFromSyncIteratorPrototype | 0 | 38 | 0 | 0 | 0.0% |
-| built-ins/AsyncFunction | 11 | 7 | 0 | 0 | 61.1% |
-| built-ins/AsyncGeneratorFunction | 9 | 14 | 0 | 0 | 39.1% |
-| built-ins/AsyncGeneratorPrototype | 0 | 48 | 0 | 0 | 0.0% |
-| built-ins/AsyncIteratorPrototype | 0 | 13 | 0 | 0 | 0.0% |
-| built-ins/Atomics | 0 | 389 | 0 | 0 | 0.0% |
-| built-ins/BigInt | 0 | 77 | 0 | 0 | 0.0% |
-| built-ins/Boolean | 48 | 3 | 0 | 0 | 94.1% |
-| built-ins/DataView | 0 | 561 | 0 | 0 | 0.0% |
-| built-ins/Date | 0 | 594 | 0 | 0 | 0.0% |
+| built-ins/AsyncFromSyncIteratorPrototype | 38 | 0 | 0 | 0 | 100.0% |
+| built-ins/AsyncFunction | 18 | 0 | 0 | 0 | 100.0% |
+| built-ins/AsyncGeneratorFunction | 23 | 0 | 0 | 0 | 100.0% |
+| built-ins/AsyncGeneratorPrototype | 48 | 0 | 0 | 0 | 100.0% |
+| built-ins/AsyncIteratorPrototype | 4 | 9 | 0 | 0 | 30.8% |
+| built-ins/Atomics | 268 | 112 | 9 | 0 | 70.5% |
+| built-ins/BigInt | 77 | 0 | 0 | 0 | 100.0% |
+| built-ins/Boolean | 51 | 0 | 0 | 0 | 100.0% |
+| built-ins/DataView | 550 | 0 | 11 | 0 | 100.0% |
+| built-ins/Date | 586 | 8 | 0 | 0 | 98.7% |
 | built-ins/DisposableStack | 0 | 93 | 0 | 0 | 0.0% |
-| built-ins/Error | 55 | 3 | 35 | 0 | 94.8% |
-| built-ins/FinalizationRegistry | 0 | 47 | 0 | 0 | 0.0% |
-| built-ins/Function | 485 | 24 | 0 | 0 | 95.3% |
+| built-ins/Error | 58 | 0 | 35 | 0 | 100.0% |
+| built-ins/FinalizationRegistry | 47 | 0 | 0 | 0 | 100.0% |
+| built-ins/Function | 508 | 1 | 0 | 0 | 99.8% |
 | built-ins/GeneratorFunction | 23 | 0 | 0 | 0 | 100.0% |
 | built-ins/GeneratorPrototype | 61 | 0 | 0 | 0 | 100.0% |
 | built-ins/Infinity | 6 | 0 | 0 | 0 | 100.0% |
-| built-ins/Iterator | 650 | 4 | 0 | 0 | 99.4% |
-| built-ins/JSON | 160 | 6 | 0 | 0 | 96.4% |
-| built-ins/Map | 0 | 204 | 0 | 0 | 0.0% |
-| built-ins/MapIteratorPrototype | 0 | 11 | 0 | 0 | 0.0% |
+| built-ins/Iterator | 654 | 0 | 0 | 0 | 100.0% |
+| built-ins/JSON | 166 | 0 | 0 | 0 | 100.0% |
+| built-ins/Map | 171 | 0 | 33 | 0 | 100.0% |
+| built-ins/MapIteratorPrototype | 11 | 0 | 0 | 0 | 100.0% |
 | built-ins/Math | 327 | 0 | 0 | 0 | 100.0% |
 | built-ins/NaN | 6 | 0 | 0 | 0 | 100.0% |
 | built-ins/NativeErrors | 94 | 0 | 0 | 0 | 100.0% |
-| built-ins/Number | 337 | 3 | 0 | 0 | 99.1% |
-| built-ins/Object | 3189 | 222 | 0 | 0 | 93.5% |
-| built-ins/Promise | 0 | 732 | 0 | 0 | 0.0% |
-| built-ins/Proxy | 304 | 7 | 0 | 0 | 97.7% |
-| built-ins/Reflect | 151 | 2 | 0 | 0 | 98.7% |
-| built-ins/RegExp | 192 | 1687 | 0 | 0 | 10.2% |
-| built-ins/RegExpStringIteratorPrototype | 0 | 17 | 0 | 0 | 0.0% |
-| built-ins/Set | 0 | 383 | 0 | 0 | 0.0% |
-| built-ins/SetIteratorPrototype | 0 | 11 | 0 | 0 | 0.0% |
+| built-ins/Number | 340 | 0 | 0 | 0 | 100.0% |
+| built-ins/Object | 3411 | 0 | 0 | 0 | 100.0% |
+| built-ins/Promise | 643 | 0 | 89 | 0 | 100.0% |
+| built-ins/Proxy | 311 | 0 | 0 | 0 | 100.0% |
+| built-ins/Reflect | 153 | 0 | 0 | 0 | 100.0% |
+| built-ins/RegExp | 1879 | 0 | 0 | 0 | 100.0% |
+| built-ins/RegExpStringIteratorPrototype | 17 | 0 | 0 | 0 | 100.0% |
+| built-ins/Set | 383 | 0 | 0 | 0 | 100.0% |
+| built-ins/SetIteratorPrototype | 11 | 0 | 0 | 0 | 100.0% |
 | built-ins/ShadowRealm | 0 | 64 | 0 | 0 | 0.0% |
-| built-ins/SharedArrayBuffer | 0 | 104 | 0 | 0 | 0.0% |
-| built-ins/String | 1041 | 182 | 0 | 0 | 85.1% |
+| built-ins/SharedArrayBuffer | 104 | 0 | 0 | 0 | 100.0% |
+| built-ins/String | 1223 | 0 | 0 | 0 | 100.0% |
 | built-ins/StringIteratorPrototype | 7 | 0 | 0 | 0 | 100.0% |
 | built-ins/SuppressedError | 0 | 22 | 0 | 0 | 0.0% |
-| built-ins/Symbol | 95 | 3 | 0 | 0 | 96.9% |
+| built-ins/Symbol | 98 | 0 | 0 | 0 | 100.0% |
 | built-ins/Temporal | 0 | 4605 | 0 | 0 | 0.0% |
 | built-ins/ThrowTypeError | 14 | 0 | 0 | 0 | 100.0% |
-| built-ins/TypedArray | 0 | 1453 | 0 | 0 | 0.0% |
-| built-ins/TypedArrayConstructors | 0 | 738 | 0 | 0 | 0.0% |
-| built-ins/Uint8Array | 0 | 70 | 0 | 0 | 0.0% |
-| built-ins/WeakMap | 0 | 141 | 0 | 0 | 0.0% |
-| built-ins/WeakRef | 0 | 29 | 0 | 0 | 0.0% |
-| built-ins/WeakSet | 0 | 85 | 0 | 0 | 0.0% |
+| built-ins/TypedArray | 1444 | 1 | 8 | 0 | 99.9% |
+| built-ins/TypedArrayConstructors | 736 | 0 | 2 | 0 | 100.0% |
+| built-ins/Uint8Array | 8 | 60 | 2 | 0 | 11.8% |
+| built-ins/WeakMap | 102 | 0 | 39 | 0 | 100.0% |
+| built-ins/WeakRef | 29 | 0 | 0 | 0 | 100.0% |
+| built-ins/WeakSet | 85 | 0 | 0 | 0 | 100.0% |
 | built-ins/decodeURI | 54 | 0 | 0 | 1 | 98.2% |
 | built-ins/decodeURIComponent | 55 | 0 | 0 | 1 | 98.2% |
 | built-ins/encodeURI | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/encodeURIComponent | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/eval | 10 | 0 | 0 | 0 | 100.0% |
-| built-ins/global | 25 | 4 | 0 | 0 | 86.2% |
+| built-ins/global | 29 | 0 | 0 | 0 | 100.0% |
 | built-ins/isFinite | 15 | 0 | 0 | 0 | 100.0% |
 | built-ins/isNaN | 15 | 0 | 0 | 0 | 100.0% |
 | built-ins/parseFloat | 54 | 0 | 0 | 0 | 100.0% |
@@ -221,9 +224,9 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/undefined | 8 | 0 | 0 | 0 | 100.0% |
 | intl402 | 0 | 22 | 0 | 0 | 0.0% |
 | intl402/Array | 1 | 1 | 0 | 0 | 50.0% |
-| intl402/BigInt | 0 | 11 | 0 | 0 | 0.0% |
+| intl402/BigInt | 5 | 6 | 0 | 0 | 45.5% |
 | intl402/Collator | 0 | 65 | 0 | 0 | 0.0% |
-| intl402/Date | 0 | 12 | 0 | 0 | 0.0% |
+| intl402/Date | 8 | 4 | 0 | 0 | 66.7% |
 | intl402/DateTimeFormat | 0 | 245 | 0 | 0 | 0.0% |
 | intl402/DisplayNames | 0 | 57 | 0 | 0 | 0.0% |
 | intl402/DurationFormat | 0 | 110 | 0 | 0 | 0.0% |
@@ -238,17 +241,17 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | intl402/Segmenter | 0 | 79 | 0 | 0 | 0.0% |
 | intl402/String | 7 | 12 | 0 | 0 | 36.8% |
 | intl402/Temporal | 0 | 2029 | 0 | 0 | 0.0% |
-| intl402/TypedArray | 0 | 1 | 0 | 0 | 0.0% |
-| language/arguments-object | 201 | 62 | 0 | 0 | 76.4% |
+| intl402/TypedArray | 1 | 0 | 0 | 0 | 100.0% |
+| language/arguments-object | 261 | 2 | 0 | 0 | 99.2% |
 | language/asi | 102 | 0 | 0 | 0 | 100.0% |
 | language/block-scope | 145 | 0 | 0 | 0 | 100.0% |
 | language/comments | 52 | 0 | 0 | 0 | 100.0% |
 | language/computed-property-names | 48 | 0 | 0 | 0 | 100.0% |
-| language/destructuring | 17 | 2 | 0 | 0 | 89.5% |
+| language/destructuring | 18 | 1 | 0 | 0 | 94.7% |
 | language/directive-prologue | 62 | 0 | 0 | 0 | 100.0% |
-| language/eval-code | 299 | 48 | 0 | 0 | 86.2% |
+| language/eval-code | 347 | 0 | 0 | 0 | 100.0% |
 | language/export | 3 | 0 | 0 | 0 | 100.0% |
-| language/expressions | 8325 | 2378 | 399 | 0 | 77.8% |
+| language/expressions | 10261 | 442 | 399 | 0 | 95.9% |
 | language/function-code | 217 | 0 | 0 | 0 | 100.0% |
 | language/future-reserved-words | 55 | 0 | 0 | 0 | 100.0% |
 | language/global-code | 42 | 0 | 0 | 0 | 100.0% |
@@ -257,50 +260,50 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/import | 15 | 1 | 113 | 0 | 93.8% |
 | language/keywords | 25 | 0 | 0 | 0 | 100.0% |
 | language/line-terminators | 41 | 0 | 0 | 0 | 100.0% |
-| language/literals | 501 | 35 | 0 | 0 | 93.5% |
+| language/literals | 532 | 4 | 0 | 0 | 99.3% |
 | language/module-code | 352 | 243 | 4 | 0 | 59.2% |
 | language/punctuators | 11 | 0 | 0 | 0 | 100.0% |
 | language/reserved-words | 27 | 0 | 0 | 0 | 100.0% |
 | language/rest-parameters | 11 | 0 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 0 | 100.0% |
-| language/statementList | 64 | 16 | 0 | 0 | 80.0% |
-| language/statements | 6671 | 2660 | 16 | 0 | 71.5% |
+| language/statementList | 80 | 0 | 0 | 0 | 100.0% |
+| language/statements | 9199 | 132 | 16 | 0 | 98.6% |
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
-| language/white-space | 42 | 25 | 0 | 0 | 62.7% |
-| **language/ (total)** | 17724 | 5470 | 532 | 0 | 76.4% |
-| **Total** | 29234 | 22206 | 575 | 2 | 56.8% |
+| language/white-space | 67 | 0 | 0 | 0 | 100.0% |
+| **language/ (total)** | 22369 | 825 | 532 | 0 | 96.4% |
+| **Total** | 41860 | 9358 | 797 | 2 | 81.7% |
 
 ### Los 30 errores más frecuentes
 
 | # | tests | error |
 |---:|---:|---|
-| 1 | 4523 | `InternalError: no implementado: async/await (requiere Promise, paso N)` |
-| 2 | 3377 | `ReferenceError: Temporal is not defined` |
-| 3 | 2809 | `harness temporalHelpers.js: Error: no implementado: RegExp (built-in del paso N)` |
-| 4 | 2083 | `harness testTypedArray.js: ReferenceError: FloatNArray is not defined` |
-| 5 | 1476 | `InternalError: no implementado: RegExp (built-in del paso N)` |
-| 6 | 978 | `ReferenceError: Intl is not defined` |
-| 7 | 796 | `ReferenceError: Date is not defined` |
-| 8 | 746 | `ReferenceError: Promise is not defined` |
-| 9 | 580 | `ReferenceError: ArrayBuffer is not defined` |
-| 10 | 429 | `ReferenceError: RegExp is not defined` |
-| 11 | 327 | `ReferenceError: Set is not defined` |
-| 12 | 306 | `TestNError: Expected a TypeError but got a ReferenceError` |
-| 13 | 255 | `InternalError: no implementado: import() (módulos, paso N)` |
-| 14 | 252 | `InternalError: no implementado: top-level await (requiere Promise)` |
-| 15 | 185 | `harness resizableArrayBufferUtils.js: ReferenceError: UintNArray is not defined` |
-| 16 | 185 | `harness testIntl.js: Error: no implementado: RegExp (built-in del paso N)` |
-| 17 | 179 | `ReferenceError: Map is not defined` |
-| 18 | 165 | `ReferenceError: DataView is not defined` |
-| 19 | 127 | `ReferenceError: SharedArrayBuffer is not defined` |
-| 20 | 121 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
-| 21 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'getReport')` |
-| 22 | 105 | `InternalError: no implementado: aritmética de BigInt (paso N)` |
-| 23 | 101 | `ReferenceError: Atomics is not defined` |
-| 24 | 95 | `ReferenceError: UintNArray is not defined` |
-| 25 | 92 | `ReferenceError: WeakMap is not defined` |
-| 26 | 89 | `ReferenceError: DisposableStack is not defined` |
-| 27 | 85 | `ReferenceError: BigInt is not defined` |
-| 28 | 85 | `ReferenceError: IntNArray is not defined` |
-| 29 | 81 | `TestNError: Expected a TestNError but got a ReferenceError` |
-| 30 | 76 | `TestN:AsyncTestFailure:TestNError: The promise should be rejected, but threw an exception: Promise is not defined` |
+| 1 | 6136 | `ReferenceError: Temporal is not defined` |
+| 2 | 1186 | `ReferenceError: Intl is not defined` |
+| 3 | 429 | `InternalError: no implementado: import() (módulos, paso N)` |
+| 4 | 252 | `InternalError: no implementado: top-level await (requiere Promise)` |
+| 5 | 121 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
+| 6 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'bind')` |
+| 7 | 103 | `InternalError: no implementado: using (explicit-resource-management)` |
+| 8 | 89 | `ReferenceError: DisposableStack is not defined` |
+| 9 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
+| 10 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
+| 11 | 63 | `TestNError: Expected a RangeError but got a ReferenceError` |
+| 12 | 61 | `ReferenceError: ShadowRealm is not defined` |
+| 13 | 34 | `RangeError: Maximum call stack size exceeded` |
+| 14 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
+| 15 | 28 | `TestNError: Expected a TypeError but got a ReferenceError` |
+| 16 | 22 | `TestNError: Expected a TestNError but got a ReferenceError` |
+| 17 | 19 | `ReferenceError: SuppressedError is not defined` |
+| 18 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
+| 19 | 18 | `TypeError: Cannot convert undefined to object` |
+| 20 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
+| 21 | 10 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 22 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
+| 23 | 8 | `TestNError: isConstructor invoked with a non-function value` |
+| 24 | 8 | `TestNError: no argument Expected a TypeError but got a ReferenceError` |
+| 25 | 7 | `TestNError: Expected a SyntaxError but got a TypeError` |
+| 26 | 7 | `TestNError: Fractional minutes not allowed in time string Expected a RangeError but got a ReferenceError` |
+| 27 | 7 | `TestNError: TypeError on wrong options type object Expected a TypeError but got a ReferenceError` |
+| 28 | 7 | `TestNError: bare date-time string is not a time zone Expected a RangeError but got a ReferenceError` |
+| 29 | 7 | `TestNError: from toString Expected a TestNError but got a ReferenceError` |
+| 30 | 7 | `TestNError: no more than N decimal places are allowed Expected a RangeError but got a ReferenceError` |

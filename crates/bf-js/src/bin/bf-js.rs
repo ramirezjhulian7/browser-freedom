@@ -80,7 +80,8 @@ fn run_script(path: &str, module: bool) -> ExitCode {
     } else {
         agent.eval_script(&src, path)
     };
-    match result {
+    // E3: RunJobs al terminar el script.
+    match result.and_then(|v| agent.run_jobs().map(|_| v)) {
         Ok(_) => ExitCode::SUCCESS,
         Err(Throw::Value(v)) => {
             let msg = describe_exception(&mut agent, &v);

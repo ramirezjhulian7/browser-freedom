@@ -120,7 +120,13 @@ impl<'t> Codegen<'t> {
             }
             Stmt::Return { argument, .. } => {
                 match argument {
-                    Some(e) => self.expr(e),
+                    Some(e) => {
+                        self.expr(e);
+                        // §14.10.1: en un generador async, `? Await(exprValue)`. (E3)
+                        if self.in_async_generator() {
+                            self.emit(Op::Await);
+                        }
+                    }
                     None => self.emit(Op::Undefined),
                 }
                 self.emit(Op::Return);
@@ -334,6 +340,24 @@ impl<'t> Codegen<'t> {
                 Control::Iter(slot) => {
                     self.emit(Op::PopHandler);
                     self.emit(Op::IterClose(slot));
+                }
+                // E3: AsyncIteratorClose con una completion normal (break/continue).
+                Control::AsyncIter(slot) => {
+                    self.emit(Op::PopHandler);
+                    let skip = self.new_label();
+                    self.emit_to(
+                        Op::AsyncIterClose {
+                            slot,
+                            kind_slot: u32::MAX,
+                            skip: 0,
+                        },
+                        skip,
+                    );
+                    self.emit(Op::Await);
+                    self.emit(Op::AsyncIterCloseCheck {
+                        kind_slot: u32::MAX,
+                    });
+                    self.bind(skip);
                 }
                 Control::Breakable { .. } => {}
                 Control::Finally {
@@ -583,10 +607,6 @@ impl<'t> Codegen<'t> {
         is_of: bool,
         is_await: bool,
     ) {
-        if is_await {
-            self.unsupported("for await (requiere async, paso 4)");
-            return;
-        }
         self.completion_reset();
         let parent = self.scope_id();
         // B.3.5: `for (var x = init in o)` evalúa el inicializador antes.
@@ -606,7 +626,10 @@ impl<'t> Codegen<'t> {
         let slot = self.alloc_temp();
         self.alloc_temp();
         self.alloc_temp();
-        if is_of {
+        if is_await {
+            // E3: ForIn/OfHeadEvaluation con iteratorKind async (§14.7.5.6).
+            self.emit(Op::GetAsyncIterator(slot));
+        } else if is_of {
             self.emit(Op::GetIterator(slot));
         } else {
             self.emit(Op::ForInPrepare(slot));
@@ -617,7 +640,12 @@ impl<'t> Codegen<'t> {
         let (brk, cont) = self.push_breakable(BreakKind::Loop, keep);
         let next = self.new_label();
         self.bind(next);
-        if is_of {
+        if is_await {
+            // E3: §14.7.5.7 pasos 6.a–f.
+            self.emit(Op::AsyncIterNext(slot));
+            self.emit(Op::Await);
+            self.emit_to(Op::AsyncIterResult { slot, done: 0 }, brk);
+        } else if is_of {
             self.emit_to(Op::IterStep { slot, done: 0 }, brk);
         } else {
             self.emit_to(Op::ForInNext { slot, done: 0 }, brk);
@@ -633,7 +661,12 @@ impl<'t> Codegen<'t> {
                 },
                 cleanup,
             );
-            self.st().controls.push(Control::Iter(slot));
+            let c = if is_await {
+                Control::AsyncIter(slot)
+            } else {
+                Control::Iter(slot)
+            };
+            self.st().controls.push(c);
         }
         if let Some(id) = iter_scope {
             self.enter_scope(id);
@@ -663,7 +696,35 @@ impl<'t> Codegen<'t> {
             self.st().controls.pop();
         }
         self.jump(next);
-        if is_of {
+        if is_await {
+            // E3: AsyncIteratorClose(iteratorRecord, status) (§7.4.13) con la completion
+            // abrupta del cuerpo en `ks`/`vs`.
+            self.bind(cleanup);
+            let after = self.new_label();
+            let catch = self.new_label();
+            self.emit_to(
+                Op::AsyncIterClose {
+                    slot,
+                    kind_slot: ks,
+                    skip: 0,
+                },
+                after,
+            );
+            self.emit_to(Op::PushCatch(0), catch);
+            self.emit(Op::Await);
+            self.emit(Op::PopHandler);
+            self.emit(Op::AsyncIterCloseCheck { kind_slot: ks });
+            self.jump(after);
+            self.bind(catch);
+            self.emit(Op::AsyncIterCloseCatch { kind_slot: ks });
+            self.bind(after);
+            let table = self.add_const(Constant::FinallyTable(std::rc::Rc::new(Vec::new())));
+            self.emit(Op::EndFinally {
+                kind_slot: ks,
+                value_slot: vs,
+                table,
+            });
+        } else if is_of {
             self.bind(cleanup);
             self.emit(Op::IterCleanup {
                 slot,
