@@ -1,5 +1,5 @@
-//! El cromo de la ventana: la barra superior (marca, ◀ ▶ ⟳, campo de URL y botón del panel del
-//! motor), la línea de estado y el panel del motor. Cada uno es un documento HTML generado
+//! El cromo de la ventana: la barra superior (franja de pestañas; marca, ◀ ▶ ⟳, campo de URL y
+//! botón del panel del motor), la línea de estado y el panel del motor. Cada uno es un documento HTML generado
 //! (plantillas de `pages/`) que maquetan y pintan el mismo motor y el mismo rasterizador que
 //! las páginas; los iconos se agregan como paths ([`icons`](super::icons)) en los huecos que
 //! deja la maqueta, y todos los colores salen del [`Theme`].
@@ -12,9 +12,10 @@ use bf_infra::{FileLoader, Url};
 use bf_layout::Size;
 use bf_layout::fragment::{Fragment, Rect};
 use bf_paint::{DisplayItem, DisplayList, Page, PageContext, Radii, document_extent, prepare_page};
+use bf_style::values::color::Rgba;
 
 use super::hit;
-use super::icons::{Icon, icon};
+use super::icons::{Icon, icon, spinner};
 use crate::internal::{self, escape, fill};
 use crate::theme::Theme;
 
@@ -43,6 +44,22 @@ pub enum Region {
 pub struct TabInfo {
     pub title: String,
     pub loading: bool,
+    /// Una página interna (`about:`): la pestaña lleva la marca en lugar del globo.
+    pub internal: bool,
+}
+
+/// El icono a la izquierda del texto del campo de URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldIcon {
+    /// `https:`.
+    Secure,
+    /// `http:`.
+    Insecure,
+    /// `about:`: la marca.
+    Internal,
+    /// Con foco: una lupa (se escribe una dirección o una búsqueda).
+    Search,
+    None,
 }
 
 const REGIONS: [(&str, Region); 5] = [
@@ -222,20 +239,26 @@ impl UrlField {
     }
 }
 
-/// La URL sin foco, formateada: esquema y ruta en texto secundario, host en el principal.
-fn formatted_url(url: &str) -> (bool, String) {
+/// La URL sin foco, formateada: esquema y ruta en texto secundario, host en el principal; y
+/// el icono que le corresponde según el esquema.
+fn formatted_url(url: &str) -> (FieldIcon, String) {
     let Ok(u) = Url::parse(url, None) else {
-        return (false, escape(url));
+        return (FieldIcon::None, escape(url));
     };
     let href = u.href();
     let host = u.host_string();
-    let secure = u.scheme == "https";
+    let kind = match u.scheme.as_str() {
+        "https" => FieldIcon::Secure,
+        "http" => FieldIcon::Insecure,
+        "about" => FieldIcon::Internal,
+        _ => FieldIcon::None,
+    };
     if host.is_empty() {
-        return (false, format!("<span>{}</span>", escape(&href)));
+        return (kind, format!("<span>{}</span>", escape(&href)));
     }
     match href.split_once(&host) {
         Some((before, after)) => (
-            secure,
+            kind,
             format!(
                 "<span class=\"sec\">{}</span><span>{}</span><span class=\"sec\">{}</span>",
                 escape(before),
@@ -243,7 +266,7 @@ fn formatted_url(url: &str) -> (bool, String) {
                 escape(after)
             ),
         ),
-        None => (secure, escape(&href)),
+        None => (kind, escape(&href)),
     }
 }
 
@@ -272,8 +295,9 @@ pub struct Chrome {
     width: f32,
     bar: Option<UiDoc>,
     regions: Vec<(Region, Rect)>,
-    icons: Vec<(Icon, Rect, bool)>,
-    field_rect: Option<Rect>,
+    /// Los iconos de la barra ya con su color, y los huecos de los indicadores de carga.
+    icons: Vec<(Icon, Rect, Rgba)>,
+    spinners: Vec<Rect>,
     status: Option<UiDoc>,
     panel: Option<UiDoc>,
     pub panel_scroll: f32,
@@ -301,7 +325,7 @@ impl Chrome {
             bar: None,
             regions: Vec::new(),
             icons: Vec::new(),
-            field_rect: None,
+            spinners: Vec::new(),
             status: None,
             panel: None,
             panel_scroll: 0.0,
@@ -350,17 +374,23 @@ impl Chrome {
                     text.push_str(&part(f.cursor, chars.len()));
                 }
             }
-            (false, text)
+            (FieldIcon::Search, text)
         } else {
             formatted_url(&self.url)
         };
         let mut tabs = String::new();
+        let lit = |i: usize| i == self.active || self.hover == Some(Region::Tab(i));
         for (i, t) in self.tabs.iter().enumerate() {
+            if i > 0 {
+                // Separador entre dos pestañas apagadas; transparente junto a la activa o la
+                // resaltada, para que nada se mueva.
+                let hidden = if lit(i - 1) || lit(i) { " hidden" } else { "" };
+                tabs.push_str(&format!("<span class=\"divider{hidden}\"></span>"));
+            }
             let mut class = String::from("tab");
             if i == self.active {
                 class.push_str(" active");
-            }
-            if self.hover == Some(Region::Tab(i)) {
+            } else if lit(i) || self.hover == Some(Region::CloseTab(i)) {
                 class.push_str(" hover");
             }
             let close = if self.hover == Some(Region::CloseTab(i)) {
@@ -373,13 +403,15 @@ impl Chrome {
             } else {
                 &t.title
             };
-            let mark = if t.loading {
-                "<span class=\"spin\"></span>"
+            let edge = if i == self.active {
+                "<span class=\"edge\"></span>"
             } else {
                 ""
             };
             tabs.push_str(&format!(
-                "<span id=\"tab-{i}\" class=\"{class}\">{mark}<span class=\"title\">{}</span><span id=\"tabclose-{i}\" class=\"{close}\">×</span></span>",
+                "<span id=\"tab-{i}\" class=\"{class}\">{edge}<span id=\"tabicon-{i}\" \
+                 class=\"ticon\"></span><span class=\"title\">{}</span><span id=\"tabclose-{i}\" \
+                 class=\"{close}\"><span id=\"tabx-{i}\" class=\"x\"></span></span></span>",
                 escape(title)
             ));
         }
@@ -388,16 +420,16 @@ impl Chrome {
         } else {
             "newtab"
         };
-        tabs.push_str(&format!("<span id=\"newtab\" class=\"{newtab}\">+</span>"));
+        tabs.push_str(&format!(
+            "<span id=\"newtab\" class=\"{newtab}\"><span id=\"icon-newtab\" class=\"icon\"></span></span>"
+        ));
         let vars = [
             ("theme", self.theme.css_vars()),
             ("tabs", tabs),
             (
                 "brand",
-                format!(
-                    "<img class=\"brand\" src=\"{}\">",
-                    internal::logo_data_url(internal::LOGO_64)
-                ),
+                "<span class=\"brand\"><span id=\"icon-brand\" class=\"icon\"></span></span>"
+                    .to_owned(),
             ),
             ("back", button("back", self.can_back, Region::Back, false)),
             (
@@ -411,14 +443,21 @@ impl Chrome {
             ),
             (
                 "field_class",
-                if f.focused { "focus" } else { "" }.to_owned(),
+                if f.focused {
+                    "focus"
+                } else if self.hover == Some(Region::Field) {
+                    "hover"
+                } else {
+                    ""
+                }
+                .to_owned(),
             ),
             (
                 "lock",
-                if lock {
-                    "<span id=\"icon-lock\" class=\"icon\"></span>".to_owned()
-                } else {
+                if lock == FieldIcon::None {
                     String::new()
+                } else {
+                    "<span id=\"icon-field\" class=\"icon\"></span>".to_owned()
                 },
             ),
             ("scroll", format!("{}", -f.scroll)),
@@ -475,22 +514,63 @@ impl Chrome {
             regions.push((Region::NewTab, r));
         }
         self.regions = regions;
+        let t = &self.theme;
+        let muted = Theme::with_alpha(t.text_secondary, 0.5);
         let reload = if self.loading {
             Icon::Stop
         } else {
             Icon::Reload
         };
-        self.icons = [
-            ("icon-back", Icon::Back, self.can_back),
-            ("icon-forward", Icon::Forward, self.can_forward),
-            ("icon-reload", reload, true),
-            ("icon-lock", Icon::Lock, true),
-            ("icon-engine", Icon::Engine, true),
-        ]
-        .into_iter()
-        .filter_map(|(id, i, enabled)| bar.rect(id).map(|r| (i, r, enabled)))
-        .collect();
-        self.field_rect = bar.rect("field");
+        let field_icon = if self.field.focused {
+            FieldIcon::Search
+        } else {
+            formatted_url(&self.url).0
+        };
+        let field = match field_icon {
+            FieldIcon::Secure => Some((Icon::Lock, t.text_secondary)),
+            FieldIcon::Insecure => Some((Icon::Insecure, t.text_secondary)),
+            FieldIcon::Internal => Some((Icon::Brand, t.text_secondary)),
+            FieldIcon::Search => Some((Icon::Search, t.text_secondary)),
+            FieldIcon::None => None,
+        };
+        let engine = if self.panel_open { t.accent } else { t.text };
+        let enabled = |on: bool| if on { t.text } else { muted };
+        let mut icons: Vec<(&str, Icon, Rgba)> = vec![
+            ("icon-brand", Icon::Brand, t.accent),
+            ("icon-back", Icon::Back, enabled(self.can_back)),
+            ("icon-forward", Icon::Forward, enabled(self.can_forward)),
+            ("icon-reload", reload, t.text),
+            ("icon-engine", Icon::Engine, engine),
+            ("icon-newtab", Icon::Plus, t.text_secondary),
+        ];
+        if let Some((i, color)) = field {
+            icons.push(("icon-field", i, color));
+        }
+        let mut found: Vec<(Icon, Rect, Rgba)> = icons
+            .into_iter()
+            .filter_map(|(id, i, color)| bar.rect(id).map(|r| (i, r, color)))
+            .collect();
+        let mut spinners = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if let Some(r) = bar.rect(&format!("tabicon-{i}")) {
+                if tab.loading {
+                    spinners.push(r);
+                } else if tab.internal {
+                    found.push((Icon::Brand, r, t.accent));
+                } else {
+                    found.push((Icon::Globe, r, t.text_secondary));
+                }
+            }
+            if let Some(r) = bar.rect(&format!("tabx-{i}")) {
+                let lit = i == self.active
+                    || self.hover == Some(Region::Tab(i))
+                    || self.hover == Some(Region::CloseTab(i));
+                let color = if lit { t.text } else { t.text_secondary };
+                found.push((Icon::Close, r, color));
+            }
+        }
+        self.icons = found;
+        self.spinners = spinners;
         self.bar = Some(bar);
         self.layout_status();
     }
@@ -557,27 +637,25 @@ impl Chrome {
         self.status.as_ref()
     }
 
-    /// La lista de visualización de la barra con los iconos y, si está cargando, la línea de
-    /// progreso indeterminada en la fase `phase` (0 a 1).
+    /// La lista de visualización de la barra con los iconos y, si algo carga, los indicadores
+    /// de las pestañas y la línea de progreso indeterminada, en la fase `phase` (0 a 1).
     pub fn bar_display_list(&self, phase: f32) -> Option<DisplayList> {
         let bar = self.bar.as_ref()?;
         let mut list = bar.display_list().clone();
-        for &(i, rect, enabled) in &self.icons {
-            let color = match (i, enabled) {
-                (Icon::Lock, _) => self.theme.text_secondary,
-                (Icon::Engine, _) if self.panel_open => self.theme.accent,
-                (_, true) => self.theme.text,
-                (_, false) => Theme::with_alpha(self.theme.text_secondary, 0.5),
-            };
+        for &(i, rect, color) in &self.icons {
             list.items.extend(icon(i, rect, color));
         }
-        if self.loading
-            && let Some(field) = self.field_rect
-        {
-            // Un tramo del 30% que recorre el ancho del campo, en el borde inferior de la barra.
-            let band = Rect::new(field.x, BAR - 3.0, field.width, 2.0);
-            let w = field.width * 0.3;
-            let x = field.x - w + (field.width + w) * phase;
+        let track = Theme::with_alpha(self.theme.text_secondary, 0.25);
+        for &rect in &self.spinners {
+            let turn = (phase * 2.0).fract();
+            list.items
+                .extend(spinner(rect, turn, self.theme.accent, track));
+        }
+        if self.loading {
+            // Un tramo del 30% que recorre todo el ancho, sobre el borde inferior de la barra.
+            let band = Rect::new(0.0, BAR - 2.0, self.width, 2.0);
+            let w = self.width * 0.3;
+            let x = -w + (self.width + w) * phase;
             list.push(DisplayItem::PushClip {
                 rect: band,
                 radii: Radii::default(),

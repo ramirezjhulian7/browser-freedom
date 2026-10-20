@@ -6,13 +6,14 @@
 {{style}}
 html { font-size: 12px; line-height: 1.45; }
 body { padding: 14px 16px 24px; border-left: 1px solid var(--border); min-height: 100%; box-sizing: border-box; }
-.title { display: flex; align-items: center; margin-bottom: 14px; }
+.title { display: flex; align-items: center; margin-bottom: 16px; }
 .title .t { font-size: 13px; font-weight: 600; flex: 1; }
-.title .x { color: var(--text2); font-size: 11px; }
+.title .t span { color: var(--accent-text); }
+.title .x { font-family: monospace; font-size: 11px; color: var(--text2); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
 .report .kv .k { width: 104px; }
 .report .phase .k { width: 64px; }
 .report .phase .v { width: 58px; }
 </style>
-<div class="title"><span class="t">Motor</span><span class="x">Ctrl+I</span></div>
+<div class="title"><span class="t">Motor <span>·</span> reporte</span><span class="x">Ctrl+I</span></div>
 <div class="report">{{body}}</div>
 </html>
