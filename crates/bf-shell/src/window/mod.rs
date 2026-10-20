@@ -22,7 +22,7 @@ mod icons;
 mod overlay;
 mod worker;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,6 +58,8 @@ const ZOOM_LEVELS: [f32; 15] = [
 
 /// Duración de un ciclo de la línea de progreso indeterminada.
 const PROGRESS_CYCLE: f32 = 1.4;
+/// Periodo de la animación de la línea de progreso (~30 fps).
+const PROGRESS_FRAME: Duration = Duration::from_millis(33);
 
 /// Cuánto se muestra un aviso en la línea de estado.
 const NOTICE: Duration = Duration::from_secs(4);
@@ -133,6 +135,17 @@ struct App {
     /// Último tiempo de raster de la página y el que muestra el panel.
     raster: Cell<Option<Duration>>,
     panel_raster: Option<Duration>,
+    /// Raster de la página en caché; se reutiliza mientras no cambien página, scroll, zoom,
+    /// DPI ni viewport, así mover el ratón o animar la barra no vuelve a pintar la página.
+    page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
+    page_generation: u64,
+    panel_cache: RefCell<Option<(RasterKey, Pixmap)>>,
+    panel_generation: u64,
+    /// Último viewport con el que se pidió layout al hilo de trabajo.
+    last_layout_request: Option<Size>,
+    /// Último cuadro de la animación de progreso: limita el redibujado a ~30 fps mientras
+    /// carga (cada `request_redraw` produce un evento inmediato, no espera al temporizador).
+    last_progress_frame: Instant,
     /// Tiempo total de la última carga (pedido → página lista).
     load_time: Option<Duration>,
     /// Aviso temporal en la línea de estado ("Guardado …").
@@ -201,6 +214,52 @@ fn timestamp() -> String {
     )
 }
 
+/// Clave de una capa rasterizada en caché. Si no cambia, el pixmap anterior sirve tal cual.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RasterKey {
+    /// Generación del contenido (página o panel): cambia cuando se asigna uno nuevo.
+    generation: u64,
+    /// Scroll cuantizado a 1/16 px.
+    scroll: (i64, i64),
+    scale: u32,
+    size: (u32, u32),
+}
+
+impl RasterKey {
+    fn new(generation: u64, scroll: (f32, f32), scale: f32, size: Size) -> Self {
+        Self {
+            generation,
+            scroll: (
+                (scroll.0 * 16.0).round() as i64,
+                (scroll.1 * 16.0).round() as i64,
+            ),
+            scale: scale.to_bits(),
+            size: (size.width.to_bits(), size.height.to_bits()),
+        }
+    }
+}
+
+/// Dos viewports se consideran iguales si difieren menos de medio px CSS: evita que un
+/// error de redondeo encadene re-layouts sin fin.
+fn same_viewport(a: Size, b: Size) -> bool {
+    (a.width - b.width).abs() <= 0.5 && (a.height - b.height).abs() <= 0.5
+}
+
+/// Trazas de eventos de la ventana en stderr, activadas con `BF_TRACE=1` (diagnóstico).
+fn trace(msg: &str) {
+    if std::env::var_os("BF_TRACE").is_some() {
+        eprintln!(
+            "[{:>8.3}] {msg}",
+            TRACE_START
+                .get_or_init(Instant::now)
+                .elapsed()
+                .as_secs_f32()
+        );
+    }
+}
+
+static TRACE_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
     frame.draw_pixmap(
         x.round() as i32,
@@ -241,6 +300,12 @@ impl App {
             overlay_hover: None,
             raster: Cell::new(None),
             panel_raster: None,
+            page_cache: RefCell::new(None),
+            page_generation: 0,
+            panel_cache: RefCell::new(None),
+            panel_generation: 0,
+            last_layout_request: None,
+            last_progress_frame: Instant::now(),
             load_time: None,
             notice: None,
             clock: Instant::now(),
@@ -404,6 +469,7 @@ impl App {
         };
         self.panel_raster = self.raster.get();
         self.chrome.layout_panel(&body, height);
+        self.panel_generation += 1;
         self.redraw_later();
     }
 
@@ -639,21 +705,33 @@ impl App {
             self.apply(done);
         }
         // Si la ventana cambió mientras se maquetaba, se rehace con el viewport actual.
-        if laid_out.is_some_and(|v| v != self.viewport())
+        let viewport = self.viewport();
+        if laid_out.is_some_and(|v| !same_viewport(v, viewport))
             && self.loading.is_none()
             && self.relayout.is_none()
+            && self
+                .last_layout_request
+                .is_none_or(|r| !same_viewport(r, viewport))
         {
             self.request_relayout();
         }
     }
 
     fn apply(&mut self, done: Done) {
+        trace(&format!(
+            "done id={} viewport={:?} relayout={:?} loading={:?}",
+            done.id,
+            done.viewport,
+            self.relayout,
+            self.loading.as_ref().map(|l| l.id)
+        ));
         let Done {
             id, loaded, page, ..
         } = done;
         if self.relayout == Some(id) {
             self.relayout = None;
             self.page = Some(page);
+            self.page_generation += 1;
             self.raster.set(None);
             self.clamp_scroll();
             self.refresh_panel();
@@ -673,6 +751,7 @@ impl App {
         let title = loaded.title().unwrap_or_else(|| url.href());
         self.current = Some(loaded);
         self.page = Some(page);
+        self.page_generation += 1;
         self.raster.set(None);
         self.hover_link = None;
         self.overlay_hover = None;
@@ -716,13 +795,21 @@ impl App {
         };
         self.next_id += 1;
         let id = self.next_id;
-        self.worker.set_viewport(self.viewport());
+        let viewport = self.viewport();
+        trace(&format!("request_relayout id={id} viewport={viewport:?}"));
+        self.worker.set_viewport(viewport);
+        self.last_layout_request = Some(viewport);
         self.worker.send(Job::Relayout { id, loaded });
         self.relayout = Some(id);
     }
 
     /// El viewport cambió (ventana, panel o zoom): se rehace el layout (en el hilo) y el cromo.
     fn resized(&mut self) {
+        trace(&format!(
+            "resized viewport={:?} loading={}",
+            self.viewport(),
+            self.loading.is_some()
+        ));
         if self.loading.is_some() {
             // La carga en curso lee el viewport nuevo antes del layout (o se rehace al
             // terminar).
@@ -814,16 +901,23 @@ impl App {
         let area = self.page_area();
         let viewport = self.viewport();
         if let Some(p) = &self.page {
-            let start = Instant::now();
-            let page = render_scrolled(
-                &p.display_list,
-                viewport,
-                dpi * self.zoom,
-                Rgba::WHITE,
-                self.scroll,
-            );
-            self.raster.set(Some(start.elapsed()));
-            blit(&mut frame, &page, 0.0, area.y * dpi);
+            let key = RasterKey::new(self.page_generation, self.scroll, dpi * self.zoom, viewport);
+            let mut cache = self.page_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+                let start = Instant::now();
+                let page = render_scrolled(
+                    &p.display_list,
+                    viewport,
+                    dpi * self.zoom,
+                    Rgba::WHITE,
+                    self.scroll,
+                );
+                self.raster.set(Some(start.elapsed()));
+                *cache = Some((key, page));
+            }
+            if let Some((_, page)) = cache.as_ref() {
+                blit(&mut frame, page, 0.0, area.y * dpi);
+            }
             if self.overlay {
                 let view = Rect::new(
                     self.scroll.0,
@@ -845,14 +939,17 @@ impl App {
             }
         }
         if let Some(panel) = self.chrome.panel() {
-            let layer = render_scrolled(
-                panel.display_list(),
-                panel.size,
-                dpi,
-                theme.chrome,
-                (0.0, self.chrome.panel_scroll),
-            );
-            blit(&mut frame, &layer, area.right() * dpi, area.y * dpi);
+            let scroll = (0.0, self.chrome.panel_scroll);
+            let key = RasterKey::new(self.panel_generation, scroll, dpi, panel.size);
+            let mut cache = self.panel_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+                let layer =
+                    render_scrolled(panel.display_list(), panel.size, dpi, theme.chrome, scroll);
+                *cache = Some((key, layer));
+            }
+            if let Some((_, layer)) = cache.as_ref() {
+                blit(&mut frame, layer, area.right() * dpi, area.y * dpi);
+            }
         }
         if let Some(list) = self.chrome.bar_display_list(self.progress_phase()) {
             let bar = render(&list, self.chrome.bar_size(), dpi, theme.chrome);
@@ -871,6 +968,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        trace("redraw");
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -1213,10 +1311,12 @@ impl ApplicationHandler<Wake> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // La línea de progreso se anima mientras carga; el aviso se borra al vencer.
         if self.loading.is_some() {
-            self.redraw_later();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(33),
-            ));
+            let next = self.last_progress_frame + PROGRESS_FRAME;
+            if Instant::now() >= next {
+                self.last_progress_frame = Instant::now();
+                self.redraw_later();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next.max(Instant::now())));
         } else if let Some((_, at)) = &self.notice {
             let until = *at + NOTICE;
             if Instant::now() >= until {

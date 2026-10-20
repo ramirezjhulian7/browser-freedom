@@ -1,0 +1,211 @@
+//! Objetos (ECMA-262 §6.1.7, §10): prototipo, extensibilidad, propiedades propias ordenadas,
+//! elementos privados y el [`ObjectKind`] que distingue los objetos exóticos y los internal
+//! slots de cada clase de objeto. Los métodos internos (`[[GetPrototypeOf]]` …
+//! `[[OwnPropertyKeys]]`) están en [`internal`] y despachan por `kind`.
+
+pub mod internal;
+mod property_map;
+
+use std::collections::{HashSet, VecDeque};
+
+use crate::bigint::BigInt;
+use crate::heap::{Gc, Trace, Tracer};
+use crate::string::JsString;
+use crate::value::{PropertyKey, Symbol, Value};
+use crate::vm::env::Env;
+use crate::vm::function::{BoundFunction, BuiltinFunction, Closure};
+use crate::vm::generator::GeneratorData;
+
+pub use property_map::{Prop, PropValue, PropertyDescriptor, PropertyMap};
+
+/// PrivateElement (§6.2.10).
+#[derive(Debug, Clone)]
+pub enum PrivateElement {
+    Field(Value),
+    Method(Gc<Object>),
+    Accessor {
+        get: Option<Gc<Object>>,
+        set: Option<Gc<Object>>,
+    },
+}
+
+impl Trace for PrivateElement {
+    fn trace(&self, t: &mut Tracer) {
+        match self {
+            PrivateElement::Field(v) => t.value(v),
+            PrivateElement::Method(m) => t.gc(*m),
+            PrivateElement::Accessor { get, set } => {
+                t.opt(*get);
+                t.opt(*set);
+            }
+        }
+    }
+}
+
+/// Los elementos de un Array exótico (§10.4.2): un vector denso de propiedades de datos con
+/// atributos `{writable, enumerable, configurable}` (los huecos son `None`). Los elementos con
+/// otros atributos o demasiado lejos del final van al [`PropertyMap`] del objeto.
+#[derive(Debug, Clone)]
+pub struct ArrayData {
+    pub dense: Vec<Option<Value>>,
+    pub length: u32,
+    pub length_writable: bool,
+}
+
+/// El ParameterMap de un objeto `arguments` mapeado (§10.4.4): el slot del environment de
+/// cada parámetro todavía mapeado.
+#[derive(Debug, Clone)]
+pub struct MappedArguments {
+    pub env: Gc<Env>,
+    pub map: Vec<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterKind {
+    Keys,
+    Values,
+    Entries,
+}
+
+/// %ArrayIteratorPrototype% (§23.1.5): `object` es `None` cuando terminó.
+#[derive(Debug, Clone)]
+pub struct ArrayIteratorData {
+    pub object: Option<Gc<Object>>,
+    pub next_index: f64,
+    pub kind: IterKind,
+}
+
+/// El iterador interno de `for-in` (§14.7.5.10, CreateForInIterator).
+#[derive(Debug, Clone)]
+pub struct ForInData {
+    pub object: Option<Gc<Object>>,
+    pub object_was_visited: bool,
+    pub visited: HashSet<PropertyKey>,
+    pub remaining: VecDeque<PropertyKey>,
+}
+
+#[derive(Debug)]
+pub enum ObjectKind {
+    Ordinary,
+    Array(ArrayData),
+    /// Función ECMAScript (§10.2).
+    Function(Box<Closure>),
+    /// Función built-in (§10.3).
+    Builtin(Box<BuiltinFunction>),
+    /// Bound function exótica (§10.4.1).
+    Bound(Box<BoundFunction>),
+    /// String exótico (§10.4.3).
+    String(JsString),
+    /// `arguments` (§10.4.4): mapeado si hay ParameterMap.
+    Arguments(Option<Box<MappedArguments>>),
+    /// Instancias de Error (`[[ErrorData]]`).
+    Error,
+    Boolean(bool),
+    Number(f64),
+    Symbol(Gc<Symbol>),
+    BigInt(Gc<BigInt>),
+    Generator(Box<GeneratorData>),
+    ArrayIterator(Box<ArrayIteratorData>),
+    StringIterator {
+        string: Option<JsString>,
+        position: usize,
+    },
+    ForIn(Box<ForInData>),
+}
+
+#[derive(Debug)]
+pub struct Object {
+    pub proto: Option<Gc<Object>>,
+    pub extensible: bool,
+    pub props: PropertyMap,
+    pub kind: ObjectKind,
+    /// `[[PrivateElements]]` (§6.2.10).
+    pub private: Vec<(Gc<Symbol>, PrivateElement)>,
+}
+
+impl Object {
+    pub fn new(proto: Option<Gc<Object>>, kind: ObjectKind) -> Object {
+        Object {
+            proto,
+            extensible: true,
+            props: PropertyMap::new(),
+            kind,
+            private: Vec::new(),
+        }
+    }
+
+    pub fn ordinary(proto: Option<Gc<Object>>) -> Object {
+        Object::new(proto, ObjectKind::Ordinary)
+    }
+
+    /// ¿Tiene `[[Call]]`?
+    pub fn is_callable(&self) -> bool {
+        matches!(
+            self.kind,
+            ObjectKind::Function(_) | ObjectKind::Builtin(_) | ObjectKind::Bound(_)
+        )
+    }
+
+    /// ¿Tiene `[[Construct]]`?
+    pub fn is_constructor(&self) -> bool {
+        match &self.kind {
+            ObjectKind::Function(c) => c.is_constructor,
+            ObjectKind::Builtin(b) => b.constructor,
+            ObjectKind::Bound(b) => b.constructor,
+            _ => false,
+        }
+    }
+
+    pub fn is_array(&self) -> bool {
+        matches!(self.kind, ObjectKind::Array(_))
+    }
+
+    /// Busca el elemento privado (PrivateElementFind, §7.3.26).
+    pub fn private_find(&self, name: Gc<Symbol>) -> Option<&PrivateElement> {
+        self.private
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, e)| e)
+    }
+}
+
+impl Trace for Object {
+    fn trace(&self, t: &mut Tracer) {
+        t.opt(self.proto);
+        self.props.trace(t);
+        for (n, e) in &self.private {
+            t.gc(*n);
+            e.trace(t);
+        }
+        match &self.kind {
+            ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Boolean(_) => {}
+            ObjectKind::Number(_) | ObjectKind::String(_) => {}
+            ObjectKind::Array(a) => {
+                for v in a.dense.iter().flatten() {
+                    t.value(v);
+                }
+            }
+            ObjectKind::Function(c) => c.trace(t),
+            ObjectKind::Builtin(b) => b.trace(t),
+            ObjectKind::Bound(b) => b.trace(t),
+            ObjectKind::Arguments(m) => {
+                if let Some(m) = m {
+                    t.gc(m.env);
+                }
+            }
+            ObjectKind::Symbol(s) => t.gc(*s),
+            ObjectKind::BigInt(b) => t.gc(*b),
+            ObjectKind::Generator(g) => g.trace(t),
+            ObjectKind::ArrayIterator(it) => t.opt(it.object),
+            ObjectKind::StringIterator { .. } => {}
+            ObjectKind::ForIn(f) => {
+                t.opt(f.object);
+                for k in f.visited.iter().chain(f.remaining.iter()) {
+                    if let PropertyKey::Symbol(s) = k {
+                        t.gc(*s);
+                    }
+                }
+            }
+        }
+    }
+}

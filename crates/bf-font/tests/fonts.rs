@@ -212,3 +212,23 @@ fn unicode_range_and_cmap_fallback() {
         assert_ne!(last.id, 0, "el fallback encontró un glifo real");
     }
 }
+
+/// Los clústeres de `shape` indexan el texto original en bytes UTF-8, también cuando hay
+/// caracteres de control multibyte (U+0085, U+009D) que el shaper sustituye por espacios.
+#[test]
+fn clusters_are_char_boundaries() {
+    let Some(db) = system() else { return };
+    let fonts = Fonts::new(db);
+    let family = generic("sans-serif");
+    let req = request(&family, 400.0, false);
+    let text = "x\u{9d}y é\u{85}z 日本";
+    let glyphs = fonts.shape(text, &req);
+    assert!(!glyphs.is_empty());
+    for g in &glyphs {
+        assert!(
+            text.is_char_boundary(g.cluster),
+            "cluster {} no es límite de carácter en {text:?}",
+            g.cluster
+        );
+    }
+}

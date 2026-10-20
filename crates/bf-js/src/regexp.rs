@@ -58,13 +58,16 @@ pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
         max_backref: 0,
         path: Vec::new(),
         next_disjunction: 0,
+        stack_base: crate::parser::stack_position(),
+        last_property_strings: false,
     };
     // Sin `u`, la gramática se reinterpreta con [+NamedCaptureGroups] si el patrón tiene un
     // GroupName (§22.2.3.4, ParsePattern).
     if !unicode {
         p.named = has_group_name(&p.s);
     }
-    p.pattern().map_err(|m| format!("Invalid regular expression: /{pattern}/{flags}: {m}"))
+    p.pattern()
+        .map_err(|m| format!("Invalid regular expression: /{pattern}/{flags}: {m}"))
 }
 
 /// ¿El patrón (sin `u`) tiene un `(?<nombre>`?
@@ -119,6 +122,9 @@ struct Parser {
     /// Alternativas en curso: (disyunción, índice de la alternativa).
     path: Vec<(u32, u32)>,
     next_disjunction: u32,
+    stack_base: usize,
+    /// El último `\p{…}` era de una propiedad de strings.
+    last_property_strings: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -186,6 +192,14 @@ impl Parser {
     }
 
     fn disjunction(&mut self) -> R<()> {
+        // Anidamiento de grupos y clases: el mismo límite de pila que el parser.
+        if self
+            .stack_base
+            .saturating_sub(crate::parser::stack_position())
+            > 256 * 1024
+        {
+            return Err("Maximum nesting depth exceeded".into());
+        }
         let id = self.next_disjunction;
         self.next_disjunction += 1;
         let mut alt = 0;
@@ -652,7 +666,12 @@ impl Parser {
                     ch('\\')
                 }
             },
-            '0' if !self.peek().is_some_and(|d| (ch('0')..=ch('9')).contains(&d)) => 0,
+            '0' if !self
+                .peek()
+                .is_some_and(|d| (ch('0')..=ch('9')).contains(&d)) =>
+            {
+                0
+            }
             '0'..='7' if !self.unicode => {
                 // LegacyOctalEscapeSequence.
                 let mut v = c - ch('0');
@@ -671,7 +690,9 @@ impl Parser {
             '8' | '9' if !self.unicode => c,
             'x' => {
                 let a = self.peek().and_then(|c| char::from_u32(c)?.to_digit(16));
-                let b = self.peek_at(1).and_then(|c| char::from_u32(c)?.to_digit(16));
+                let b = self
+                    .peek_at(1)
+                    .and_then(|c| char::from_u32(c)?.to_digit(16));
                 match (a, b) {
                     (Some(a), Some(b)) => {
                         self.i += 2;
@@ -759,6 +780,13 @@ impl Parser {
 
     /// Después de `[`. Devuelve si la clase puede contener strings (MayContainStrings).
     fn class_v_body(&mut self) -> R<bool> {
+        if self
+            .stack_base
+            .saturating_sub(crate::parser::stack_position())
+            > 256 * 1024
+        {
+            return Err("Maximum nesting depth exceeded".into());
+        }
         let negated = self.eat('^');
         let strings = self.class_set_expression()?;
         if !self.eat(']') {

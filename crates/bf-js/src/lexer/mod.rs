@@ -8,7 +8,7 @@
 //! `/` o `/=`, pide [`Lexer::rescan_regex`], y al cerrar una sustitución de template con `}`,
 //! [`Lexer::rescan_template`].
 
-mod number;
+pub mod number;
 pub mod unicode_tables;
 
 use crate::ast::Span;
@@ -16,10 +16,10 @@ use crate::string::{Atom, JsString};
 
 /// Los puntuadores (§12.8), del más largo al más corto para el "longest match".
 const PUNCTUATORS: &[&str] = &[
-    ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==",
-    "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "%=", "&=", "|=",
-    "^=", "/=", "<<", ">>", "**", "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-",
-    "*", "%", "&", "|", "^", "!", "~", "?", ":", "=", ".", "/",
+    ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=",
+    "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "%=", "&=", "|=", "^=", "/=",
+    "<<", ">>", "**", "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "%", "&",
+    "|", "^", "!", "~", "?", ":", "=", ".", "/",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +153,14 @@ impl Lexer {
         Span::new(self.offsets[start], self.offsets[end.min(self.chars.len())])
     }
 
+    /// El índice de code point de un offset UTF-16.
+    pub fn pos_of_offset(&self, offset: u32) -> usize {
+        match self.offsets.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+    }
+
     pub fn offset(&self, pos: usize) -> u32 {
         self.offsets[pos.min(self.chars.len())]
     }
@@ -180,7 +188,9 @@ impl Lexer {
 
     /// El texto fuente entre dos posiciones.
     pub fn slice(&self, start: usize, end: usize) -> String {
-        self.chars[start..end.min(self.chars.len())].iter().collect()
+        self.chars[start..end.min(self.chars.len())]
+            .iter()
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -200,14 +210,9 @@ impl Lexer {
     }
 
     fn starts_with(&self, s: &str) -> bool {
-        let mut i = self.pos;
-        for c in s.chars() {
-            if self.chars.get(i) != Some(&c) {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        s.chars()
+            .enumerate()
+            .all(|(k, c)| self.chars.get(self.pos + k) == Some(&c))
     }
 
     fn err<T>(&self, pos: usize, message: impl Into<String>) -> LResult<T> {
@@ -220,6 +225,9 @@ impl Lexer {
     /// Salta espacios, terminadores y comentarios; devuelve si hubo un LineTerminator.
     fn skip_trivia(&mut self) -> LResult<bool> {
         let mut newline = false;
+        // Al principio del código, `-->` también es un comentario (B.1.1,
+        // InputElementHashbangOrRegExp).
+        let at_start = self.pos == 0;
         // Hashbang (§12.5), solo al principio del código.
         if self.pos == 0 && self.starts_with("#!") {
             while let Some(c) = self.peek() {
@@ -258,7 +266,7 @@ impl Lexer {
             } else if !self.module && self.starts_with("<!--") {
                 // SingleLineHTMLOpenComment (B.1.1).
                 self.skip_line();
-            } else if !self.module && newline && self.starts_with("-->") {
+            } else if !self.module && (newline || at_start) && self.starts_with("-->") {
                 // SingleLineHTMLCloseComment: solo después de un LineTerminator.
                 self.skip_line();
             } else {
@@ -305,7 +313,9 @@ impl Lexer {
                 }
                 _ => return self.err(start, "Invalid or unexpected token"),
             }
-        } else if c.is_ascii_digit() || (c == '.' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit())) {
+        } else if c.is_ascii_digit()
+            || (c == '.' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()))
+        {
             self.number()?
         } else if c == '"' || c == '\'' {
             self.string(c)?
@@ -347,8 +357,7 @@ impl Lexer {
         let mut name = String::new();
         let mut escaped = false;
         let mut first = true;
-        loop {
-            let Some(c) = self.peek() else { break };
+        while let Some(c) = self.peek() {
             let ch = if c == '\\' {
                 let at = self.pos;
                 if self.peek_at(1) != Some('u') {
@@ -359,7 +368,11 @@ impl Lexer {
                 let Some(ch) = char::from_u32(cp) else {
                     return self.err(at, "Invalid Unicode escape sequence");
                 };
-                let ok = if first { is_id_start(ch) } else { is_id_part(ch) };
+                let ok = if first {
+                    is_id_start(ch)
+                } else {
+                    is_id_part(ch)
+                };
                 if !ok {
                     return self.err(at, "Invalid Unicode escape sequence");
                 }
@@ -427,7 +440,11 @@ impl Lexer {
 
     /// Un escape después de `\` en un string o template. Devuelve las unidades (vacío para
     /// LineContinuation) o el error de un escape inválido.
-    fn escape(&mut self, units: &mut Vec<u16>, template: bool) -> Result<EscapeKind, (usize, &'static str)> {
+    fn escape(
+        &mut self,
+        units: &mut Vec<u16>,
+        template: bool,
+    ) -> Result<EscapeKind, (usize, &'static str)> {
         let at = self.pos - 1;
         let Some(c) = self.peek() else {
             return Err((at, "Invalid or unexpected token"));
@@ -486,7 +503,10 @@ impl Lexer {
             }
             '0'..='7' => {
                 if template {
-                    return Err((at, "Octal escape sequences are not allowed in template strings"));
+                    return Err((
+                        at,
+                        "Octal escape sequences are not allowed in template strings",
+                    ));
                 }
                 // LegacyOctalEscapeSequence (B.1.2): hasta tres dígitos, valor ≤ 255.
                 let mut value = c.to_digit(8).unwrap_or(0);
@@ -805,7 +825,7 @@ mod tests {
             panic!()
         };
         assert_eq!(value.to_string(), "A😀A");
-        assert_eq!(*octal, Some(9));
+        assert_eq!(*octal, Some(14));
     }
 
     #[test]

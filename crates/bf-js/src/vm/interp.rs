@@ -1,0 +1,2047 @@
+//! El intérprete: ejecuta el frame del tope de la pila hasta que retorna, se suspende
+//! (generadores) o lanza una excepción que nadie atrapa en el frame.
+//!
+//! Las excepciones y los `return` se desenrollan por la pila de handlers del frame: un
+//! handler `catch` recibe la excepción en la pila; uno `finally` recibe la completion en sus
+//! dos slots (clase y valor) y al terminar el bloque `EndFinally` la continúa.
+
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use crate::compiler::bytecode::*;
+use crate::heap::Gc;
+use crate::object::{Object, ObjectKind, PrivateElement, PropertyDescriptor};
+use crate::string::{Atom, JsString};
+use crate::value::{PropertyKey, Value};
+use crate::vm::env::{Env, EnvKind, FunctionEnvData};
+use crate::vm::frame::{Handler, HandlerKind};
+use crate::vm::function::{ClassData, ClassField, Closure, FieldName};
+use crate::vm::{Agent, ErrorType, JsResult, Throw};
+
+/// Cómo se reanuda un frame.
+#[derive(Debug, Clone)]
+pub enum Resume {
+    Normal,
+    Next(Value),
+    Throw(Value),
+    Return(Value),
+}
+
+/// Cómo terminó (o se suspendió) un frame.
+#[derive(Debug)]
+pub enum FrameExit {
+    Return(Value),
+    /// Valor y si se devuelve sin envolver (`yield*`).
+    Yield(Value, bool),
+    GeneratorStart(Gc<Object>),
+}
+
+enum Flow {
+    Next,
+    Return(Value),
+    Yield(Value, bool),
+    GenStart(Gc<Object>),
+}
+
+macro_rules! frame {
+    ($s:ident) => {
+        $s.frames.last_mut().expect("frame")
+    };
+}
+
+impl Agent {
+    pub(crate) fn run(&mut self, resume: Resume) -> JsResult<FrameExit> {
+        let mut pending: Option<JsResult<Flow>> = None;
+        if !matches!(resume, Resume::Normal) {
+            let f = frame!(self);
+            let prev = f.pc.checked_sub(1).map(|p| f.code.ops[p]);
+            if let Some(Op::YieldRaw {
+                kind_slot,
+                value_slot,
+            }) = prev
+            {
+                let (k, v) = match resume {
+                    Resume::Next(v) => (COMPLETION_NORMAL, v),
+                    Resume::Throw(v) => (COMPLETION_THROW, v),
+                    Resume::Return(v) => (COMPLETION_RETURN, v),
+                    Resume::Normal => unreachable!(),
+                };
+                f.locals[kind_slot as usize] = Some(Value::Number(f64::from(k)));
+                f.locals[value_slot as usize] = Some(v);
+            } else {
+                match resume {
+                    Resume::Next(v) => f.stack.push(v),
+                    Resume::Throw(e) => pending = Some(Err(Throw::Value(e))),
+                    Resume::Return(v) => pending = Some(Ok(Flow::Return(v))),
+                    Resume::Normal => {}
+                }
+            }
+        }
+        self.safepoint()?;
+        loop {
+            let r = match pending.take() {
+                Some(r) => r,
+                None => self.step(),
+            };
+            match r {
+                Ok(Flow::Next) => {}
+                Ok(Flow::Return(v)) => {
+                    if !self.unwind_return(&v) {
+                        return Ok(FrameExit::Return(v));
+                    }
+                }
+                Ok(Flow::Yield(v, raw)) => return Ok(FrameExit::Yield(v, raw)),
+                Ok(Flow::GenStart(g)) => return Ok(FrameExit::GeneratorStart(g)),
+                Err(Throw::Value(e)) => {
+                    if !self.unwind_throw(&e) {
+                        return Err(Throw::Value(e));
+                    }
+                }
+                Err(t) => return Err(t),
+            }
+        }
+    }
+
+    fn restore_handler(&mut self, h: &Handler) {
+        let f = frame!(self);
+        f.stack.truncate(h.stack_len as usize);
+        f.refs.truncate(h.refs_len as usize);
+        f.env = h.env;
+        f.pc = h.pc as usize;
+    }
+
+    fn unwind_throw(&mut self, e: &Value) -> bool {
+        let Some(h) = frame!(self).handlers.pop() else {
+            return false;
+        };
+        self.restore_handler(&h);
+        let f = frame!(self);
+        match h.kind {
+            HandlerKind::Catch => f.stack.push(e.clone()),
+            HandlerKind::Finally {
+                kind_slot,
+                value_slot,
+            } => {
+                f.locals[kind_slot as usize] = Some(Value::Number(f64::from(COMPLETION_THROW)));
+                f.locals[value_slot as usize] = Some(e.clone());
+            }
+        }
+        true
+    }
+
+    fn unwind_return(&mut self, v: &Value) -> bool {
+        loop {
+            let Some(h) = frame!(self).handlers.pop() else {
+                return false;
+            };
+            if let HandlerKind::Finally {
+                kind_slot,
+                value_slot,
+            } = h.kind
+            {
+                self.restore_handler(&h);
+                let f = frame!(self);
+                f.locals[kind_slot as usize] = Some(Value::Number(f64::from(COMPLETION_RETURN)));
+                f.locals[value_slot as usize] = Some(v.clone());
+                return true;
+            }
+        }
+    }
+
+    // --- Ayudas ---
+
+    fn pop(&mut self) -> Value {
+        frame!(self).stack.pop().expect("pila vacía")
+    }
+
+    fn push(&mut self, v: Value) {
+        frame!(self).stack.push(v);
+    }
+
+    fn peek(&self, depth: usize) -> &Value {
+        let s = &self.frames.last().expect("frame").stack;
+        &s[s.len() - 1 - depth]
+    }
+
+    fn name_const(&self, i: u32) -> (Atom, PropertyKey) {
+        match &self.frames.last().expect("frame").code.consts[i as usize] {
+            Constant::Name(a, k) => (a.clone(), k.clone()),
+            other => unreachable!("se esperaba un nombre: {other:?}"),
+        }
+    }
+
+    fn string_const(&self, i: u32) -> JsString {
+        match &self.frames.last().expect("frame").code.consts[i as usize] {
+            Constant::String(s) => s.clone(),
+            Constant::Name(a, _) => a.to_js_string(),
+            other => unreachable!("se esperaba un string: {other:?}"),
+        }
+    }
+
+    fn env_at(&self, hops: u32) -> Gc<Env> {
+        let mut e = self.frames.last().expect("frame").env;
+        for _ in 0..hops {
+            e = self.heap[e].outer.expect("environment externo");
+        }
+        e
+    }
+
+    fn strict_code(&self) -> bool {
+        self.frames.last().expect("frame").code.strict
+    }
+
+    fn local(&self, slot: u32) -> Value {
+        self.frames.last().expect("frame").locals[slot as usize]
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// El environment del contexto (Function Environment) según la ubicación.
+    fn ctx_env(&self, loc: CtxLoc) -> Option<Gc<Env>> {
+        match loc {
+            CtxLoc::Frame => None,
+            CtxLoc::Env(h) => Some(self.env_at(h)),
+            CtxLoc::Dynamic => {
+                let start = self.frames.last().expect("frame").env;
+                Some(self.get_this_environment(start))
+            }
+        }
+    }
+
+    fn get_ctx(&mut self, what: CtxWhat, loc: CtxLoc) -> JsResult<Value> {
+        let env = self.ctx_env(loc);
+        let Some(env) = env else {
+            let f = self.frames.last().expect("frame");
+            return match what {
+                CtxWhat::This => match &f.this {
+                    Some(v) => Ok(v.clone()),
+                    None => self.reference_error(
+                        "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+                    ),
+                },
+                CtxWhat::NewTarget => Ok(f.new_target.into()),
+                CtxWhat::Function => Ok(f.callee.into()),
+            };
+        };
+        match &self.heap[env].kind {
+            EnvKind::Declarative(d) => {
+                let fd = d.function.as_ref().expect("Function Environment");
+                match what {
+                    CtxWhat::This => match &fd.this {
+                        Some(v) => Ok(v.clone()),
+                        None => self.reference_error(
+                            "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+                        ),
+                    },
+                    CtxWhat::NewTarget => Ok(fd.new_target.into()),
+                    CtxWhat::Function => Ok(Value::Object(fd.function)),
+                }
+            }
+            EnvKind::Global(g) => match what {
+                CtxWhat::This => Ok(Value::Object(g.this)),
+                _ => Ok(Value::Undefined),
+            },
+            EnvKind::Object { .. } => Ok(Value::Undefined),
+        }
+    }
+
+    // --- Instrucciones ---
+
+    fn step(&mut self) -> JsResult<Flow> {
+        let f = frame!(self);
+        let op = f.code.ops[f.pc];
+        f.pc += 1;
+        self.instructions += 1;
+        match op {
+            Op::Pop => {
+                self.pop();
+            }
+            Op::Dup => {
+                let v = self.peek(0).clone();
+                self.push(v);
+            }
+            Op::Dup2 => {
+                let a = self.peek(1).clone();
+                let b = self.peek(0).clone();
+                self.push(a);
+                self.push(b);
+            }
+            Op::Dup3 => {
+                let a = self.peek(2).clone();
+                let b = self.peek(1).clone();
+                let c = self.peek(0).clone();
+                self.push(a);
+                self.push(b);
+                self.push(c);
+            }
+            Op::Swap => {
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.swap(n - 1, n - 2);
+            }
+            Op::Over => {
+                let v = self.peek(1).clone();
+                self.push(v);
+            }
+            Op::Pull(n) => {
+                let s = &mut frame!(self).stack;
+                let i = s.len() - 1 - n as usize;
+                let v = s.remove(i);
+                s.push(v);
+            }
+            Op::Bury(n) => {
+                let s = &mut frame!(self).stack;
+                let v = s.pop().expect("pila");
+                let i = s.len() - n as usize;
+                s.insert(i, v);
+            }
+            Op::Undefined => self.push(Value::Undefined),
+            Op::Null => self.push(Value::Null),
+            Op::True => self.push(Value::Boolean(true)),
+            Op::False => self.push(Value::Boolean(false)),
+            Op::Int(i) => self.push(Value::Number(f64::from(i))),
+            Op::Const(i) => {
+                let v = match &frame!(self).code.consts[i as usize] {
+                    Constant::Number(n) => Value::Number(*n),
+                    Constant::String(s) => Value::String(s.clone()),
+                    Constant::Name(a, _) => Value::String(a.to_js_string()),
+                    other => unreachable!("constante {other:?}"),
+                };
+                self.push(v);
+            }
+            Op::BigInt(i) => {
+                let raw = match &frame!(self).code.consts[i as usize] {
+                    Constant::BigInt(r) => r.clone(),
+                    _ => unreachable!("bigint"),
+                };
+                let b = crate::bigint::BigInt::from_literal(&raw).unwrap_or_default();
+                let g = self.heap.alloc(b);
+                self.push(Value::BigInt(g));
+            }
+            Op::RegExp(_) => return self.internal_error("RegExp (built-in del paso 3)"),
+
+            // --- Bindings ---
+            Op::GetLocal(s) => {
+                let v = self.local(s);
+                self.push(v);
+            }
+            Op::GetLocalChecked(s, n) => match frame!(self).locals[s as usize].clone() {
+                Some(v) => self.push(v),
+                None => return self.tdz_error(n),
+            },
+            Op::SetLocal(s) => {
+                let v = self.peek(0).clone();
+                frame!(self).locals[s as usize] = Some(v);
+            }
+            Op::SetLocalChecked(s, n) => {
+                if frame!(self).locals[s as usize].is_none() {
+                    return self.tdz_error(n);
+                }
+                let v = self.peek(0).clone();
+                frame!(self).locals[s as usize] = Some(v);
+            }
+            Op::InitLocal(s) => {
+                let v = self.pop();
+                frame!(self).locals[s as usize] = Some(v);
+            }
+            Op::ClearLocal(s) => frame!(self).locals[s as usize] = None,
+            Op::ConstAssignLocal(s, n) => {
+                if frame!(self).locals[s as usize].is_none() {
+                    return self.tdz_error(n);
+                }
+                let (name, _) = self.name_const(n);
+                return self.type_error(&format!("Assignment to constant variable '{name}'"));
+            }
+            Op::GetEnv(h, s) => {
+                let e = self.env_at(h);
+                let v = self.heap[e].decl().expect("declarativo").slots[s as usize]
+                    .clone()
+                    .unwrap_or_default();
+                self.push(v);
+            }
+            Op::GetEnvChecked(h, s, n) => {
+                let e = self.env_at(h);
+                match self.heap[e].decl().expect("declarativo").slots[s as usize].clone() {
+                    Some(v) => self.push(v),
+                    None => return self.tdz_error(n),
+                }
+            }
+            Op::SetEnv(h, s) => {
+                let e = self.env_at(h);
+                let v = self.peek(0).clone();
+                self.heap[e].decl_mut().expect("declarativo").slots[s as usize] = Some(v);
+            }
+            Op::SetEnvChecked(h, s, n) => {
+                let e = self.env_at(h);
+                if self.heap[e].decl().expect("declarativo").slots[s as usize].is_none() {
+                    return self.tdz_error(n);
+                }
+                let v = self.peek(0).clone();
+                self.heap[e].decl_mut().expect("declarativo").slots[s as usize] = Some(v);
+            }
+            Op::InitEnv(h, s) => {
+                let e = self.env_at(h);
+                let v = self.pop();
+                self.heap[e].decl_mut().expect("declarativo").slots[s as usize] = Some(v);
+            }
+            Op::ConstAssignEnv(h, s, n) => {
+                let e = self.env_at(h);
+                if self.heap[e].decl().expect("declarativo").slots[s as usize].is_none() {
+                    return self.tdz_error(n);
+                }
+                let (name, _) = self.name_const(n);
+                return self.type_error(&format!("Assignment to constant variable '{name}'"));
+            }
+            Op::GetName(n) | Op::GetGlobal(n) => {
+                let start = match op {
+                    Op::GetGlobal(_) => self.global_env(),
+                    _ => frame!(self).env,
+                };
+                let (name, key) = self.name_const(n);
+                match self.resolve_binding_from(start, &name, &key)? {
+                    Some(env) => {
+                        let strict = self.strict_code();
+                        let v = self.env_get_binding_value(env, &name, &key, strict)?;
+                        self.push(v);
+                    }
+                    None => return self.reference_error(&format!("{name} is not defined")),
+                }
+            }
+            Op::TypeofName(n) | Op::TypeofGlobal(n) => {
+                let start = match op {
+                    Op::TypeofGlobal(_) => self.global_env(),
+                    _ => frame!(self).env,
+                };
+                let (name, key) = self.name_const(n);
+                let v = match self.resolve_binding_from(start, &name, &key)? {
+                    Some(env) => {
+                        let strict = self.strict_code();
+                        self.env_get_binding_value(env, &name, &key, strict)?
+                    }
+                    None => Value::Undefined,
+                };
+                let t = self.type_of(&v);
+                self.push(Value::str(t));
+            }
+            Op::ResolveRef(n) | Op::ResolveGlobalRef(n) => {
+                let start = match op {
+                    Op::ResolveGlobalRef(_) => self.global_env(),
+                    _ => frame!(self).env,
+                };
+                let (name, key) = self.name_const(n);
+                let r = self.resolve_binding_from(start, &name, &key)?;
+                frame!(self).refs.push(r);
+            }
+            Op::GetRefValue(n) => {
+                let r = *frame!(self).refs.last().expect("referencia");
+                let (name, key) = self.name_const(n);
+                match r {
+                    Some(env) => {
+                        let strict = self.strict_code();
+                        let v = self.env_get_binding_value(env, &name, &key, strict)?;
+                        self.push(v);
+                    }
+                    None => return self.reference_error(&format!("{name} is not defined")),
+                }
+            }
+            Op::PutRef(n, strict) => {
+                let r = frame!(self).refs.pop().expect("referencia");
+                let (name, key) = self.name_const(n);
+                let v = self.peek(0).clone();
+                match r {
+                    Some(env) => self.env_set_mutable_binding(env, &name, &key, v, strict)?,
+                    None => {
+                        if strict {
+                            return self.reference_error(&format!("{name} is not defined"));
+                        }
+                        let g = self.realm().global_object;
+                        self.set_or_throw(g, key, v, false)?;
+                    }
+                }
+            }
+            Op::InitRef(n) => {
+                let r = frame!(self).refs.pop().expect("referencia");
+                let (name, key) = self.name_const(n);
+                let v = self.pop();
+                match r {
+                    Some(env) => self.env_initialize_binding(env, &name, &key, v)?,
+                    None => {
+                        let g = self.realm().global_object;
+                        self.set_or_throw(g, key, v, false)?;
+                    }
+                }
+            }
+            Op::PopRef => {
+                frame!(self).refs.pop();
+            }
+            Op::DeleteName(n) => {
+                let (name, key) = self.name_const(n);
+                let start = frame!(self).env;
+                let r = match self.resolve_binding_from(start, &name, &key)? {
+                    Some(env) => self.env_delete_binding(env, &name, &key)?,
+                    None => true,
+                };
+                self.push(Value::Boolean(r));
+            }
+            Op::GetNameForCall(n) | Op::GetGlobalForCall(n) => {
+                let start = match op {
+                    Op::GetGlobalForCall(_) => self.global_env(),
+                    _ => frame!(self).env,
+                };
+                let (name, key) = self.name_const(n);
+                match self.resolve_binding_from(start, &name, &key)? {
+                    Some(env) => {
+                        let strict = self.strict_code();
+                        let v = self.env_get_binding_value(env, &name, &key, strict)?;
+                        let this = self.env_with_base_object(env);
+                        self.push(v);
+                        self.push(this);
+                    }
+                    None => return self.reference_error(&format!("{name} is not defined")),
+                }
+            }
+            Op::GetCallee => {
+                let c = frame!(self).callee;
+                self.push(c.into());
+            }
+            Op::PushScope(c) => {
+                let layout = match &frame!(self).code.consts[c as usize] {
+                    Constant::Layout(l) => l.clone(),
+                    _ => unreachable!("layout"),
+                };
+                let outer = frame!(self).env;
+                let e = self.heap.alloc(Env::declarative(Some(outer), layout));
+                frame!(self).env = e;
+            }
+            Op::PushFunctionScope(c) => {
+                let layout = match &frame!(self).code.consts[c as usize] {
+                    Constant::Layout(l) => l.clone(),
+                    _ => unreachable!("layout"),
+                };
+                let f = frame!(self);
+                let outer = f.env;
+                let data = FunctionEnvData {
+                    this: f.this.clone(),
+                    function: f.callee.expect("función"),
+                    new_target: f.new_target,
+                };
+                let mut env = Env::declarative(Some(outer), layout);
+                if let Some(d) = env.decl_mut() {
+                    d.function = Some(Box::new(data));
+                }
+                let e = self.heap.alloc(env);
+                let f = frame!(self);
+                f.env = e;
+                f.function_env = Some(e);
+            }
+            Op::MarkVarEnv => {
+                let f = frame!(self);
+                f.var_env = Some(f.env);
+            }
+            Op::PopScope => {
+                let e = frame!(self).env;
+                frame!(self).env = self.heap[e].outer.expect("environment externo");
+            }
+            Op::CopyScope => {
+                let e = frame!(self).env;
+                let copy = self.heap[e].clone();
+                let n = self.heap.alloc(copy);
+                frame!(self).env = n;
+            }
+            Op::PushWith => {
+                let v = self.pop();
+                let o = self.to_object(&v)?;
+                let outer = frame!(self).env;
+                let e = self.heap.alloc(Env {
+                    outer: Some(outer),
+                    kind: EnvKind::Object {
+                        object: o,
+                        with: true,
+                    },
+                });
+                frame!(self).env = e;
+            }
+
+            // --- Contexto ---
+            Op::Ctx(what, loc) => {
+                let v = self.get_ctx(what, loc)?;
+                self.push(v);
+            }
+            Op::SuperCallFinish(loc) => {
+                let result = self.peek(0).clone();
+                match self.ctx_env(loc) {
+                    None => {
+                        if frame!(self).this.is_some() {
+                            return self
+                                .reference_error("Super constructor may only be called once");
+                        }
+                        frame!(self).this = Some(result.clone());
+                    }
+                    Some(env) => {
+                        let d = self.heap[env]
+                            .decl_mut()
+                            .and_then(|d| d.function.as_mut())
+                            .expect("Function Environment");
+                        if d.this.is_some() {
+                            return self
+                                .reference_error("Super constructor may only be called once");
+                        }
+                        d.this = Some(result.clone());
+                    }
+                }
+                let func = self.get_ctx(CtxWhat::Function, loc)?;
+                if let (Value::Object(r), Value::Object(f)) = (&result, &func) {
+                    self.initialize_instance_elements(*r, *f)?;
+                }
+            }
+            Op::SuperConstructor => {
+                let f = self.pop();
+                let p = match f {
+                    Value::Object(o) => self.get_prototype_of(o)?,
+                    _ => None,
+                };
+                self.push(p.map_or(Value::Null, Value::Object));
+            }
+            Op::SuperBase => {
+                let home = self.pop();
+                let p = match home {
+                    Value::Object(o) => {
+                        self.get_prototype_of(o)?.map_or(Value::Null, Value::Object)
+                    }
+                    _ => Value::Undefined,
+                };
+                self.push(p);
+            }
+            Op::GetSuperElem => {
+                let base = self.pop();
+                let key = self.pop();
+                let this = self.pop();
+                let key = self.to_property_key(&key)?;
+                let o = self.to_object(&base)?;
+                let v = self.get(o, &key, this)?;
+                self.push(v);
+            }
+            Op::SetSuperElem(strict) => {
+                let v = self.pop();
+                let base = self.pop();
+                let key = self.pop();
+                let this = self.pop();
+                let key = self.to_property_key(&key)?;
+                let o = self.to_object(&base)?;
+                let ok = self.set(o, key.clone(), v.clone(), this)?;
+                if !ok && strict {
+                    return self
+                        .type_error(&format!("Cannot assign to read only property '{key}'"));
+                }
+                self.push(v);
+            }
+            Op::HomeObject => {
+                let f = self.pop();
+                let h = match f {
+                    Value::Object(o) => match &self.heap[o].kind {
+                        ObjectKind::Function(c) => c.home_object.into(),
+                        _ => Value::Undefined,
+                    },
+                    _ => Value::Undefined,
+                };
+                self.push(h);
+            }
+
+            // --- Operadores ---
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Exp
+            | Op::Shl
+            | Op::Shr
+            | Op::UShr
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor => {
+                let r = self.pop();
+                let l = self.pop();
+                let v = self.apply_binary(op, l, r)?;
+                self.push(v);
+            }
+            Op::Lt | Op::Gt | Op::Le | Op::Ge => {
+                let r = self.pop();
+                let l = self.pop();
+                let v = match op {
+                    Op::Lt => self.is_less_than(&l, &r, true)? == Some(true),
+                    Op::Gt => self.is_less_than(&r, &l, false)? == Some(true),
+                    Op::Le => self.is_less_than(&r, &l, false)? == Some(false),
+                    _ => self.is_less_than(&l, &r, true)? == Some(false),
+                };
+                self.push(Value::Boolean(v));
+            }
+            Op::Eq | Op::Ne => {
+                let r = self.pop();
+                let l = self.pop();
+                let eq = self.is_loosely_equal(&l, &r)?;
+                self.push(Value::Boolean(if op == Op::Eq { eq } else { !eq }));
+            }
+            Op::StrictEq | Op::StrictNe => {
+                let r = self.pop();
+                let l = self.pop();
+                let eq = self.is_strictly_equal(&l, &r);
+                self.push(Value::Boolean(if op == Op::StrictEq { eq } else { !eq }));
+            }
+            Op::In => {
+                let r = self.pop();
+                let l = self.pop();
+                let Value::Object(o) = r else {
+                    return self.type_error(
+                        "Cannot use 'in' operator to search for a key in a non-object",
+                    );
+                };
+                let k = self.to_property_key(&l)?;
+                let v = self.has_property(o, &k)?;
+                self.push(Value::Boolean(v));
+            }
+            Op::InstanceOf => {
+                let r = self.pop();
+                let l = self.pop();
+                let v = self.instanceof_operator(&l, &r)?;
+                self.push(Value::Boolean(v));
+            }
+            Op::PrivateIn => {
+                let o = self.pop();
+                let name = self.pop();
+                let Value::Object(o) = o else {
+                    return self.type_error(
+                        "Cannot use 'in' operator to search for a private field in a non-object",
+                    );
+                };
+                let Value::Symbol(n) = name else {
+                    unreachable!("nombre privado")
+                };
+                let has = self.heap[o].private_find(n).is_some();
+                self.push(Value::Boolean(has));
+            }
+            Op::Neg => {
+                let v = self.pop();
+                match self.to_numeric(&v)? {
+                    Value::Number(n) => self.push(Value::Number(-n)),
+                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                }
+            }
+            Op::Plus => {
+                let v = self.pop();
+                let n = self.to_number(&v)?;
+                self.push(Value::Number(n));
+            }
+            Op::Not => {
+                let v = self.pop();
+                let b = crate::abstract_ops::conversion::to_boolean(self, &v);
+                self.push(Value::Boolean(!b));
+            }
+            Op::BitNot => {
+                let v = self.pop();
+                match self.to_numeric(&v)? {
+                    Value::Number(n) => {
+                        let i = crate::abstract_ops::conversion::to_int32(n);
+                        self.push(Value::Number(f64::from(!i)));
+                    }
+                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                }
+            }
+            Op::Typeof => {
+                let v = self.pop();
+                let t = self.type_of(&v);
+                self.push(Value::str(t));
+            }
+            Op::ToNumeric => {
+                let v = self.pop();
+                let n = self.to_numeric(&v)?;
+                self.push(n);
+            }
+            Op::Inc | Op::Dec => {
+                let v = self.pop();
+                match v {
+                    Value::Number(n) => {
+                        self.push(Value::Number(if op == Op::Inc { n + 1.0 } else { n - 1.0 }))
+                    }
+                    _ => return self.internal_error("aritmética de BigInt (paso 4)"),
+                }
+            }
+            Op::ToPropertyKey => {
+                let v = self.pop();
+                let k = self.to_property_key(&v)?;
+                self.push(k.to_value());
+            }
+            Op::ToPropertyKeyAt(d) => {
+                let v = self.peek(d as usize).clone();
+                let k = self.to_property_key(&v)?.to_value();
+                let st = &mut frame!(self).stack;
+                let i = st.len() - 1 - d as usize;
+                st[i] = k;
+            }
+            Op::ToStringOp => {
+                let v = self.pop();
+                let s = self.to_string(&v)?;
+                self.push(Value::String(s));
+            }
+            Op::CheckCoercible(d) => {
+                let v = self.peek(d as usize).clone();
+                if v.is_nullish() {
+                    return self.type_error(&format!(
+                        "Cannot set properties of {}",
+                        if v.is_null() { "null" } else { "undefined" }
+                    ));
+                }
+            }
+            Op::PrepareElem => {
+                let key = self.pop();
+                let obj = self.peek(0).clone();
+                if obj.is_nullish() {
+                    return self.nullish_access(&obj, &key);
+                }
+                let k = self.to_property_key(&key)?;
+                self.push(k.to_value());
+            }
+
+            // --- Propiedades ---
+            Op::GetProp(n) => {
+                let obj = self.pop();
+                let (_, key) = self.name_const(n);
+                let v = self.get_value_of(&obj, &key)?;
+                self.push(v);
+            }
+            Op::GetPropKeep(n) => {
+                let obj = self.peek(0).clone();
+                let (_, key) = self.name_const(n);
+                let v = self.get_value_of(&obj, &key)?;
+                self.push(v);
+            }
+            Op::GetElem | Op::GetElemKeep => {
+                let key = self.pop();
+                let obj = if op == Op::GetElem {
+                    self.pop()
+                } else {
+                    self.peek(0).clone()
+                };
+                if obj.is_nullish() {
+                    return self.nullish_access(&obj, &key);
+                }
+                let k = self.to_property_key(&key)?;
+                let v = self.get_value_of(&obj, &k)?;
+                self.push(v);
+            }
+            Op::SetProp(n, strict) => {
+                let v = self.pop();
+                let obj = self.pop();
+                let (_, key) = self.name_const(n);
+                self.put_value_of(&obj, key, v.clone(), strict)?;
+                self.push(v);
+            }
+            Op::SetElem(strict) => {
+                let v = self.pop();
+                let key = self.pop();
+                let obj = self.pop();
+                if obj.is_nullish() {
+                    return self.nullish_access(&obj, &key);
+                }
+                let k = self.to_property_key(&key)?;
+                self.put_value_of(&obj, k, v.clone(), strict)?;
+                self.push(v);
+            }
+            Op::DeleteProp(n, strict) => {
+                let obj = self.pop();
+                let (_, key) = self.name_const(n);
+                let o = self.to_object(&obj)?;
+                let ok = self.delete(o, &key)?;
+                if !ok && strict {
+                    return self.type_error(&format!("Cannot delete property '{key}'"));
+                }
+                self.push(Value::Boolean(ok));
+            }
+            Op::DeleteElem(strict) => {
+                let key = self.pop();
+                let obj = self.pop();
+                let o = self.to_object(&obj)?;
+                let k = self.to_property_key(&key)?;
+                let ok = self.delete(o, &k)?;
+                if !ok && strict {
+                    return self.type_error(&format!("Cannot delete property '{k}'"));
+                }
+                self.push(Value::Boolean(ok));
+            }
+            Op::InitProp(n) => {
+                let v = self.pop();
+                let obj = self.peek(0).as_object().expect("objeto literal");
+                let (_, key) = self.name_const(n);
+                self.create_data_property_or_throw(obj, key, v)?;
+            }
+            Op::InitElem => {
+                let v = self.pop();
+                let key = self.pop();
+                let obj = self.peek(0).as_object().expect("objeto literal");
+                let k = self.to_property_key(&key)?;
+                self.create_data_property_or_throw(obj, k, v)?;
+            }
+            Op::InitProto => {
+                let v = self.pop();
+                let obj = self.peek(0).as_object().expect("objeto literal");
+                match v {
+                    Value::Object(p) => {
+                        self.set_prototype_of(obj, Some(p))?;
+                    }
+                    Value::Null => {
+                        self.set_prototype_of(obj, None)?;
+                    }
+                    _ => {}
+                }
+            }
+            Op::InitAccessor {
+                name,
+                setter,
+                computed,
+            } => {
+                let f = self.pop().as_object().expect("función");
+                let key = if computed {
+                    let k = self.pop();
+                    self.to_property_key(&k)?
+                } else {
+                    self.name_const(name).1
+                };
+                let obj = self.peek(0).as_object().expect("objeto literal");
+                let desc = if setter {
+                    PropertyDescriptor {
+                        set: Some(Some(f)),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..PropertyDescriptor::default()
+                    }
+                } else {
+                    PropertyDescriptor {
+                        get: Some(Some(f)),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..PropertyDescriptor::default()
+                    }
+                };
+                self.define_property_or_throw(obj, key, desc)?;
+            }
+            Op::CopyDataProperties => {
+                let src = self.pop();
+                let obj = self.peek(0).as_object().expect("objeto literal");
+                self.copy_data_properties(obj, &src, &[])?;
+            }
+            Op::CopyRest(n) => {
+                let mut keys = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let k = self.pop();
+                    keys.push(self.to_property_key(&k)?);
+                }
+                let src = self.pop();
+                let rest = self.new_plain_object();
+                self.push(Value::Object(rest));
+                self.copy_data_properties(rest, &src, &keys)?;
+            }
+            Op::PrivateGet => {
+                let obj = self.pop();
+                let name = self.pop();
+                let Value::Symbol(n) = name else {
+                    unreachable!("nombre privado")
+                };
+                let v = self.private_get(&obj, n)?;
+                self.push(v);
+            }
+            Op::PrivateSet => {
+                let v = self.pop();
+                let obj = self.pop();
+                let name = self.pop();
+                let Value::Symbol(n) = name else {
+                    unreachable!("nombre privado")
+                };
+                self.private_set(&obj, n, v.clone())?;
+                self.push(v);
+            }
+            Op::NewObject => {
+                let o = self.new_plain_object();
+                self.push(Value::Object(o));
+            }
+            Op::NewArray => {
+                let a = self.array_create(0, None)?;
+                self.push(Value::Object(a));
+            }
+            Op::ArrayPush => {
+                let v = self.pop();
+                let a = self.peek(0).as_object().expect("array");
+                if let ObjectKind::Array(d) = &mut self.heap[a].kind {
+                    d.dense.push(Some(v));
+                    d.length += 1;
+                }
+            }
+            Op::ArrayHole => {
+                let a = self.peek(0).as_object().expect("array");
+                if let ObjectKind::Array(d) = &mut self.heap[a].kind {
+                    d.dense.push(None);
+                    d.length += 1;
+                }
+            }
+            Op::ArraySpread => {
+                let iterable = self.pop();
+                let a = self.peek(0).as_object().expect("array");
+                let values = self.iterable_to_list(&iterable)?;
+                if let ObjectKind::Array(d) = &mut self.heap[a].kind {
+                    d.length += values.len() as u32;
+                    d.dense.extend(values.into_iter().map(Some));
+                }
+            }
+
+            // --- Llamadas ---
+            Op::Call(argc, t) => {
+                let n = argc as usize;
+                let len = frame!(self).stack.len();
+                let base = len - n - 2;
+                let (callee, this, args) = {
+                    let s = &frame!(self).stack;
+                    (s[base].clone(), s[base + 1].clone(), s[base + 2..].to_vec())
+                };
+                if !self.is_callable(&callee) {
+                    return self.not_callable(t, &callee, "a function");
+                }
+                let r = self.call_internal(&callee, this, &args)?;
+                frame!(self).stack.truncate(base);
+                self.push(r);
+                self.safepoint()?;
+            }
+            Op::CallSpread(t) => {
+                let arr = self.peek(0).clone();
+                let this = self.peek(1).clone();
+                let callee = self.peek(2).clone();
+                if !self.is_callable(&callee) {
+                    return self.not_callable(t, &callee, "a function");
+                }
+                let args = self.array_values(&arr);
+                let r = self.call_internal(&callee, this, &args)?;
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.truncate(n - 3);
+                self.push(r);
+                self.safepoint()?;
+            }
+            Op::CallEval(argc, flags) => {
+                let n = argc as usize;
+                let len = frame!(self).stack.len();
+                let base = len - n - 2;
+                let (callee, this, args) = {
+                    let s = &frame!(self).stack;
+                    (s[base].clone(), s[base + 1].clone(), s[base + 2..].to_vec())
+                };
+                let r = self.call_maybe_eval(&callee, this, &args, flags)?;
+                frame!(self).stack.truncate(base);
+                self.push(r);
+            }
+            Op::CallEvalSpread(flags) => {
+                let arr = self.peek(0).clone();
+                let this = self.peek(1).clone();
+                let callee = self.peek(2).clone();
+                let args = self.array_values(&arr);
+                let r = self.call_maybe_eval(&callee, this, &args, flags)?;
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.truncate(n - 3);
+                self.push(r);
+            }
+            Op::New(argc, t) => {
+                let n = argc as usize;
+                let len = frame!(self).stack.len();
+                let base = len - n - 1;
+                let (callee, args) = {
+                    let s = &frame!(self).stack;
+                    (s[base].clone(), s[base + 1..].to_vec())
+                };
+                if !self.is_constructor(&callee) {
+                    return self.not_callable(t, &callee, "a constructor");
+                }
+                let r = self.new_operator(&callee, &args)?;
+                frame!(self).stack.truncate(base);
+                self.push(r);
+                self.safepoint()?;
+            }
+            Op::NewSpread(t) => {
+                let arr = self.peek(0).clone();
+                let callee = self.peek(1).clone();
+                if !self.is_constructor(&callee) {
+                    return self.not_callable(t, &callee, "a constructor");
+                }
+                let args = self.array_values(&arr);
+                let r = self.new_operator(&callee, &args)?;
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.truncate(n - 2);
+                self.push(r);
+            }
+            Op::SuperConstruct(argc) => {
+                let n = argc as usize;
+                let len = frame!(self).stack.len();
+                let base = len - n - 2;
+                let (nt, ctor, args) = {
+                    let s = &frame!(self).stack;
+                    (s[base].clone(), s[base + 1].clone(), s[base + 2..].to_vec())
+                };
+                let r = self.super_construct(&nt, &ctor, &args)?;
+                frame!(self).stack.truncate(base);
+                self.push(r);
+            }
+            Op::SuperConstructSpread => {
+                let arr = self.peek(0).clone();
+                let ctor = self.peek(1).clone();
+                let nt = self.peek(2).clone();
+                let args = self.array_values(&arr);
+                let r = self.super_construct(&nt, &ctor, &args)?;
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.truncate(n - 3);
+                self.push(r);
+            }
+            Op::SuperConstructForward => {
+                let ctor = self.peek(0).clone();
+                let nt = self.peek(1).clone();
+                let args = frame!(self).args.clone();
+                let r = self.super_construct(&nt, &ctor, &args)?;
+                let s = &mut frame!(self).stack;
+                let n = s.len();
+                s.truncate(n - 2);
+                self.push(r);
+            }
+            Op::FieldName => {
+                let callee = frame!(self).callee;
+                let v = match callee.map(|c| &self.heap[c].kind) {
+                    Some(ObjectKind::Function(c)) => match &c.field_name {
+                        Some(FieldName::Key(k)) => k.to_value(),
+                        Some(FieldName::Private(s)) => Value::Symbol(*s),
+                        None => Value::str(""),
+                    },
+                    _ => Value::str(""),
+                };
+                self.push(v);
+            }
+            Op::TemplateObject(site) => {
+                let site = match &frame!(self).code.consts[site as usize] {
+                    Constant::Template(t) => t.clone(),
+                    _ => unreachable!("template"),
+                };
+                let t = self.get_template_object(&site)?;
+                self.push(Value::Object(t));
+            }
+            Op::Closure { code, name, home } => {
+                let code = match &frame!(self).code.consts[code as usize] {
+                    Constant::Function(c) => c.clone(),
+                    _ => unreachable!("función"),
+                };
+                let home_obj = if home > 0 {
+                    self.peek(home as usize - 1).as_object()
+                } else {
+                    None
+                };
+                let name = match name {
+                    FnName::Code => None,
+                    FnName::Stack(prefix) => {
+                        let k = self.peek(0).clone();
+                        Some(self.function_name_from_key(&k, prefix)?)
+                    }
+                    FnName::Local(slot) => {
+                        let k = self.local(slot);
+                        Some(self.function_name_from_key(&k, NamePrefix::None)?)
+                    }
+                };
+                let env = frame!(self).env;
+                let f = self.make_closure(code, env, home_obj, name);
+                self.push(Value::Object(f));
+            }
+
+            // --- Control ---
+            Op::Jump(t) => {
+                let f = frame!(self);
+                let back = (t as usize) < f.pc;
+                f.pc = t as usize;
+                if back {
+                    self.safepoint()?;
+                }
+            }
+            Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                let v = self.pop();
+                let b = crate::abstract_ops::conversion::to_boolean(self, &v);
+                if b == matches!(op, Op::JumpIfTrue(_)) {
+                    let f = frame!(self);
+                    let back = (t as usize) < f.pc;
+                    f.pc = t as usize;
+                    if back {
+                        self.safepoint()?;
+                    }
+                }
+            }
+            Op::JumpIfTrueKeep(t) | Op::JumpIfFalseKeep(t) => {
+                let v = self.peek(0).clone();
+                let b = crate::abstract_ops::conversion::to_boolean(self, &v);
+                if b == matches!(op, Op::JumpIfTrueKeep(_)) {
+                    frame!(self).pc = t as usize;
+                } else {
+                    self.pop();
+                }
+            }
+            Op::JumpIfNotNullishKeep(t) => {
+                if self.peek(0).is_nullish() {
+                    self.pop();
+                } else {
+                    frame!(self).pc = t as usize;
+                }
+            }
+            Op::JumpIfNotUndefined(t) => {
+                if !self.peek(0).is_undefined() {
+                    frame!(self).pc = t as usize;
+                }
+            }
+            Op::JumpIfNullishChain { target, extra } => {
+                if self.peek(extra as usize).is_nullish() {
+                    let s = &mut frame!(self).stack;
+                    let n = s.len();
+                    s.truncate(n - 1 - extra as usize);
+                    s.push(Value::Undefined);
+                    frame!(self).pc = target as usize;
+                }
+            }
+            Op::Throw => {
+                let v = self.pop();
+                return Err(Throw::Value(v));
+            }
+            Op::ThrowError(kind, msg) => {
+                let m = self.string_const(msg).to_string_lossy();
+                let t = match kind {
+                    ErrorKind::TypeError => ErrorType::TypeError,
+                    ErrorKind::ReferenceError => ErrorType::ReferenceError,
+                    ErrorKind::SyntaxError => ErrorType::SyntaxError,
+                    ErrorKind::RangeError => ErrorType::RangeError,
+                };
+                return Err(self.error(t, &m));
+            }
+            Op::Unsupported(msg) => {
+                let m = self.string_const(msg).to_string_lossy();
+                return self.internal_error(&m);
+            }
+            Op::PushCatch(t) => {
+                let f = frame!(self);
+                let h = Handler {
+                    kind: HandlerKind::Catch,
+                    pc: t,
+                    stack_len: f.stack.len() as u32,
+                    refs_len: f.refs.len() as u32,
+                    env: f.env,
+                };
+                f.handlers.push(h);
+            }
+            Op::PushFinally {
+                target,
+                kind_slot,
+                value_slot,
+            } => {
+                let f = frame!(self);
+                let h = Handler {
+                    kind: HandlerKind::Finally {
+                        kind_slot,
+                        value_slot,
+                    },
+                    pc: target,
+                    stack_len: f.stack.len() as u32,
+                    refs_len: f.refs.len() as u32,
+                    env: f.env,
+                };
+                f.handlers.push(h);
+            }
+            Op::PopHandler => {
+                frame!(self).handlers.pop();
+            }
+            Op::EndFinally {
+                kind_slot,
+                value_slot,
+                table,
+            } => {
+                let kind = match self.local(kind_slot) {
+                    Value::Number(n) => n as u32,
+                    _ => COMPLETION_NORMAL,
+                };
+                let value = self.local(value_slot);
+                match kind {
+                    COMPLETION_NORMAL => {}
+                    COMPLETION_THROW => return Err(Throw::Value(value)),
+                    COMPLETION_RETURN => return Ok(Flow::Return(value)),
+                    k => {
+                        let t = match &frame!(self).code.consts[table as usize] {
+                            Constant::FinallyTable(t) => {
+                                t.iter().find(|(kk, _)| *kk == k).map(|(_, pc)| *pc)
+                            }
+                            _ => None,
+                        };
+                        frame!(self).pc = t.expect("continuación de finally") as usize;
+                    }
+                }
+            }
+            Op::Return => {
+                let v = self.pop();
+                return Ok(Flow::Return(v));
+            }
+            Op::Debugger => {}
+
+            // --- Iteración ---
+            Op::GetIterator(slot) => {
+                let obj = self.pop();
+                let (it, next) = self.get_iterator(&obj)?;
+                let f = frame!(self);
+                f.locals[slot as usize] = Some(it);
+                f.locals[slot as usize + 1] = Some(next);
+                f.locals[slot as usize + 2] = Some(Value::Boolean(false));
+            }
+            Op::IterStep { slot, done } => match self.iter_step_slot(slot)? {
+                Some(v) => self.push(v),
+                None => frame!(self).pc = done as usize,
+            },
+            Op::IterValue(slot) => {
+                let v = if self.local(slot + 2).is_undefined()
+                    || matches!(self.local(slot + 2), Value::Boolean(true))
+                {
+                    Value::Undefined
+                } else {
+                    self.iter_step_slot(slot)?.unwrap_or_default()
+                };
+                self.push(v);
+            }
+            Op::IterRest(slot) => {
+                let mut values = Vec::new();
+                while !matches!(self.local(slot + 2), Value::Boolean(true)) {
+                    match self.iter_step_slot(slot)? {
+                        Some(v) => values.push(v),
+                        None => break,
+                    }
+                }
+                let a = self.create_array_from_list(&values)?;
+                self.push(Value::Object(a));
+            }
+            Op::IterClose(slot) => {
+                if !matches!(self.local(slot + 2), Value::Boolean(true)) {
+                    let it = self.local(slot);
+                    self.iterator_close(&it)?;
+                }
+            }
+            Op::IterCleanup {
+                slot,
+                kind_slot,
+                value_slot,
+            } => {
+                let kind = match self.local(kind_slot) {
+                    Value::Number(n) => n as u32,
+                    _ => COMPLETION_NORMAL,
+                };
+                let value = self.local(value_slot);
+                let done = matches!(self.local(slot + 2), Value::Boolean(true));
+                let it = self.local(slot);
+                if kind == COMPLETION_THROW {
+                    if !done {
+                        self.iterator_close_on_throw(&it);
+                    }
+                    return Err(Throw::Value(value));
+                }
+                if !done {
+                    self.iterator_close(&it)?;
+                }
+                return Ok(Flow::Return(value));
+            }
+            Op::ForInPrepare(slot) => {
+                let v = self.pop();
+                let it = if v.is_nullish() {
+                    Value::Undefined
+                } else {
+                    let o = self.to_object(&v)?;
+                    Value::Object(self.create_for_in_iterator(o))
+                };
+                frame!(self).locals[slot as usize] = Some(it);
+            }
+            Op::ForInNext { slot, done } => {
+                let it = self.local(slot);
+                let next = match it {
+                    Value::Object(o) => self.for_in_next(o)?,
+                    _ => None,
+                };
+                match next {
+                    Some(k) => self.push(k),
+                    None => frame!(self).pc = done as usize,
+                }
+            }
+
+            // --- Generadores ---
+            Op::GeneratorStart => {
+                let callee = frame!(self).callee.expect("función generadora");
+                let g = crate::vm::generator::create_generator(self, callee)?;
+                return Ok(Flow::GenStart(g));
+            }
+            Op::Yield => {
+                let v = self.pop();
+                return Ok(Flow::Yield(v, false));
+            }
+            Op::YieldRaw { .. } => {
+                let v = self.pop();
+                return Ok(Flow::Yield(v, true));
+            }
+            Op::YieldStarStep {
+                slot,
+                kind_slot,
+                value_slot,
+                done,
+            } => return self.yield_star_step(slot, kind_slot, value_slot, done),
+            Op::Await => return self.internal_error("async/await (requiere Promise, paso 4)"),
+
+            // --- Funciones ---
+            Op::CreateArguments(table) => {
+                let o = match table {
+                    None => self.create_unmapped_arguments(),
+                    Some(t) => {
+                        let map = match &frame!(self).code.consts[t as usize] {
+                            Constant::ParamMap(m) => m.clone(),
+                            _ => unreachable!("tabla de parámetros"),
+                        };
+                        self.create_mapped_arguments(&map)
+                    }
+                };
+                self.push(Value::Object(o));
+            }
+            Op::GetArg(i) => {
+                let v = frame!(self)
+                    .args
+                    .get(i as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                self.push(v);
+            }
+            Op::RestArgs(i) => {
+                let rest: Vec<Value> = frame!(self).args.iter().skip(i as usize).cloned().collect();
+                let a = self.create_array_from_list(&rest)?;
+                self.push(Value::Object(a));
+            }
+
+            // --- Clases ---
+            Op::ClassHeritage(has) => {
+                let (proto_parent, ctor_parent) = if has {
+                    let sup = self.pop();
+                    match sup {
+                        Value::Null => (
+                            Value::Null,
+                            Value::Object(self.intrinsics().function_prototype),
+                        ),
+                        Value::Object(o) if self.heap[o].is_constructor() => {
+                            let k = self.keys.prototype.clone();
+                            let pp = self.get(o, &k, Value::Object(o))?;
+                            if !matches!(pp, Value::Object(_) | Value::Null) {
+                                return self.type_error(
+                                    "Class extends value does not have valid prototype property",
+                                );
+                            }
+                            (pp, Value::Object(o))
+                        }
+                        _ => {
+                            return self
+                                .type_error("Class extends value is not a constructor or null");
+                        }
+                    }
+                } else {
+                    let i = self.intrinsics();
+                    (
+                        Value::Object(i.object_prototype),
+                        Value::Object(i.function_prototype),
+                    )
+                };
+                self.push(proto_parent);
+                self.push(ctor_parent);
+            }
+            Op::ClassCreate { code, name } => {
+                let ctor_parent = self.pop().as_object();
+                let proto_parent = self.pop().as_object();
+                let code = match &frame!(self).code.consts[code as usize] {
+                    Constant::Function(c) => c.clone(),
+                    _ => unreachable!("función"),
+                };
+                let name = match name {
+                    FnName::Code => Value::String(code.name.clone()),
+                    FnName::Local(slot) => {
+                        let k = self.local(slot);
+                        self.function_name_from_key(&k, NamePrefix::None)?
+                    }
+                    FnName::Stack(p) => {
+                        let k = self.peek(0).clone();
+                        self.function_name_from_key(&k, p)?
+                    }
+                };
+                let env = frame!(self).env;
+                let (f, proto) = self.class_create(code, env, proto_parent, ctor_parent, name);
+                self.push(Value::Object(f));
+                self.push(Value::Object(proto));
+            }
+            Op::DefineMethod {
+                kind,
+                is_static,
+                name,
+            } => {
+                let f = self.pop().as_object().expect("método");
+                let key = match name {
+                    Some(n) => self.name_const(n).1,
+                    None => {
+                        let k = self.pop();
+                        self.to_property_key(&k)?
+                    }
+                };
+                let target = if is_static {
+                    self.peek(1)
+                } else {
+                    self.peek(0)
+                }
+                .as_object()
+                .expect("objetivo");
+                let desc = match kind {
+                    MethodKind::Method => {
+                        PropertyDescriptor::data(Value::Object(f), true, false, true)
+                    }
+                    MethodKind::Getter => PropertyDescriptor {
+                        get: Some(Some(f)),
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                        ..PropertyDescriptor::default()
+                    },
+                    MethodKind::Setter => PropertyDescriptor {
+                        set: Some(Some(f)),
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                        ..PropertyDescriptor::default()
+                    },
+                };
+                self.define_property_or_throw(target, key, desc)?;
+            }
+            Op::AddField {
+                private, has_init, ..
+            } => {
+                let init = if has_init {
+                    self.pop().as_object()
+                } else {
+                    None
+                };
+                let key = self.pop();
+                let ctor = self.peek(1).as_object().expect("constructor");
+                let name = if private {
+                    let Value::Symbol(s) = key else {
+                        unreachable!("privado")
+                    };
+                    FieldName::Private(s)
+                } else {
+                    FieldName::Key(self.to_property_key(&key)?)
+                };
+                if let Some(i) = init
+                    && let ObjectKind::Function(c) = &mut self.heap[i].kind
+                {
+                    c.field_name = Some(name.clone());
+                }
+                if let ObjectKind::Function(c) = &mut self.heap[ctor].kind {
+                    c.class
+                        .get_or_insert_with(|| Box::new(ClassData::default()))
+                        .fields
+                        .push(ClassField {
+                            name,
+                            initializer: init,
+                        });
+                }
+            }
+            Op::AddPrivateMethod(kind) => {
+                let f = self.pop().as_object().expect("método");
+                let name = self.pop();
+                let Value::Symbol(n) = name else {
+                    unreachable!("privado")
+                };
+                let ctor = self.peek(1).as_object().expect("constructor");
+                if let ObjectKind::Function(c) = &mut self.heap[ctor].kind {
+                    let class = c
+                        .class
+                        .get_or_insert_with(|| Box::new(ClassData::default()));
+                    add_private_element(&mut class.private_methods, n, kind, f);
+                }
+            }
+            Op::AddPrivateMethodTo(kind) => {
+                let f = self.pop().as_object().expect("método");
+                let name = self.pop();
+                let Value::Symbol(n) = name else {
+                    unreachable!("privado")
+                };
+                let obj = self.peek(0).as_object().expect("objeto");
+                let existing = self.heap[obj].private.iter().position(|(x, _)| *x == n);
+                match (existing, kind) {
+                    (Some(i), MethodKind::Getter | MethodKind::Setter)
+                        if matches!(
+                            self.heap[obj].private[i].1,
+                            PrivateElement::Accessor { .. }
+                        ) =>
+                    {
+                        if let PrivateElement::Accessor { get, set } =
+                            &mut self.heap[obj].private[i].1
+                        {
+                            if kind == MethodKind::Getter {
+                                *get = Some(f);
+                            } else {
+                                *set = Some(f);
+                            }
+                        }
+                    }
+                    _ => {
+                        let e = match kind {
+                            MethodKind::Method => PrivateElement::Method(f),
+                            MethodKind::Getter => PrivateElement::Accessor {
+                                get: Some(f),
+                                set: None,
+                            },
+                            MethodKind::Setter => PrivateElement::Accessor {
+                                get: None,
+                                set: Some(f),
+                            },
+                        };
+                        self.private_method_or_accessor_add(obj, n, e)?;
+                    }
+                }
+            }
+            Op::DefineStaticField { private, has_init } => {
+                let init = if has_init {
+                    self.pop().as_object()
+                } else {
+                    None
+                };
+                let key = self.pop();
+                let obj = self.peek(0).as_object().expect("constructor");
+                let name = if private {
+                    let Value::Symbol(s) = key else {
+                        unreachable!("privado")
+                    };
+                    FieldName::Private(s)
+                } else {
+                    FieldName::Key(self.to_property_key(&key)?)
+                };
+                if let Some(i) = init
+                    && let ObjectKind::Function(c) = &mut self.heap[i].kind
+                {
+                    c.field_name = Some(name.clone());
+                }
+                self.define_field(
+                    obj,
+                    &ClassField {
+                        name,
+                        initializer: init,
+                    },
+                )?;
+            }
+            Op::CallStaticBlock => {
+                let f = self.pop();
+                let obj = self.peek(0).clone();
+                self.call(&f, obj, &[])?;
+            }
+            Op::NewPrivateName(d) => {
+                let desc = self.string_const(d);
+                let s = self.heap.alloc(crate::value::Symbol {
+                    description: Some(desc),
+                    private: true,
+                });
+                self.push(Value::Symbol(s));
+            }
+
+            // --- Declaraciones ---
+            Op::DeclareFunction(n) => {
+                let v = self.pop();
+                let (name, key) = self.name_const(n);
+                self.declare_function_binding(&name, &key, v)?;
+            }
+            Op::DeclareVar(n) => {
+                let (name, key) = self.name_const(n);
+                self.declare_var_binding(&name, &key)?;
+            }
+            Op::DeclareGlobalLex { name, constant } => {
+                let (name, _) = self.name_const(name);
+                let g = self.global_env();
+                if let Some(ge) = self.heap[g].global_mut() {
+                    ge.decl.insert(name, (None, !constant));
+                }
+            }
+            Op::InitGlobalLex(n) => {
+                let v = self.pop();
+                let (name, _) = self.name_const(n);
+                let g = self.global_env();
+                if let Some(ge) = self.heap[g].global_mut()
+                    && let Some(cell) = ge.decl.get_mut(&name)
+                {
+                    cell.0 = Some(v);
+                }
+            }
+            Op::SetVarEnv(n) => {
+                let v = self.pop();
+                let (name, key) = self.name_const(n);
+                let env = frame!(self).var_env.unwrap_or_else(|| self.global_env());
+                self.env_set_mutable_binding(env, &name, &key, v, false)?;
+            }
+            Op::IsHoisted(n) => {
+                let (name, _) = self.name_const(n);
+                let h = frame!(self)
+                    .hoisted
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&name));
+                self.push(Value::Boolean(h));
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    /// TypeError "x is not a function/constructor" con el texto del callee.
+    fn not_callable<T>(&mut self, t: u32, callee: &Value, what: &str) -> JsResult<T> {
+        let name = if t == u32::MAX {
+            self.describe(callee)
+        } else {
+            self.string_const(t).to_string_lossy()
+        };
+        self.type_error(&format!("{name} is not {what}"))
+    }
+
+    fn tdz_error<T>(&mut self, n: u32) -> JsResult<T> {
+        let (name, _) = self.name_const(n);
+        self.reference_error(&format!("Cannot access '{name}' before initialization"))
+    }
+
+    fn nullish_access<T>(&mut self, obj: &Value, key: &Value) -> JsResult<T> {
+        let what = if obj.is_null() { "null" } else { "undefined" };
+        let k = match key {
+            Value::String(s) => s.to_string_lossy(),
+            Value::Number(n) => crate::abstract_ops::number::number_to_string(*n).to_string_lossy(),
+            _ => String::from("?"),
+        };
+        self.type_error(&format!("Cannot read properties of {what} (reading '{k}')"))
+    }
+
+    /// El nombre de una función a partir de una clave de propiedad (SetFunctionName).
+    fn function_name_from_key(&mut self, key: &Value, prefix: NamePrefix) -> JsResult<Value> {
+        let base = match key {
+            Value::Symbol(s) => {
+                let sym = self.heap[*s].clone();
+                match (sym.private, sym.description) {
+                    (true, d) => d.unwrap_or_default(),
+                    (false, Some(d)) => {
+                        let mut u = vec![u16::from(b'[')];
+                        u.extend_from_slice(d.units());
+                        u.push(u16::from(b']'));
+                        JsString::from_units(u)
+                    }
+                    (false, None) => JsString::default(),
+                }
+            }
+            other => self.to_string(other)?,
+        };
+        let p = match prefix {
+            NamePrefix::None => return Ok(Value::String(base)),
+            NamePrefix::Get => "get ",
+            NamePrefix::Set => "set ",
+        };
+        let mut u: Vec<u16> = p.encode_utf16().collect();
+        u.extend_from_slice(base.units());
+        Ok(Value::String(JsString::from_units(u)))
+    }
+
+    /// Los valores de un array denso (los argumentos de una llamada con spread).
+    fn array_values(&self, arr: &Value) -> Vec<Value> {
+        match arr {
+            Value::Object(o) => match &self.heap[*o].kind {
+                ObjectKind::Array(d) => d
+                    .dense
+                    .iter()
+                    .map(|v| v.clone().unwrap_or_default())
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// El operador `new` (§13.3.5.1.1 EvaluateNew, pasos 5–7).
+    fn new_operator(&mut self, callee: &Value, args: &[Value]) -> JsResult<Value> {
+        match callee {
+            Value::Object(o) if self.heap[*o].is_constructor() => {
+                let o = *o;
+                self.construct_internal(o, args, o)
+            }
+            _ => {
+                let d = self.describe(callee);
+                self.type_error(&format!("{d} is not a constructor"))
+            }
+        }
+    }
+
+    /// SuperCall (§13.3.7.1) pasos 3–6.
+    fn super_construct(&mut self, nt: &Value, ctor: &Value, args: &[Value]) -> JsResult<Value> {
+        let Value::Object(c) = ctor else {
+            return self.type_error("Super constructor is not a constructor");
+        };
+        if !self.heap[*c].is_constructor() {
+            return self.type_error("Super constructor is not a constructor");
+        }
+        let nt = nt.as_object().unwrap_or(*c);
+        self.construct_internal(*c, args, nt)
+    }
+
+    /// Un `eval(...)` que puede ser directo (§13.3.6.1 paso 6).
+    fn call_maybe_eval(
+        &mut self,
+        callee: &Value,
+        this: Value,
+        args: &[Value],
+        flags: u32,
+    ) -> JsResult<Value> {
+        let is_eval = matches!(callee, Value::Object(o) if *o == self.intrinsics().eval);
+        if !is_eval {
+            let r = self.call_internal(callee, this, args)?;
+            return Ok(r);
+        }
+        let Some(x) = args.first() else {
+            return Ok(Value::Undefined);
+        };
+        self.perform_eval(x, true, crate::compiler::EvalFlags::from_bits(flags))
+    }
+
+    /// Un paso de un IteratorRecord guardado en los slots: el valor, o `None` si terminó.
+    fn iter_step_slot(&mut self, slot: u32) -> JsResult<Option<Value>> {
+        let it = self.local(slot);
+        let next = self.local(slot + 1);
+        let r = self.iterator_step_value(&it, &next);
+        match r {
+            Ok(Some(v)) => Ok(Some(v)),
+            Ok(None) => {
+                frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+                Ok(None)
+            }
+            Err(e) => {
+                frame!(self).locals[slot as usize + 2] = Some(Value::Boolean(true));
+                Err(e)
+            }
+        }
+    }
+
+    /// Un paso de `yield*` (§15.5.5, YieldExpression : yield * AssignmentExpression).
+    fn yield_star_step(&mut self, slot: u32, ks: u32, vs: u32, done: u32) -> JsResult<Flow> {
+        let it = self.local(slot);
+        let next = self.local(slot + 1);
+        let kind = match self.local(ks) {
+            Value::Number(n) => n as u32,
+            _ => COMPLETION_NORMAL,
+        };
+        let received = self.local(vs);
+        let inner = match kind {
+            COMPLETION_NORMAL => self.call(&next, it.clone(), &[received])?,
+            COMPLETION_THROW => {
+                let Value::Object(io) = &it else {
+                    return self.type_error("iterator is not an object");
+                };
+                let k = self.keys.throw.clone();
+                let throw = self.get_method_of(&Value::Object(*io), &k)?;
+                match throw {
+                    Some(t) => self.call(&t, it.clone(), &[received])?,
+                    None => {
+                        // Sin `throw`: se cierra el iterador y TypeError (paso 7.b.iii).
+                        self.iterator_close(&it)?;
+                        return self.type_error("The iterator does not provide a 'throw' method");
+                    }
+                }
+            }
+            _ => {
+                let k = self.keys.return_.clone();
+                let ret = self.get_method_of(&it, &k)?;
+                match ret {
+                    None => return Ok(Flow::Return(received)),
+                    Some(r) => {
+                        let res = self.call(&r, it.clone(), &[received])?;
+                        let Value::Object(ro) = res else {
+                            return self.type_error("iterator result is not an object");
+                        };
+                        if self.iterator_complete(ro)? {
+                            let v = self.iterator_value(ro)?;
+                            return Ok(Flow::Return(v));
+                        }
+                        self.push(Value::Object(ro));
+                        return Ok(Flow::Next);
+                    }
+                }
+            }
+        };
+        let Value::Object(io) = inner else {
+            return self.type_error("iterator result is not an object");
+        };
+        if self.iterator_complete(io)? {
+            let v = self.iterator_value(io)?;
+            self.push(v);
+            frame!(self).pc = done as usize;
+            return Ok(Flow::Next);
+        }
+        self.push(Value::Object(io));
+        Ok(Flow::Next)
+    }
+
+    /// GetTemplateObject (§13.2.8.4).
+    fn get_template_object(&mut self, site: &Rc<TemplateSite>) -> JsResult<Gc<Object>> {
+        if let Some(o) = self.realm().template_map.get(&site.id) {
+            return Ok(*o);
+        }
+        let n = site.raw.len();
+        let template = self.array_create(n as u64, None)?;
+        let raw = self.array_create(n as u64, None)?;
+        for i in 0..n {
+            let cooked = site.cooked[i]
+                .clone()
+                .map_or(Value::Undefined, Value::String);
+            self.define_property_or_throw(
+                template,
+                PropertyKey::from(i as u32),
+                PropertyDescriptor::data(cooked, false, true, false),
+            )?;
+            self.define_property_or_throw(
+                raw,
+                PropertyKey::from(i as u32),
+                PropertyDescriptor::data(Value::String(site.raw[i].clone()), false, true, false),
+            )?;
+        }
+        self.set_integrity_level(raw, true)?;
+        self.define_property_or_throw(
+            template,
+            PropertyKey::from("raw"),
+            PropertyDescriptor::data(Value::Object(raw), false, false, false),
+        )?;
+        self.set_integrity_level(template, true)?;
+        let realm = self.current_realm;
+        self.realms[realm].template_map.insert(site.id, template);
+        Ok(template)
+    }
+
+    /// Crea el constructor de una clase y su prototipo (§15.7.14 pasos 8–18).
+    fn class_create(
+        &mut self,
+        code: Rc<FunctionCode>,
+        env: Gc<Env>,
+        proto_parent: Option<Gc<Object>>,
+        ctor_parent: Option<Gc<Object>>,
+        name: Value,
+    ) -> (Gc<Object>, Gc<Object>) {
+        let proto = self.new_object(proto_parent);
+        let realm = self.current_realm;
+        let length = f64::from(code.length);
+        let f = self.heap.alloc(Object::new(
+            ctor_parent,
+            ObjectKind::Function(Box::new(Closure {
+                code,
+                env,
+                home_object: Some(proto),
+                realm,
+                is_constructor: true,
+                class: None,
+                field_name: None,
+            })),
+        ));
+        let k = self.keys.length.clone();
+        self.put_data(f, k, Value::Number(length), false, false, true);
+        self.set_function_name_value(f, name);
+        let k = self.keys.prototype.clone();
+        self.put_data(f, k, Value::Object(proto), false, false, false);
+        let k = self.keys.constructor.clone();
+        self.put_data(proto, k, Value::Object(f), true, false, true);
+        (f, proto)
+    }
+
+    /// El binding de una declaración de función de script o eval (§16.1.7 paso 16,
+    /// §19.2.1.3 paso 17).
+    fn declare_function_binding(
+        &mut self,
+        name: &Atom,
+        key: &PropertyKey,
+        v: Value,
+    ) -> JsResult<()> {
+        let f = self.frames.last().expect("frame");
+        let is_eval = f.code.kind == CodeKind::Eval;
+        let var_env = f.var_env;
+        match (is_eval, var_env) {
+            (false, _) | (true, None) => {
+                let g = self.global_env();
+                self.global_create_function_binding(g, name, v, is_eval)
+            }
+            (true, Some(env)) => {
+                if self.heap[env].global().is_some() {
+                    return self.global_create_function_binding(env, name, v, true);
+                }
+                if self.env_has_binding(env, name, key)? {
+                    self.env_set_mutable_binding(env, name, key, v, false)
+                } else {
+                    if let Some(d) = self.heap[env].decl_mut() {
+                        d.extra.push((name.clone(), Some(v)));
+                    }
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// El binding de un `var` de script o eval.
+    fn declare_var_binding(&mut self, name: &Atom, key: &PropertyKey) -> JsResult<()> {
+        let f = self.frames.last().expect("frame");
+        let is_eval = f.code.kind == CodeKind::Eval;
+        let var_env = f.var_env;
+        match (is_eval, var_env) {
+            (false, _) | (true, None) => {
+                let g = self.global_env();
+                self.global_create_var_binding(g, name, is_eval)
+            }
+            (true, Some(env)) => {
+                if self.heap[env].global().is_some() {
+                    return self.global_create_var_binding(env, name, true);
+                }
+                if !self.env_has_binding(env, name, key)?
+                    && let Some(d) = self.heap[env].decl_mut()
+                {
+                    d.extra.push((name.clone(), Some(Value::Undefined)));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Las decisiones de B.3.2.2/B.3.2.3 para el frame actual.
+    pub(crate) fn set_hoisted(&mut self, names: HashSet<Atom>) {
+        frame!(self).hoisted = Some(Rc::new(names));
+    }
+}
+
+/// Agrega un método privado a la lista (combinando getter y setter del mismo nombre).
+fn add_private_element(
+    list: &mut Vec<(Gc<crate::value::Symbol>, PrivateElement)>,
+    name: Gc<crate::value::Symbol>,
+    kind: MethodKind,
+    f: Gc<Object>,
+) {
+    if let Some((_, PrivateElement::Accessor { get, set })) =
+        list.iter_mut().find(|(n, _)| *n == name)
+    {
+        match kind {
+            MethodKind::Getter => *get = Some(f),
+            MethodKind::Setter => *set = Some(f),
+            MethodKind::Method => {}
+        }
+        return;
+    }
+    let e = match kind {
+        MethodKind::Method => PrivateElement::Method(f),
+        MethodKind::Getter => PrivateElement::Accessor {
+            get: Some(f),
+            set: None,
+        },
+        MethodKind::Setter => PrivateElement::Accessor {
+            get: None,
+            set: Some(f),
+        },
+    };
+    list.push((name, e));
+}

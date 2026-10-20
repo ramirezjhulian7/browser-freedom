@@ -327,7 +327,8 @@ impl Fonts {
             .or_else(|| self.db.fallback(c).map(|i| FontKey(i as u32)))
     }
 
-    fn shape_run(&self, text: &str, key: FontKey, size: f32, base: usize, out: &mut Vec<Glyph>) {
+    /// `map[i]` es el offset en el texto original del byte `i` de `text` (ver `shape`).
+    fn shape_run(&self, text: &str, key: FontKey, size: f32, map: &[usize], out: &mut Vec<Glyph>) {
         let face = self.face(key);
         let shaped = face.as_ref().and_then(|f| {
             let rb = rustybuzz::Face::from_slice(&f.data, f.index)?;
@@ -340,7 +341,7 @@ impl Fonts {
             // Sin fuente: cajas vacías de medio em, como TestFont.
             out.extend(
                 text.char_indices()
-                    .map(|(i, _)| Glyph::simple(size * 0.5, base + i, 0, NO_FONT)),
+                    .map(|(i, _)| Glyph::simple(size * 0.5, map[i], 0, NO_FONT)),
             );
             return;
         };
@@ -348,7 +349,7 @@ impl Fonts {
         for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
             out.push(Glyph {
                 advance: pos.x_advance as f32 * scale,
-                cluster: base + info.cluster as usize,
+                cluster: map[info.cluster as usize],
                 id: u16::try_from(info.glyph_id).unwrap_or(0),
                 font: key,
                 x_offset: pos.x_offset as f32 * scale,
@@ -410,11 +411,19 @@ impl FontProvider for Fonts {
         }
         let mut glyphs = Vec::with_capacity(text.len());
         for (start, end, k) in runs {
-            let run: String = text[start..end]
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
-            self.shape_run(&run, k, request.size, start, &mut glyphs);
+            // Los controles se sustituyen por espacios y eso puede cambiar la longitud en
+            // bytes (U+0085, U+009D… ocupan 2). `map[offset_en_run] = offset_en_text`, para
+            // que `Glyph::cluster` indexe `text` siempre en un límite de carácter.
+            let mut run = String::with_capacity(end - start);
+            let mut map = Vec::with_capacity(end - start + 1);
+            for (i, c) in text[start..end].char_indices() {
+                let c = if c.is_control() { ' ' } else { c };
+                map.resize(run.len(), start + i);
+                map.push(start + i);
+                run.push(c);
+            }
+            map.resize(run.len() + 1, end);
+            self.shape_run(&run, k, request.size, &map, &mut glyphs);
         }
         lock(&self.shaped).insert(key, Arc::new(glyphs.clone()));
         glyphs

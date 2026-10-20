@@ -24,7 +24,10 @@ impl Parser {
             return self.raise(p, "Invalid shorthand property initializer");
         }
         if let Some(p) = errs.double_proto {
-            return self.raise(p, "Duplicate __proto__ fields are not allowed in object literals");
+            return self.raise(
+                p,
+                "Duplicate __proto__ fields are not allowed in object literals",
+            );
         }
         Ok(false)
     }
@@ -39,7 +42,7 @@ impl Parser {
 
     /// Reinterpreta `expr` como destino (AssignmentPattern, o patrón de binding si
     /// `binding`).
-    pub fn to_assignable(
+    pub fn pattern_from_expr(
         &mut self,
         expr: Expr,
         binding: bool,
@@ -78,7 +81,7 @@ impl Parser {
                                 );
                             }
                             let value = match value {
-                                PropValue::Expr(e) => self.to_assignable(e, binding, None)?,
+                                PropValue::Expr(e) => self.pattern_from_expr(e, binding, None)?,
                                 PropValue::CoverInit(id, default) => Pat::Assign {
                                     span,
                                     left: Box::new(Pat::Ident(id)),
@@ -105,10 +108,12 @@ impl Parser {
                                     "Rest element must be last element",
                                 );
                             }
-                            let arg = self.to_assignable(argument, binding, None)?;
+                            let arg = self.pattern_from_expr(argument, binding, None)?;
                             // `{...{a}} = x` y `{...[a]} = x` (§13.15.1).
-                            if matches!(arg, Pat::Object { .. } | Pat::Array { .. } | Pat::Assign { .. })
-                            {
+                            if matches!(
+                                arg,
+                                Pat::Object { .. } | Pat::Array { .. } | Pat::Assign { .. }
+                            ) {
                                 return self.raise(
                                     self.lex_pos(arg.span().start),
                                     "`...` must be followed by an assignable reference in assignment contexts",
@@ -143,7 +148,7 @@ impl Parser {
                                         "Rest element must be last element",
                                     );
                                 }
-                                let arg = self.to_assignable(item.expr, binding, None)?;
+                                let arg = self.pattern_from_expr(item.expr, binding, None)?;
                                 if matches!(arg, Pat::Assign { .. }) {
                                     return self.raise(
                                         self.lex_pos(arg.span().start),
@@ -156,7 +161,9 @@ impl Parser {
                                     argument: Box::new(arg),
                                 }));
                             }
-                            None => out.push(Some(self.to_assignable(item.expr, binding, None)?)),
+                            None => {
+                                out.push(Some(self.pattern_from_expr(item.expr, binding, None)?))
+                            }
                         },
                     }
                 }
@@ -181,13 +188,19 @@ impl Parser {
             }
             Expr::Paren { span, expression } => {
                 if binding {
-                    return self.raise(self.lex_pos(span.start), "Invalid destructuring assignment target");
+                    return self.raise(
+                        self.lex_pos(span.start),
+                        "Invalid destructuring assignment target",
+                    );
                 }
                 let inner = *expression;
                 if matches!(inner, Expr::Object { .. } | Expr::Array { .. }) {
-                    return self.raise(self.lex_pos(span.start), "Invalid destructuring assignment target");
+                    return self.raise(
+                        self.lex_pos(span.start),
+                        "Invalid destructuring assignment target",
+                    );
                 }
-                match self.to_assignable(inner, false, None)? {
+                match self.pattern_from_expr(inner, false, None)? {
                     Pat::Expr(e) => Ok(Pat::Expr(Box::new(Expr::Paren {
                         span,
                         expression: e,
@@ -196,7 +209,10 @@ impl Parser {
                         span,
                         expression: Box::new(Expr::Ident(id)),
                     }))),
-                    _ => self.raise(self.lex_pos(span.start), "Invalid destructuring assignment target"),
+                    _ => self.raise(
+                        self.lex_pos(span.start),
+                        "Invalid destructuring assignment target",
+                    ),
                 }
             }
             Expr::Member {
@@ -227,12 +243,37 @@ impl Parser {
         self.lex.pos_of_offset(offset)
     }
 
-    /// Un destino simple (`AssignmentTargetType` simple): `++x`, `x += 1`, `x &&= y`.
-    pub fn check_simple_target(&self, expr: &Expr, what: &str) -> PResult<()> {
+    /// ¿Una llamada que fuera de código estricto es un destino `~web-compat~` (B.3.6, Runtime
+    /// Errors for Function Call Assignment Targets: un ReferenceError al ejecutar)?
+    pub fn is_web_compat_call(&self, expr: &Expr) -> bool {
+        if self.strict {
+            return false;
+        }
+        match expr {
+            Expr::Call {
+                optional: false,
+                callee,
+                ..
+            } => !matches!(**callee, Expr::Super(_)),
+            Expr::Paren { expression, .. } => self.is_web_compat_call(expression),
+            _ => false,
+        }
+    }
+
+    /// Un destino simple (`AssignmentTargetType` simple): `++x`, `x += 1`, `x &&= y`. Con
+    /// `allow_call`, también una llamada `~web-compat~` (no en las asignaciones lógicas).
+    pub fn check_simple_target(&self, expr: &Expr, what: &str, allow_call: bool) -> PResult<()> {
+        if allow_call && self.is_web_compat_call(expr) {
+            return Ok(());
+        }
         match expr {
             Expr::Ident(id) => self.check_strict_assign(&id.name, id.span.start, false),
-            Expr::Member { optional: false, .. } => Ok(()),
-            Expr::Paren { expression, .. } => self.check_simple_target(expression, what),
+            Expr::Member {
+                optional: false, ..
+            } => Ok(()),
+            Expr::Paren { expression, .. } => {
+                self.check_simple_target(expression, what, allow_call)
+            }
             other => self.raise(
                 self.lex_pos(other.span().start),
                 format!("Invalid left-hand side expression in {what}"),
@@ -250,7 +291,7 @@ impl Parser {
                     if binding {
                         format!("Binding '{n}' in strict mode")
                     } else {
-                        format!("Unexpected eval or arguments in strict mode")
+                        "Unexpected eval or arguments in strict mode".to_owned()
                     },
                 );
             }
@@ -296,7 +337,10 @@ impl Parser {
             Pat::Assign { left, .. } => self.check_lval_pattern(left, bind, clashes),
             Pat::Expr(e) => {
                 if bind != Bind::None {
-                    return self.raise(self.lex_pos(e.span().start), "Invalid destructuring assignment target");
+                    return self.raise(
+                        self.lex_pos(e.span().start),
+                        "Invalid destructuring assignment target",
+                    );
                 }
                 self.check_assign_expr(e)
             }
@@ -324,10 +368,10 @@ impl Parser {
             if bind == Bind::Lexical && id.name == "let" {
                 return self.raise(pos, "let is disallowed as a lexically bound name");
             }
-            if let Some(set) = clashes {
-                if !set.insert(id.name.clone()) {
-                    return self.raise(pos, "Duplicate parameter name not allowed in this context");
-                }
+            if let Some(set) = clashes
+                && !set.insert(id.name.clone())
+            {
+                return self.raise(pos, "Duplicate parameter name not allowed in this context");
             }
             if bind != Bind::Outside {
                 self.declare_name(&id.name, bind, pos)?;
@@ -340,6 +384,7 @@ impl Parser {
 
     /// BindingIdentifier o BindingPattern.
     pub fn parse_binding_atom(&mut self) -> PResult<Pat> {
+        self.check_stack()?;
         if self.is_punct("[") {
             return self.parse_binding_array();
         }
@@ -366,7 +411,10 @@ impl Parser {
                 let rest = self.parse_rest_binding()?;
                 elements.push(Some(rest));
                 if self.is_punct(",") {
-                    return self.raise(self.tok.start, "Comma is not permitted after the rest element");
+                    return self.raise(
+                        self.tok.start,
+                        "Comma is not permitted after the rest element",
+                    );
                 }
                 self.expect_punct("]")?;
                 break;
@@ -400,7 +448,10 @@ impl Parser {
             if self.eat_punct("...")? {
                 let argument = Pat::Ident(self.parse_ident(false)?);
                 if self.is_punct(",") {
-                    return self.raise(self.tok.start, "Comma is not permitted after the rest element");
+                    return self.raise(
+                        self.tok.start,
+                        "Comma is not permitted after the rest element",
+                    );
                 }
                 properties.push(ObjectPatProp::Rest {
                     span: self.span_from(pstart),
@@ -471,7 +522,10 @@ impl Parser {
         self.expect_punct("...")?;
         let argument = self.parse_binding_atom()?;
         if self.is_punct("=") {
-            return self.raise(self.tok.start, "Rest parameter may not have a default initializer");
+            return self.raise(
+                self.tok.start,
+                "Rest parameter may not have a default initializer",
+            );
         }
         Ok(Pat::Rest {
             span: self.span_from(start),
@@ -494,7 +548,10 @@ impl Parser {
             if self.is_punct("...") {
                 params.push(self.parse_rest_binding()?);
                 if self.is_punct(",") {
-                    return self.raise(self.tok.start, "Rest parameter must be last formal parameter");
+                    return self.raise(
+                        self.tok.start,
+                        "Rest parameter must be last formal parameter",
+                    );
                 }
                 self.expect_punct(")")?;
                 break;

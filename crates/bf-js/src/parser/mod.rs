@@ -25,10 +25,42 @@ use crate::ast::{Program, SourceType, Span};
 use crate::lexer::{Lexer, Tok, Token};
 use crate::string::Atom;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ParseOptions {
     /// Empezar en código estricto (como si el script empezara con `"use strict"`).
     pub strict: bool,
+    /// Pila máxima (bytes) que puede usar la recursión del parser antes de rechazar la
+    /// entrada por demasiado anidada, en lugar de desbordar la pila del hilo.
+    pub max_stack: usize,
+    /// Contexto de un `eval` directo (§19.2.1.1 PerformEval pasos 5–6): `new.target`,
+    /// `super.x` y `super()` permitidos en el top-level, `arguments` prohibido (inicializador
+    /// de campo) y los nombres privados (sin `#`) de las clases que encierran al `eval`.
+    pub allow_new_target: bool,
+    pub allow_super_property: bool,
+    pub allow_super_call: bool,
+    pub in_class_field_init: bool,
+    pub private_names: Vec<Atom>,
+}
+
+impl Default for ParseOptions {
+    fn default() -> ParseOptions {
+        ParseOptions {
+            strict: false,
+            max_stack: 512 * 1024,
+            allow_new_target: false,
+            allow_super_property: false,
+            allow_super_call: false,
+            in_class_field_init: false,
+            private_names: Vec::new(),
+        }
+    }
+}
+
+/// La dirección de una variable local: mide cuánto creció la pila (que crece hacia abajo).
+#[inline(never)]
+pub(crate) fn stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +73,11 @@ pub struct SyntaxError {
 
 impl std::fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SyntaxError: {} ({}:{})", self.message, self.line, self.column)
+        write!(
+            f,
+            "SyntaxError: {} ({}:{})",
+            self.message, self.line, self.column
+        )
     }
 }
 
@@ -127,10 +163,42 @@ pub(crate) struct PrivateClass {
 /// Palabras reservadas siempre (§12.7.2), salvo `await`/`yield`/`let`/`static`, que dependen
 /// del contexto.
 pub(crate) const KEYWORDS: &[&str] = &[
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
-    "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if",
-    "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw",
-    "true", "try", "typeof", "var", "void", "while", "with",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
 ];
 
 /// Reservadas además en código estricto.
@@ -163,9 +231,27 @@ pub(crate) struct Parser {
     pub private_stack: Vec<PrivateClass>,
     pub exports: HashSet<String>,
     pub undefined_exports: Vec<(Atom, usize)>,
+    stack_base: usize,
+    max_stack: usize,
+    /// Contexto de eval (ver [`ParseOptions`]).
+    pub eval_new_target: bool,
+    pub eval_super_property: bool,
+    pub eval_super_call: bool,
+    pub eval_class_field: bool,
+    /// Hay una pseudo-clase con los nombres privados del contexto del eval.
+    eval_privates: bool,
 }
 
 impl Parser {
+    /// Rechaza la entrada si la recursión ya usó demasiada pila.
+    pub fn check_stack(&self) -> PResult<()> {
+        let used = self.stack_base.saturating_sub(stack_position());
+        if used > self.max_stack {
+            return self.raise(self.tok.start, "Maximum nesting depth exceeded");
+        }
+        Ok(())
+    }
+
     pub fn new(src: &str, module: bool, opts: &ParseOptions) -> PResult<Parser> {
         let lex = Lexer::new(src, module);
         let mut p = Parser {
@@ -191,7 +277,24 @@ impl Parser {
             private_stack: Vec::new(),
             exports: HashSet::new(),
             undefined_exports: Vec::new(),
+            stack_base: stack_position(),
+            max_stack: opts.max_stack,
+            eval_new_target: opts.allow_new_target,
+            eval_super_property: opts.allow_super_property,
+            eval_super_call: opts.allow_super_call,
+            eval_class_field: opts.in_class_field_init,
+            eval_privates: !opts.private_names.is_empty(),
         };
+        if !opts.private_names.is_empty() {
+            p.private_stack.push(PrivateClass {
+                declared: opts
+                    .private_names
+                    .iter()
+                    .map(|n| (n.clone(), "true"))
+                    .collect(),
+                used: Vec::new(),
+            });
+        }
         p.tok = p.lex.next_token().map_err(|e| p.lex_error(e))?;
         Ok(p)
     }
@@ -201,6 +304,18 @@ impl Parser {
         let body = self.parse_top_level()?;
         if let Some((name, pos)) = self.undefined_exports.first().cloned() {
             return self.raise(pos, format!("Export '{name}' is not defined"));
+        }
+        if self.eval_privates
+            && let Some(class) = self.private_stack.pop()
+        {
+            for (name, pos) in class.used {
+                if !class.declared.contains_key(&name) {
+                    return self.raise(
+                        pos,
+                        format!("Private field '#{name}' must be declared in an enclosing class"),
+                    );
+                }
+            }
         }
         self.exit_scope();
         Ok(Program {
@@ -323,19 +438,6 @@ impl Parser {
         }
     }
 
-    pub fn tok_name(&self) -> Option<&Atom> {
-        match &self.tok.tok {
-            Tok::Name(n) => Some(n),
-            _ => None,
-        }
-    }
-
-    /// ¿Una palabra reservada (palabra clave sin escapes)?
-    pub fn is_keyword_token(&self) -> bool {
-        self.tok_name()
-            .is_some_and(|n| !self.tok.escaped && KEYWORDS.contains(&n.as_str()))
-    }
-
     pub fn can_insert_semicolon(&self) -> bool {
         self.tok.tok == Tok::Eof || self.is_punct("}") || self.tok.nl_before
     }
@@ -384,11 +486,14 @@ impl Parser {
         match bind {
             Bind::Lexical => {
                 let s = self.scope();
-                redeclared = s.lexical.contains(name)
-                    || s.functions.contains(name)
-                    || s.var.contains(name);
+                redeclared =
+                    s.lexical.contains(name) || s.functions.contains(name) || s.var.contains(name);
                 let top = s.flags & SCOPE_TOP != 0;
-                self.scopes.last_mut().expect("scope").lexical.insert(name.clone());
+                self.scopes
+                    .last_mut()
+                    .expect("scope")
+                    .lexical
+                    .insert(name.clone());
                 if self.module && top {
                     self.undefined_exports.retain(|(n, _)| n != name);
                 }
@@ -414,8 +519,8 @@ impl Parser {
             Bind::Var => {
                 for i in (0..self.scopes.len()).rev() {
                     let s = &self.scopes[i];
-                    let catch_exception = s.flags & SCOPE_SIMPLE_CATCH != 0
-                        && s.simple_catch.as_ref() == Some(name);
+                    let catch_exception =
+                        s.flags & SCOPE_SIMPLE_CATCH != 0 && s.simple_catch.as_ref() == Some(name);
                     if (s.lexical.contains(name) && !catch_exception)
                         || (!self.treat_functions_as_var_in(s) && s.functions.contains(name))
                     {
@@ -435,7 +540,10 @@ impl Parser {
             Bind::None | Bind::Outside => {}
         }
         if redeclared {
-            return self.raise(pos, format!("Identifier '{name}' has already been declared"));
+            return self.raise(
+                pos,
+                format!("Identifier '{name}' has already been declared"),
+            );
         }
         Ok(())
     }
@@ -482,17 +590,20 @@ impl Parser {
     }
 
     pub fn allow_super(&self) -> bool {
-        self.this_scope().flags & (SCOPE_SUPER | SCOPE_CLASS_FIELD_INIT) != 0
+        let f = self.this_scope().flags;
+        f & (SCOPE_SUPER | SCOPE_CLASS_FIELD_INIT) != 0
+            || (f & SCOPE_TOP != 0 && self.eval_super_property)
     }
 
     pub fn allow_direct_super(&self) -> bool {
-        self.this_scope().flags & SCOPE_DIRECT_SUPER != 0
+        let f = self.this_scope().flags;
+        f & SCOPE_DIRECT_SUPER != 0 || (f & SCOPE_TOP != 0 && self.eval_super_call)
     }
 
     pub fn allow_new_target(&self) -> bool {
-        self.this_scope().flags
-            & (SCOPE_FUNCTION | SCOPE_CLASS_STATIC_BLOCK | SCOPE_CLASS_FIELD_INIT)
-            != 0
+        let f = self.this_scope().flags;
+        f & (SCOPE_FUNCTION | SCOPE_CLASS_STATIC_BLOCK | SCOPE_CLASS_FIELD_INIT) != 0
+            || (f & SCOPE_TOP != 0 && self.eval_new_target)
     }
 
     pub fn in_class_static_block(&self) -> bool {
@@ -510,7 +621,7 @@ impl Parser {
                 return false;
             }
         }
-        false
+        self.eval_class_field
     }
 
     /// Early errors de un IdentifierReference/BindingIdentifier/LabelIdentifier (§13.1.1).
@@ -520,9 +631,11 @@ impl Parser {
         {
             return self.raise(pos, "Cannot use 'yield' as identifier inside a generator");
         }
-        if n == "await" && (self.in_async() || self.var_scope().flags & SCOPE_OUTER_AWAIT != 0)
-        {
-            return self.raise(pos, "Cannot use 'await' as identifier inside an async function");
+        if n == "await" && (self.in_async() || self.var_scope().flags & SCOPE_OUTER_AWAIT != 0) {
+            return self.raise(
+                pos,
+                "Cannot use 'await' as identifier inside an async function",
+            );
         }
         if n == "arguments" && self.arguments_forbidden() {
             return self.raise(
@@ -531,7 +644,10 @@ impl Parser {
             );
         }
         if self.in_class_static_block() && n == "await" {
-            return self.raise(pos, "Cannot use 'await' in class static initialization block");
+            return self.raise(
+                pos,
+                "Cannot use 'await' in class static initialization block",
+            );
         }
         if KEYWORDS.contains(&n) {
             return self.raise(pos, format!("Unexpected keyword '{n}'"));

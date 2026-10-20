@@ -57,6 +57,8 @@ pub struct FontKey(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glyph {
     pub advance: f32,
+    /// Offset en bytes UTF-8, dentro del texto pasado a `shape`, del primer carácter del
+    /// clúster. Siempre es un límite de carácter de ese texto.
     pub cluster: usize,
     pub id: u16,
     pub font: FontKey,

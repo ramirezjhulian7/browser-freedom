@@ -45,7 +45,10 @@ pub enum LitValue {
     String(JsString),
     /// Dígitos tal como aparecen (sin `n` ni separadores).
     BigInt(String),
-    Regex { pattern: String, flags: String },
+    Regex {
+        pattern: String,
+        flags: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

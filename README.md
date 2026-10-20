@@ -21,6 +21,8 @@ historial, scroll y zoom. El plan de las fases siguientes está en
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan (7 omitidos: encoders multibyte) |
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
+| Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
+| Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
@@ -109,7 +111,13 @@ motor JavaScript.
 - **`bf-shell`**: el binario. Carga en un hilo de trabajo y muestra el resultado en una
   ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
   páginas `about:` (ver [La interfaz](#la-interfaz)).
-- **`bf-js`**: reservado para el motor ECMAScript de la fase 2.
+- **`bf-js`** (fase 2, en curso): el front-end de ECMAScript 2026:
+  - lexer (§12) con identificadores Unicode, números correctamente redondeados, templates y
+    re-escaneo de regex dirigido por el parser;
+  - parser con las cover grammars, ASI, Annex B y todos los early errors;
+  - validador de la sintaxis de RegExp (§22.2.1, modos `u` y `v`);
+  - AST con la forma de ESTree (`bf-js dump-ast archivo.js [--module]`);
+  - `JsString` UTF-16.
 
 ## Arquitectura
 
@@ -120,7 +128,7 @@ motor JavaScript.
           encoding)                                                 ▲
                                                bf-font ─────────────┤ (métricas, shaping)
                                                bf-image ────────────┘ (tamaños naturales; pixmaps a bf-paint)
- bf-infra: tipos comunes, ResourceLoader, encodings (lo usan todos)       bf-js: fase 2
+ bf-infra: tipos comunes, ResourceLoader, encodings (lo usan todos)       bf-js: parser de JS (fase 2)
 ```
 
 El flujo de una página:
@@ -274,19 +282,26 @@ ventana nunca se bloquea.
 | html5lib-tests (tokenizador) | `tests/html5lib-tests` | submódulo de git |
 | css-parsing-tests | `tests/css-parsing-tests` | submódulo de git |
 | WPT: `html/syntax/parsing`, `url/resources` y los reftests de CSS | `tests/wpt` | `tools/fetch-wpt.sh` o `tools/fetch-wpt.ps1` |
+| test262-parser-tests | `tests/test262-parser-tests` | submódulo de git |
+| test262 (`harness`, `test/language`, `test/built-ins`, `test/annexB`, `test/intl402`) | `tests/test262` | `tools/fetch-test262.sh` o `tools/fetch-test262.ps1` |
 
 WPT pesa varios GB. `tools/fetch-wpt` hace un clon parcial y sparse de los directorios que se
-usan, en el commit pineado en `tools/wpt-commit.txt`. `tests/wpt/` no se versiona.
+usan, en el commit pineado en `tools/wpt-commit.txt`. `tools/fetch-test262` hace lo mismo con
+test262 (`tools/test262-commit.txt`). Ni `tests/wpt/` ni `tests/test262/` se versionan.
 
 ```sh
-git submodule update --init                 # tests/html5lib-tests y tests/css-parsing-tests
+git submodule update --init                 # html5lib-tests, css-parsing-tests, test262-parser-tests
 sh tools/fetch-wpt.sh                       # o: powershell -File tools/fetch-wpt.ps1
+sh tools/fetch-test262.sh                   # o: powershell -File tools/fetch-test262.ps1
 
 cargo test --workspace                      # todas las pruebas (sin los reftests)
 cargo test -p bf-html --test html5lib_tokenizer -- --nocapture       # resumen por archivo
 cargo test -p bf-html --test wpt_tree_construction -- --nocapture
 cargo test -p bf-css --test css_parsing_tests -- --nocapture
 cargo test -p bf-url --test wpt_url -- --nocapture
+cargo test -p bf-js --test parser_tests -- --nocapture         # test262-parser-tests
+cargo test -p bf-js --test test262_parse -- --nocapture        # parsing de test262 (escribe docs/test262-status.md)
+cargo test -p bf-js --release --test fuzz -- --ignored --nocapture   # 1000 mutaciones sin pánico
 cargo test -p bf-layout --test layout       # 102 casos propios (BF_LAYOUT_PRINT=1 imprime)
 cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPECTED=1 regenera)
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture  # reftests (~1,5 min)
@@ -304,6 +319,7 @@ Tablas generadas (con `python -I`):
 | `tools/gen_entities.py` | `crates/bf-html/data/entities.json` | entidades nombradas de HTML |
 | `tools/gen_idna.py` | `crates/bf-url/data/` (IDNA 18.0, bidi, joining) | `crates/bf-url/src/tables.rs` |
 | `tools/gen_encodings.py` | `crates/bf-infra/data/` (índices de WHATWG Encoding) | `crates/bf-infra/src/encoding_tables.rs` |
+| `tools/gen_unicode_id.py` | `crates/bf-js/data/` (UCD 18.0: ID_Start/ID_Continue, Zs, alias de propiedades) | `crates/bf-js/src/lexer/unicode_tables.rs` |
 
 Verificación completa antes de integrar cambios:
 

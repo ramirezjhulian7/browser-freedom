@@ -37,7 +37,10 @@ fn digits(
         *pos += 1;
     }
     if prev_sep {
-        return Err((*pos - 1, "Numeric separators are not allowed at the end of numeric literals"));
+        return Err((
+            *pos - 1,
+            "Numeric separators are not allowed at the end of numeric literals",
+        ));
     }
     Ok(out)
 }
@@ -112,7 +115,10 @@ pub fn scan(chars: &[char], pos: &mut usize) -> NResult {
             }
             if chars.get(*pos) == Some(&'n') {
                 *pos += 1;
-                let raw: String = chars[start..*pos - 1].iter().filter(|&&c| c != '_').collect();
+                let raw: String = chars[start..*pos - 1]
+                    .iter()
+                    .filter(|&&c| c != '_')
+                    .collect();
                 return Ok(Tok::BigInt(raw));
             }
             return Ok(Tok::Number {
@@ -160,7 +166,10 @@ pub fn scan(chars: &[char], pos: &mut usize) -> NResult {
     }
     // `0_1`: un cero inicial no admite separadores (§12.9.3, DecimalIntegerLiteral).
     if c == '0' && next == Some('_') {
-        return Err((start + 1, "Numeric separator can not be used after leading 0"));
+        return Err((
+            start + 1,
+            "Numeric separator can not be used after leading 0",
+        ));
     }
     let mut text = String::new();
     let mut integer = true;
@@ -170,7 +179,10 @@ pub fn scan(chars: &[char], pos: &mut usize) -> NResult {
     // BigInt: solo enteros decimales sin ceros a la izquierda.
     if chars.get(*pos) == Some(&'n') {
         *pos += 1;
-        let raw: String = chars[start..*pos - 1].iter().filter(|&&c| c != '_').collect();
+        let raw: String = chars[start..*pos - 1]
+            .iter()
+            .filter(|&&c| c != '_')
+            .collect();
         return Ok(Tok::BigInt(raw));
     }
     if chars.get(*pos) == Some(&'.') || matches!(chars.get(*pos), Some('e' | 'E')) {
@@ -254,7 +266,8 @@ mod tests {
         assert_eq!(value("0x20000000000001"), 9007199254740992.0);
         assert_eq!(value("0x20000000000003"), 9007199254740996.0);
         assert_eq!(value("0x1fffffffffffff800"), 36893488147419103232.0);
-        assert_eq!(value("0x1fffffffffffff801"), 36893488147419111424.0);
+        assert_eq!(value("0x1fffffffffffff801"), 36893488147419103232.0);
+        assert_eq!(value("0x1fffffffffffff7ff"), 36893488147419099136.0);
     }
 
     #[test]
