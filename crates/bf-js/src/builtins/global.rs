@@ -78,6 +78,10 @@ pub fn init_global_object(agent: &mut Agent, global: Gc<Object>) {
         ("URIError", i.uri_error_ctor),
         ("Math", i.math),
         ("Reflect", i.reflect),
+        // E2
+        ("RegExp", i.regexp_ctor),
+        ("BigInt", i.bigint_ctor),
+        ("Date", i.date_ctor),
     ];
     for (name, o) in ctors {
         agent.put_data(

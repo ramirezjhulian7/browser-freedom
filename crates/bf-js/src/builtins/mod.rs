@@ -16,6 +16,10 @@ pub mod object;
 pub mod reflect;
 pub mod string;
 pub mod symbol;
+// E2
+pub mod bigint;
+pub mod date;
+pub mod regexp;
 
 use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, Prop, PropValue};
@@ -199,4 +203,8 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     let bp = agent.new_object(Some(object_prototype));
     to_string_tag(agent, bp, "BigInt");
     agent.realms[realm].intrinsics.bigint_prototype = bp;
+    // E2
+    regexp::init(agent, realm);
+    bigint::init(agent, realm);
+    date::init(agent, realm);
 }

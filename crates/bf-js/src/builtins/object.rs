@@ -385,6 +385,9 @@ pub fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             ObjectKind::Boolean(_) => "Boolean",
             ObjectKind::Number(_) => "Number",
             ObjectKind::String(_) => "String",
+            // E2
+            ObjectKind::Date(_) => "Date",
+            ObjectKind::RegExp(_) => "RegExp",
             _ => "Object",
         }
     };
