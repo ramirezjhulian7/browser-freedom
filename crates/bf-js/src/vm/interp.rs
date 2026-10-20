@@ -5,7 +5,6 @@
 //! handler `catch` recibe la excepción en la pila; uno `finally` recibe la completion en sus
 //! dos slots (clase y valor) y al terminar el bloque `EndFinally` la continúa.
 
-use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::compiler::bytecode::*;
@@ -2007,11 +2006,6 @@ impl Agent {
                 Ok(())
             }
         }
-    }
-
-    /// Las decisiones de B.3.2.2/B.3.2.3 para el frame actual.
-    pub(crate) fn set_hoisted(&mut self, names: HashSet<Atom>) {
-        frame!(self).hoisted = Some(Rc::new(names));
     }
 }
 

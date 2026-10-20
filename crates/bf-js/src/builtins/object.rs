@@ -23,6 +23,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
         ("getOwnPropertyNames", 1, get_own_property_names),
         ("getOwnPropertySymbols", 1, get_own_property_symbols),
         ("getPrototypeOf", 1, get_prototype_of),
+        ("groupBy", 2, group_by_fn),
         ("hasOwn", 2, has_own),
         ("is", 2, is),
         ("isExtensible", 1, is_extensible),
@@ -375,10 +376,11 @@ pub fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => {}
     }
     let o = agent.to_object(&a.this)?;
+    let is_array = agent.is_array(&Value::Object(o))?;
     let builtin = {
         let obj = &agent.heap[o];
         match &obj.kind {
-            ObjectKind::Array(_) => "Array",
+            _ if is_array => "Array",
             ObjectKind::Arguments(_) => "Arguments",
             _ if obj.is_callable() => "Function",
             ObjectKind::Error => "Error",
@@ -490,4 +492,74 @@ fn lookup_getter(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn lookup_setter(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     lookup_accessor(agent, a, true)
+}
+
+/// GroupBy (§7.3.35) con coerción de clave de propiedad: los grupos en orden de aparición.
+pub fn group_by(
+    agent: &mut Agent,
+    items: &Value,
+    callback: &Value,
+    property_keys: bool,
+) -> JsResult<Vec<(Value, Vec<Value>)>> {
+    agent.require_object_coercible(items)?;
+    if !agent.is_callable(callback) {
+        return agent.type_error("groupBy: callback is not a function");
+    }
+    let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+    let (it, next) = agent.get_iterator(items)?;
+    let mut k = 0.0;
+    loop {
+        if k >= 9007199254740991.0 {
+            let e = agent.type_error("groupBy: too many elements");
+            agent.iterator_close_on_throw(&it);
+            return e;
+        }
+        let Some(value) = agent.iterator_step_value(&it, &next)? else {
+            return Ok(groups);
+        };
+        let key = match agent.call(
+            callback,
+            Value::Undefined,
+            &[value.clone(), Value::Number(k)],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                agent.iterator_close_on_throw(&it);
+                return Err(e);
+            }
+        };
+        let key = if property_keys {
+            match agent.to_property_key(&key) {
+                Ok(pk) => pk.to_value(),
+                Err(e) => {
+                    agent.iterator_close_on_throw(&it);
+                    return Err(e);
+                }
+            }
+        } else {
+            // CanonicalizeKeyedCollectionKey: −0 → +0.
+            match key {
+                Value::Number(n) if n == 0.0 && n.is_sign_negative() => Value::Number(0.0),
+                other => other,
+            }
+        };
+        // AddValueToKeyedGroup (§7.3.36).
+        match groups.iter_mut().find(|(gk, _)| agent.same_value(gk, &key)) {
+            Some((_, elems)) => elems.push(value),
+            None => groups.push((key, vec![value])),
+        }
+        k += 1.0;
+    }
+}
+
+/// Object.groupBy (§20.1.2.12).
+fn group_by_fn(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let groups = group_by(agent, &a.arg(0), &a.arg(1), true)?;
+    let obj = agent.new_object(None);
+    for (k, elems) in groups {
+        let arr = agent.create_array_from_list(&elems)?;
+        let key = agent.to_property_key(&k)?;
+        agent.create_data_property_or_throw(obj, key, Value::Object(arr))?;
+    }
+    Ok(Value::Object(obj))
 }
