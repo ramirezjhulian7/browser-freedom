@@ -297,6 +297,7 @@ const MEDIA_COMMON: &[Attr] = &[
     b("loop"),
     b("controls"),
     b_as("defaultMuted", "muted"),
+    e("loading", "loading", &LOADING),
 ];
 
 /// Las interfaces de elemento con sus atributos propios (sin los de HTMLElement).
@@ -331,6 +332,8 @@ pub static INTERFACES: &[Interface] = &[
             s("rel"),
             tl("relList", "rel"),
             e("referrerPolicy", "referrerpolicy", &REFERRER_POLICY),
+            s("hreflang"),
+            s("type"),
             b_as("noHref", "nohref"),
         ],
     ),
@@ -371,7 +374,6 @@ pub static INTERFACES: &[Interface] = &[
         "HTMLButtonElement",
         &[
             b("disabled"),
-            url_as("formAction", "formaction"),
             e("formEnctype", "formenctype", &FORM_ENCTYPE),
             e("formMethod", "formmethod", &BUTTON_FORM_METHOD),
             b_as("formNoValidate", "formnovalidate"),
@@ -478,7 +480,6 @@ pub static INTERFACES: &[Interface] = &[
             b_as("defaultChecked", "checked"),
             s_as("dirName", "dirname"),
             b("disabled"),
-            url_as("formAction", "formaction"),
             e("formEnctype", "formenctype", &FORM_ENCTYPE),
             e("formMethod", "formmethod", &INPUT_FORM_METHOD),
             b_as("formNoValidate", "formnovalidate"),

@@ -197,6 +197,7 @@ fn class_strings() {
     let mut p = Page::new(SIMPLE);
     assert_eq!(
         p.show("[document.body, document.body.firstChild.firstChild.firstChild, document.doctype || document.firstChild].map(x => Object.prototype.toString.call(x)).join()"),
-        "[object Element],[object Text],[object DocumentType]"
+        // E1: `body` tiene su interfaz HTML (HTMLBodyElement).
+        "[object HTMLBodyElement],[object Text],[object DocumentType]"
     );
 }

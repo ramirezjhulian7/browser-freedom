@@ -106,6 +106,75 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
         });
     }
     define_reflection(agent, realm);
+    define_document_colors(agent, realm);
+}
+
+/// Los atributos obsoletos de `Document` que reflejan los de `body` (HTML §15.3.1
+/// "Other elements, attributes and APIs": `fgColor`, `linkColor`, `vlinkColor`,
+/// `alinkColor`, `bgColor`, `[LegacyNullToEmptyString]`).
+const DOCUMENT_COLORS: [(&str, &str); 5] = [
+    ("fgColor", "text"),
+    ("linkColor", "link"),
+    ("vlinkColor", "vlink"),
+    ("alinkColor", "alink"),
+    ("bgColor", "bgcolor"),
+];
+
+fn define_document_colors(agent: &mut Agent, realm: RealmId) {
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let class = dom::classes(agent).document;
+    let proto = agent.host_class_objects(realm, class).prototype;
+    for (i, (idl, _)) in DOCUMENT_COLORS.iter().enumerate() {
+        let slot = vec![Value::Number(i as f64)];
+        let g =
+            agent.create_builtin_with_slots(document_color, 0, &format!("get {idl}"), slot.clone());
+        let s = agent.create_builtin_with_slots(set_document_color, 1, &format!("set {idl}"), slot);
+        let _ = agent.define_own_property(
+            proto,
+            PropertyKey::from(*idl),
+            PropertyDescriptor::accessor(Some(g), Some(s), true, true),
+        );
+    }
+    agent.current_realm = saved;
+}
+
+/// El atributo de `body` del accessor en curso y el `body` del documento (si es un
+/// elemento `body`).
+fn document_color_target(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+) -> JsResult<(&'static str, Option<NodeRef>)> {
+    let class = dom::classes(agent).document;
+    if !agent.host_is_instance(&a.this, class) {
+        return agent.type_error("Illegal invocation");
+    }
+    let i = match bf_js::builtins::slots(agent, a.callee).first() {
+        Some(Value::Number(n)) => *n as usize,
+        _ => 0,
+    };
+    let attr = DOCUMENT_COLORS[i.min(DOCUMENT_COLORS.len() - 1)].1;
+    let doc = this_node(agent, a)?;
+    let body = with_doc(agent, doc.doc, |d| {
+        d.body()
+            .filter(|b| d.element(*b).is_some_and(|e| e.is_html("body")))
+    });
+    Ok((attr, body.map(|b| NodeRef::new(doc.doc, b))))
+}
+
+fn document_color(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (attr, body) = document_color_target(agent, a)?;
+    let v = body.and_then(|b| attr_value(agent, b, attr));
+    Ok(v.map_or_else(|| js_str(""), |v| from_dom_string(&v)))
+}
+
+fn set_document_color(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (attr, body) = document_color_target(agent, a)?;
+    let v = webidl::to_dom_string_null_empty(agent, &a.arg(0))?;
+    if let Some(b) = body {
+        set_attr(agent, b, attr, DomString::from_utf16(v.units()))?;
+    }
+    Ok(Value::Undefined)
 }
 
 /// Los nombres locales con interfaz propia o `HTMLElement` (ver [`interface_for`]).
@@ -449,8 +518,17 @@ fn set_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn access_key_label(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(js_str(""))
+/// `accessKeyLabel` (§6.7.2): la combinación asignada al primer token de un carácter de
+/// `accesskey` (en Windows, Alt + la tecla); vacío si no hay tecla asignada.
+fn access_key_label(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let key = attr_value(agent, n, "accesskey").and_then(|v| {
+        v.to_string_lossy()
+            .split(['\t', '\n', '\x0C', '\r', ' '])
+            .find(|t| t.chars().count() == 1)
+            .map(str::to_uppercase)
+    });
+    Ok(js_str(&key.map(|k| format!("Alt+{k}")).unwrap_or_default()))
 }
 
 /// `draggable` (§6.11.7): `true`/`false` del atributo; sin él, `true` para `img` y los
@@ -768,9 +846,7 @@ pub fn rendered_text(agent: &Agent, n: NodeRef) -> String {
                         out.push_str(&"\n".repeat(pending));
                     }
                     pending = 0;
-                    let t = if out.is_empty() || out.ends_with('\n') {
-                        t.trim_start_matches(' ').to_owned()
-                    } else if out.ends_with(' ') {
+                    let t = if out.is_empty() || out.ends_with('\n') || out.ends_with(' ') {
                         t.trim_start_matches(' ').to_owned()
                     } else {
                         t

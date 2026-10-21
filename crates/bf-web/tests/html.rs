@@ -107,6 +107,16 @@ fn reflection_kinds() {
         p.show("var pr = document.createElement('progress'); pr.max = 0; pr.max = 5; pr.max"),
         "5"
     );
+    // §2.3.4.3: el exponente puede seguir al punto.
+    assert_eq!(p.show("pr.setAttribute('max', '1.e2'); pr.max"), "100");
+    assert_eq!(
+        p.show("var b = document.createElement('b'); b.accessKey = 'q r'; b.accessKeyLabel"),
+        "Alt+Q"
+    );
+    assert_eq!(
+        p.show("[document.bgColor = null, document.bgColor, document.body.getAttribute('bgcolor')].join('|')"),
+        "||"
+    );
     // Brand check.
     assert_eq!(
         p.show("try { Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'target').get.call(d) } catch (e) { e.constructor.name }"),

@@ -85,8 +85,13 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
                     Some(set_value_as_number),
                 )
                 .attribute("autocomplete", Some(autocomplete), Some(set_autocomplete))
-                .attribute("width", Some(zero), Some(ignore))
-                .attribute("height", Some(zero), Some(ignore)),
+                .attribute("width", Some(zero), Some(set_input_width))
+                .attribute("height", Some(zero), Some(set_input_height))
+                .attribute(
+                    "formAction",
+                    Some(form_action_attr),
+                    Some(set_form_action_attr),
+                ),
         )
         .attribute("willValidate", Some(will_validate), None)
         .method("checkValidity", 0, check_validity)
@@ -133,6 +138,11 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             .attribute("form", Some(option_form), None),
         "HTMLButtonElement" => class
             .attribute("form", Some(form_owner), None)
+            .attribute(
+                "formAction",
+                Some(form_action_attr),
+                Some(set_form_action_attr),
+            )
             .attribute("willValidate", Some(will_validate), None)
             .method("checkValidity", 0, check_validity)
             .method("reportValidity", 0, check_validity)
@@ -191,7 +201,40 @@ fn zero(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Number(0.0))
 }
 
-fn ignore(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+/// `width`/`height` de `input` (§4.10.5.1.20): sin imagen, 0; el setter refleja el
+/// atributo como `unsigned long`.
+fn set_dimension(agent: &mut Agent, a: &CallArgs<'_>, name: &str) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let v = webidl::to_unsigned_long(agent, &a.arg(0))?;
+    let v = if v <= 2147483647 { v } else { 0 };
+    set_attr(agent, n, name, DomString::from(v.to_string().as_str()))?;
+    Ok(Value::Undefined)
+}
+
+fn set_input_width(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    set_dimension(agent, a, "width")
+}
+
+fn set_input_height(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    set_dimension(agent, a, "height")
+}
+
+/// `formAction` (§4.10.18.6): sin atributo (o vacío), la URL del documento; si no, el
+/// atributo parseado (o tal cual si no parsea).
+fn form_action_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let v = attr_value(agent, n, "formaction").map(|s| s.to_string_lossy().into_owned());
+    let url = match v.as_deref() {
+        None | Some("") => with_doc(agent, n.doc, |d| d.url.serialize(false)),
+        Some(s) => parse_url(agent, n, s).map_or_else(|| s.to_owned(), |u| u.serialize(false)),
+    };
+    Ok(js_str(&url))
+}
+
+fn set_form_action_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let v = webidl::to_dom_string(agent, &a.arg(0))?;
+    set_attr(agent, n, "formaction", DomString::from_utf16(v.units()))?;
     Ok(Value::Undefined)
 }
 
@@ -290,7 +333,7 @@ fn days_in_month(y: u32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ if (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400) => 29,
         _ => 28,
     }
 }
@@ -1071,8 +1114,7 @@ fn option_text_of(agent: &Agent, o: NodeRef) -> String {
                 let in_script = d.inclusive_ancestors(id).iter().any(|a| {
                     *a != o.node
                         && d.element(*a).is_some_and(|e| {
-                            e.name.to_string() == "script"
-                                && matches!(e.ns, Namespace::Html | Namespace::Svg)
+                            e.name == "script" && matches!(e.ns, Namespace::Html | Namespace::Svg)
                         })
                 });
                 if !in_script {
@@ -1082,7 +1124,7 @@ fn option_text_of(agent: &Agent, o: NodeRef) -> String {
         }
         s
     });
-    raw.split(|c: char| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' '))
+    raw.split(['\t', '\n', '\x0C', '\r', ' '])
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
