@@ -8,7 +8,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WPT="$ROOT/tests/wpt"
-DIRS="html/syntax/parsing fonts css/support css/CSS2/box-display css/CSS2/margin-padding-clear css/CSS2/normal-flow css/CSS2/floats css/CSS2/floats-clear css/CSS2/positioning css/CSS2/linebox css/CSS2/text css/CSS2/colors css/CSS2/borders css/CSS2/support css/CSS2/reference css/css-backgrounds css/selectors css/reference url/resources css/css-flexbox css/CSS2/tables css/css-tables css/css-grid css/css-ui dom/nodes dom/events html/syntax/serializing-html-fragments resources common dom html/dom html/semantics/scripting-1 html/webappapis html/resources url encoding console interfaces"
+DIRS="html/syntax/parsing fonts css/support css/CSS2/box-display css/CSS2/margin-padding-clear css/CSS2/normal-flow css/CSS2/floats css/CSS2/floats-clear css/CSS2/positioning css/CSS2/linebox css/CSS2/text css/CSS2/colors css/CSS2/borders css/CSS2/support css/CSS2/reference css/css-backgrounds css/selectors css/reference url/resources css/css-flexbox css/CSS2/tables css/css-tables css/css-grid css/css-ui dom/nodes dom/events html/syntax/serializing-html-fragments resources common dom html/dom html/semantics/scripting-1 html/semantics/forms html/semantics/interactive-elements html/webappapis html/resources url encoding console interfaces"
 COMMIT="$(tr -d ' \r\n' < "$ROOT/tools/wpt-commit.txt")"
 
 if [ -d "$WPT/.git" ]; then

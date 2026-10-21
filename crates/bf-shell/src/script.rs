@@ -248,6 +248,15 @@ impl BomHooks for ShellBom {
         });
     }
 
+    // E1: el envío POST de un formulario desde script.
+    fn navigate_post(&mut self, url: &Url, body: Vec<u8>, content_type: &str) {
+        self.request(PageRequest::Navigate {
+            url: url.clone(),
+            replace: false,
+            post: Some((body, content_type.to_owned())),
+        });
+    }
+
     fn same_document_navigation(&mut self, url: &Url, replace: bool) {
         self.request(PageRequest::SameDocument {
             url: url.clone(),
@@ -612,6 +621,17 @@ impl Engine {
             .into_iter()
             .map(|(n, _, p)| (n, p))
             .collect()
+    }
+
+    /// Completa una activación del documento de la ventana (E1: `label`, `summary`).
+    pub fn run_activation(&mut self, a: bf_dom::events::Activation) {
+        let realm = self.realm;
+        let agent = &mut self.rt.agent;
+        let saved = agent.current_realm;
+        agent.current_realm = realm;
+        bf_web::html::activation::run(agent, 0, a);
+        agent.current_realm = saved;
+        self.flush_rejections();
     }
 
     /// Cambia cada vez que un script dibuja en un `<canvas>` (E1).

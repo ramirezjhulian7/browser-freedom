@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use bf_dom::events::{EventInit, EventKind, EventTarget};
+use bf_dom::events::EventInit;
 use bf_dom::{DomException, Namespace, NodeData};
 use bf_infra::DomString;
 use bf_js::host::{HostClass, webidl};
@@ -22,7 +22,6 @@ use super::elements::{
     attr_value, html_element_arg, html_local_name, live_collection, parse_url, set_attr,
 };
 use super::reflect::parse_float;
-use super::scripting::fire_event;
 use crate::dom::{from_dom_string, mutated, this_node, throw_dom, wrap_node, wrap_opt};
 use crate::{NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
@@ -159,8 +158,8 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             .method("submit", 0, form_submit)
             .method("requestSubmit", 0, form_request_submit)
             .method("reset", 0, form_reset)
-            .method("checkValidity", 0, check_validity)
-            .method("reportValidity", 0, check_validity),
+            .method("checkValidity", 0, form_check_validity)
+            .method("reportValidity", 0, form_check_validity),
         "HTMLLabelElement" => class
             .attribute("control", Some(label_control), None)
             .attribute("form", Some(label_form), None),
@@ -877,57 +876,32 @@ fn set_form_action(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// `submit()` (§4.10.21.3, "submitted from submit() method"): sin eventos; la navegación
-/// todavía no se hace desde el motor.
-fn form_submit(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+/// `submit()` (§4.10.21.3, "submitted from submit() method"): sin eventos ni validación.
+fn form_submit(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    super::submission::submit(agent, n, n, true);
     Ok(Value::Undefined)
 }
 
-/// `requestSubmit(submitter)` (§4.10.18.6): valida el submitter y dispara `submit`
-/// (cancelable).
+/// `requestSubmit(submitter)` (§4.10.18.6): valida el submitter y envía con eventos.
 fn form_request_submit(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let submitter = a.arg(0);
+    let mut from = n;
     if !matches!(submitter, Value::Undefined | Value::Null) {
         let Some(s) = html_element_arg(agent, &submitter) else {
             return agent.type_error("The specified element is not a submit button.");
         };
-        let is_submit = match html_local_name(agent, s).as_deref() {
-            Some("button") => !matches!(
-                attr_value(agent, s, "type")
-                    .map(|t| t.to_string_lossy().to_ascii_lowercase())
-                    .as_deref(),
-                Some("reset" | "button")
-            ),
-            Some("input") => matches!(input_type(agent, s).as_str(), "submit" | "image"),
-            _ => false,
-        };
-        if !is_submit {
+        if !super::submission::is_submit_button(agent, s) {
             return agent.type_error("The specified element is not a submit button.");
         }
         if form_owner_of(agent, s) != Some(n) {
             return throw_dom(agent, DomException::NotFoundError);
         }
+        from = s;
     }
-    submit_form(agent, n);
+    super::submission::submit(agent, n, from, false);
     Ok(Value::Undefined)
-}
-
-/// "Submit" (§4.10.21.3) hasta el evento `submit`.
-fn submit_form(agent: &mut Agent, form: NodeRef) {
-    let init = EventInit {
-        bubbles: true,
-        cancelable: true,
-        composed: false,
-    };
-    fire_event(
-        agent,
-        form.doc,
-        EventTarget::Node(form.node),
-        "submit",
-        init,
-        EventKind::Event,
-    );
 }
 
 /// `reset()` (§4.10.21.6): dispara `reset` (cancelable) y, si no se canceló, el "reset
@@ -938,49 +912,75 @@ fn form_reset(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn reset_form(agent: &mut Agent, form: NodeRef) {
+/// "Reset" (§4.10.21.6): `reset` (cancelable, de confianza) y el "reset algorithm" de cada
+/// control.
+pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
+    let realm = WebContextHandle::current(agent).realm;
+    // "Locked for reset".
+    let locked = agent
+        .realm_data::<ResetLocks>(realm)
+        .is_some_and(|l| l.0.contains(&form));
+    if locked {
+        return;
+    }
+    if agent.realm_data::<ResetLocks>(realm).is_none() {
+        agent.set_realm_data(realm, ResetLocks::default());
+    }
+    if let Some(l) = agent.realm_data_mut::<ResetLocks>(realm) {
+        l.0.push(form);
+    }
     let init = EventInit {
         bubbles: true,
         cancelable: true,
         composed: false,
     };
-    if !fire_event(
-        agent,
-        form.doc,
-        EventTarget::Node(form.node),
-        "reset",
-        init,
-        EventKind::Event,
-    ) {
-        return;
-    }
-    for c in listed_elements(agent, form) {
-        match html_local_name(agent, c).as_deref() {
-            Some("input") => {
-                let st = state_mut(agent, c);
-                st.value = None;
-                st.selection = None;
-                let checked = attr_value(agent, c, "checked").is_some();
-                with_doc_mut(agent, c.doc, |d| d.set_checkedness(c.node, checked));
+    if super::submission::fire_simple(agent, form, "reset", init) {
+        for c in listed_elements(agent, form) {
+            match html_local_name(agent, c).as_deref() {
+                Some("input" | "textarea") => {
+                    let st = state_mut(agent, c);
+                    st.value = None;
+                    st.selection = None;
+                    with_doc_mut(agent, c.doc, |d| d.reset_form_control(c.node));
+                }
+                Some("select") => {
+                    with_doc_mut(agent, c.doc, |d| d.reset_form_control(c.node));
+                }
+                _ => {}
             }
-            Some("textarea") => {
-                let st = state_mut(agent, c);
-                st.value = None;
-                st.selection = None;
-            }
-            _ => {}
         }
+        mutated(agent);
     }
-    mutated(agent);
+    if let Some(l) = agent.realm_data_mut::<ResetLocks>(realm) {
+        l.0.retain(|f| *f != form);
+    }
 }
+
+/// Los formularios con el *locked for reset flag*.
+#[derive(Debug, Default)]
+struct ResetLocks(Vec<NodeRef>);
 
 // --- Validación (§4.10.20, mínima) ---
 
 /// `willValidate`: los controles no deshabilitados ni de tipo hidden/reset/button.
 fn will_validate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    Ok(Value::Boolean(will_validate_node(agent, n)))
+}
+
+/// ¿Es candidato a la validación de restricciones (§4.10.20.1)?
+pub(super) fn will_validate_node(agent: &Agent, n: NodeRef) -> bool {
     let name = html_local_name(agent, n).unwrap_or_default();
-    let barred = attr_value(agent, n, "disabled").is_some()
+    if !matches!(name.as_str(), "input" | "textarea" | "select" | "button") {
+        return false;
+    }
+    let in_datalist = with_doc(agent, n.doc, |d| {
+        d.inclusive_ancestors(n.node)
+            .iter()
+            .any(|a| is_html_el(d, *a, "datalist"))
+    });
+    let barred = in_datalist
+        || with_doc(agent, n.doc, |d| d.is_disabled(n.node))
         || (name == "input"
             && matches!(input_type(agent, n).as_str(), "hidden" | "reset" | "button"))
         || (name == "button"
@@ -992,15 +992,45 @@ fn will_validate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             }))
         || (matches!(name.as_str(), "input" | "textarea")
             && attr_value(agent, n, "readonly").is_some());
-    Ok(Value::Boolean(!barred))
+    !barred
 }
 
-/// `checkValidity()` con los estados `valueMissing` y `customError`.
+/// `checkValidity()` (§4.10.20.3): si es candidato y no satisface sus restricciones,
+/// dispara `invalid` (cancelable) y devuelve `false`.
 fn check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    Ok(Value::Boolean(check_node(agent, n)))
+}
+
+fn check_node(agent: &mut Agent, n: NodeRef) -> bool {
+    if !will_validate_node(agent, n) || satisfies_constraints(agent, n) {
+        return true;
+    }
+    let init = EventInit {
+        cancelable: true,
+        ..EventInit::default()
+    };
+    super::submission::fire_simple(agent, n, "invalid", init);
+    false
+}
+
+/// `form.checkValidity()`: valida cada control del formulario ("statically validate").
+fn form_check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let mut valid = true;
+    for c in listed_elements(agent, n) {
+        if !check_node(agent, c) {
+            valid = false;
+        }
+    }
+    Ok(Value::Boolean(valid))
+}
+
+/// ¿Satisface sus restricciones? (Los estados `valueMissing` y `customError`.)
+pub(super) fn satisfies_constraints(agent: &Agent, n: NodeRef) -> bool {
     let st = state(agent, n);
     if !st.custom_validity.is_empty() {
-        return Ok(Value::Boolean(false));
+        return false;
     }
     let name = html_local_name(agent, n).unwrap_or_default();
     let required = attr_value(agent, n, "required").is_some();
@@ -1011,9 +1041,35 @@ fn check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 _ => current_value(agent, n).is_empty(),
             },
             "textarea" => textarea_api_value(agent, n).is_empty(),
+            "select" => !options(agent, n).iter().any(|o| {
+                with_doc(agent, o.doc, |d| d.option_selectedness(o.node))
+                    && !option_value_of(agent, *o).is_empty()
+            }),
             _ => false,
         };
-    Ok(Value::Boolean(!missing))
+    !missing
+}
+
+// --- Para el envío (`submission`) ---
+
+pub(super) fn input_current_value(agent: &Agent, n: NodeRef) -> String {
+    current_value(agent, n)
+}
+
+pub(super) fn textarea_value_of(agent: &Agent, n: NodeRef) -> String {
+    textarea_api_value(agent, n)
+}
+
+pub(super) fn select_options(agent: &Agent, n: NodeRef) -> Vec<NodeRef> {
+    options(agent, n)
+}
+
+pub(super) fn option_value_str(agent: &Agent, o: NodeRef) -> String {
+    option_value_of(agent, o)
+}
+
+pub(super) fn labeled_control(agent: &Agent, label: NodeRef) -> Option<NodeRef> {
+    label_control_of(agent, label)
 }
 
 fn set_custom_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
