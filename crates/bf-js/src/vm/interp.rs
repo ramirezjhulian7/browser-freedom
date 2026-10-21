@@ -138,7 +138,26 @@ impl Agent {
                         self.safepoint()?;
                         continue;
                     }
-                    self.step()
+                    let f = frame!(self);
+                    match f.code.ops[f.pc] {
+                        Op::Return => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            let v = f.stack.pop().expect("pila vacía");
+                            Ok(Flow::Return(v))
+                        }
+                        Op::Call(argc, t) => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            self.op_call(argc, t)
+                        }
+                        Op::New(argc, t) => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            self.op_new(argc, t)
+                        }
+                        _ => self.step(),
+                    }
                 }
             };
             match r {
@@ -148,7 +167,12 @@ impl Agent {
                         if !frame!(self).inline {
                             return Ok(FrameExit::Return(v));
                         }
-                        // La vuelta de una llamada en línea: el resultado al llamador.
+                        // La vuelta de una llamada en línea: el resultado al llamador (en un
+                        // `new`, el objeto devuelto o `this`).
+                        let v = match frame!(self).construct {
+                            Some(t) if !v.is_object() => Value::Object(t),
+                            _ => v,
+                        };
                         self.pop_inline_frame();
                         self.push(v);
                         self.safepoint()?;
@@ -347,6 +371,82 @@ impl Agent {
     }
 
     // --- Instrucciones ---
+
+    /// `Call(argc, t)` (fuera de `step`: las llamadas son frecuentes y `step` es grande). E3.
+    #[inline(never)]
+    fn op_call(&mut self, argc: u32, t: u32) -> JsResult<Flow> {
+        let n = argc as usize;
+        let len = frame!(self).stack.len();
+        let base = len - n - 2;
+        let callee = frame!(self).stack[base].clone();
+        if !self.is_callable(&callee) {
+            return self.not_callable(t, &callee, "a function");
+        }
+        let closure = matches!(&callee, Value::Object(o)
+            if matches!(self.heap[*o].kind, ObjectKind::Function(_)));
+        let r = if closure {
+            // Una función ECMAScript recibe los argumentos sin copiarlos (E3): salen de
+            // la pila y pasan a su frame (no hay recolección hasta que el frame entra en
+            // la pila de frames).
+            let s = &mut frame!(self).stack;
+            let args = s.split_off(base + 2);
+            let this = s.pop().expect("this");
+            s.pop();
+            // Una función simple corre en este mismo bucle (sin recursión de Rust).
+            if let Value::Object(fo) = callee
+                && let Some(frame) = self.inline_frame(fo, this.clone(), &args)?
+            {
+                let mut frame = frame;
+                frame.args = args;
+                self.frames.push(frame);
+                return Ok(Flow::Next);
+            }
+            self.call_internal_vec(&callee, this, args)?
+        } else {
+            let (this, args) = {
+                let s = &frame!(self).stack;
+                (s[base + 1].clone(), s[base + 2..].to_vec())
+            };
+            let r = self.call_internal(&callee, this, &args)?;
+            frame!(self).stack.truncate(base);
+            r
+        };
+        self.push(r);
+        self.safepoint()?;
+        Ok(Flow::Next)
+    }
+
+    /// `New(argc, t)` (fuera de `step`). E3.
+    #[inline(never)]
+    fn op_new(&mut self, argc: u32, t: u32) -> JsResult<Flow> {
+        let n = argc as usize;
+        let len = frame!(self).stack.len();
+        let base = len - n - 1;
+        // Un constructor ECMAScript corre en este mismo bucle (E3). `this` se crea
+        // antes de sacar los argumentos de la pila (que siguen enraizados si corre JS).
+        if let Value::Object(fo) = frame!(self).stack[base]
+            && let Some(mut frame) = self.inline_construct_frame(fo)?
+        {
+            let s = &mut frame!(self).stack;
+            frame.args = s.split_off(base + 1);
+            s.pop();
+            self.current_realm = frame.realm;
+            self.frames.push(frame);
+            return Ok(Flow::Next);
+        }
+        let (callee, args) = {
+            let s = &frame!(self).stack;
+            (s[base].clone(), s[base + 1..].to_vec())
+        };
+        if !self.is_constructor(&callee) {
+            return self.not_callable(t, &callee, "a constructor");
+        }
+        let r = self.new_operator(&callee, &args)?;
+        frame!(self).stack.truncate(base);
+        self.push(r);
+        self.safepoint()?;
+        Ok(Flow::Next)
+    }
 
     fn step(&mut self) -> JsResult<Flow> {
         self.instructions += 1;
@@ -1218,46 +1318,7 @@ impl Agent {
             }
 
             // --- Llamadas ---
-            Op::Call(argc, t) => {
-                let n = argc as usize;
-                let len = frame!(self).stack.len();
-                let base = len - n - 2;
-                let callee = frame!(self).stack[base].clone();
-                if !self.is_callable(&callee) {
-                    return self.not_callable(t, &callee, "a function");
-                }
-                let closure = matches!(&callee, Value::Object(o)
-                    if matches!(self.heap[*o].kind, ObjectKind::Function(_)));
-                let r = if closure {
-                    // Una función ECMAScript recibe los argumentos sin copiarlos (E3): salen de
-                    // la pila y pasan a su frame (no hay recolección hasta que el frame entra en
-                    // la pila de frames).
-                    let s = &mut frame!(self).stack;
-                    let args = s.split_off(base + 2);
-                    let this = s.pop().expect("this");
-                    s.pop();
-                    // Una función simple corre en este mismo bucle (sin recursión de Rust).
-                    if let Value::Object(fo) = callee
-                        && let Some(frame) = self.inline_frame(fo, this.clone(), &args)?
-                    {
-                        let mut frame = frame;
-                        frame.args = args;
-                        self.frames.push(frame);
-                        return Ok(Flow::Next);
-                    }
-                    self.call_internal_vec(&callee, this, args)?
-                } else {
-                    let (this, args) = {
-                        let s = &frame!(self).stack;
-                        (s[base + 1].clone(), s[base + 2..].to_vec())
-                    };
-                    let r = self.call_internal(&callee, this, &args)?;
-                    frame!(self).stack.truncate(base);
-                    r
-                };
-                self.push(r);
-                self.safepoint()?;
-            }
+            Op::Call(argc, t) => return self.op_call(argc, t),
             Op::CallSpread(t) => {
                 let arr = self.peek(0).clone();
                 let this = self.peek(1).clone();
@@ -1296,22 +1357,7 @@ impl Agent {
                 s.truncate(n - 3);
                 self.push(r);
             }
-            Op::New(argc, t) => {
-                let n = argc as usize;
-                let len = frame!(self).stack.len();
-                let base = len - n - 1;
-                let (callee, args) = {
-                    let s = &frame!(self).stack;
-                    (s[base].clone(), s[base + 1..].to_vec())
-                };
-                if !self.is_constructor(&callee) {
-                    return self.not_callable(t, &callee, "a constructor");
-                }
-                let r = self.new_operator(&callee, &args)?;
-                frame!(self).stack.truncate(base);
-                self.push(r);
-                self.safepoint()?;
-            }
+            Op::New(argc, t) => return self.op_new(argc, t),
             Op::NewSpread(t) => {
                 let arr = self.peek(0).clone();
                 let callee = self.peek(1).clone();

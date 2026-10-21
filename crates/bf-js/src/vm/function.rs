@@ -442,6 +442,56 @@ impl Agent {
         Ok(Some(frame))
     }
 
+    /// El frame de un `new` en línea a `f` (E3): una función ECMAScript constructora que no es
+    /// un constructor derivado; crea `this` (con los campos de la clase) antes de devolverlo.
+    /// `None` si no corresponde.
+    pub(crate) fn inline_construct_frame(&mut self, f: Gc<Object>) -> JsResult<Option<Frame>> {
+        let (code, env, realm) = match &self.heap[f].kind {
+            ObjectKind::Function(c)
+                if c.is_constructor
+                    && !matches!(c.code.kind, CodeKind::ClassConstructor { derived: true }) =>
+            {
+                (c.code.clone(), c.env, c.realm)
+            }
+            _ => return Ok(None),
+        };
+        if self.stack_exhausted() {
+            return Ok(None);
+        }
+        // §10.2.2 pasos 3-6: OrdinaryCreateFromConstructor y los campos. `prototype` como
+        // propiedad propia de datos con un objeto es lo que devuelve [[Get]] (sin getter).
+        let own = match self.heap[f].props.get(&self.keys.prototype) {
+            Some(crate::object::Prop {
+                value: PropValue::Data {
+                    value: Value::Object(p),
+                    ..
+                },
+                ..
+            }) => Some(*p),
+            _ => None,
+        };
+        let proto = match own {
+            Some(p) => p,
+            None => self.get_prototype_from_constructor(f, |i| i.object_prototype)?,
+        };
+        let t = self.new_object(Some(proto));
+        if matches!(code.kind, CodeKind::ClassConstructor { .. }) {
+            let saved = self.current_realm;
+            self.current_realm = realm;
+            let r = self.initialize_instance_elements(t, f);
+            self.current_realm = saved;
+            r?;
+        }
+        let mut frame = self.new_frame(code, env, realm);
+        frame.this = Some(Value::Object(t));
+        frame.callee = Some(f);
+        frame.new_target = Some(f);
+        frame.inline = true;
+        frame.construct = Some(t);
+        frame.caller_realm = self.current_realm;
+        Ok(Some(frame))
+    }
+
     /// `[[Call]]` con los argumentos ya en un vector propio: a una función ECMAScript se le
     /// pasan sin copiarlos (E3).
     pub(crate) fn call_internal_vec(
@@ -775,7 +825,12 @@ impl Agent {
         ctor: Gc<Object>,
     ) -> JsResult<()> {
         let class = match &self.heap[ctor].kind {
-            ObjectKind::Function(c) => c.class.as_ref().map(|c| (**c).clone()),
+            // Sin campos ni métodos privados no hay nada que hacer (y no se copia la clase).
+            ObjectKind::Function(c) => c
+                .class
+                .as_ref()
+                .filter(|c| !c.fields.is_empty() || !c.private_methods.is_empty())
+                .map(|c| (**c).clone()),
             _ => None,
         };
         let Some(class) = class else { return Ok(()) };

@@ -59,6 +59,9 @@ pub struct Frame {
     pub inline: bool,
     /// El realm en curso antes de la llamada (para restaurarlo al volver).
     pub caller_realm: RealmId,
+    /// En un `new` en línea: el objeto `this` creado (si el cuerpo no devuelve un objeto, el
+    /// resultado es él).
+    pub construct: Option<Gc<Object>>,
 }
 
 impl Frame {
@@ -88,6 +91,7 @@ impl Frame {
             hoisted: None,
             inline: false,
             caller_realm: realm,
+            construct: None,
         }
     }
 
@@ -111,6 +115,7 @@ impl Frame {
             hoisted: None,
             inline: false,
             caller_realm: realm,
+            construct: None,
         }
     }
 }
