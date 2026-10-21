@@ -24,7 +24,17 @@ pub use cookies::CookieJar;
 pub use http::Headers;
 pub use sniff::{EncodingSource, MimeType, html_encoding, html_encoding_with_source};
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; Freedom/0.1)";
+/// La versión mayor de Chrome estable que anuncia Freedom (se actualiza con cada versión
+/// estable de Chrome: los sitios detectan el navegador por ella).
+pub const CHROME_MAJOR: &str = "153";
+
+/// El `User-Agent` de Freedom: el de Chrome estable en Windows (con la versión reducida,
+/// `Chrome/<mayor>.0.0.0`) y `Freedom/0.1` al final, para que los sitios lo traten como Chrome.
+pub const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/",
+    "153",
+    ".0.0.0 Safari/537.36 Freedom/0.1"
+);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 20;

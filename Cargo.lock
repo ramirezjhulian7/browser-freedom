@@ -417,6 +417,7 @@ dependencies = [
  "bf-html",
  "bf-image",
  "bf-infra",
+ "bf-js",
  "bf-layout",
  "bf-net",
  "bf-paint",

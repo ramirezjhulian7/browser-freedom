@@ -16,6 +16,7 @@ use bf_net::{
 };
 
 use crate::internal;
+use crate::script::{Engine, parse_with_scripts};
 use crate::theme::Theme;
 
 /// Los subrecursos de un documento (hojas, imágenes, fuentes) en memoria, para que volver a
@@ -219,22 +220,31 @@ impl LoadContext {
 }
 
 /// Carga para la línea de comandos: las páginas internas se generan; un error de red es un
-/// error del comando.
+/// error del comando. Los scripts se ejecutan (la consola va a stderr).
 pub fn load(arg: &str) -> Result<Loaded, String> {
     let url = url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     if url.scheme == "about" {
         return Ok(internal::page(&url, &LoadContext::cli()));
     }
-    fetch_document(&url, Arc::new(NetLoader::new()))
-        .map_err(|e| format!("no se pudo cargar {url}: {e}"))
+    let mut engine = Engine::stderr();
+    let loaded = fetch_document_with(&url, Arc::new(NetLoader::new()), None, Some(&mut engine))
+        .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
+    if engine.executed > 0 {
+        eprintln!(
+            "scripts: {} ejecutados, {} con error",
+            engine.executed, engine.failed
+        );
+    }
+    Ok(loaded)
 }
 
-/// Carga para la ventana: nunca falla; los errores se muestran como `about:error`.
-pub fn load_with(url: &Url, ctx: &LoadContext) -> Loaded {
+/// Carga para la ventana: nunca falla; los errores se muestran como `about:error`. Con
+/// `engine`, los scripts del documento se ejecutan con él.
+pub fn load_with(url: &Url, ctx: &LoadContext, engine: Option<&mut Engine>) -> Loaded {
     if url.scheme == "about" {
         return internal::page(url, ctx);
     }
-    match fetch_document_with(url, ctx.net.clone(), ctx.post.clone()) {
+    match fetch_document_with(url, ctx.net.clone(), ctx.post.clone(), engine) {
         // Un 4xx/5xx sin cuerpo: la página de error interna (con cuerpo, se muestra el del
         // servidor, como hacen los navegadores).
         Ok(l) if l.meta.bytes == 0 && l.meta.status.as_ref().is_some_and(|s| s.0 >= 400) => {
@@ -264,14 +274,16 @@ pub fn document_base_url(doc: &Document, url: &Url) -> Url {
 
 /// Fetch y parseo de `url` con `net` (que conserva conexiones y cookies entre cargas).
 pub fn fetch_document(url: &Url, net: Arc<NetLoader>) -> Result<Loaded, LoadError> {
-    fetch_document_with(url, net, None)
+    fetch_document_with(url, net, None, None)
 }
 
-/// Como [`fetch_document`], con un cuerpo `POST` (envío de formularios): `(bytes, Content-Type)`.
+/// Como [`fetch_document`], con un cuerpo `POST` (envío de formularios): `(bytes, Content-Type)`,
+/// y, con `engine`, ejecutando los scripts del documento HTML durante el parseo.
 pub fn fetch_document_with(
     url: &Url,
     net: Arc<NetLoader>,
     post: Option<(Vec<u8>, String)>,
+    engine: Option<&mut Engine>,
 ) -> Result<Loaded, LoadError> {
     let start = Instant::now();
     let mut options = FetchOptions::document();
@@ -291,6 +303,7 @@ pub fn fetch_document_with(
     }
     let fetch = start.elapsed();
     let start = Instant::now();
+    let loader = Arc::new(CachedLoader::new(net));
     let content_type = response.content_type();
     let path = response.url.path_string().to_ascii_lowercase();
     let xml = match &content_type {
@@ -320,7 +333,10 @@ pub fn fetch_document_with(
             );
         }
         let (text, enc) = encoding::decode(&response.body, enc);
-        let (doc, _) = bf_html::parse_document(&text, &bf_html::ParseOptions::default());
+        let doc = match engine {
+            Some(engine) => parse_with_scripts(&text, &response.url, engine, loader.clone()),
+            None => bf_html::parse_document(&text, &bf_html::ParseOptions::default()).0,
+        };
         (doc, enc, source)
     };
     let base = document_base_url(&doc, &response.url);
@@ -339,7 +355,7 @@ pub fn fetch_document_with(
         url: response.url,
         base,
         encoding,
-        loader: Arc::new(CachedLoader::new(net)),
+        loader,
         fetch,
         parse: start.elapsed(),
         meta,
