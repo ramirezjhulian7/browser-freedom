@@ -539,6 +539,18 @@ impl Engine {
         snapshot.scroll = scroll;
         snapshot.device_pixel_ratio = device_pixel_ratio;
         *self.images.borrow_mut() = page.images.sizes.clone();
+        // E1: las imágenes decodificadas de la página, para `drawImage`/`createPattern` con
+        // `<img>` (los bitmaps de los canvas no: esos ya los tiene el motor).
+        let bitmaps: std::collections::HashMap<String, Arc<bf_paint::Pixmap>> = page
+            .images
+            .by_url
+            .iter()
+            .filter(|(url, _)| !url.starts_with("canvas:"))
+            .map(|(url, p)| (url.clone(), p.clone()))
+            .collect();
+        self.rt
+            .agent
+            .set_realm_data(realm, bf_web::html::canvas::ImageBitmaps(bitmaps));
         if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
             ctx.layout = Some(snapshot);
         }

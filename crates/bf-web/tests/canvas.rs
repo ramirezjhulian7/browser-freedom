@@ -498,3 +498,29 @@ fn fingerprint_script() {
         "true,true,4"
     );
 }
+
+/// `drawImage` con un `<img>`: usa el bitmap que el navegador decodificó (`ImageBitmaps`);
+/// sin él, no dibuja nada.
+#[test]
+fn draw_image_from_img() {
+    let mut p = Page::with(
+        "<!DOCTYPE html><body><canvas id=c width=20 height=20></canvas><img id=i src=a.png>\
+         <img id=j src=nada.png></body>",
+    );
+    let realm = p.ctx.realm;
+    let mut bitmap = tiny_skia::Pixmap::new(2, 2).unwrap();
+    bitmap.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/a.png".to_owned(),
+        std::sync::Arc::new(bitmap),
+    );
+    p.rt.agent
+        .set_realm_data(realm, bf_web::html::canvas::ImageBitmaps(map));
+    p.show(
+        "ctx.drawImage(document.getElementById('i'), 3, 3, 4, 4); \
+            ctx.drawImage(document.getElementById('j'), 10, 10)",
+    );
+    assert_eq!(p.px(5, 5), "0,0,255,255");
+    assert_eq!(p.px(11, 11), CLEAR);
+}
