@@ -1,5 +1,7 @@
 //! Módulos ECMAScript (§16.2.1): Module Records, el module map del host, la carga
-//! (LoadRequestedModules), Link, Evaluate, GetModuleNamespace e `import.meta`.
+//! (LoadRequestedModules), Link, Evaluate (con top-level await: ExecuteAsyncModule y
+//! AsyncModuleExecutionFulfilled/Rejected), GetModuleNamespace, `import()` (EvaluateImportCall,
+//! ContinueDynamicImport) e `import.meta`.
 //!
 //! La carga es síncrona: el [`ModuleLoader`] del host resuelve y lee cada módulo en el
 //! momento en que InnerModuleLoading lo pide, así que HostLoadImportedModule termina antes de
@@ -13,17 +15,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::builtins::promise::Handler;
 use crate::compiler::bytecode::{Constant, Source};
 use crate::compiler::module::{
     ExportImportName, ImportName, ModuleCode, ModuleRequest, compile_module,
 };
 use crate::heap::{Gc, Trace, Tracer};
-use crate::object::Object;
+use crate::object::{IterKind, Object, ObjectKind};
 use crate::parser::ParseOptions;
 use crate::string::{Atom, JsString};
 use crate::value::{PropertyKey, Value};
 use crate::vm::env::{BindingKind, Env, ModuleEnvData, ScopeLayout};
 use crate::vm::frame::Frame;
+use crate::vm::function::CallArgs;
 use crate::vm::{Agent, JsResult, RealmId, Throw};
 
 pub type ModuleId = usize;
@@ -170,6 +174,15 @@ pub struct ModuleRecord {
     /// `[[LoadedModules]]`, por índice de `[[RequestedModules]]`.
     pub loaded: Vec<Option<ModuleId>>,
     pub cycle_root: Option<ModuleId>,
+    pub has_tla: bool,
+    /// `[[AsyncEvaluation]]`: el orden en que se marcó (`None`: false).
+    pub async_evaluation: Option<u64>,
+    /// `[[PendingAsyncDependencies]]`.
+    pub pending_async: usize,
+    /// `[[AsyncParentModules]]`.
+    pub async_parents: Vec<ModuleId>,
+    /// `[[TopLevelCapability]]` (la promesa de Evaluate).
+    pub top_level_capability: Option<Gc<Object>>,
 }
 
 impl ModuleRecord {
@@ -193,6 +206,9 @@ pub struct ModuleHost {
     /// Record para la misma petición (§16.2.1.8).
     map: HashMap<(RealmId, String, bool), ModuleId>,
     pub loader: Option<Rc<dyn ModuleLoader>>,
+    /// El contador de IncrementModuleAsyncEvaluationCount (el orden de
+    /// `[[AsyncEvaluation]]`).
+    async_eval_count: u64,
 }
 
 impl Trace for ModuleHost {
@@ -201,6 +217,7 @@ impl Trace for ModuleHost {
             t.opt(r.environment);
             t.opt(r.namespace);
             t.opt(r.import_meta);
+            t.opt(r.top_level_capability);
             t.opt_value(&r.evaluation_error);
             if let ModuleKind::Synthetic { default } = &r.kind {
                 t.value(default);
@@ -285,6 +302,10 @@ impl Agent {
     ) -> JsResult<ModuleId> {
         let id = self.modules.records.len();
         let realm = self.current_realm;
+        let has_tla = match &kind {
+            ModuleKind::SourceText(c) => c.has_tla,
+            ModuleKind::Synthetic { .. } => false,
+        };
         let status = if json {
             ModuleStatus::Unlinked
         } else {
@@ -303,24 +324,29 @@ impl Agent {
             dfs_ancestor_index: 0,
             loaded: vec![None; requests],
             cycle_root: None,
+            has_tla,
+            async_evaluation: None,
+            pending_async: 0,
+            async_parents: Vec::new(),
+            top_level_capability: None,
         });
         self.modules.map.insert((realm, url.to_owned(), json), id);
         Ok(id)
     }
 
     /// HostLoadImportedModule (§16.2.1.8) + FinishLoadingImportedModule (§16.2.1.9): el
-    /// Module Record de `request` pedido desde `referrer` (síncrono).
+    /// Module Record de `request` pedido desde el script o módulo de URL `referrer_url`
+    /// (síncrono).
     pub fn host_load_imported_module(
         &mut self,
-        referrer: Option<ModuleId>,
+        referrer_url: Option<&str>,
         request: &ModuleRequest,
     ) -> JsResult<ModuleId> {
         let Some(loader) = self.modules.loader.clone() else {
             return self.type_error("No module loader");
         };
         let specifier = request.specifier.to_string_lossy();
-        let referrer_url = referrer.map(|r| self.modules.records[r].url.clone());
-        let url = match loader.resolve(&specifier, referrer_url.as_deref()) {
+        let url = match loader.resolve(&specifier, referrer_url) {
             Ok(u) => u,
             Err(e) => return self.type_error(&format!("Cannot resolve module: {e}")),
         };
@@ -386,7 +412,8 @@ impl Agent {
             let dep = match self.modules.records[m].loaded[i] {
                 Some(d) => d,
                 None => {
-                    let d = self.host_load_imported_module(Some(m), request)?;
+                    let url = self.modules.records[m].url.clone();
+                    let d = self.host_load_imported_module(Some(&url), request)?;
                     self.modules.records[m].loaded[i] = Some(d);
                     d
                 }
@@ -740,34 +767,58 @@ impl Agent {
 
     // --- Evaluate (§16.2.1.5.3) ---
 
-    /// Evaluate() de un Cyclic Module Record (§16.2.1.5.3). Sin Promise todavía, el
-    /// resultado es la completion (la promesa que devolvería, ya resuelta o rechazada).
-    pub fn evaluate_module(&mut self, m: ModuleId) -> JsResult<()> {
+    /// Evaluate() de un Module Record (§16.2.1.5.3): la promesa `[[TopLevelCapability]]`
+    /// del módulo raíz del ciclo, que se resuelve cuando termina la evaluación (también la
+    /// asíncrona, con top-level await).
+    pub fn evaluate_module(&mut self, m: ModuleId) -> JsResult<Gc<Object>> {
         let mut module = m;
         match self.modules.records[m].status {
             ModuleStatus::Linked => {}
+            // Paso 3.
             ModuleStatus::EvaluatingAsync | ModuleStatus::Evaluated => {
                 module = self.modules.records[m].cycle_root.unwrap_or(m);
-                return match self.modules.records[module].evaluation_error.clone() {
-                    Some(e) => Err(Throw::Value(e)),
-                    None => Ok(()),
-                };
             }
             _ => return self.internal_error("Evaluate de un módulo sin enlazar"),
         }
+        // Paso 4.
+        if let Some(p) = self.modules.records[module].top_level_capability {
+            return Ok(p);
+        }
+        // Pasos 5–7: NewPromiseCapability(%Promise%).
+        let promise = self.new_internal_promise();
+        self.modules.records[module].top_level_capability = Some(promise);
         let mut stack = Vec::new();
         match self.inner_module_evaluation(module, &mut stack, 0) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if let Throw::Value(v) = &e {
-                    for s in stack {
-                        let r = &mut self.modules.records[s];
-                        r.status = ModuleStatus::Evaluated;
-                        r.evaluation_error = Some(v.clone());
-                    }
+            // Paso 9.
+            Err(Throw::Value(v)) => {
+                for s in stack {
+                    let r = &mut self.modules.records[s];
+                    r.status = ModuleStatus::Evaluated;
+                    r.evaluation_error = Some(v.clone());
                 }
-                Err(e)
+                self.reject_promise(promise, v);
             }
+            Err(t) => return Err(t),
+            // Paso 10.
+            Ok(_) => {
+                if self.modules.records[module].async_evaluation.is_none() {
+                    self.fulfill_promise(promise, Value::Undefined);
+                }
+            }
+        }
+        Ok(promise)
+    }
+
+    /// El estado de una promesa: `None` si sigue pendiente.
+    pub fn promise_outcome(&self, p: Gc<Object>) -> Option<Result<Value, Value>> {
+        use crate::builtins::promise::PromiseState;
+        match &self.heap[p].kind {
+            ObjectKind::Promise(d) => match d.state {
+                PromiseState::Pending => None,
+                PromiseState::Fulfilled => Some(Ok(d.result.clone())),
+                PromiseState::Rejected => Some(Err(d.result.clone())),
+            },
+            _ => None,
         }
     }
 
@@ -779,7 +830,8 @@ impl Agent {
         mut index: usize,
     ) -> JsResult<usize> {
         if !self.modules.records[m].is_cyclic() {
-            // Synthetic: SetSyntheticModuleExport("default", json) (§16.2.1.7.4).
+            // Paso 1: Evaluate() de un Synthetic Module Record no queda pendiente:
+            // SetSyntheticModuleExport("default", json) (§16.2.1.7.4).
             if self.modules.records[m].status != ModuleStatus::Evaluated {
                 if let ModuleKind::Synthetic { default } = &self.modules.records[m].kind {
                     let v = default.clone();
@@ -802,46 +854,63 @@ impl Agent {
             ModuleStatus::Linked => {}
             _ => return self.internal_error("Evaluate de un módulo sin enlazar"),
         }
+        // Pasos 5–10.
         {
             let r = &mut self.modules.records[m];
             r.status = ModuleStatus::Evaluating;
             r.dfs_index = index;
             r.dfs_ancestor_index = index;
+            r.pending_async = 0;
         }
         index += 1;
         stack.push(m);
+        // Paso 11.
         let n = self.modules.records[m].loaded.len();
         for i in 0..n {
-            let required = self.imported(m, i);
+            let mut required = self.imported(m, i);
             index = self.inner_module_evaluation(required, stack, index)?;
+            if !self.modules.records[required].is_cyclic() {
+                continue;
+            }
             let req = &self.modules.records[required];
-            if req.is_cyclic() {
-                if req.status == ModuleStatus::Evaluating {
-                    let a = req.dfs_ancestor_index;
-                    let r = &mut self.modules.records[m];
-                    r.dfs_ancestor_index = r.dfs_ancestor_index.min(a);
-                } else {
-                    let root = req.cycle_root.unwrap_or(required);
-                    if let Some(e) = self.modules.records[root].evaluation_error.clone() {
-                        return Err(Throw::Value(e));
-                    }
+            if req.status == ModuleStatus::Evaluating {
+                let a = req.dfs_ancestor_index;
+                let r = &mut self.modules.records[m];
+                r.dfs_ancestor_index = r.dfs_ancestor_index.min(a);
+            } else {
+                required = req.cycle_root.unwrap_or(required);
+                if let Some(e) = self.modules.records[required].evaluation_error.clone() {
+                    return Err(Throw::Value(e));
                 }
             }
+            if self.modules.records[required].async_evaluation.is_some() {
+                self.modules.records[m].pending_async += 1;
+                self.modules.records[required].async_parents.push(m);
+            }
         }
-        let code = self.modules.records[m]
-            .code()
-            .expect("Source Text Module Record");
-        if code.has_tla {
-            // ExecuteAsyncModule necesita Promise (llega con E3).
-            return self.internal_error("top-level await (requiere Promise)");
+        // Pasos 12–13.
+        let rec = &self.modules.records[m];
+        if rec.pending_async > 0 || rec.has_tla {
+            let order = self.modules.async_eval_count;
+            self.modules.async_eval_count += 1;
+            self.modules.records[m].async_evaluation = Some(order);
+            if self.modules.records[m].pending_async == 0 {
+                self.execute_async_module(m)?;
+            }
+        } else {
+            self.execute_module(m)?;
         }
-        self.execute_module(m, &code)?;
+        // Paso 16.
         let r = &self.modules.records[m];
         if r.dfs_ancestor_index == r.dfs_index {
             loop {
                 let required = stack.pop().expect("pila de Evaluate");
                 let r = &mut self.modules.records[required];
-                r.status = ModuleStatus::Evaluated;
+                r.status = if r.async_evaluation.is_none() {
+                    ModuleStatus::Evaluated
+                } else {
+                    ModuleStatus::EvaluatingAsync
+                };
                 r.cycle_root = Some(m);
                 if required == m {
                     break;
@@ -851,16 +920,276 @@ impl Agent {
         Ok(index)
     }
 
-    /// ExecuteModule (§16.2.1.6.5): el cuerpo con el Module Environment Record como
-    /// LexicalEnvironment y VariableEnvironment, y `this` = `undefined`.
-    fn execute_module(&mut self, m: ModuleId, code: &ModuleCode) -> JsResult<()> {
+    /// El frame del cuerpo del módulo: el Module Environment Record como LexicalEnvironment
+    /// y VariableEnvironment, y `this` = `undefined`.
+    fn module_frame(&self, m: ModuleId) -> Frame {
         let rec = &self.modules.records[m];
+        let code = rec.code().expect("Source Text Module Record");
         let env = rec.environment.expect("environment del módulo");
         let mut frame = Frame::new(code.code.clone(), env, rec.realm);
         frame.this = Some(Value::Undefined);
         frame.var_env = Some(env);
+        frame
+    }
+
+    /// ExecuteModule() sin capability (§16.2.1.6.5 paso 9): el cuerpo síncrono.
+    fn execute_module(&mut self, m: ModuleId) -> JsResult<()> {
+        let frame = self.module_frame(m);
         self.run_frame(frame)?;
         Ok(())
+    }
+
+    /// ExecuteAsyncModule (§16.2.1.5.3.2): el cuerpo como AsyncBlockStart (ExecuteModule con
+    /// capability); su promesa termina en AsyncModuleExecutionFulfilled o
+    /// AsyncModuleExecutionRejected.
+    fn execute_async_module(&mut self, m: ModuleId) -> JsResult<()> {
+        let frame = self.module_frame(m);
+        let promise = crate::builtins::r#async::async_function_start(self, frame)?;
+        let Value::Object(p) = promise else {
+            return self.internal_error("ExecuteAsyncModule sin promesa");
+        };
+        let scope = self.heap.open_scope();
+        self.heap.root(Value::Object(p));
+        let id = Value::Number(m as f64);
+        let on_fulfilled =
+            self.create_builtin_with_slots(async_module_fulfilled, 0, "", vec![id.clone()]);
+        let on_rejected = self.create_builtin_with_slots(async_module_rejected, 1, "", vec![id]);
+        self.perform_promise_then(
+            p,
+            Handler::Callback(Value::Object(on_fulfilled)),
+            Handler::Callback(Value::Object(on_rejected)),
+            None,
+        );
+        self.heap.close_scope(scope);
+        Ok(())
+    }
+
+    /// GatherAvailableAncestors (§16.2.1.5.3.3).
+    fn gather_available_ancestors(&mut self, m: ModuleId, exec_list: &mut Vec<ModuleId>) {
+        let parents = self.modules.records[m].async_parents.clone();
+        for p in parents {
+            let root = self.modules.records[p].cycle_root.unwrap_or(p);
+            if exec_list.contains(&p) || self.modules.records[root].evaluation_error.is_some() {
+                continue;
+            }
+            let r = &mut self.modules.records[p];
+            r.pending_async = r.pending_async.saturating_sub(1);
+            if r.pending_async == 0 {
+                exec_list.push(p);
+                if !self.modules.records[p].has_tla {
+                    self.gather_available_ancestors(p, exec_list);
+                }
+            }
+        }
+    }
+
+    /// AsyncModuleExecutionFulfilled (§16.2.1.5.3.4).
+    fn async_module_execution_fulfilled(&mut self, m: ModuleId) -> JsResult<()> {
+        if self.modules.records[m].status == ModuleStatus::Evaluated {
+            return Ok(());
+        }
+        {
+            let r = &mut self.modules.records[m];
+            r.async_evaluation = None;
+            r.status = ModuleStatus::Evaluated;
+        }
+        if let Some(p) = self.modules.records[m].top_level_capability {
+            self.fulfill_promise(p, Value::Undefined);
+        }
+        let mut exec_list = Vec::new();
+        self.gather_available_ancestors(m, &mut exec_list);
+        // Paso 8: en el orden en que se marcó `[[AsyncEvaluation]]`.
+        exec_list.sort_by_key(|&x| self.modules.records[x].async_evaluation.unwrap_or(u64::MAX));
+        for x in exec_list {
+            if self.modules.records[x].status == ModuleStatus::Evaluated {
+                continue;
+            }
+            if self.modules.records[x].has_tla {
+                self.execute_async_module(x)?;
+                continue;
+            }
+            match self.execute_module(x) {
+                Err(Throw::Value(e)) => self.async_module_execution_rejected(x, e),
+                Err(t) => return Err(t),
+                Ok(()) => {
+                    let r = &mut self.modules.records[x];
+                    r.async_evaluation = None;
+                    r.status = ModuleStatus::Evaluated;
+                    if let Some(p) = self.modules.records[x].top_level_capability {
+                        self.fulfill_promise(p, Value::Undefined);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// AsyncModuleExecutionRejected (§16.2.1.5.3.5).
+    fn async_module_execution_rejected(&mut self, m: ModuleId, error: Value) {
+        if self.modules.records[m].status == ModuleStatus::Evaluated {
+            return;
+        }
+        {
+            let r = &mut self.modules.records[m];
+            r.evaluation_error = Some(error.clone());
+            r.status = ModuleStatus::Evaluated;
+            r.async_evaluation = None;
+        }
+        // La capability del módulo se rechaza antes que las de sus padres (el orden de los
+        // jobs de rechazo, ES2025; test262 `top-level-await/rejection-order`).
+        if let Some(p) = self.modules.records[m].top_level_capability {
+            self.reject_promise(p, error.clone());
+        }
+        let parents = self.modules.records[m].async_parents.clone();
+        for p in parents {
+            self.async_module_execution_rejected(p, error.clone());
+        }
+    }
+
+    // --- import() (§13.3.10) ---
+
+    /// El [`Source`] de código creado en tiempo de ejecución (`eval`, CreateDynamicFunction)
+    /// con el ScriptOrModule activo (PerformEval paso 20; OrdinaryFunctionCreate,
+    /// `[[ScriptOrModule]]`).
+    pub(crate) fn inherited_source(&self, name: &str, text: &str) -> Source {
+        let mut s = Source::new(name, text);
+        if let Some(f) = self.frames.last() {
+            let caller = &f.code.source;
+            s.module = caller.module;
+            s.url = Some(caller.url.clone().unwrap_or_else(|| caller.name.clone()));
+        }
+        s
+    }
+
+    /// GetActiveScriptOrModule (§9.4.1): el módulo activo y la URL del script o módulo
+    /// activo (`(None, None)`: el referrer es el realm).
+    pub(crate) fn active_script_or_module(&self) -> (Option<ModuleId>, Option<String>) {
+        let Some(f) = self.frames.last() else {
+            return (None, None);
+        };
+        let s = &f.code.source;
+        match s.module {
+            Some(m) => (Some(m), Some(self.modules.records[m].url.clone())),
+            None => (None, Some(s.url.clone().unwrap_or_else(|| s.name.clone()))),
+        }
+    }
+
+    /// EvaluateImportCall (§13.3.10.2) desde el paso 4, con el especificador y las opciones
+    /// ya evaluados: la promesa del `import()`.
+    pub(crate) fn evaluate_import_call(
+        &mut self,
+        specifier: Value,
+        options: Value,
+    ) -> JsResult<Value> {
+        let (_, referrer_url) = self.active_script_or_module();
+        let promise = self.new_internal_promise();
+        let scope = self.heap.open_scope();
+        self.heap.root(Value::Object(promise));
+        let out = match self.import_call_request(&specifier, &options) {
+            Err(Throw::Value(e)) => {
+                self.reject_promise(promise, e);
+                Ok(())
+            }
+            Err(t) => Err(t),
+            // HostLoadImportedModule (§16.2.1.8) → FinishLoadingImportedModule →
+            // ContinueDynamicImport (§16.2.1.10), síncronos.
+            Ok(request) => {
+                match self.host_load_imported_module(referrer_url.as_deref(), &request) {
+                    Err(Throw::Value(e)) => {
+                        self.reject_promise(promise, e);
+                        Ok(())
+                    }
+                    Err(t) => Err(t),
+                    Ok(m) => self.continue_dynamic_import(promise, m),
+                }
+            }
+        };
+        self.heap.close_scope(scope);
+        out?;
+        Ok(Value::Object(promise))
+    }
+
+    /// EvaluateImportCall pasos 5–10: el especificador y los atributos de `with`.
+    fn import_call_request(
+        &mut self,
+        specifier: &Value,
+        options: &Value,
+    ) -> JsResult<ModuleRequest> {
+        let s = self.to_string(specifier)?;
+        let mut attributes: Vec<(JsString, JsString)> = Vec::new();
+        if !matches!(options, Value::Undefined) {
+            let Value::Object(o) = options else {
+                return self.type_error("The second argument of import() must be an object");
+            };
+            let with = self.get(*o, &PropertyKey::from("with"), options.clone())?;
+            if !matches!(with, Value::Undefined) {
+                let Value::Object(w) = with else {
+                    return self.type_error("The 'with' option of import() must be an object");
+                };
+                let entries = self.enumerable_own_properties(w, IterKind::Entries)?;
+                for e in entries {
+                    let Value::Object(pair) = e else { continue };
+                    let k = self.get(pair, &PropertyKey::Index(0), e.clone())?;
+                    let v = self.get(pair, &PropertyKey::Index(1), e.clone())?;
+                    let (Value::String(k), Value::String(v)) = (k, v) else {
+                        return self.type_error("Import attribute values must be strings");
+                    };
+                    attributes.push((k, v));
+                }
+            }
+            // AllImportAttributesSupported: el host solo entiende `type`.
+            if let Some((k, _)) = attributes
+                .iter()
+                .find(|(k, _)| k.to_string_lossy() != "type")
+            {
+                let k = k.to_string_lossy();
+                return self.type_error(&format!("Unsupported import attribute '{k}'"));
+            }
+            attributes.sort_by(|a, b| a.0.units().cmp(b.0.units()));
+        }
+        Ok(ModuleRequest {
+            specifier: s,
+            attributes,
+        })
+    }
+
+    /// ContinueDynamicImport (§16.2.1.10): LoadRequestedModules y, en un job, Link,
+    /// Evaluate y el namespace.
+    fn continue_dynamic_import(&mut self, promise: Gc<Object>, m: ModuleId) -> JsResult<()> {
+        let load = self.new_internal_promise();
+        let scope = self.heap.open_scope();
+        self.heap.root(Value::Object(load));
+        let on_rejected =
+            self.create_builtin_with_slots(import_rejected, 1, "", vec![Value::Object(promise)]);
+        let link_and_evaluate = self.create_builtin_with_slots(
+            import_link_and_evaluate,
+            0,
+            "",
+            vec![
+                Value::Object(promise),
+                Value::Number(m as f64),
+                Value::Object(on_rejected),
+            ],
+        );
+        self.perform_promise_then(
+            load,
+            Handler::Callback(Value::Object(link_and_evaluate)),
+            Handler::Callback(Value::Object(on_rejected)),
+            None,
+        );
+        let r = match self.load_requested_modules(m) {
+            Ok(()) => {
+                self.fulfill_promise(load, Value::Undefined);
+                Ok(())
+            }
+            Err(Throw::Value(e)) => {
+                self.reject_promise(load, e);
+                Ok(())
+            }
+            Err(t) => Err(t),
+        };
+        self.heap.close_scope(scope);
+        r
     }
 
     // --- import.meta ---
@@ -895,7 +1224,100 @@ impl Agent {
         let m = self.parse_module_record(url, &text)?;
         self.load_requested_modules(m)?;
         self.link_module(m)?;
-        self.evaluate_module(m)?;
-        Ok(m)
+        let p = self.evaluate_module(m)?;
+        // La evaluación asíncrona (top-level await) termina con la cola de jobs.
+        self.run_jobs()?;
+        match self.promise_outcome(p) {
+            Some(Err(e)) => Err(Throw::Value(e)),
+            _ => Ok(m),
+        }
     }
+}
+
+// --- Las funciones internas (CreateBuiltinFunction de los algoritmos) ---
+
+/// El slot `i` de la función activa.
+fn slot(agent: &Agent, a: &CallArgs<'_>, i: usize) -> Value {
+    match &agent.heap[a.callee].kind {
+        ObjectKind::Builtin(b) => b.slots.get(i).cloned().unwrap_or_default(),
+        _ => Value::Undefined,
+    }
+}
+
+fn slot_module(agent: &Agent, a: &CallArgs<'_>, i: usize) -> ModuleId {
+    match slot(agent, a, i) {
+        Value::Number(n) => n as ModuleId,
+        _ => 0,
+    }
+}
+
+fn slot_object(agent: &Agent, a: &CallArgs<'_>, i: usize) -> Option<Gc<Object>> {
+    match slot(agent, a, i) {
+        Value::Object(o) => Some(o),
+        _ => None,
+    }
+}
+
+/// `fulfilledClosure` de ExecuteAsyncModule (§16.2.1.5.3.2 paso 4).
+fn async_module_fulfilled(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let m = slot_module(agent, a, 0);
+    agent.async_module_execution_fulfilled(m)?;
+    Ok(Value::Undefined)
+}
+
+/// `rejectedClosure` de ExecuteAsyncModule (§16.2.1.5.3.2 paso 6).
+fn async_module_rejected(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let m = slot_module(agent, a, 0);
+    agent.async_module_execution_rejected(m, a.arg(0));
+    Ok(Value::Undefined)
+}
+
+/// `rejectedClosure` de ContinueDynamicImport (§16.2.1.10 paso 4).
+fn import_rejected(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if let Some(p) = slot_object(agent, a, 0) {
+        agent.reject_promise(p, a.arg(0));
+    }
+    Ok(Value::Undefined)
+}
+
+/// `linkAndEvaluateClosure` de ContinueDynamicImport (§16.2.1.10 paso 6).
+fn import_link_and_evaluate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (Some(promise), Some(on_rejected)) = (slot_object(agent, a, 0), slot_object(agent, a, 2))
+    else {
+        return Ok(Value::Undefined);
+    };
+    let m = slot_module(agent, a, 1);
+    match agent.link_module(m) {
+        Ok(()) => {}
+        Err(Throw::Value(e)) => {
+            agent.reject_promise(promise, e);
+            return Ok(Value::Undefined);
+        }
+        Err(t) => return Err(t),
+    }
+    let evaluate = agent.evaluate_module(m)?;
+    let on_fulfilled = agent.create_builtin_with_slots(
+        import_fulfilled,
+        0,
+        "",
+        vec![Value::Object(promise), Value::Number(m as f64)],
+    );
+    agent.perform_promise_then(
+        evaluate,
+        Handler::Callback(Value::Object(on_fulfilled)),
+        Handler::Callback(Value::Object(on_rejected)),
+        None,
+    );
+    Ok(Value::Undefined)
+}
+
+/// `fulfilledClosure` de ContinueDynamicImport (§16.2.1.10 paso 6.d): el namespace.
+fn import_fulfilled(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(promise) = slot_object(agent, a, 0) else {
+        return Ok(Value::Undefined);
+    };
+    let m = slot_module(agent, a, 1);
+    let ns = agent.get_module_namespace(m);
+    agent.resolve_promise(promise, Value::Object(ns))?;
+    Ok(Value::Undefined)
 }

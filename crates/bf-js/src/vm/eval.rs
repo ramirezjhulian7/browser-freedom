@@ -179,7 +179,11 @@ impl Agent {
             Err(e) => return self.syntax_error(&e.message),
         };
         let strict_eval = flags.strict || crate::compiler::scope::has_use_strict(&program.body);
-        let code = compile_eval(&program, Rc::new(Source::new("<eval>", &text)), strict_eval);
+        let code = compile_eval(
+            &program,
+            Rc::new(self.inherited_source("<eval>", &text)),
+            strict_eval,
+        ); // E1
         let realm = self.current_realm;
         let genv = self.global_env();
         let (outer_env, var_env) = if direct {
@@ -368,8 +372,11 @@ impl Agent {
         if !ok {
             return self.syntax_error("Invalid function parameters or body");
         }
-        let Some(code) =
-            compile_dynamic_function(&program, Rc::new(Source::new("<anonymous>", &text)))
+        let Some(code) = compile_dynamic_function(
+            &program,
+            Rc::new(self.inherited_source("<anonymous>", &text)),
+        )
+        // E1
         else {
             return self.syntax_error("Invalid function");
         };
