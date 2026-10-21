@@ -57,6 +57,33 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Un frame con los vectores dados (vacíos; `locals` ya con `num_locals` posiciones).
+    pub fn with_buffers(
+        code: Rc<FunctionCode>,
+        env: Gc<Env>,
+        realm: RealmId,
+        stack: Vec<Value>,
+        locals: Vec<Option<Value>>,
+    ) -> Frame {
+        Frame {
+            code,
+            pc: 0,
+            stack,
+            locals,
+            env,
+            var_env: None,
+            function_env: None,
+            handlers: Vec::new(),
+            refs: Vec::new(),
+            this: Some(Value::Undefined),
+            callee: None,
+            new_target: None,
+            args: Vec::new(),
+            realm,
+            hoisted: None,
+        }
+    }
+
     pub fn new(code: Rc<FunctionCode>, env: Gc<Env>, realm: RealmId) -> Frame {
         let n = code.num_locals as usize;
         Frame {

@@ -184,7 +184,12 @@ impl Agent {
             return self.range_error("Maximum call stack size exceeded");
         }
         match &self.heap[fo].kind {
-            ObjectKind::Function(_) => self.call_closure(fo, this, args.to_vec(), None),
+            ObjectKind::Function(_) => {
+                // Los argumentos van a un vector del pool (E3).
+                let mut v = self.value_pool.pop().unwrap_or_default();
+                v.extend_from_slice(args);
+                self.call_closure(fo, this, v, None)
+            }
             ObjectKind::HtmlDda => Ok(Value::Null),
             // E1: Proxy exótico.
             ObjectKind::Proxy(p) if p.callable => {
@@ -333,7 +338,7 @@ impl Agent {
             self.current_realm = saved;
             Some(Value::Object(o?))
         };
-        let mut frame = Frame::new(code, env, realm);
+        let mut frame = self.new_frame(code, env, realm);
         frame.this = this_value;
         frame.callee = Some(f);
         frame.new_target = new_target;
@@ -343,7 +348,10 @@ impl Agent {
             return crate::builtins::r#async::async_function_start(self, frame);
         }
         match self.run_frame(frame)? {
-            (FrameExit::Return(v), _) => Ok(v),
+            (FrameExit::Return(v), frame) => {
+                self.recycle_frame(frame);
+                Ok(v)
+            }
             (FrameExit::GeneratorStart(g), frame) => {
                 crate::vm::generator::store_start_frame(self, g, frame);
                 Ok(Value::Object(g))
@@ -351,6 +359,59 @@ impl Agent {
             (FrameExit::Yield(..), _) => unreachable!("yield fuera de un generador"),
             (FrameExit::Await(_), _) => unreachable!("await fuera de una función async"),
         }
+    }
+
+    /// Un frame nuevo con los vectores de un frame ya terminado, si hay (E3).
+    pub(crate) fn new_frame(
+        &mut self,
+        code: std::rc::Rc<crate::compiler::bytecode::FunctionCode>,
+        env: Gc<crate::vm::env::Env>,
+        realm: crate::vm::RealmId,
+    ) -> Frame {
+        let n = code.num_locals as usize;
+        let stack = self.value_pool.pop().unwrap_or_else(|| Vec::with_capacity(16));
+        let mut locals = self.locals_pool.pop().unwrap_or_default();
+        locals.resize(n, None);
+        Frame::with_buffers(code, env, realm, stack, locals)
+    }
+
+    /// Devuelve los vectores de un frame terminado a los pools (E3).
+    pub(crate) fn recycle_frame(&mut self, frame: Frame) {
+        const MAX_POOL: usize = 64;
+        const MAX_CAPACITY: usize = 256;
+        let Frame {
+            mut stack,
+            mut locals,
+            mut args,
+            ..
+        } = frame;
+        for v in [&mut stack, &mut args] {
+            if v.capacity() <= MAX_CAPACITY && self.value_pool.len() < MAX_POOL {
+                v.clear();
+                self.value_pool.push(std::mem::take(v));
+            }
+        }
+        if locals.capacity() <= MAX_CAPACITY && self.locals_pool.len() < MAX_POOL {
+            locals.clear();
+            self.locals_pool.push(locals);
+        }
+    }
+
+    /// `[[Call]]` con los argumentos ya en un vector propio: a una función ECMAScript se le
+    /// pasan sin copiarlos (E3).
+    pub(crate) fn call_internal_vec(
+        &mut self,
+        f: &Value,
+        this: Value,
+        args: Vec<Value>,
+    ) -> JsResult<Value> {
+        if let Value::Object(fo) = f
+            && matches!(self.heap[*fo].kind, ObjectKind::Function(_))
+            && !self.stack_exhausted()
+        {
+            return self.call_closure(*fo, this, args, None);
+        }
+        self.call_internal(f, this, &args)
     }
 
     /// Ejecuta un frame nuevo hasta que termina (o se suspende el generador al empezar).

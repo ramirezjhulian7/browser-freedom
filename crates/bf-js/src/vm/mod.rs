@@ -197,6 +197,10 @@ pub struct Agent {
     /// La salida de `print`.
     pub printer: Box<dyn FnMut(&str)>,
     /// Profundidad de llamadas nativas (para el límite de pila).
+    /// Vectores de pila y argumentos de frames terminados, para reutilizar (E3).
+    pub(crate) value_pool: Vec<Vec<Value>>,
+    /// Vectores de locales de frames terminados, para reutilizar (E3).
+    pub(crate) locals_pool: Vec<Vec<Option<Value>>>,
     pub(crate) call_depth: usize,
     stack_base: usize,
     /// Los Module Records y el loader del host (§16.2.1) (E1).
@@ -262,6 +266,8 @@ impl Agent {
             instructions: 0,
             internal_errors: Vec::new(),
             printer: Box::new(|s| println!("{s}")),
+            value_pool: Vec::new(),
+            locals_pool: Vec::new(),
             call_depth: 0,
             stack_base: crate::parser::stack_position(),
             modules: module::ModuleHost::default(), // E1

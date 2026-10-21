@@ -955,9 +955,18 @@ impl Agent {
                 };
                 let code = frame!(self).code.clone();
                 let key = name_key(&code, n);
-                let v = match obj {
-                    // Inline cache (E3): la disposición del objeto ya vista en este sitio.
-                    Value::Object(o) => match self.ic_get(&code, n, o, key) {
+                // Inline cache (E3): la disposición ya vista en este sitio. Para un primitivo
+                // (salvo `length` de un string) se busca en su prototipo.
+                let target = match &obj {
+                    Value::Object(o) => Some(*o),
+                    Value::String(_) if *key != self.keys.length => {
+                        Some(self.intrinsics().string_prototype)
+                    }
+                    Value::Number(_) => Some(self.intrinsics().number_prototype),
+                    _ => None,
+                };
+                let v = match target {
+                    Some(o) => match self.ic_get(&code, n, o, key, &obj) {
                         Some(r) => r?,
                         None => {
                             let v = self.get_value_of(&obj, key)?;
@@ -965,7 +974,7 @@ impl Agent {
                             v
                         }
                     },
-                    _ => self.get_value_of(&obj, key)?,
+                    None => self.get_value_of(&obj, key)?,
                 };
                 self.push(v);
             }
@@ -1168,15 +1177,30 @@ impl Agent {
                 let n = argc as usize;
                 let len = frame!(self).stack.len();
                 let base = len - n - 2;
-                let (callee, this, args) = {
-                    let s = &frame!(self).stack;
-                    (s[base].clone(), s[base + 1].clone(), s[base + 2..].to_vec())
-                };
+                let callee = frame!(self).stack[base].clone();
                 if !self.is_callable(&callee) {
                     return self.not_callable(t, &callee, "a function");
                 }
-                let r = self.call_internal(&callee, this, &args)?;
-                frame!(self).stack.truncate(base);
+                let closure = matches!(&callee, Value::Object(o)
+                    if matches!(self.heap[*o].kind, ObjectKind::Function(_)));
+                let r = if closure {
+                    // Una función ECMAScript recibe los argumentos sin copiarlos (E3): salen de
+                    // la pila y pasan a su frame (no hay recolección hasta que el frame entra en
+                    // la pila de frames).
+                    let s = &mut frame!(self).stack;
+                    let args = s.split_off(base + 2);
+                    let this = s.pop().expect("this");
+                    s.pop();
+                    self.call_internal_vec(&callee, this, args)?
+                } else {
+                    let (this, args) = {
+                        let s = &frame!(self).stack;
+                        (s[base + 1].clone(), s[base + 2..].to_vec())
+                    };
+                    let r = self.call_internal(&callee, this, &args)?;
+                    frame!(self).stack.truncate(base);
+                    r
+                };
                 self.push(r);
                 self.safepoint()?;
             }
@@ -2480,6 +2504,17 @@ fn fast_op(f: &mut Frame, op: Op) -> Fast {
             let v = f.stack.last().expect("pila").clone();
             f.stack.push(v);
         }
+        Op::GetArg(i) => {
+            let v = f.args.get(i as usize).cloned().unwrap_or_default();
+            f.stack.push(v);
+        }
+        Op::Ctx(CtxWhat::This, CtxLoc::Frame) => match &f.this {
+            Some(v) => {
+                let v = v.clone();
+                f.stack.push(v);
+            }
+            None => return Fast::Slow,
+        },
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
         Op::True => f.stack.push(Value::Boolean(true)),

@@ -163,13 +163,15 @@ pub(crate) struct BeforeSet {
 }
 
 impl Agent {
-    /// `[[Get]]` de la clave `n` de `code` en `o` por la cache; `None` si no acertó.
+    /// `[[Get]]` de la clave `n` de `code` en `o` por la cache; `None` si no acertó. Los
+    /// getters reciben `receiver` (el objeto, o el primitivo cuyo prototipo es `o`).
     pub(crate) fn ic_get(
         &mut self,
         code: &Rc<FunctionCode>,
         n: u32,
         o: Gc<Object>,
         key: &PropertyKey,
+        receiver: &Value,
     ) -> Option<JsResult<Value>> {
         let shape = self.heap[o].props.shape_id();
         let hit = code.ics.with(n, |site| {
@@ -198,7 +200,7 @@ impl Agent {
                 self.heap[proto].props.slot(slot as usize).cloned()
             }
         };
-        read(self, prop, Value::Object(o))
+        read(self, prop, receiver.clone())
     }
 
     /// Después de un `[[Get]]` por el camino general: recuerda dónde estaba la propiedad.
