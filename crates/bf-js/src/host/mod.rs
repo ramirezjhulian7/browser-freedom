@@ -286,28 +286,6 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);
     let f = agent.host.fns[idx];
-<<<<<<< HEAD
-=======
-    // E2: WebIDL §3.7.7 ("create an operation function"): con `this` null o undefined se usa
-    // el objeto global del realm de la función (p. ej. `getComputedStyle(el)` sin `window.`).
-    if s[2].as_number() == Some(CALL_METHOD) && a.this.is_nullish() {
-        let realm = match &agent.heap[a.callee].kind {
-            ObjectKind::Builtin(b) => b.realm,
-            _ => agent.current_realm,
-        };
-        let global = Value::Object(agent.realms[realm].global_object);
-        if !agent.host_is_instance(&global, class) {
-            return agent.type_error("Illegal invocation");
-        }
-        let args = CallArgs {
-            this: global,
-            args: a.args,
-            new_target: a.new_target,
-            callee: a.callee,
-        };
-        return f(agent, &args);
-    }
->>>>>>> master
     if s[2].as_number() == Some(CALL_METHOD) && !agent.host_is_instance(&a.this, class) {
         // WebIDL §3.7.6 (operaciones de una interfaz `[Global]`): con `this` null o
         // undefined se usa el objeto global del realm.
