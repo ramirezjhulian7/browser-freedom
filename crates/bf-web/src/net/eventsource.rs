@@ -440,11 +440,9 @@ fn process_line(agent: &mut Agent, t: TargetRef, line: &str) {
                 s.id_buffer = value.to_owned();
             }
         }
-        "retry" => {
-            if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-                if let Ok(ms) = value.parse::<f64>() {
-                    s.retry_ms = ms;
-                }
+        "retry" if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => {
+            if let Ok(ms) = value.parse::<f64>() {
+                s.retry_ms = ms;
             }
         }
         _ => {}

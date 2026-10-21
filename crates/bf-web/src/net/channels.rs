@@ -23,43 +23,41 @@ use crate::dom::events::{
 
 type Obj = bf_js::heap::Gc<bf_js::object::Object>;
 
-// --- MessageEvent (HTML §9.3.1) ---
+// --- Eventos de mensaje (el `MessageEvent` de `dom::event_types`, HTML §9.3.1) ---
 
-pub fn message_event_class(event: HostClassId) -> HostClass {
-    HostClass::new("MessageEvent")
-        .parent(event)
-        .constructor(message_event_ctor, 1)
-        .attribute("data", Some(me_data), None)
-        .attribute("origin", Some(me_origin), None)
-        .attribute("lastEventId", Some(me_last_event_id), None)
-        .attribute("source", Some(me_source), None)
-        .attribute("ports", Some(me_ports), None)
-        .method("initMessageEvent", 1, me_init)
-}
-
-/// Un `MessageEvent` nuevo (`trusted` si lo dispara el navegador).
+/// Un `MessageEvent` de confianza `type_` (los slots siguen `dom::event_types`: 0 y 1 del
+/// evento, luego `data`, `lastEventId`, `origin`, `ports`, `source`).
 pub fn create_message_event(
     agent: &mut Agent,
     type_: &str,
-    init: EventInit,
-    trusted: bool,
-    fields: [Value; 5],
-) -> JsResult<Obj> {
-    let mut ev = Event::new(type_, init);
-    ev.is_trusted = trusted;
-    let class = classes(agent).message_event;
+    data: Value,
+    origin: &str,
+    last_event_id: &str,
+    ports: Value,
+) -> Obj {
+    let mut ev = Event::new(type_, EventInit::default());
+    ev.is_trusted = true;
+    let class = crate::dom::classes(agent).message_event;
     let o = agent.host_create(
         class,
         Box::new(EventData {
             cell: Rc::new(RefCell::new(ev)),
-            iface: EventIface::Event,
+            iface: EventIface::Class(class),
             doc: Cell::new(0),
         }),
     );
     if let Some(s) = agent.host_slots_mut(o) {
-        *s = fields.to_vec();
+        *s = vec![
+            Value::Null,
+            Value::Undefined,
+            data,
+            Value::str(last_event_id),
+            Value::str(origin),
+            ports,
+            Value::Null,
+        ];
     }
-    Ok(o)
+    o
 }
 
 /// Despacha un evento en `t` (fijado mientras dura).
@@ -86,218 +84,8 @@ pub fn fire_message(
         }
         Err(_) => Value::Null,
     };
-    if let Ok(ev) = create_message_event(
-        agent,
-        type_,
-        EventInit::default(),
-        true,
-        [
-            data,
-            Value::str(origin),
-            Value::str(last_event_id),
-            Value::Null,
-            ports,
-        ],
-    ) {
-        dispatch(agent, t, ev);
-    }
-}
-
-fn dict_member(agent: &mut Agent, d: &Value, name: &str) -> JsResult<Value> {
-    match d {
-        Value::Object(o) => agent.get(*o, &PropertyKey::from(name), d.clone()),
-        Value::Undefined | Value::Null => Ok(Value::Undefined),
-        _ => agent.type_error("The provided value is not of type 'MessageEventInit'"),
-    }
-}
-
-fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let Some(nt) = a.new_target else {
-        return agent.type_error("Illegal constructor");
-    };
-    if a.args.is_empty() {
-        return agent.type_error(
-            "Failed to construct 'MessageEvent': 1 argument required, but only 0 present.",
-        );
-    }
-    let type_ = crate::dom::to_dom_string(agent, &a.arg(0))?;
-    let d = a.arg(1);
-    let flag = |agent: &mut Agent, n: &str| -> JsResult<bool> {
-        let v = dict_member(agent, &d, n)?;
-        Ok(bf_js::host::webidl::to_boolean(agent, &v))
-    };
-    let bubbles = flag(agent, "bubbles")?;
-    let cancelable = flag(agent, "cancelable")?;
-    let composed = flag(agent, "composed")?;
-    let data = dict_member(agent, &d, "data")?;
-    let data = if data.is_undefined() {
-        Value::Null
-    } else {
-        data
-    };
-    let str_member = |agent: &mut Agent, n: &str| -> JsResult<Value> {
-        let v = dict_member(agent, &d, n)?;
-        if v.is_undefined() {
-            Ok(Value::str(""))
-        } else {
-            Ok(Value::String(agent.to_string(&v)?))
-        }
-    };
-    let last_event_id = str_member(agent, "lastEventId")?;
-    let origin = str_member(agent, "origin")?;
-    let ports_v = dict_member(agent, &d, "ports")?;
-    let ports = if ports_v.is_undefined() {
-        Vec::new()
-    } else {
-        let m = match &ports_v {
-            Value::Object(o) => {
-                let k = PropertyKey::Symbol(agent.well_known.iterator);
-                agent.get(*o, &k, ports_v.clone())?
-            }
-            _ => Value::Undefined,
-        };
-        if !agent.is_callable(&m) {
-            return agent.type_error(
-                "Failed to construct 'MessageEvent': The 'ports' member is not iterable.",
-            );
-        }
-        let items = super::headers::collect_iterable(agent, &ports_v, &m)?;
-        let port_class = classes(agent).message_port;
-        for p in &items {
-            if !agent.host_is_instance(p, port_class) {
-                return agent.type_error("Failed to construct 'MessageEvent': Failed to read the 'ports' member: element is not of type 'MessagePort'.");
-            }
-        }
-        items
-    };
-    let source = dict_member(agent, &d, "source")?;
-    let source = if source.is_undefined() {
-        Value::Null
-    } else {
-        source
-    };
-    let ports_arr = agent.create_array_from_list(&ports)?;
-    agent.set_integrity_level(ports_arr, true)?;
-    let class = classes(agent).message_event;
-    let o = agent.host_create_from_new_target(
-        nt,
-        class,
-        None,
-        Box::new(EventData {
-            cell: Rc::new(RefCell::new(Event::new(
-                type_,
-                EventInit {
-                    bubbles,
-                    cancelable,
-                    composed,
-                },
-            ))),
-            iface: EventIface::Event,
-            doc: Cell::new(0),
-        }),
-    )?;
-    if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![
-            data,
-            origin,
-            last_event_id,
-            source,
-            Value::Object(ports_arr),
-        ];
-    }
-    Ok(Value::Object(o))
-}
-
-fn me_slot(agent: &mut Agent, a: &CallArgs<'_>, i: usize) -> JsResult<Value> {
-    let class = classes(agent).message_event;
-    if !agent.host_is_instance(&a.this, class) {
-        return agent.type_error("Illegal invocation");
-    }
-    let Value::Object(o) = &a.this else {
-        return agent.type_error("Illegal invocation");
-    };
-    Ok(agent
-        .host_slots_mut(*o)
-        .and_then(|s| s.get(i).cloned())
-        .unwrap_or(Value::Null))
-}
-
-fn me_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    me_slot(agent, a, 0)
-}
-
-fn me_origin(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    me_slot(agent, a, 1)
-}
-
-fn me_last_event_id(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    me_slot(agent, a, 2)
-}
-
-fn me_source(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    me_slot(agent, a, 3)
-}
-
-fn me_ports(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    me_slot(agent, a, 4)
-}
-
-/// `initMessageEvent(type, bubbles, cancelable, data, origin, lastEventId, source, ports)`.
-fn me_init(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let class = classes(agent).message_event;
-    if !agent.host_is_instance(&a.this, class) {
-        return agent.type_error("Illegal invocation");
-    }
-    let Some(d) = agent.host_unwrap::<EventData>(&a.this) else {
-        return agent.type_error("Illegal invocation");
-    };
-    let cell = d.cell.clone();
-    if cell.borrow().event_phase != bf_dom::events::EventPhase::None {
-        return Ok(Value::Undefined);
-    }
-    let type_ = crate::dom::to_dom_string(agent, &a.arg(0))?;
-    let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
-    let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
-    {
-        let mut ev = cell.borrow_mut();
-        let trusted = ev.is_trusted;
-        *ev = Event::new(
-            type_,
-            EventInit {
-                bubbles,
-                cancelable,
-                composed: false,
-            },
-        );
-        ev.is_trusted = trusted;
-    }
-    let origin = Value::String(agent.to_string(&a.arg(4))?);
-    let last = Value::String(agent.to_string(&a.arg(5))?);
-    let ports = if a.arg(7).is_undefined() {
-        Vec::new()
-    } else {
-        let pv = a.arg(7);
-        let m = match &pv {
-            Value::Object(o) => {
-                let k = PropertyKey::Symbol(agent.well_known.iterator);
-                agent.get(*o, &k, pv.clone())?
-            }
-            _ => Value::Undefined,
-        };
-        if agent.is_callable(&m) {
-            super::headers::collect_iterable(agent, &pv, &m)?
-        } else {
-            Vec::new()
-        }
-    };
-    let arr = agent.create_array_from_list(&ports)?;
-    agent.set_integrity_level(arr, true)?;
-    if let Value::Object(o) = &a.this
-        && let Some(s) = agent.host_slots_mut(*o)
-    {
-        *s = vec![a.arg(3), origin, last, a.arg(6), Value::Object(arr)];
-    }
-    Ok(Value::Undefined)
+    let ev = create_message_event(agent, type_, data, origin, last_event_id, ports);
+    dispatch(agent, t, ev);
 }
 
 // --- MessageChannel / MessagePort (HTML §9.4) ---

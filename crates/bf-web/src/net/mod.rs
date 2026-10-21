@@ -137,7 +137,10 @@ pub enum NetEvent {
     End(Result<(), String>),
 }
 
-type Listener = std::rc::Rc<std::cell::RefCell<Box<dyn FnMut(&mut Agent, NetEvent)>>>;
+/// Quien recibe los eventos de una conexión.
+pub type NetListener = Box<dyn FnMut(&mut Agent, NetEvent)>;
+
+type Listener = std::rc::Rc<std::cell::RefCell<NetListener>>;
 
 /// Por dónde un hilo de red manda los eventos de una conexión.
 #[derive(Clone)]
@@ -161,7 +164,7 @@ impl EventSink {
 
 /// Registra una conexión: `listener` recibe sus eventos en tareas *networking*. Devuelve el
 /// `EventSink` para el hilo de la conexión.
-pub fn listen(agent: &mut Agent, listener: Box<dyn FnMut(&mut Agent, NetEvent)>) -> EventSink {
+pub fn listen(agent: &mut Agent, listener: NetListener) -> EventSink {
     let realm = WebContextHandle::current(agent).realm;
     let s = state_of(agent, realm);
     s.next_id += 1;
@@ -615,7 +618,6 @@ pub struct NetClasses {
     pub xhr_event_target: HostClassId,
     pub xhr: HostClassId,
     pub xhr_upload: HostClassId,
-    pub message_event: HostClassId,
     pub close_event: HostClassId,
     pub message_port: HostClassId,
     pub message_channel: HostClassId,
@@ -646,7 +648,6 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             agent.register_host_class(xhr::xhr_event_target_class(dom.event_target));
         let xhr = agent.register_host_class(xhr::xhr_class(xhr_event_target));
         let xhr_upload = agent.register_host_class(xhr::upload_class(xhr_event_target));
-        let message_event = agent.register_host_class(channels::message_event_class(dom.event));
         let close_event = agent.register_host_class(websocket::close_event_class(dom.event));
         let message_port =
             agent.register_host_class(channels::message_port_class(dom.event_target));
@@ -668,7 +669,6 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             xhr_event_target,
             xhr,
             xhr_upload,
-            message_event,
             close_event,
             message_port,
             message_channel,

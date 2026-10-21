@@ -366,13 +366,12 @@ fn run(
         .get("sec-websocket-protocol")
         .unwrap_or("")
         .to_owned();
-    if !protocol.is_empty() && !options.protocols.iter().any(|p| *p == protocol) {
+    if !protocol.is_empty() && !options.protocols.contains(&protocol) {
         return Err("the server selected a subprotocol that was not requested".into());
     }
     let set_cookies = head
         .headers
         .get_all("set-cookie")
-        .into_iter()
         .map(str::to_owned)
         .collect();
     on_event(WsEvent::Open {
