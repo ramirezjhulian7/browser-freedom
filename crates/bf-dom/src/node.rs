@@ -258,6 +258,20 @@ impl Document {
             if !data.is_empty() {
                 let _ = self.replace_data(node, length, 0, &data);
             }
+            // E3: paso 6.6, los rangos vivos de los nodos que se fusionan.
+            let mut merged = length as u32;
+            let mut cur = self.get(node).next_sibling();
+            while let Some(s) = cur {
+                if !matches!(self.get(s).data, NodeData::Text(_)) {
+                    break;
+                }
+                if let Some(parent) = self.parent(s) {
+                    let index = self.index(s) as u32;
+                    self.ranges_merge(node, s, parent, index, merged);
+                }
+                merged += self.node_length(s) as u32;
+                cur = self.get(s).next_sibling();
+            }
             let mut cur = self.get(node).next_sibling();
             while let Some(s) = cur {
                 if !matches!(self.get(s).data, NodeData::Text(_)) {
