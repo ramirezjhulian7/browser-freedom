@@ -20,10 +20,10 @@ Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 tiene firma digital, Windows puede mostrar «Windows protegió tu PC»: elige **Más
 información → Ejecutar de todas formas**.
 
-**macOS.** Abre el `.dmg` y arrastra Freedom a **Aplicaciones**. La primera vez, macOS avisa
-que no puede verificar al desarrollador: haz **clic derecho sobre Freedom → Abrir → Abrir**
-(o, en Ajustes del Sistema → Privacidad y seguridad, **Abrir igualmente**). Después se abre
-normal.
+**macOS.** Abre el `.dmg` y arrastra Freedom a **Aplicaciones**. Como Freedom todavía no
+está notarizado por Apple, la primera vez macOS no lo deja abrir: cierra el aviso, ve a
+**Ajustes del Sistema → Privacidad y seguridad**, baja hasta el final y pulsa **Abrir
+igualmente** junto a Freedom. Desde ahí se abre normal.
 
 **Ubuntu y Debian.** En una terminal, en la carpeta de la descarga:
 

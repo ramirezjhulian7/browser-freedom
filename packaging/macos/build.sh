@@ -4,8 +4,9 @@
 #   sh packaging/macos/build.sh [versión]
 #
 # El ejecutable es universal (Apple Silicon e Intel). La app va firmada ad hoc, no con una
-# cuenta de Apple Developer: la primera vez, macOS pide confirmar la apertura (clic
-# derecho → Abrir). La versión, si no se da, sale del Cargo.toml del workspace.
+# cuenta de Apple Developer ni notarizada: la primera vez, macOS la bloquea y se permite en
+# Ajustes del Sistema → Privacidad y seguridad → «Abrir igualmente» (desde macOS 15 el clic
+# derecho → Abrir ya no basta). La versión, si no se da, sale del Cargo.toml del workspace.
 set -eu
 
 cd "$(dirname "$0")/../.."
