@@ -4,7 +4,7 @@
 //! propiedades), que siempre es Unicode válido.
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
@@ -227,6 +227,9 @@ impl fmt::Debug for JsString {
 
 thread_local! {
     static INTERNED: RefCell<HashSet<Rc<str>>> = RefCell::new(HashSet::new());
+    /// El `JsString` de cada átomo (E3): las claves de propiedades con el mismo nombre
+    /// comparten la memoria y se comparan por puntero.
+    static ATOM_STRINGS: RefCell<HashMap<Rc<str>, JsString>> = RefCell::new(HashMap::new());
 }
 
 /// Un nombre internado: dos `Atom` con el mismo texto comparten la memoria.
@@ -250,8 +253,16 @@ impl Atom {
         &self.0
     }
 
+    /// El string del átomo (internado: el mismo átomo da siempre el mismo `JsString`).
     pub fn to_js_string(&self) -> JsString {
-        JsString::from(self.as_str())
+        ATOM_STRINGS.with(|m| {
+            if let Some(s) = m.borrow().get(&*self.0) {
+                return s.clone();
+            }
+            let s = JsString::from(self.as_str());
+            m.borrow_mut().insert(self.0.clone(), s.clone());
+            s
+        })
     }
 }
 
@@ -327,5 +338,7 @@ mod tests {
         let b = Atom::new(&String::from("foo"));
         assert!(Rc::ptr_eq(&a.0, &b.0));
         assert_eq!(a, "foo");
+        let (x, y) = (a.to_js_string(), b.to_js_string());
+        assert!(matches!((&x.0, &y.0), (Repr::Flat(p), Repr::Flat(q)) if Rc::ptr_eq(p, q)));
     }
 }

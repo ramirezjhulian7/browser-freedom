@@ -211,6 +211,10 @@ impl PropertyKey {
 
 impl From<&str> for PropertyKey {
     fn from(s: &str) -> PropertyKey {
+        // Los nombres cortos (los de las built-ins y del host) se internan (E3).
+        if s.len() <= 64 {
+            return PropertyKey::from_atom(&Atom::new(s));
+        }
         PropertyKey::from_js_string(JsString::from(s))
     }
 }

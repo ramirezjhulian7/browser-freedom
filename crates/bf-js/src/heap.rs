@@ -257,6 +257,9 @@ pub struct GcStats {
     pub live: usize,
     pub collections: usize,
     pub freed_total: usize,
+    /// E3: el tiempo total de las recolecciones y la pausa más larga.
+    pub pause_total: std::time::Duration,
+    pub pause_max: std::time::Duration,
 }
 
 /// Marca de un [`HandleScope`] abierto: el tamaño de la pila de handles al abrirlo.
@@ -280,6 +283,9 @@ pub struct Heap {
     // E3: los objetos con referencias débiles y los FinalizationRegistry por limpiar.
     weak_containers: Vec<Gc<Object>>,
     finalization_pending: Vec<Gc<Object>>,
+    // E3: las pausas de recolección.
+    pause_total: std::time::Duration,
+    pause_max: std::time::Duration,
 }
 
 /// Umbral mínimo de asignaciones entre recolecciones.
@@ -300,6 +306,8 @@ impl Default for Heap {
             min_threshold: MIN_THRESHOLD,
             weak_containers: Vec::new(),
             finalization_pending: Vec::new(),
+            pause_total: std::time::Duration::ZERO,
+            pause_max: std::time::Duration::ZERO,
         }
     }
 }
@@ -334,7 +342,15 @@ impl Heap {
                 + self.envs.live(),
             collections: self.collections,
             freed_total: self.freed_total,
+            pause_total: self.pause_total,
+            pause_max: self.pause_max,
         }
+    }
+
+    /// Anota la duración de una recolección (E3).
+    pub fn record_pause(&mut self, d: std::time::Duration) {
+        self.pause_total += d;
+        self.pause_max = self.pause_max.max(d);
     }
 
     // --- HandleScope ---

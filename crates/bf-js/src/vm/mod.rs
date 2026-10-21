@@ -432,9 +432,11 @@ impl Agent {
         if self.gc_inhibit > 0 {
             return false;
         }
+        let start = Instant::now(); // E3: medir la pausa
         let mut t = Tracer::default();
         self.trace_roots(&mut t);
         self.heap.collect(t);
+        self.heap.record_pause(start.elapsed());
         // E3: los FinalizationRegistry con celdas vaciadas piden su job de limpieza.
         crate::builtins::weak::enqueue_cleanup_jobs(self);
         crate::host::after_gc(self);

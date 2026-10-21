@@ -208,7 +208,9 @@ impl Agent {
     fn restore_handler(&mut self, h: &Handler) {
         let f = frame!(self);
         f.stack.truncate(h.stack_len as usize);
-        f.refs.truncate(h.refs_len as usize);
+        if let Some(rare) = &mut f.rare {
+            rare.refs.truncate(h.refs_len as usize);
+        }
         f.env = h.env;
         f.pc = h.pc as usize;
     }
@@ -675,10 +677,10 @@ impl Agent {
                 };
                 let (name, key) = self.name_const(n);
                 let r = self.resolve_binding_from(start, &name, &key)?;
-                frame!(self).refs.push(r);
+                frame!(self).rare_mut().refs.push(r);
             }
             Op::GetRefValue(n) => {
-                let r = *frame!(self).refs.last().expect("referencia");
+                let r = *frame!(self).rare_mut().refs.last().expect("referencia");
                 let (name, key) = self.name_const(n);
                 match r {
                     Some(env) => {
@@ -690,7 +692,7 @@ impl Agent {
                 }
             }
             Op::PutRef(n, strict) => {
-                let r = frame!(self).refs.pop().expect("referencia");
+                let r = frame!(self).rare_mut().refs.pop().expect("referencia");
                 let (name, key) = self.name_const(n);
                 let v = self.peek(0).clone();
                 match r {
@@ -705,7 +707,7 @@ impl Agent {
                 }
             }
             Op::InitRef(n) => {
-                let r = frame!(self).refs.pop().expect("referencia");
+                let r = frame!(self).rare_mut().refs.pop().expect("referencia");
                 let (name, key) = self.name_const(n);
                 let v = self.pop();
                 match r {
@@ -717,7 +719,7 @@ impl Agent {
                 }
             }
             Op::PopRef => {
-                frame!(self).refs.pop();
+                frame!(self).rare_mut().refs.pop();
             }
             Op::DeleteName(n) => {
                 let (name, key) = self.name_const(n);
@@ -1556,7 +1558,7 @@ impl Agent {
                     kind: HandlerKind::Catch,
                     pc: t,
                     stack_len: f.stack.len() as u32,
-                    refs_len: f.refs.len() as u32,
+                    refs_len: f.refs_len() as u32,
                     env: f.env,
                 };
                 f.handlers.push(h);
@@ -1574,7 +1576,7 @@ impl Agent {
                     },
                     pc: target,
                     stack_len: f.stack.len() as u32,
-                    refs_len: f.refs.len() as u32,
+                    refs_len: f.refs_len() as u32,
                     env: f.env,
                 };
                 f.handlers.push(h);
@@ -2057,10 +2059,7 @@ impl Agent {
             }
             Op::IsHoisted(n) => {
                 let (name, _) = self.name_const(n);
-                let h = frame!(self)
-                    .hoisted
-                    .as_ref()
-                    .is_some_and(|s| s.contains(&name));
+                let h = frame!(self).hoisted().is_some_and(|s| s.contains(&name));
                 self.push(Value::Boolean(h));
             }
             // E1
