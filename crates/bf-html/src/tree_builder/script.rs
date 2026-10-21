@@ -118,6 +118,24 @@ impl Parser {
         Parser::from_builder(TreeBuilder::new(input, opts), opts)
     }
 
+    /// El "parser" de un documento que ya terminó de cargarse (o que se creó sin parser): no
+    /// hay parser activo, y `document.write()` sin insertion point lo abre de nuevo
+    /// (`document.open()`).
+    pub fn from_document(doc: Document, opts: &ParseOptions) -> Parser {
+        let mut b = TreeBuilder::new("", opts);
+        b.doc = doc;
+        b.stopped = true;
+        Parser {
+            b,
+            opts: *opts,
+            end: End::Complete,
+            tasks: VecDeque::new(),
+            script_created: false,
+            aborted: false,
+            generation: 0,
+        }
+    }
+
     fn from_builder(mut b: TreeBuilder, opts: &ParseOptions) -> Parser {
         // "Create and initialize a Document object": readiness "loading".
         b.doc.scripts_mut().readiness = DocumentReadiness::Loading;

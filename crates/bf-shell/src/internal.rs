@@ -413,6 +413,46 @@ fn chips<'a>(items: impl Iterator<Item = (&'a str, usize)>) -> String {
 
 /// El reporte del motor para un documento ya maquetado: tiempos por fase, datos del
 /// documento, lo que se ignoró, las fuentes y (en el panel) las acciones.
+/// Las entradas de la consola que se muestran en el panel.
+const CONSOLE_SHOWN: usize = 60;
+
+/// La sección "Consola" del panel del motor: cuántos mensajes hay de cada nivel y los últimos
+/// (los más recientes arriba).
+pub fn console_section(entries: &[crate::script::ConsoleEntry]) -> String {
+    use bf_js::host::ConsoleLevel;
+    let count = |l: ConsoleLevel| entries.iter().filter(|e| e.level == l).count();
+    let mut out = String::from("<div class=\"section\"><h3>Consola</h3>");
+    if entries.is_empty() {
+        out.push_str("<p class=\"muted\">Sin mensajes.</p></div>");
+        return out;
+    }
+    kv(
+        &mut out,
+        "Mensajes",
+        &format!(
+            "{} errores · {} avisos · {} otros",
+            count(ConsoleLevel::Error),
+            count(ConsoleLevel::Warn),
+            entries.len() - count(ConsoleLevel::Error) - count(ConsoleLevel::Warn)
+        ),
+    );
+    for e in entries.iter().rev().take(CONSOLE_SHOWN) {
+        let class = match e.level {
+            ConsoleLevel::Error => "bad",
+            ConsoleLevel::Warn => "warn",
+            _ => "muted",
+        };
+        let first = e.text.lines().next().unwrap_or_default();
+        let _ = write!(
+            out,
+            "<p class=\"{class}\" style=\"font-family:monospace;margin:2px 0\">{}</p>",
+            escape(first)
+        );
+    }
+    out.push_str("</div>");
+    out
+}
+
 pub fn engine_body(
     loaded: &Loaded,
     page: &Page,

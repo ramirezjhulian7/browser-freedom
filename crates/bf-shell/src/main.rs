@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 mod internal;
 mod load;
+mod script;
 mod theme;
 mod window;
 
@@ -49,11 +50,14 @@ fn main() -> ExitCode {
             println!("Freedom {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        [cmd, path] if cmd == "dump-dom" => dump_dom(path),
-        [cmd, path] if cmd == "dump-css" => dump_css(path),
-        [cmd, path, rest @ ..] if cmd == "dump-style" => dump_style(path, rest),
-        [cmd, path, rest @ ..] if cmd == "dump-layout" => dump_layout(path, rest),
-        [cmd, path, rest @ ..] if cmd == "render" => render(path, rest),
+        [cmd, _, ..]
+            if matches!(
+                cmd.as_str(),
+                "dump-dom" | "dump-css" | "dump-style" | "dump-layout" | "render"
+            ) =>
+        {
+            on_script_stack(args.clone())
+        }
         [cmd] if cmd == "open" => window::open(None),
         [cmd, path] if cmd == "open" => window::open(Some(path)),
         [cmd, path, rest @ ..] if cmd == "session" => session(path, rest),
@@ -70,6 +74,26 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Los comandos sin ventana corren en un hilo con la pila del motor de JavaScript (los
+/// scripts de la página se ejecutan al cargarla).
+fn on_script_stack(args: Vec<String>) -> Result<(), String> {
+    let run = move || match args.as_slice() {
+        [cmd, path] if cmd == "dump-dom" => dump_dom(path),
+        [cmd, path] if cmd == "dump-css" => dump_css(path),
+        [cmd, path, rest @ ..] if cmd == "dump-style" => dump_style(path, rest),
+        [cmd, path, rest @ ..] if cmd == "dump-layout" => dump_layout(path, rest),
+        [cmd, path, rest @ ..] if cmd == "render" => render(path, rest),
+        _ => Err(USAGE.to_owned()),
+    };
+    std::thread::Builder::new()
+        .name("freedom-cli".into())
+        .stack_size(script::THREAD_STACK)
+        .spawn(run)
+        .map_err(|e| format!("no se pudo crear el hilo: {e}"))?
+        .join()
+        .unwrap_or_else(|_| Err("error interno del motor".to_owned()))
 }
 
 fn read(path: &str) -> Result<Vec<u8>, String> {

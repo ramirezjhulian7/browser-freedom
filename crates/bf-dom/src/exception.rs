@@ -26,6 +26,7 @@ pub enum DomException {
     TimeoutError,
     InvalidNodeTypeError,
     DataCloneError,
+    QuotaExceededError,
     /// `TypeError` de ECMAScript.
     TypeError,
 }
@@ -53,6 +54,7 @@ impl DomException {
             DomException::TimeoutError => "TimeoutError",
             DomException::InvalidNodeTypeError => "InvalidNodeTypeError",
             DomException::DataCloneError => "DataCloneError",
+            DomException::QuotaExceededError => "QuotaExceededError",
             DomException::TypeError => "TypeError",
         }
     }
@@ -87,6 +89,7 @@ impl DomException {
                 "The supplied node is incorrect or has an incorrect ancestor for this operation."
             }
             DomException::DataCloneError => "The object can not be cloned.",
+            DomException::QuotaExceededError => "The quota has been exceeded.",
             DomException::TypeError => "Type error.",
         }
     }
@@ -113,6 +116,7 @@ impl DomException {
             DomException::TimeoutError => 23,
             DomException::InvalidNodeTypeError => 24,
             DomException::DataCloneError => 25,
+            DomException::QuotaExceededError => 22,
             DomException::TypeError => 0,
         }
     }
