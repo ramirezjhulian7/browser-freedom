@@ -878,39 +878,30 @@ pub fn document_partial() -> HostClass {
         .attribute("scrollingElement", Some(scrolling_element), None)
 }
 
-/// Los elementos bajo `(x, y)` del viewport, del más alto al más bajo en el orden de
-/// pintura (con el elemento raíz al final).
-fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
-    let m = window_metrics(agent);
-    if x < 0.0 || y < 0.0 || x > f64::from(m.viewport.width) || y > f64::from(m.viewport.height) {
-        return Vec::new();
-    }
-    let tree = current_layout(agent);
-    let mut hits: Vec<((i32, bool, usize), NodeId)> = Vec::new();
-    let mut counter = 0;
-    fn visit(
-        f: &Fragment,
-        point: (f32, f32),
-        scroll: (f32, f32),
-        z: i32,
-        positioned: bool,
-        fixed: bool,
-        clip: Option<Rect>,
-        counter: &mut usize,
-        hits: &mut Vec<((i32, bool, usize), NodeId)>,
-    ) {
+/// El recorrido del hit testing en orden de pintura aproximado: `(z-index efectivo, dentro
+/// de una caja posicionada, orden de árbol)` (CSS 2.2 Apéndice E).
+struct HitWalk {
+    point: (f32, f32),
+    scroll: (f32, f32),
+    counter: usize,
+    hits: Vec<((i32, bool, usize), NodeId)>,
+}
+
+impl HitWalk {
+    fn visit(&mut self, f: &Fragment, z: i32, positioned: bool, fixed: bool, clip: Option<Rect>) {
         let is_box = !matches!(f.kind, FragmentKind::Line | FragmentKind::Text);
         let fixed = fixed || (is_box && f.style.position == Position::Fixed);
+        // Lo fijo está en coordenadas del viewport; el resto, en las de la página.
         let p = if fixed {
-            point
+            self.point
         } else {
-            (point.0 + scroll.0, point.1 + scroll.1)
+            (self.point.0 + self.scroll.0, self.point.1 + self.scroll.1)
         };
         let own = is_box && f.style.position != Position::Static;
         let positioned = positioned || own;
         let z = if own { f.z_index.unwrap_or(z) } else { z };
-        let order = *counter;
-        *counter += 1;
+        let order = self.counter;
+        self.counter += 1;
         let inside = |r: &Rect| p.0 >= r.x && p.0 < r.right() && p.1 >= r.y && p.1 < r.bottom();
         if f.kind != FragmentKind::Line
             && let Some(node) = f.node
@@ -919,7 +910,7 @@ fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
             && inside(&f.rect)
             && clip.is_none_or(|c| inside(&c))
         {
-            hits.push(((z, positioned, order), node));
+            self.hits.push(((z, positioned, order), node));
         }
         let inner = match (f.clip, clip) {
             (Some(c), Some(o)) => {
@@ -936,28 +927,36 @@ fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
             (None, o) => o,
         };
         for c in &f.children {
+            // Un fijo no lo recortan los `overflow` de sus ancestros.
             let cc = if c.style.position == Position::Fixed {
                 None
             } else {
                 inner
             };
-            visit(c, point, scroll, z, positioned, fixed, cc, counter, hits);
+            self.visit(c, z, positioned, fixed, cc);
         }
     }
-    if let Some(root) = &tree.root {
-        visit(
-            root,
-            (x as f32, y as f32),
-            m.scroll,
-            0,
-            false,
-            false,
-            None,
-            &mut counter,
-            &mut hits,
-        );
+}
+
+/// Los elementos bajo `(x, y)` del viewport, del más alto al más bajo en el orden de
+/// pintura (con el elemento raíz al final).
+fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
+    let m = window_metrics(agent);
+    if x < 0.0 || y < 0.0 || x > f64::from(m.viewport.width) || y > f64::from(m.viewport.height) {
+        return Vec::new();
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    let tree = current_layout(agent);
+    let mut walk = HitWalk {
+        point: (x as f32, y as f32),
+        scroll: m.scroll,
+        counter: 0,
+        hits: Vec::new(),
+    };
+    if let Some(root) = &tree.root {
+        walk.visit(root, 0, false, false, None);
+    }
+    let mut hits = walk.hits;
+    hits.sort_by_key(|h| std::cmp::Reverse(h.0));
     // Los nodos de texto cuentan como su elemento padre.
     let mut out: Vec<NodeId> = Vec::new();
     with_doc(agent, 0, |d| {

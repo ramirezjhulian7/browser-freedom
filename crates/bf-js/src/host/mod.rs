@@ -494,7 +494,8 @@ impl Agent {
             let def = &mut self.host.classes[ci];
             def.methods.extend(ext.methods.iter().copied());
             def.attributes.extend(ext.attributes.iter().copied());
-            def.static_methods.extend(ext.static_methods.iter().copied());
+            def.static_methods
+                .extend(ext.static_methods.iter().copied());
         }
         for realm in 0..self.host.realm_classes.len() {
             let Some(Some(objs)) = self.host.realm_classes[realm].get(ci).copied() else {
