@@ -550,10 +550,17 @@ impl Agent {
     /// Notifica las promesas rechazadas que siguen sin handler (al vaciar la cola).
     pub(crate) fn notify_rejections(&mut self) {
         let pending = std::mem::take(&mut self.rejections.pending);
+        let mut unhandled = Vec::new();
         for p in pending {
             if matches!(&self.heap[p].kind, ObjectKind::Promise(d) if !d.is_handled) {
                 self.rejections.unhandled += 1;
+                unhandled.push(p);
             }
+        }
+        if !unhandled.is_empty()
+            && let Some(f) = self.host.rejection_notifier
+        {
+            f(self, unhandled);
         }
     }
 

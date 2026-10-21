@@ -378,15 +378,22 @@ fn json_parse(agent: &mut Agent, text: &str) -> JsResult<Value> {
 }
 
 impl bf_dom::events::ScriptHost for WebScripts<'_> {
-    /// Los listeners de JavaScript los registra y llama el DOM de E3; mientras tanto no hay
-    /// listeners de script en `bf-dom`.
+    /// Los listeners de JavaScript (del DOM de E3): el documento vuelve al contexto mientras
+    /// corre el listener (el parser lo tiene prestado durante `feed`).
     fn call_listener(
         &mut self,
-        _doc: &mut Document,
-        _handle: u64,
-        _event: &mut bf_dom::events::Event,
+        doc: &mut Document,
+        handle: u64,
+        event: &mut bf_dom::events::Event,
     ) -> bool {
-        false
+        let h = WebContextHandle { realm: self.realm };
+        std::mem::swap(h.get_mut(self.agent).doc_mut(0), doc);
+        let saved = self.agent.current_realm;
+        self.agent.current_realm = self.realm;
+        let threw = crate::dom::events::invoke_listener(self.agent, handle, event);
+        self.agent.current_realm = saved;
+        std::mem::swap(h.get_mut(self.agent).doc_mut(0), doc);
+        threw
     }
 }
 
