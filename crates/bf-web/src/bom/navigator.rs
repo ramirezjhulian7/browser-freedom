@@ -1,7 +1,8 @@
-//! `Navigator` (HTML §8.9.1) y `NavigatorUAData` (User-Agent Client Hints §3): Freedom se
-//! presenta como Chrome estable en Windows (el `User-Agent` sale de los hooks del motor), con
-//! las marcas `Chromium` y `Freedom`.
+//! `Navigator` (HTML §8.9.1) y `NavigatorUAData` (User-Agent Client Hints §3): los mismos
+//! datos que da Chrome, con Freedom como producto y como motor (ver
+//! [`bf_infra::identity`]). El `User-Agent` sale de los hooks del motor.
 
+use bf_infra::identity;
 use bf_js::heap::Gc;
 use bf_js::host::HostClass;
 use bf_js::object::Object;
@@ -16,15 +17,6 @@ const SLOT_LANGUAGES: usize = 0;
 const SLOT_UA_DATA: usize = 1;
 const SLOT_PLUGINS: usize = 2;
 const SLOT_MIME_TYPES: usize = 3;
-
-/// El nombre de los visores de PDF que Chrome expone en `navigator.plugins`.
-const PDF_PLUGINS: [&str; 5] = [
-    "PDF Viewer",
-    "Chrome PDF Viewer",
-    "Chromium PDF Viewer",
-    "Microsoft Edge PDF Viewer",
-    "WebKit built-in PDF",
-];
 
 pub fn navigator_class() -> HostClass {
     HostClass::new("Navigator")
@@ -46,7 +38,8 @@ pub fn navigator_class() -> HostClass {
         .attribute("maxTouchPoints", Some(zero), None)
         .attribute("doNotTrack", Some(null), None)
         .attribute("webdriver", Some(no), None)
-        .attribute("pdfViewerEnabled", Some(yes), None)
+        // Freedom no tiene visor de PDF: `plugins` y `mimeTypes` quedan vacíos (HTML §8.9.1.6).
+        .attribute("pdfViewerEnabled", Some(no), None)
         .attribute("userAgentData", Some(user_agent_data), None)
         .attribute("plugins", Some(plugins), None)
         .attribute("mimeTypes", Some(mime_types), None)
@@ -78,16 +71,6 @@ fn ua(agent: &Agent) -> String {
     agent.host.hooks.user_agent()
 }
 
-/// La versión mayor de Chrome del `User-Agent` (`Chrome/<mayor>.`).
-pub fn chrome_major(user_agent: &str) -> String {
-    user_agent
-        .split("Chrome/")
-        .nth(1)
-        .and_then(|rest| rest.split('.').next())
-        .unwrap_or("0")
-        .to_owned()
-}
-
 fn user_agent(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::str(&ua(agent)))
 }
@@ -110,17 +93,19 @@ fn product(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::str("Gecko"))
 }
 
-/// `productSub` de los navegadores de la familia de Chrome y Safari.
+/// `productSub` (HTML §8.9.1.1): uno de los dos valores de compatibilidad del estándar.
 fn product_sub(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::str("20030107"))
 }
 
+/// `vendor` (HTML §8.9.1.1): la cadena vacía (las otras opciones del estándar son las de
+/// Apple y Google).
 fn vendor(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::str("Google Inc."))
+    Ok(Value::str(""))
 }
 
 fn platform(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::str("Win32"))
+    Ok(Value::str(identity::NAVIGATOR_PLATFORM))
 }
 
 fn empty(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
@@ -227,11 +212,11 @@ fn frozen_record(agent: &mut Agent, fields: &[(&str, Value)]) -> JsResult<Gc<Obj
     Ok(o)
 }
 
-/// Las marcas (`brands`): Chromium y Freedom con la versión `version`.
-fn brand_list(agent: &mut Agent, chrome: &str) -> JsResult<Value> {
-    let list = [("Chromium", chrome), ("Freedom", "0.1")];
+/// Una lista de marcas (`brands` o `fullVersionList`) como array congelado de
+/// `{brand, version}`.
+fn brand_list(agent: &mut Agent, list: &[(&str, &str)]) -> JsResult<Value> {
     let mut values = Vec::new();
-    for (brand, version) in list {
+    for &(brand, version) in list {
         let o = frozen_record(
             agent,
             &[
@@ -247,12 +232,13 @@ fn brand_list(agent: &mut Agent, chrome: &str) -> JsResult<Value> {
 }
 
 fn brands(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let major = chrome_major(&ua(agent));
-    cached(agent, &a.this, 0, |agent| brand_list(agent, &major))
+    cached(agent, &a.this, 0, |agent| {
+        brand_list(agent, &identity::brands())
+    })
 }
 
 fn ua_platform(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::str("Windows"))
+    Ok(Value::str(identity::UA_PLATFORM))
 }
 
 /// `toJSON()`: `{brands, mobile, platform}`.
@@ -271,7 +257,7 @@ fn ua_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     agent.put_data(
         o,
         PropertyKey::from("platform"),
-        Value::str("Windows"),
+        Value::str(identity::UA_PLATFORM),
         true,
         true,
         true,
@@ -282,9 +268,6 @@ fn ua_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `getHighEntropyValues(hints)` (UA-CH §3.3): una promesa con los valores de baja entropía y
 /// los pedidos.
 fn get_high_entropy_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let ua = ua(agent);
-    let major = chrome_major(&ua);
-    let full = format!("{major}.0.0.0");
     let mut hints: Vec<String> = Vec::new();
     if let Value::Object(list) = a.arg(0) {
         let len = agent.get_str(list, "length")?;
@@ -295,7 +278,7 @@ fn get_high_entropy_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
         }
     }
     let o = agent.new_plain_object();
-    let b = brand_list(agent, &major)?;
+    let b = brand_list(agent, &identity::brands())?;
     agent.put_data(o, PropertyKey::from("brands"), b, true, true, true);
     agent.put_data(
         o,
@@ -308,20 +291,21 @@ fn get_high_entropy_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     agent.put_data(
         o,
         PropertyKey::from("platform"),
-        Value::str("Windows"),
+        Value::str(identity::UA_PLATFORM),
         true,
         true,
         true,
     );
     for hint in &hints {
         let v = match hint.as_str() {
-            "architecture" => Value::str("x86"),
-            "bitness" => Value::str("64"),
+            "architecture" => Value::str(identity::ARCHITECTURE),
+            "bitness" => Value::str(identity::BITNESS),
             "model" => Value::str(""),
-            "platformVersion" => Value::str("15.0.0"),
-            "uaFullVersion" => Value::str(&full),
+            // La versión exacta del sistema no se expone (el estándar permite la cadena vacía).
+            "platformVersion" => Value::str(""),
+            "uaFullVersion" => Value::str(identity::VERSION),
             "wow64" => Value::Boolean(false),
-            "fullVersionList" => brand_list(agent, &full)?,
+            "fullVersionList" => brand_list(agent, &identity::full_version_list())?,
             "formFactors" => frozen_strings(agent, &["Desktop".to_owned()])?,
             _ => continue,
         };
@@ -329,38 +313,6 @@ fn get_high_entropy_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     }
     let ctor = agent.intrinsics().promise_ctor;
     agent.promise_resolve(ctor, Value::Object(o))
-}
-
-/// Un plugin o un MIME type de PDF (objetos planos con los campos de `Plugin`/`MimeType`).
-fn pdf_entries(agent: &mut Agent, mime: bool) -> JsResult<Vec<(String, Value)>> {
-    let mut out = Vec::new();
-    if mime {
-        for ty in ["application/pdf", "text/pdf"] {
-            let o = frozen_record(
-                agent,
-                &[
-                    ("type", Value::str(ty)),
-                    ("suffixes", Value::str("pdf")),
-                    ("description", Value::str("Portable Document Format")),
-                ],
-            )?;
-            out.push((ty.to_owned(), Value::Object(o)));
-        }
-    } else {
-        for name in PDF_PLUGINS {
-            let o = frozen_record(
-                agent,
-                &[
-                    ("name", Value::str(name)),
-                    ("filename", Value::str("internal-pdf-viewer")),
-                    ("description", Value::str("Portable Document Format")),
-                    ("length", Value::Number(2.0)),
-                ],
-            )?;
-            out.push((name.to_owned(), Value::Object(o)));
-        }
-    }
-    Ok(out)
 }
 
 /// `PluginArray`/`MimeTypeArray` con sus entradas como propiedades indexadas y con nombre.
@@ -371,7 +323,8 @@ fn collection(agent: &mut Agent, mime: bool) -> JsResult<Value> {
     } else {
         c.plugin_array
     };
-    let entries = pdf_entries(agent, mime)?;
+    // Sin visor de PDF no hay plugins ni tipos MIME que listar (HTML §8.9.1.6).
+    let entries: Vec<(String, Value)> = Vec::new();
     let o = agent.host_create(class, Box::new(entries.len()));
     for (i, (name, v)) in entries.iter().enumerate() {
         agent.put_data(

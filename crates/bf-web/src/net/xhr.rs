@@ -639,7 +639,7 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     for (n, v) in &headers_list.0 {
         net_headers.push(n, v);
     }
-    if !same {
+    if !same || !matches!(s.method.as_str(), "GET" | "HEAD") {
         net_headers.push("Origin", &super::document_origin(agent));
     }
     let req = NetRequest {

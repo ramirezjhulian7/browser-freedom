@@ -71,6 +71,8 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
   los sitios se cierran). Solo escribe archivos cuando tú lo pides, como al guardar una
   imagen.
 - No envía datos de uso: solo se conecta a los sitios que visitas (y a Google cuando buscas).
+- Se presenta ante los sitios como lo que es, Freedom: no se hace pasar por Chrome ni por
+  otro navegador.
 
 ### Qué funciona y qué todavía no
 
@@ -157,6 +159,8 @@ motor JavaScript.
   - `ResourceLoader` por `Url` y `FileLoader` (`file:`, `data:` y prefijos montados);
   - WHATWG Encoding: 228 etiquetas, BOM, UTF-8, UTF-16 y los 28 single-byte. Los multibyte
     se reconocen y se decodifican como windows-1252 (fase 3).
+  - `identity`: cómo se presenta Freedom a los sitios (`User-Agent`, Client Hints,
+    `navigator.platform`); ver [Identidad](CONTRIBUTING.md#identidad-del-navegador).
 - **`bf-net`**:
   - HTTP/1.1 sobre TCP y TLS (rustls, webpki-roots, SNI, ALPN `http/1.1`), con timeouts de
     10 s (conexión) y 30 s (lectura) y pool keep-alive;
@@ -275,6 +279,11 @@ El flujo de una página:
   el spec vigente, se documenta en [`docs/wpt-status.md`](docs/wpt-status.md); no se agrega a
   una lista de omitidos sin explicación.
 - `#![forbid(unsafe_code)]` en todos los crates.
+- **Identidad propia.** Freedom da a los sitios los mismos datos que Chrome (sistema,
+  arquitectura, idiomas, Client Hints), pero se identifica como Freedom, producto y motor: sin
+  `AppleWebKit`, `Chrome` ni `Safari` en el `User-Agent`, sin marca `Chromium`, sin
+  `vendor` de Google. Todo sale de `bf_infra::identity` (ver
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#identidad-del-navegador)).
 
 Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) para el flujo de trabajo.
 

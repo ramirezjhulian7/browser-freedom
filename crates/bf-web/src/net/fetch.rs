@@ -973,7 +973,9 @@ pub fn net_request(agent: &mut Agent, r: &RequestData, list: &HeaderList) -> Net
     for (n, v) in &list.0 {
         headers.push(n, v);
     }
-    if !same && r.mode == "cors" {
+    // Fetch §3.1 ("append a request `Origin` header"): las peticiones CORS y las que no son
+    // GET ni HEAD.
+    if (!same && r.mode == "cors") || !matches!(r.method.as_str(), "GET" | "HEAD") {
         headers.push("Origin", &super::document_origin(agent));
     }
     let referrer = match r.referrer.as_str() {

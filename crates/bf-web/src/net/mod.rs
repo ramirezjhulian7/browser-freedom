@@ -23,6 +23,7 @@ pub mod body;
 pub mod fetch;
 pub mod formdata;
 pub mod headers;
+pub mod wptserve;
 pub mod xhr;
 
 use std::collections::HashMap;
@@ -252,9 +253,32 @@ fn backend(agent: &mut Agent) -> Arc<dyn NetBackend> {
         return b;
     }
     if let Some(r) = agent.realm_data::<crate::html::scripting::PageResources>(realm) {
-        return Arc::new(LoaderBackend(r.loader.clone()));
+        let loader = r.loader.clone();
+        let url = WebContextHandle::current(agent).get(agent).url.clone();
+        // Las páginas de WPT: el docroot común y los handlers emulados de wptserve.
+        if url.host.as_ref().is_some_and(|h| h.to_string().ends_with("web-platform.test")) {
+            let mut origin = url.clone();
+            origin.host = Url::parse("http://web-platform.test/", None).ok().and_then(|u| u.host);
+            return Arc::new(wptserve::WptServe {
+                files: LoaderBackend(loader),
+                origin,
+            });
+        }
+        return Arc::new(LoaderBackend(loader));
     }
     default_fetcher()
+}
+
+/// "Bad port" (Fetch §2.9): los puertos a los que nunca se conecta por HTTP(S).
+pub fn is_bad_port(url: &Url) -> bool {
+    const BAD: &[u16] = &[
+        0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
+        101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179,
+        389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601,
+        636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+        6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+    ];
+    matches!(url.scheme.as_str(), "http" | "https") && url.port.is_some_and(|p| BAD.contains(&p))
 }
 
 /// Empieza una petición; `done` corre en una tarea *networking* con el resultado. Devuelve
@@ -265,6 +289,12 @@ pub fn start(agent: &mut Agent, req: NetRequest, done: Done) -> u64 {
     let s = state_of(agent, realm);
     s.next_id += 1;
     let id = s.next_id;
+    if is_bad_port(&req.url) {
+        let msg = format!("Failed to fetch: bad port {}", req.url.href());
+        queue_result(agent, realm, done, Err(msg));
+        return id;
+    }
+    let s = state_of(agent, realm);
     if s.threaded {
         s.pending.insert(id, done);
         let inbox = s.inbox.clone();
@@ -293,6 +323,9 @@ pub fn cancel(agent: &mut Agent, id: u64) {
 
 /// Una petición bloqueante (XMLHttpRequest síncrono).
 pub fn fetch_blocking(agent: &mut Agent, req: &NetRequest) -> NetResult {
+    if is_bad_port(&req.url) {
+        return Err(format!("bad port {}", req.url.href()));
+    }
     backend(agent).fetch(req)
 }
 

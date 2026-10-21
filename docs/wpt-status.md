@@ -60,22 +60,13 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 
 Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md`.
 
-- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `dom`, `html/dom`, `html/semantics/scripting-1`, `html/webappapis`, `url`, `encoding`, `console`; 1935 documentos en 15 s.
+- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `url`, `encoding`, `console`, `html/webappapis`, `html/dom`; 759 documentos en 4 s.
 - Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por archivo.
 - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). Detalle por subtest: `target/wpt-testharness/results.tsv`.
 
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | console | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom | 11 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/abort | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/collections | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/events | 177 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/lists | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/nodes | 359 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/observable | 29 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/ranges | 68 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| dom/traversal | 18 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | encoding | 45 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | encoding/legacy-mb-japanese | 51 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | encoding/legacy-mb-korean | 26 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
@@ -83,7 +74,38 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | encoding/legacy-mb-tchinese | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | encoding/streams | 13 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | html/dom | 223 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| html/semantics | 491 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | html/webappapis | 321 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
 | url | 41 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
-| **Total** | 1935 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| **Total** | 759 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+
+Las causas más frecuentes de los archivos sin estado OK:
+
+- 759: `NORESULT TypeError: object.addEventListener is not a function`
+
+## Proyección de testharness con el core DOM de E3
+
+Medido el 2026-10-20 con un merge temporal (sin commit) de `duo/e3` (`8961aeb`, WIP: eventos,
+colecciones, `Node`/`Element`/`Document` completos) sobre `master`, y los listeners que dispara
+el parser (`DOMContentLoaded`, `load`) llamados con el `JsHost` de E3. Es lo que mostrará la
+sección anterior cuando el core de E3 esté en `master`. Directorios: `url`, `encoding`,
+`console`, `html/webappapis`, `html/dom`, `dom/nodes`.
+
+| Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| console | 12 | 12 | 29 | 12 | 17 | 0 | 0 | 41.4% |
+| dom/nodes | 359 | 296 | 9656 | 7537 | 1363 | 80 | 676 | 78.1% |
+| encoding | 45 | 39 | 12003 | 11275 | 382 | 343 | 3 | 93.9% |
+| encoding/legacy-mb-japanese | 51 | 10 | 227170 | 0 | 66019 | 0 | 161151 | 0.0% |
+| encoding/legacy-mb-korean | 26 | 1 | 74430 | 0 | 3119 | 0 | 71311 | 0.0% |
+| encoding/legacy-mb-schinese | 4 | 4 | 660 | 2 | 658 | 0 | 0 | 0.3% |
+| encoding/legacy-mb-tchinese | 23 | 3 | 78893 | 0 | 14742 | 0 | 64151 | 0.0% |
+| encoding/streams | 13 | 12 | 111 | 0 | 111 | 0 | 0 | 0.0% |
+| html/dom | 223 | 147 | 34513 | 2985 | 31439 | 41 | 48 | 8.6% |
+| html/webappapis | 321 | 197 | 1079 | 545 | 299 | 179 | 56 | 50.5% |
+| url | 41 | 40 | 573 | 471 | 101 | 1 | 0 | 82.2% |
+| **Total** | 1118 | 761 | 439117 | 22827 | 118250 | 644 | 297396 | 5.2% |
+
+- `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
+  casi completo); `html/dom`: los `reflection-*` necesitan las interfaces `HTML*Element`
+  (parte 3 de E1). Sin ellas, `html/dom/reflection-*` da 2685/31723 subtests (8.5%); tres
+  archivos (`reflection-embedded`, `-forms`, `-text`) no llegan a reportar en 10 s.

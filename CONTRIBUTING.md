@@ -31,6 +31,36 @@ cargo fmt --all --check
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture   # si toca estilo, layout o pintura
 ```
 
+## Identidad del navegador
+
+Freedom da a los sitios **los mismos datos que Chrome**, con los mismos formatos, pero **se
+identifica como Freedom**: el producto y el motor son Freedom. Los sitios de detección deben
+ver «Freedom» (o un motor desconocido), nunca Blink, WebKit ni Gecko.
+
+- **Un solo lugar:** [`crates/bf-infra/src/identity.rs`](crates/bf-infra/src/identity.rs).
+  De ahí salen la cabecera `User-Agent` (`bf-net`), `navigator.userAgent`, `appVersion`,
+  `platform` y `userAgentData` (`bf-web`, a través de los hooks), las cabeceras
+  `Sec-CH-UA`, `Sec-CH-UA-Mobile` y `Sec-CH-UA-Platform` (`bf-net`, solo en HTTPS, como
+  Chrome) y el `User-Agent` por defecto de `bf-js`. No se escriben valores de identidad en
+  otro crate.
+- **`User-Agent`:** `Mozilla/5.0 (<sistema>) Freedom/<versión>`, con el sistema reducido
+  como lo hace Chrome (`Windows NT 10.0; Win64; x64`, `Macintosh; Intel Mac OS X 10_15_7`,
+  `X11; Linux x86_64`). `Mozilla/5.0` es el prefijo histórico que llevan todos los
+  navegadores y no implica motor.
+- **Prohibido:** los tokens `AppleWebKit`, `KHTML, like Gecko`, `Chrome`, `Safari`,
+  `Firefox` o `Gecko/<fecha>`; la marca `Chromium` o `Google Chrome` en las Client Hints;
+  `navigator.vendor = "Google Inc."`; listar visores de PDF u otras capacidades que Freedom
+  no tiene (`pdfViewerEnabled` es `false` y `plugins`/`mimeTypes` están vacíos).
+- **Client Hints:** marcas `Freedom` (versión mayor) y la marca GREASE `Not.A/Brand`;
+  `fullVersionList` y `uaFullVersion` con la versión completa; `architecture`, `bitness` y
+  `platform` reales de la compilación; `platformVersion` vacío.
+- **Valores fijados por el estándar** se dejan como están: `appName = "Netscape"`,
+  `appCodeName = "Mozilla"`, `product = "Gecko"` y `productSub = "20030107"` (HTML
+  §8.9.1.1).
+- **Si un sitio se rompe porque no reconoce el `User-Agent`**, no se falsifica la
+  identidad: se anota el sitio y lo que falla en el issue correspondiente, y se arregla la
+  funcionalidad que el sitio espera.
+
 ## Cómo añadir una propiedad CSS
 
 Todas las propiedades viven en un único registry en `crates/bf-style/src/properties/`.
