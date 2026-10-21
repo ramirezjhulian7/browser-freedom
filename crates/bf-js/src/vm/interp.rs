@@ -403,11 +403,20 @@ impl Agent {
             }
             self.call_internal_vec(&callee, this, args)?
         } else {
-            let (this, args) = {
+            // Los argumentos de una builtin van a un vector del pool (siguen también en la
+            // pila, que los enraíza mientras corre).
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            let this = {
                 let s = &frame!(self).stack;
-                (s[base + 1].clone(), s[base + 2..].to_vec())
+                args.extend_from_slice(&s[base + 2..]);
+                s[base + 1].clone()
             };
-            let r = self.call_internal(&callee, this, &args)?;
+            let r = self.call_internal(&callee, this, &args);
+            args.clear();
+            if self.value_pool.len() < 64 {
+                self.value_pool.push(args);
+            }
+            let r = r?;
             frame!(self).stack.truncate(base);
             r
         };
