@@ -4,11 +4,22 @@
 //! clases, para heredar de ellas y para elegir la clase de cada nodo), [`wrap_node`] /
 //! [`unwrap_node`] / [`this_node`], las conversiones de strings y [`throw_dom`].
 
+pub mod abort;
+pub mod adopt;
+pub mod collections;
 pub mod document;
 pub mod element;
+pub mod events;
 pub mod exception;
+pub mod implementation;
+pub mod insertion;
+pub mod mixins;
 pub mod node;
+pub mod observer;
+pub mod state;
+pub mod traversal;
 pub mod window;
+pub mod write;
 
 use std::collections::HashMap;
 
@@ -39,6 +50,27 @@ pub struct DomClasses {
     pub attr: HostClassId,
     pub window: HostClassId,
     pub dom_exception: HostClassId,
+    pub event: HostClassId,
+    pub custom_event: HostClassId,
+    pub ui_event: HostClassId,
+    pub focus_event: HostClassId,
+    pub mouse_event: HostClassId,
+    pub keyboard_event: HostClassId,
+    pub input_event: HostClassId,
+    pub error_event: HostClassId,
+    pub promise_rejection_event: HostClassId,
+    pub node_list: HostClassId,
+    pub html_collection: HostClassId,
+    pub dom_token_list: HostClassId,
+    pub named_node_map: HostClassId,
+    pub mutation_observer: HostClassId,
+    pub mutation_record: HostClassId,
+    pub abort_controller: HostClassId,
+    pub abort_signal: HostClassId,
+    pub node_filter: HostClassId,
+    pub node_iterator: HostClassId,
+    pub tree_walker: HostClassId,
+    pub dom_implementation: HostClassId,
     /// La clase de los elementos por (namespace, local name), p. ej. `HTMLDivElement` (la
     /// llena E1 con [`set_element_class`]).
     pub element_classes: HashMap<(Namespace, DomString), HostClassId>,
@@ -70,23 +102,15 @@ pub fn set_html_default_class(agent: &mut Agent, class: HostClassId) {
 /// Registra las clases del DOM (la primera vez) y convierte el global de `realm` en `Window`.
 pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     if agent.embedder_data::<DomClasses>().is_none() {
-        let event_target = agent.register_host_class(node::event_target_class());
+        let event_target = agent.register_host_class(events::event_target_class());
         let dom_exception = agent.register_host_class(exception::dom_exception_class());
         let n = agent.register_host_class(node::node_class(event_target));
         let document = agent.register_host_class(document::document_class(n));
-        let document_fragment = agent.register_host_class(
-            bf_js::host::HostClass::new("DocumentFragment")
-                .parent(n)
-                .constructor(document::document_fragment_ctor, 0),
-        );
+        let document_fragment = agent.register_host_class(document::document_fragment_class(n));
         let document_type = agent.register_host_class(node::document_type_class(n));
         let element = agent.register_host_class(element::element_class(n));
         let character_data = agent.register_host_class(node::character_data_class(n));
-        let text = agent.register_host_class(
-            bf_js::host::HostClass::new("Text")
-                .parent(character_data)
-                .constructor(document::text_ctor, 0),
-        );
+        let text = agent.register_host_class(node::text_class(character_data));
         let cdata_section =
             agent.register_host_class(bf_js::host::HostClass::new("CDATASection").parent(text));
         let comment = agent.register_host_class(
@@ -101,6 +125,29 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         );
         let attr = agent.register_host_class(node::attr_class(n));
         let window = agent.register_host_class(window::window_class(event_target));
+        let event = agent.register_host_class(events::event_class());
+        let custom_event = agent.register_host_class(events::custom_event_class(event));
+        let ui_event = agent.register_host_class(events::ui_event_class(event));
+        let focus_event = agent.register_host_class(events::focus_event_class(ui_event));
+        let mouse_event = agent.register_host_class(events::mouse_event_class(ui_event));
+        let keyboard_event = agent.register_host_class(events::keyboard_event_class(ui_event));
+        let input_event = agent.register_host_class(events::input_event_class(ui_event));
+        let error_event = agent.register_host_class(events::error_event_class(event));
+        let promise_rejection_event =
+            agent.register_host_class(events::promise_rejection_event_class(event));
+        let node_list = agent.register_host_class(collections::node_list_class());
+        let html_collection = agent.register_host_class(collections::html_collection_class());
+        let dom_token_list = agent.register_host_class(collections::dom_token_list_class());
+        let named_node_map = agent.register_host_class(collections::named_node_map_class());
+        let mutation_observer = agent.register_host_class(observer::mutation_observer_class());
+        let mutation_record = agent.register_host_class(observer::mutation_record_class());
+        let abort_controller = agent.register_host_class(abort::abort_controller_class());
+        let abort_signal = agent.register_host_class(abort::abort_signal_class(event_target));
+        let node_filter = agent.register_host_class(traversal::node_filter_class());
+        let node_iterator = agent.register_host_class(traversal::node_iterator_class());
+        let tree_walker = agent.register_host_class(traversal::tree_walker_class());
+        let dom_implementation =
+            agent.register_host_class(implementation::dom_implementation_class());
         agent.set_embedder_data(DomClasses {
             event_target,
             node: n,
@@ -116,11 +163,34 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
             attr,
             window,
             dom_exception,
+            event,
+            custom_event,
+            ui_event,
+            focus_event,
+            mouse_event,
+            keyboard_event,
+            input_event,
+            error_event,
+            promise_rejection_event,
+            node_list,
+            html_collection,
+            dom_token_list,
+            named_node_map,
+            mutation_observer,
+            mutation_record,
+            abort_controller,
+            abort_signal,
+            node_filter,
+            node_iterator,
+            tree_walker,
+            dom_implementation,
             element_classes: HashMap::new(),
             html_default: None,
         });
     }
     exception::finish_realm(agent, realm);
+    collections::finish_realm(agent, realm);
+    mixins::finish_realm(agent, realm);
     window::install(agent, realm, ctx);
 }
 
@@ -223,7 +293,19 @@ pub fn throw_dom<T>(agent: &mut Agent, e: DomException) -> JsResult<T> {
     exception::throw(agent, e)
 }
 
-/// Registra una mutación hecha desde JavaScript (re-render).
+/// Registra una mutación hecha desde JavaScript (re-render) y agenda la entrega de los
+/// `MutationObserver` de los documentos que encolaron records.
 pub fn mutated(agent: &mut Agent) {
-    WebContextHandle::current(agent).get_mut(agent).mutated();
+    let ctx = WebContextHandle::current(agent);
+    ctx.get_mut(agent).mutated();
+    let n = ctx.get(agent).documents.len();
+    for doc in 0..n as DocIndex {
+        observer::schedule_delivery(agent, doc);
+    }
+}
+
+/// Después de que un algoritmo de `bf-dom` corrió con script (dispatch, abort): agenda la
+/// entrega de los observers de `doc`.
+pub fn after_dom_mutation(agent: &mut Agent, doc: DocIndex) {
+    observer::schedule_delivery(agent, doc);
 }
