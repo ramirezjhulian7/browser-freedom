@@ -416,6 +416,16 @@ impl bf_dom::events::ScriptHost for WebScripts<'_> {
     ) -> bool {
         lend_and_invoke(self.agent, self.realm, doc, handle, event)
     }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: bf_dom::events::EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, 0, doc, target, type_);
+    }
 }
 
 /// El host de un despacho que empieza fuera de un script (un evento del usuario): el
@@ -434,6 +444,16 @@ impl bf_dom::events::ScriptHost for LendHost<'_> {
         event: &mut bf_dom::events::Event,
     ) -> bool {
         lend_and_invoke(self.agent, self.realm, doc, handle, event)
+    }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: bf_dom::events::EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, 0, doc, target, type_);
     }
 }
 
@@ -635,4 +655,27 @@ fn fire_window_handler(agent: &mut Agent, realm: RealmId, type_: &str, state: Op
         }
     }
     agent.current_realm = saved;
+}
+
+// E3: los `script` que inserta el DOM (no el parser) usan la misma carga y ejecución.
+/// Busca el script de `url` con el loader de la ventana de `realm` (`None` sin loader o si
+/// falló): el texto decodificado y la URL final.
+pub fn fetch_script(
+    agent: &mut Agent,
+    realm: RealmId,
+    url: &Url,
+    charset: &str,
+) -> Option<(String, String)> {
+    let mut host = WebScripts { agent, realm };
+    host.fetch(url, charset).map(|f| (f.source, f.url))
+}
+
+/// Ejecuta un script clásico (`module = false`) o un módulo como los del parser.
+pub fn run_script(agent: &mut Agent, realm: RealmId, source: &str, url: &str, module: bool) {
+    let mut host = WebScripts { agent, realm };
+    if module {
+        host.run_module(source, url);
+    } else {
+        host.run_classic(source, url);
+    }
 }

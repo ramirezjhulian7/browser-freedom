@@ -33,6 +33,7 @@ pub mod mutation;
 mod names;
 mod node;
 pub mod observer;
+pub mod range; // E3
 pub mod script;
 mod serialize;
 
@@ -248,6 +249,7 @@ pub struct Document {
     pub(crate) listeners: events::Listeners,
     pub(crate) aborts: abort::AbortState,
     pub(crate) scripts: script::ScriptLists,
+    pub(crate) live_ranges: range::LiveRanges, // E3
 }
 
 impl Default for Document {
@@ -274,6 +276,7 @@ impl Document {
             listeners: events::Listeners::default(),
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
+            live_ranges: range::LiveRanges::default(), // E3
         };
         doc.push(NodeData::Document);
         doc
