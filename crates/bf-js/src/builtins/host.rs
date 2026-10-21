@@ -45,6 +45,9 @@ pub fn install_test262(agent: &mut Agent, realm: RealmId) -> Gc<Object> {
     let dda = agent.alloc(Object::new(Some(op), crate::object::ObjectKind::HtmlDda));
     value_prop(agent, o, "IsHTMLDDA", Value::Object(dda));
     crate::builtins::atomics::install_agent_hooks(agent, o); // E3
+    // E3: un `setTimeout` del host (lo usa atomicsHelper.js si existe; sin él, el harness
+    // espera con microtasks que no dejan vencer los timeouts de `Atomics.waitAsync`).
+    crate::builtins::atomics::install_global_set_timeout(agent, g);
     agent.put_data(
         g,
         PropertyKey::from("$262"),

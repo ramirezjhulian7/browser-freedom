@@ -15,6 +15,7 @@
 //! - [`hooks`]: la interfaz con el embebedor; [`event_loop`]: tareas, temporizadores,
 //!   microtasks y animation frames; [`webidl`]: conversiones; [`runtime`]: la fachada.
 
+pub mod agents; // E3
 pub mod event_loop;
 pub mod exotic;
 pub mod hooks;

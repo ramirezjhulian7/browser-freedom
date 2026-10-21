@@ -207,7 +207,9 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
         deadline: Some(Instant::now() + TIME_LIMIT),
     });
     agent.reset_stack_base();
-    agent.can_block = meta.flags.iter().any(|f| f == "CanBlockIsTrue"); // E3: AgentCanSuspend
+    // E3: AgentCanSuspend: el agente principal puede suspenderse (como en los shells de los
+    // motores), salvo en los tests `CanBlockIsFalse`.
+    agent.can_block = !meta.flags.iter().any(|f| f == "CanBlockIsFalse");
     if let Some(t) = std::env::var("BF_GC_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

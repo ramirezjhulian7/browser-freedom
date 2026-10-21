@@ -57,6 +57,7 @@ fn structured_clone(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 data: d.data.clone(),
                 max_byte_length: d.max_byte_length,
                 shared: false,
+                block: None,
             },
             _ => ArrayBufferData::default(),
         };
@@ -251,6 +252,7 @@ impl Cloner {
                 data: Some(data),
                 max_byte_length: max,
                 shared: false,
+                block: None,
             })),
         ));
         self.memory.insert(b, c);

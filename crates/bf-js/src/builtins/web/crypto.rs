@@ -210,11 +210,8 @@ fn get_random_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let mut bytes = vec![0u8; len];
     random_bytes(&mut bytes);
-    if let ObjectKind::ArrayBuffer(b) = &mut agent.heap[buffer].kind
-        && let Some(d) = &mut b.data
-        && let Some(slot) = d.get_mut(offset..offset + len)
-    {
-        slot.copy_from_slice(&bytes);
+    if offset + len <= crate::builtins::array_buffer::byte_length(agent, buffer) {
+        crate::builtins::array_buffer::write_bytes(agent, buffer, offset, &bytes);
     }
     Ok(arr)
 }

@@ -1,14 +1,16 @@
-//! Atomics (§25.4) para un solo agente: sin otros hilos, las operaciones atómicas son
-//! lecturas y escrituras simples del Data Block. `Atomics.wait` solo puede terminar por
-//! timeout (nadie más puede notificar) y lanza TypeError si el agente no puede suspenderse
-//! (AgentCanSuspend, `Agent::can_block`); los waiters de `Atomics.waitAsync` quedan como
-//! timers que RunJobs dispara cuando la cola de jobs se vacía y que `Atomics.notify`
-//! despierta.
+//! Atomics (§25.4) entre agentes de distintos hilos (E3): sobre un SharedArrayBuffer, las
+//! operaciones van al Shared Data Block compartido (`crate::host::agents::SharedBlock`, con
+//! lectura-modificación-escritura atómica de verdad) y `wait`/`notify`/`waitAsync` usan las
+//! WaiterLists globales de `crate::host::agents`. `Atomics.wait` lanza TypeError si el
+//! agente no puede suspenderse (AgentCanSuspend, `Agent::can_block`). Los waiters de
+//! `Atomics.waitAsync` quedan como timers del agente: RunJobs (o el bucle de eventos del
+//! embebedor, con [`poll_timers`]) los resuelve con `"ok"` cuando otro agente los notifica
+//! (que despierta al agente con su `AgentSignal`) o con `"timed-out"` al vencer.
 //!
 //! También están aquí los timers del host de test262 (`$262.agent.setTimeout`,
 //! `monotonicNow`, `sleep`), que usan la misma cola.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::builtins::array_buffer::{
@@ -18,6 +20,7 @@ use crate::builtins::array_buffer::{
 use crate::builtins::typed_array::{kind_of, ta_data, ta_length, validate};
 use crate::builtins::{FnEntry, method, methods, to_string_tag};
 use crate::heap::{Gc, Trace, Tracer};
+use crate::host::agents::{self, Waiter};
 use crate::object::Object;
 use crate::value::{PropertyKey, Value};
 use crate::vm::function::CallArgs;
@@ -33,6 +36,8 @@ pub enum Timer {
         byte_index: usize,
         promise: Gc<Object>,
         deadline: Option<Instant>,
+        /// El waiter en la WaiterList compartida.
+        waiter: Arc<Waiter>,
     },
     /// `$262.agent.setTimeout`.
     Callback { deadline: Instant, callback: Value },
@@ -75,9 +80,20 @@ fn sleep_until(agent: &Agent, until: Instant) -> JsResult<()> {
     Ok(())
 }
 
-/// Dispara el timer con el vencimiento más próximo; `false` si no queda ninguno con
-/// vencimiento.
-pub fn fire_next_timer(agent: &mut Agent) -> JsResult<bool> {
+/// Dispara un timer listo (un waiter notificado o un vencimiento cumplido); `true` si
+/// disparó alguno.
+fn fire_ready(agent: &mut Agent, now: Instant) -> JsResult<bool> {
+    // Los waiters que otro agente notificó: "ok", en orden de llegada.
+    if let Some(i) = agent
+        .timers
+        .iter()
+        .position(|t| matches!(t, Timer::Waiter { waiter, .. } if waiter.is_notified()))
+    {
+        if let Timer::Waiter { promise, .. } = agent.timers.remove(i) {
+            agent.resolve_promise(promise, Value::str("ok"))?;
+        }
+        return Ok(true);
+    }
     let next = agent
         .timers
         .iter()
@@ -87,10 +103,20 @@ pub fn fire_next_timer(agent: &mut Agent) -> JsResult<bool> {
     let Some((deadline, i)) = next else {
         return Ok(false);
     };
-    sleep_until(agent, deadline)?;
+    if deadline > now {
+        return Ok(false);
+    }
     match agent.timers.remove(i) {
-        Timer::Waiter { promise, .. } => {
-            agent.resolve_promise(promise, Value::str("timed-out"))?;
+        Timer::Waiter {
+            promise, waiter, ..
+        } => {
+            // Si lo notificaron justo ahora, ya no está en la lista: "ok".
+            let v = if agents::remove_waiter(&waiter) {
+                "timed-out"
+            } else {
+                "ok"
+            };
+            agent.resolve_promise(promise, Value::str(v))?;
         }
         Timer::Callback { callback, .. } => match agent.call(&callback, Value::Undefined, &[]) {
             Ok(_) => {}
@@ -99,6 +125,52 @@ pub fn fire_next_timer(agent: &mut Agent) -> JsResult<bool> {
         },
     }
     Ok(true)
+}
+
+/// RunJobs con la cola vacía: espera (durmiendo) el próximo timer y lo dispara; `false` si
+/// no queda ninguno. Un waiter sin vencimiento espera a que otro agente lo notifique, hasta
+/// el límite de tiempo del agente.
+pub fn fire_next_timer(agent: &mut Agent) -> JsResult<bool> {
+    loop {
+        if agent.timers.is_empty() {
+            return Ok(false);
+        }
+        let seen = agent.signal.seen();
+        if fire_ready(agent, Instant::now())? {
+            return Ok(true);
+        }
+        let next = agent.timers.iter().filter_map(Timer::deadline).min();
+        let limit = agent.options.deadline;
+        let until = match (next, limit) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if limit.is_some_and(|l| Instant::now() >= l) {
+            return Err(Throw::Terminate("tiempo agotado".into()));
+        }
+        agent.signal.wait(seen, until);
+    }
+}
+
+/// Para el bucle de eventos del embebedor (E3): resuelve los waiters de `waitAsync`
+/// notificados o vencidos y los timers vencidos, sin dormir. El próximo vencimiento queda en
+/// [`next_timer_deadline`].
+pub fn poll_timers(agent: &mut Agent) -> JsResult<()> {
+    while fire_ready(agent, Instant::now())? {}
+    Ok(())
+}
+
+/// El vencimiento más próximo de los timers del agente (ahora, si hay un waiter ya
+/// notificado).
+pub fn next_timer_deadline(agent: &Agent) -> Option<Instant> {
+    let notified = agent
+        .timers
+        .iter()
+        .any(|t| matches!(t, Timer::Waiter { waiter, .. } if waiter.is_notified()));
+    if notified {
+        return Some(Instant::now());
+    }
+    agent.timers.iter().filter_map(Timer::deadline).min()
 }
 
 // --- Validaciones (§25.4.3.1–4) ---
@@ -196,8 +268,14 @@ fn read_modify_write(
     revalidate(agent, o, byte_index)?;
     let buffer = ta_data(agent, o).expect("typed array").buffer;
     let size = kind.size();
+    let operand = numeric_to_raw(agent, kind, &v);
+    // Sobre memoria compartida, atómico de verdad (un compare_exchange de la palabra).
+    if let Some(block) = ab::shared_block(agent, buffer) {
+        let old = block.rmw(byte_index, size, |x| Some(op(x, operand) & mask(size)));
+        return Ok(raw_to_numeric(agent, kind, old));
+    }
     let old = read_raw(agent, buffer, byte_index, size, true);
-    let new = op(old, numeric_to_raw(agent, kind, &v)) & mask(size);
+    let new = op(old, operand) & mask(size);
     write_raw(agent, buffer, byte_index, size, new, true);
     Ok(raw_to_numeric(agent, kind, old))
 }
@@ -265,9 +343,14 @@ fn compare_exchange(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     revalidate(agent, o, byte_index)?;
     let buffer = ta_data(agent, o).expect("typed array").buffer;
     let size = kind.size();
+    let e = numeric_to_raw(agent, kind, &expected) & mask(size);
+    let r = numeric_to_raw(agent, kind, &replacement) & mask(size);
+    if let Some(block) = ab::shared_block(agent, buffer) {
+        let old = block.rmw(byte_index, size, |x| (x == e).then_some(r));
+        return Ok(raw_to_numeric(agent, kind, old));
+    }
     let old = read_raw(agent, buffer, byte_index, size, true);
-    if old == numeric_to_raw(agent, kind, &expected) & mask(size) {
-        let r = numeric_to_raw(agent, kind, &replacement);
+    if old == e {
         write_raw(agent, buffer, byte_index, size, r, true);
     }
     Ok(raw_to_numeric(agent, kind, old))
@@ -315,7 +398,9 @@ fn pause(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// Atomics.notify (§25.4.12): despierta waiters de `waitAsync` del agente.
+/// Atomics.notify (§25.4.12): despierta hasta `count` waiters del elemento, de cualquier
+/// agente. Los de `waitAsync` de este mismo agente se resuelven ya; los de otros agentes, en
+/// su propio bucle.
 fn notify(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (o, len) = validate_integer_ta(agent, &a.arg(0), true)?;
     let byte_index = validate_atomic_access(agent, o, len, &a.arg(1))?;
@@ -325,38 +410,40 @@ fn notify(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         agent.to_integer_or_infinity(&a.arg(2))?.max(0.0)
     };
     let buffer = ta_data(agent, o).expect("typed array").buffer;
-    if !is_shared(agent, buffer) {
+    let Some(block) = ab::shared_block(agent, buffer).cloned() else {
         return Ok(Value::Number(0.0));
-    }
-    let mut woken = Vec::new();
-    let mut i = 0;
-    while i < agent.timers.len() && (woken.len() as f64) < count {
-        match &agent.timers[i] {
-            Timer::Waiter {
-                buffer: b,
-                byte_index: bi,
-                promise,
-                ..
-            } if *b == buffer && *bi == byte_index => {
-                woken.push(*promise);
-                agent.timers.remove(i);
-            }
-            _ => i += 1,
+    };
+    let count = if count >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        count as usize
+    };
+    let woken = agents::notify(&block, byte_index, count);
+    for w in &woken {
+        if !w.owned_by(&agent.signal) {
+            continue;
+        }
+        let i = agent
+            .timers
+            .iter()
+            .position(|t| matches!(t, Timer::Waiter { waiter, .. } if Arc::ptr_eq(waiter, w)));
+        if let Some(i) = i
+            && let Timer::Waiter { promise, .. } = agent.timers.remove(i)
+        {
+            agent.resolve_promise(promise, Value::str("ok"))?;
         }
     }
-    let n = woken.len();
-    for p in woken {
-        agent.resolve_promise(p, Value::str("ok"))?;
-    }
-    Ok(Value::Number(n as f64))
+    Ok(Value::Number(woken.len() as f64))
 }
 
-/// DoWait (§25.4.3.14) hasta la comparación: (TypedArray, índice de byte, ¿igual?, t).
+/// DoWait (§25.4.3.14) hasta antes de la critical section: (bloque, índice de byte, tamaño,
+/// valor esperado, t).
+#[allow(clippy::type_complexity)]
 fn do_wait_prefix(
     agent: &mut Agent,
     a: &CallArgs<'_>,
     sync: bool,
-) -> JsResult<(Gc<Object>, usize, bool, f64)> {
+) -> JsResult<(Gc<Object>, agents::SharedBlock, usize, usize, u64, f64)> {
     let (o, len) = validate_integer_ta(agent, &a.arg(0), true)?;
     let buffer = ta_data(agent, o).expect("typed array").buffer;
     if !is_shared(agent, buffer) {
@@ -382,39 +469,48 @@ fn do_wait_prefix(
     if sync && !agent.can_block {
         return agent.type_error("Atomics.wait cannot be called in this context");
     }
-    let w = read_raw(agent, buffer, byte_index, kind.size(), true);
-    Ok((o, byte_index, v & mask(kind.size()) == w, t))
+    let block = ab::shared_block(agent, buffer)
+        .cloned()
+        .expect("SharedArrayBuffer");
+    let size = kind.size();
+    Ok((buffer, block, byte_index, size, v & mask(size), t))
 }
 
-/// Atomics.wait (§25.4.16): sin otros agentes, solo puede vencer el timeout.
+/// Atomics.wait (§25.4.16): suspende el hilo hasta que otro agente lo notifique o venza `t`.
 fn wait(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (_, _, equal, t) = do_wait_prefix(agent, a, true)?;
-    if !equal {
-        return Ok(Value::str("not-equal"));
-    }
-    if t.is_infinite() {
-        return Err(Throw::Terminate(
-            "Atomics.wait sin timeout y sin otros agentes que notifiquen".into(),
-        ));
-    }
-    sleep_until(agent, Instant::now() + Duration::from_secs_f64(t / 1000.0))?;
-    Ok(Value::str("timed-out"))
+    let (_, block, byte_index, size, v, t) = do_wait_prefix(agent, a, true)?;
+    let timeout = t.is_finite().then(|| Duration::from_secs_f64(t / 1000.0));
+    let r = agents::wait(&block, byte_index, size, v, timeout, agent.options.deadline);
+    Ok(Value::str(match r {
+        agents::WaitResult::NotEqual => "not-equal",
+        agents::WaitResult::Ok => "ok",
+        agents::WaitResult::TimedOut => "timed-out",
+        agents::WaitResult::Terminated => {
+            return Err(Throw::Terminate("tiempo agotado".into()));
+        }
+    }))
 }
 
 /// Atomics.waitAsync (§25.4.17).
 fn wait_async(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (o, byte_index, equal, t) = do_wait_prefix(agent, a, false)?;
+    let (buffer, block, byte_index, size, v, t) = do_wait_prefix(agent, a, false)?;
     let result = agent.new_plain_object();
     let k_async = PropertyKey::from("async");
     let k_value = PropertyKey::from("value");
-    if !equal || t == 0.0 {
-        let v = if equal { "timed-out" } else { "not-equal" };
-        agent.create_data_property_or_throw(result, k_async, Value::Boolean(false))?;
-        agent.create_data_property_or_throw(result, k_value, Value::str(v))?;
-        return Ok(Value::Object(result));
+    let sync_result = |agent: &mut Agent, v: &str| -> JsResult<Value> {
+        agent.create_data_property_or_throw(result, k_async.clone(), Value::Boolean(false))?;
+        agent.create_data_property_or_throw(result, k_value.clone(), Value::str(v))?;
+        Ok(Value::Object(result))
+    };
+    // Pasos 20–24 dentro de la critical section: comparar y, si coincide, encolarse.
+    if t == 0.0 {
+        let equal = block.load(byte_index, size) == v;
+        return sync_result(agent, if equal { "timed-out" } else { "not-equal" });
     }
+    let Some(waiter) = agents::wait_async(&block, byte_index, size, v, agent.signal.clone()) else {
+        return sync_result(agent, "not-equal");
+    };
     let promise = agent.new_internal_promise();
-    let buffer = ta_data(agent, o).expect("typed array").buffer;
     let deadline = if t.is_finite() {
         Some(Instant::now() + Duration::from_secs_f64(t / 1000.0))
     } else {
@@ -425,6 +521,7 @@ fn wait_async(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         byte_index,
         promise,
         deadline,
+        waiter,
     });
     agent.create_data_property_or_throw(result, k_async, Value::Boolean(true))?;
     agent.create_data_property_or_throw(result, k_value, Value::Object(promise))?;
@@ -432,6 +529,20 @@ fn wait_async(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 // --- `$262.agent` del host de test262 (solo lo que no necesita otros hilos) ---
+
+/// Los métodos de `$262.agent` de un agente creado con `$262.agent.start` que no necesitan
+/// al agente principal (`sleep`, `monotonicNow`, `setTimeout`).
+pub fn install_child_hooks(agent: &mut Agent, o: Gc<Object>) {
+    method(agent, o, "monotonicNow", 0, monotonic_now);
+    method(agent, o, "setTimeout", 2, set_timeout);
+    method(agent, o, "sleep", 1, sleep);
+}
+
+/// `setTimeout(callback, ms)` global del host de test262 (el mismo timer que
+/// `$262.agent.setTimeout`).
+pub fn install_global_set_timeout(agent: &mut Agent, g: Gc<Object>) {
+    method(agent, g, "setTimeout", 2, set_timeout);
+}
 
 fn start_instant() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -445,6 +556,7 @@ pub fn install_agent_hooks(agent: &mut Agent, o262: Gc<Object>) {
     method(agent, o, "monotonicNow", 0, monotonic_now);
     method(agent, o, "setTimeout", 2, set_timeout);
     method(agent, o, "sleep", 1, sleep);
+    agents::install_test262_agent(agent, o); // start, broadcast, getReport
     agent.put_data(
         o262,
         PropertyKey::from("agent"),
