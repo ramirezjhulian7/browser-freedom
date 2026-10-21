@@ -18,6 +18,7 @@
 
 mod chrome;
 mod edit;
+mod events;
 mod hit;
 mod icons;
 mod menu;
@@ -188,6 +189,8 @@ struct App {
     /// La interfaz cambió el documento actual (un campo editado): el próximo re-layout se lo
     /// manda al hilo del documento.
     edited: bool,
+    /// El foco que ya conoce el documento (pestaña, nodo).
+    focus_sent: (u64, Option<NodeId>),
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
     scroll: (f32, f32),
@@ -420,6 +423,45 @@ fn submit_button_at(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
     None
 }
 
+/// La navegación de un envío de formulario (HTML §4.10.21.3, GET y POST `urlencoded`): la URL
+/// y, para POST, el cuerpo con su `Content-Type`.
+fn form_submission(
+    doc: &bf_dom::Document,
+    base: &Url,
+    url: &Url,
+    form: NodeId,
+    submitter: Option<NodeId>,
+) -> (Url, Option<(Vec<u8>, String)>) {
+    let attr = |name: &str| -> Option<String> {
+        submitter
+            .and_then(|s| doc.element(s))
+            .and_then(|e| e.attr(&format!("form{name}")).map(str::to_owned))
+            .or_else(|| {
+                doc.element(form)
+                    .and_then(|e| e.attr(name).map(str::to_owned))
+            })
+    };
+    let method = attr("method").unwrap_or_default().to_ascii_lowercase();
+    let action = attr("action")
+        .filter(|a| !a.trim().is_empty())
+        .and_then(|a| Url::parse(a.trim(), Some(base)).ok())
+        .unwrap_or_else(|| url.clone());
+    let data = form_data(doc, form, submitter);
+    let query = bf_url::form::serialize(&data);
+    if method == "post" {
+        let body = (
+            query.into_bytes(),
+            "application/x-www-form-urlencoded".to_owned(),
+        );
+        (action, Some(body))
+    } else {
+        let mut target = action;
+        target.query = Some(query);
+        target.fragment = None;
+        (target, None)
+    }
+}
+
 /// El conjunto de datos de un formulario (HTML §4.10.21.4, sin archivos).
 fn form_data(
     doc: &bf_dom::Document,
@@ -588,6 +630,7 @@ impl App {
             next_tab_key: 1,
             consoles: HashMap::new(),
             edited: false,
+            focus_sent: (0, None),
             current: None,
             page: None,
             scroll: (0.0, 0.0),
@@ -947,10 +990,10 @@ impl App {
             }
             Key::Named(NamedKey::Tab) => return false,
             Key::Named(NamedKey::Enter) if kind == Editable::Input => {
-                // Envío implícito (HTML §4.10.21.2).
+                // Envío implícito (HTML §4.10.21.2): lo hace el documento (`submit`).
                 self.focus = None;
-                if let Some(form) = form_of(&current.doc, f.node) {
-                    self.submit_form(form, None);
+                if form_of(&current.doc, f.node).is_some() {
+                    self.send_input(events::UserInput::ImplicitSubmit { field: f.node });
                 }
                 return true;
             }
@@ -1043,54 +1086,14 @@ impl App {
         let mut l: Loaded = (**cur).clone();
         edit::set_value(&mut l.doc, node, kind, &text);
         self.current = Some(Arc::new(l));
-        self.edited = true;
-        self.request_relayout();
-    }
-
-    /// Envía el formulario del botón `button`.
-    fn submit(&mut self, button: NodeId) {
-        let Some(cur) = self.current.clone() else {
-            return;
-        };
-        if let Some(form) = form_of(&cur.doc, button) {
-            self.submit_form(form, Some(button));
-        }
-    }
-
-    /// Envío de un formulario (HTML §4.10.21.3, GET y POST `urlencoded`).
-    fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
-        let Some(cur) = self.current.clone() else {
-            return;
-        };
-        let doc = &cur.doc;
-        let attr = |name: &str| -> Option<String> {
-            submitter
-                .and_then(|s| doc.element(s))
-                .and_then(|e| e.attr(&format!("form{name}")).map(str::to_owned))
-                .or_else(|| {
-                    doc.element(form)
-                        .and_then(|e| e.attr(name).map(str::to_owned))
-                })
-        };
-        let method = attr("method").unwrap_or_default().to_ascii_lowercase();
-        let action = attr("action")
-            .filter(|a| !a.trim().is_empty())
-            .and_then(|a| Url::parse(a.trim(), Some(&cur.base)).ok())
-            .unwrap_or_else(|| cur.url.clone());
-        let data = form_data(doc, form, submitter);
-        let query = bf_url::form::serialize(&data);
-        if method == "post" {
-            let body = (
-                query.into_bytes(),
-                "application/x-www-form-urlencoded".to_owned(),
-            );
-            self.start_load_with(action, Navigation::Push, Some(body));
-        } else {
-            let mut url = action;
-            url.query = Some(query);
-            url.fragment = None;
-            self.navigate(url);
-        }
+        // El documento (con sus scripts) recibe el valor nuevo y el evento `input`.
+        self.send_input(events::UserInput::SetValue {
+            node,
+            kind,
+            value: text,
+            input_type: "insertText",
+            data: None,
+        });
     }
 
     /// La URL de la imagen (`<img>`) bajo el puntero.
@@ -1103,7 +1106,18 @@ impl App {
     }
 
     /// Clic derecho en la página: el menú contextual según lo que hay bajo el puntero.
+    /// Clic derecho: la página recibe `contextmenu` y, si no lo cancela, el hilo del documento
+    /// pide abrir el menú del navegador ([`Self::open_context_menu`]).
     fn context_menu(&mut self) {
+        let (x, y) = self.mouse;
+        if self.area_at(x, y) != Area::Page {
+            return;
+        }
+        self.send_mouse(events::MouseKind::ContextMenu, 2, 0);
+    }
+
+    /// El menú contextual del navegador según lo que hay bajo el puntero.
+    fn open_context_menu(&mut self) {
         let (x, y) = self.mouse;
         if self.area_at(x, y) != Area::Page {
             return;
@@ -1675,7 +1689,7 @@ impl App {
                     }
                 }
                 FromDoc::Console { tab, entry } => self.console_entry(tab, entry),
-                FromDoc::Request { tab, request } => self.page_request(tab, request),
+                FromDoc::Request { tab, request } => self.page_request(tab, *request),
             }
         }
         // Si la ventana cambió mientras se maquetaba, se rehace con el viewport actual.
@@ -1740,6 +1754,71 @@ impl App {
     fn sync_view(&mut self) {
         let dpr = self.dpi() * self.zoom;
         self.worker.set_scroll(self.tab_key, self.scroll, dpr);
+        // El foco de los campos de la página (`focus`/`blur` en el documento).
+        let focus = self.focus.as_ref().map(|f| f.node);
+        if self.focus_sent != (self.tab_key, focus) {
+            self.focus_sent = (self.tab_key, focus);
+            self.send_input(events::UserInput::Focus(focus));
+        }
+    }
+
+    /// Soltar el botón izquierdo: termina el arrastre y, sobre la página, `mouseup` y `click`
+    /// (con su activation behavior en el documento).
+    fn release(&mut self) {
+        self.drag = None;
+        if self.menu.is_none() && self.area_at(self.mouse.0, self.mouse.1) == Area::Page {
+            let detail = self.last_click.map_or(1, |(_, _, n)| i32::from(n));
+            self.send_mouse(events::MouseKind::Up, 0, 0);
+            self.send_mouse(events::MouseKind::Click, 0, detail);
+        }
+    }
+
+    /// Sesiones sin ventana: deja que el documento procese lo enviado y aplica lo que pida.
+    fn settle_input(&mut self) {
+        std::thread::sleep(Duration::from_millis(150));
+        self.receive();
+        self.settle();
+    }
+
+    /// Manda una entrada del usuario al documento de la pestaña activa.
+    fn send_input(&mut self, input: events::UserInput) {
+        self.worker.send(self.tab_key, Job::Input(Box::new(input)));
+    }
+
+    fn mods(&self) -> events::Mods {
+        events::Mods {
+            ctrl: self.modifiers.control_key(),
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            meta: self.modifiers.super_key(),
+        }
+    }
+
+    /// El nodo de la página bajo el puntero.
+    fn node_under_mouse(&self) -> Option<NodeId> {
+        let (px, py) = self.page_point(self.mouse.0, self.mouse.1);
+        let page = self.page.as_ref()?;
+        hit::hit_test(&page.tree, px, py, self.scroll)?.node
+    }
+
+    /// Un evento del puntero en la página para el documento.
+    fn send_mouse(&mut self, kind: events::MouseKind, button: i16, detail: i32) {
+        let client = self.page_point(self.mouse.0, self.mouse.1);
+        let buttons = match kind {
+            events::MouseKind::Down => 1 << button.clamp(0, 4),
+            _ => 0,
+        };
+        let input = events::UserInput::Mouse {
+            kind,
+            client,
+            screen: (self.mouse.0 / self.zoom, self.mouse.1 / self.zoom),
+            button,
+            buttons,
+            mods: self.mods(),
+            detail,
+            target: self.node_under_mouse(),
+        };
+        self.send_input(input);
     }
 
     /// La pantalla en la que está la ventana (`window.screen`), en px CSS.
@@ -1771,13 +1850,21 @@ impl App {
             return;
         };
         match request {
-            PageRequest::Navigate { url, replace } => {
-                let nav = if replace {
-                    Navigation::Replace
-                } else {
-                    Navigation::Push
-                };
-                self.with_tab(i, |app| app.start_load(url, nav));
+            PageRequest::Navigate { url, replace, post } => {
+                self.with_tab(i, |app| {
+                    if post.is_some() {
+                        app.start_load_with(url, Navigation::Push, post);
+                    } else if replace {
+                        app.start_load(url, Navigation::Replace);
+                    } else {
+                        app.navigate(url);
+                    }
+                });
+            }
+            PageRequest::ContextMenu => {
+                if i == self.active {
+                    self.open_context_menu();
+                }
             }
             PageRequest::SameDocument { url, replace } => {
                 self.with_tab(i, |app| app.same_document_url(url, replace));
@@ -2340,6 +2427,9 @@ impl App {
             }
         }
         self.set_cursor(cursor);
+        if self.area_at(x, y) == Area::Page && self.current.is_some() {
+            self.send_mouse(events::MouseKind::Move, 0, 0);
+        }
         let overlay_changed =
             overlay_hover.as_ref().map(|h| h.0) != self.overlay_hover.as_ref().map(|h| h.0);
         if link != self.hover_link || bar_hover != self.chrome.hover || overlay_changed {
@@ -2391,24 +2481,22 @@ impl App {
         }
     }
 
-    /// Clic en la página: enlaces, campos de texto (foco y caret) y botones de envío.
+    /// Clic en la página: `mousedown` al documento; enlaces y botones de envío los sigue el
+    /// documento al soltar (`click` y su activation behavior); aquí, el foco y caret de los
+    /// campos y la selección de texto.
     fn page_click(&mut self) {
         if self.chrome.field.focused {
             self.chrome.field.focused = false;
             self.refresh_chrome();
         }
-        if let Some(url) = self.link_under_mouse() {
+        self.send_mouse(events::MouseKind::Down, 0, 1);
+        if self.link_under_mouse().is_some() {
             self.selection = None;
-            if self.modifiers.control_key() {
-                self.new_tab(Some(url), true);
-            } else {
-                self.navigate(url);
-            }
             return;
         }
         enum Hit {
             Field(NodeId, Editable, usize),
-            Submit(NodeId),
+            Submit,
             Nothing,
         }
         let (x, y) = self.mouse;
@@ -2428,8 +2516,8 @@ impl App {
                                 )
                             });
                             Hit::Field(node, kind, caret)
-                        } else if let Some(b) = submit_button_at(&current.doc, n) {
-                            Hit::Submit(b)
+                        } else if submit_button_at(&current.doc, n).is_some() {
+                            Hit::Submit
                         } else {
                             Hit::Nothing
                         }
@@ -2456,10 +2544,9 @@ impl App {
                 self.drag = Some(Drag::Field);
                 self.redraw_later();
             }
-            Hit::Submit(button) => {
+            Hit::Submit => {
                 self.focus = None;
                 self.selection = None;
-                self.submit(button);
             }
             Hit::Nothing => {
                 if self.focus.take().is_some() {
@@ -2601,6 +2688,15 @@ impl App {
             self.redraw_later();
             return;
         }
+        if self.area_at(x, y) == Area::Page {
+            let input = events::UserInput::Wheel {
+                client: self.page_point(x, y),
+                delta: (dx, dy),
+                mods: self.mods(),
+                target: self.node_under_mouse(),
+            };
+            self.send_input(input);
+        }
         self.scroll_by(dx, dy);
         self.mouse_moved();
     }
@@ -2664,6 +2760,27 @@ impl App {
     }
 
     fn key(&mut self, event: &KeyEvent) {
+        // Las teclas sobre la página (no en el campo de URL ni en un menú) van al documento.
+        if !self.chrome.field.focused && self.menu.is_none() {
+            let key = match &event.logical_key {
+                Key::Character(c) => c.to_string(),
+                Key::Named(n) => format!("{n:?}"),
+                _ => "Unidentified".to_owned(),
+            };
+            let code = match event.physical_key {
+                winit::keyboard::PhysicalKey::Code(c) => format!("{c:?}"),
+                _ => String::new(),
+            };
+            let input = events::UserInput::Key {
+                down: event.state == ElementState::Pressed,
+                key,
+                code,
+                mods: self.mods(),
+                repeat: event.repeat,
+                text: event.text.as_ref().map(ToString::to_string),
+            };
+            self.send_input(input);
+        }
         if event.state == ElementState::Pressed {
             self.key_press(&event.logical_key, event.text.as_deref());
         }
@@ -2894,7 +3011,7 @@ impl ApplicationHandler<Wake> for App {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => self.drag = None,
+            } => self.release(),
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.modifiers.control_key() {
                     let up = match delta {
@@ -2965,7 +3082,7 @@ impl App {
                     continue;
                 }
                 FromDoc::Request { tab, request } => {
-                    self.page_request(tab, request);
+                    self.page_request(tab, *request);
                     continue;
                 }
             };
@@ -3137,7 +3254,8 @@ impl App {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
                 self.click();
-                self.drag = None;
+                self.release();
+                self.settle_input();
             }
             "link" => {
                 self.mouse = self
@@ -3145,6 +3263,8 @@ impl App {
                     .ok_or_else(|| format!("no hay un enlace con el texto {arg:?}"))?;
                 self.mouse_moved();
                 self.click();
+                self.release();
+                self.settle_input();
             }
             "resize" => {
                 let (w, h) = point(arg).ok_or_else(bad)?;

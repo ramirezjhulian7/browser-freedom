@@ -52,6 +52,8 @@ pub enum Job {
         id: u64,
         loaded: Option<Arc<Loaded>>,
     },
+    /// Una entrada del usuario para el documento.
+    Input(Box<super::events::UserInput>),
 }
 
 /// Un documento maquetado.
@@ -99,7 +101,7 @@ pub enum FromDoc {
     /// Algo que el documento de la pestaña `tab` le pide a la interfaz.
     Request {
         tab: u64,
-        request: PageRequest,
+        request: Box<PageRequest>,
     },
 }
 
@@ -213,6 +215,11 @@ struct State {
     view: Arc<Mutex<View>>,
     current: Option<Current>,
     last_frame: Instant,
+    /// Puntero y foco del documento actual.
+    input: super::events::InputState,
+    /// El viewport y el scroll del último `resize`/`scroll` despachado.
+    last_viewport: Option<Size>,
+    last_scroll: (f32, f32),
 }
 
 impl DocumentThread {
@@ -238,6 +245,9 @@ impl DocumentThread {
                     view: shared,
                     current: None,
                     last_frame: Instant::now(),
+                    input: super::events::InputState::default(),
+                    last_viewport: None,
+                    last_scroll: (0.0, 0.0),
                 };
                 state.run(rx);
             })
@@ -251,6 +261,21 @@ impl DocumentThread {
 fn coalesce(queue: &mut VecDeque<Job>) {
     if let Some(last) = queue.iter().rposition(|j| matches!(j, Job::Load(_))) {
         queue.drain(..last);
+    }
+    // De varios `mousemove` seguidos solo cuenta el último.
+    let is_move = |j: &Job| {
+        matches!(j, Job::Input(i) if matches!(**i, super::events::UserInput::Mouse {
+            kind: super::events::MouseKind::Move,
+            ..
+        }))
+    };
+    let mut i = 0;
+    while i + 1 < queue.len() {
+        if is_move(&queue[i]) && is_move(&queue[i + 1]) {
+            queue.remove(i);
+        } else {
+            i += 1;
+        }
     }
     let Some(last) = queue
         .iter()
@@ -287,11 +312,70 @@ impl State {
         self.view().viewport
     }
 
-    /// El desplazamiento o la escala cambiaron: el snapshot del layout se pone al día.
+    /// El desplazamiento o la escala cambiaron: el snapshot del layout se pone al día y, si
+    /// cambió el scroll, el documento recibe `scroll` (CSSOM View §13.1).
     fn view_changed(&mut self) {
         let view = self.view();
+        let scrolled = view.scroll != self.last_scroll;
+        self.last_scroll = view.scroll;
         if let Some(engine) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
             engine.update_view(view.scroll, view.device_pixel_ratio);
+            if scrolled && let Some(root) = engine.document().map(bf_dom::Document::root) {
+                let mut ev = bf_dom::events::Event::new(
+                    "scroll",
+                    bf_dom::events::EventInit {
+                        bubbles: true,
+                        ..Default::default()
+                    },
+                );
+                engine.dispatch(bf_dom::events::EventTarget::Node(root), &mut ev);
+            }
+        }
+        self.refresh();
+    }
+
+    /// Una entrada del usuario: el dispatch, lo que pide a la ventana y, si cambió el
+    /// documento, un cuadro nuevo.
+    fn input(&mut self, input: super::events::UserInput) {
+        let Some(current) = &mut self.current else {
+            return;
+        };
+        let requests = super::events::handle(
+            current.engine.as_mut(),
+            &mut current.loaded,
+            &mut self.input,
+            input,
+        );
+        for request in requests {
+            let _ = self.tx.send(FromDoc::Request {
+                tab: self.tab,
+                request: Box::new(request),
+            });
+            (self.wake)();
+        }
+        self.refresh();
+    }
+
+    /// Si los scripts (o una entrada) cambiaron el documento, un cuadro nuevo (como mucho uno
+    /// cada [`FRAME`]).
+    fn refresh(&mut self) {
+        let Some(current) = &mut self.current else {
+            return;
+        };
+        if let Some(engine) = &mut current.engine
+            && engine.take_dirty()
+            && let Some(doc) = engine.render_copy()
+        {
+            let mut loaded = (*current.loaded).clone();
+            loaded.doc = doc;
+            current.loaded = Arc::new(loaded);
+        }
+        if current.loaded.doc.version() != current.version {
+            let wait = FRAME.saturating_sub(self.last_frame.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
+            self.layout(0, None);
         }
     }
 
@@ -347,6 +431,7 @@ impl State {
             };
             match job {
                 Job::Load(job) => self.load(*job),
+                Job::Input(input) => self.input(*input),
                 Job::Relayout { id, loaded } => {
                     if let (Some(l), Some(c)) = (loaded, self.current.as_mut()) {
                         if let Some(engine) = &mut c.engine {
@@ -379,7 +464,13 @@ impl State {
     fn request_sink(&self) -> crate::script::RequestSink {
         let (tx, wake, tab) = (self.tx.clone(), self.wake.clone(), self.tab);
         std::rc::Rc::new(move |request: PageRequest| {
-            if tx.send(FromDoc::Request { tab, request }).is_ok() {
+            if tx
+                .send(FromDoc::Request {
+                    tab,
+                    request: Box::new(request),
+                })
+                .is_ok()
+            {
                 wake();
             }
         })
@@ -415,6 +506,8 @@ impl State {
         };
         // El documento anterior (y su motor) se descartan.
         self.current = None;
+        self.input.reset();
+        self.last_viewport = None;
         let mut engine = Engine::new(self.console_sink());
         let loaded = catch_unwind(AssertUnwindSafe(|| {
             load_with(&url, &ctx, Some((&mut engine, &env)))
@@ -480,9 +573,19 @@ impl State {
             }
         };
         let view = self.view();
+        let resized = self
+            .last_viewport
+            .is_some_and(|v| v.width != viewport.width || v.height != viewport.height);
+        self.last_viewport = Some(viewport);
         if let Some(c) = &mut self.current {
             c.version = loaded.doc.version();
             if let Some(engine) = &mut c.engine {
+                if resized {
+                    // `resize` en la ventana (CSSOM View §13.1).
+                    let mut ev =
+                        bf_dom::events::Event::new("resize", bf_dom::events::EventInit::default());
+                    engine.dispatch(bf_dom::events::EventTarget::Window, &mut ev);
+                }
                 engine.set_layout(
                     &page,
                     loaded.doc.version(),
@@ -517,28 +620,14 @@ impl State {
         if let Some((x, y)) = engine.take_scroll_request() {
             let _ = self.tx.send(FromDoc::Request {
                 tab: self.tab,
-                request: PageRequest::ScrollTo(x, y),
+                request: Box::new(PageRequest::ScrollTo(x, y)),
             });
             (self.wake)();
         }
         if ran == 0 {
             return;
         }
-        if engine.take_dirty()
-            && let Some(doc) = engine.document()
-        {
-            // Una copia del documento que cambiaron los scripts, para maquetar y mostrar.
-            let mut loaded = (*current.loaded).clone();
-            loaded.doc = doc.clone();
-            current.loaded = Arc::new(loaded);
-        }
-        if current.loaded.doc.version() != current.version {
-            let wait = FRAME.saturating_sub(self.last_frame.elapsed());
-            if !wait.is_zero() {
-                std::thread::sleep(wait);
-            }
-            self.layout(0, None);
-        }
+        self.refresh();
     }
 }
 
@@ -584,6 +673,7 @@ mod tests {
             .map(|j| match j {
                 Job::Load(l) => l.id,
                 Job::Relayout { id, .. } => *id,
+                Job::Input(_) => 0,
             })
             .collect();
         assert_eq!(ids, [3, 5]);
