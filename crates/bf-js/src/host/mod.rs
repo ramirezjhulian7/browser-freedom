@@ -282,10 +282,24 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = slots(agent, a.callee);
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);
+    let f = agent.host.fns[idx];
     if s[2].as_number() == Some(CALL_METHOD) && !agent.host_is_instance(&a.this, class) {
+        // WebIDL §3.7.6 (operaciones de una interfaz `[Global]`): con `this` null o
+        // undefined se usa el objeto global del realm.
+        if a.this.is_nullish() {
+            let global = Value::Object(agent.realms[agent.current_realm].global_object);
+            if agent.host_is_instance(&global, class) {
+                let args = CallArgs {
+                    this: global,
+                    args: a.args,
+                    new_target: a.new_target,
+                    callee: a.callee,
+                };
+                return f(agent, &args);
+            }
+        }
         return agent.type_error("Illegal invocation");
     }
-    let f = agent.host.fns[idx];
     f(agent, a)
 }
 
