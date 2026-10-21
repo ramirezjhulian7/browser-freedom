@@ -13,3 +13,5 @@
 *.woff binary
 *.woff2 binary
 *.icns binary
+# Artefacto generado (tools/arquitectura): no se reformatea a mano.
+docs/arquitectura.html -whitespace
