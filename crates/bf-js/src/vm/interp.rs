@@ -161,6 +161,26 @@ impl Agent {
         frame!(self).stack.push(v);
     }
 
+    /// Los dos valores del tope (`a` debajo, `b` arriba) si los dos son `Number`.
+    #[inline]
+    fn top_numbers(&mut self) -> Option<(f64, f64)> {
+        let s = &frame!(self).stack;
+        match s.len().checked_sub(2).map(|i| (&s[i], &s[i + 1])) {
+            Some((Value::Number(a), Value::Number(b))) => Some((*a, *b)),
+            _ => None,
+        }
+    }
+
+    /// Reemplaza los dos valores del tope por `v`.
+    #[inline]
+    fn replace_top2(&mut self, v: Value) {
+        let s = &mut frame!(self).stack;
+        s.pop();
+        if let Some(top) = s.last_mut() {
+            *top = v;
+        }
+    }
+
     fn peek(&self, depth: usize) -> &Value {
         let s = &self.frames.last().expect("frame").stack;
         &s[s.len() - 1 - depth]
@@ -680,12 +700,41 @@ impl Agent {
             | Op::BitAnd
             | Op::BitOr
             | Op::BitXor => {
+                // Ruta rápida: Number × Number (el resultado de §6.1.6.1 sin conversiones).
+                if let Some((a, b)) = self.top_numbers() {
+                    let v = match op {
+                        Op::Add => a + b,
+                        Op::Sub => a - b,
+                        Op::Mul => a * b,
+                        Op::Div => a / b,
+                        Op::Mod => crate::abstract_ops::number::remainder(a, b),
+                        Op::Exp => crate::abstract_ops::number::exponentiate(a, b),
+                        Op::Shl => f64::from(crate::abstract_ops::conversion::to_int32(a).wrapping_shl(crate::abstract_ops::conversion::to_uint32(b) & 31)),
+                        Op::Shr => f64::from(crate::abstract_ops::conversion::to_int32(a) >> (crate::abstract_ops::conversion::to_uint32(b) & 31)),
+                        Op::UShr => f64::from(crate::abstract_ops::conversion::to_uint32(a) >> (crate::abstract_ops::conversion::to_uint32(b) & 31)),
+                        Op::BitAnd => f64::from(crate::abstract_ops::conversion::to_int32(a) & crate::abstract_ops::conversion::to_int32(b)),
+                        Op::BitOr => f64::from(crate::abstract_ops::conversion::to_int32(a) | crate::abstract_ops::conversion::to_int32(b)),
+                        _ => f64::from(crate::abstract_ops::conversion::to_int32(a) ^ crate::abstract_ops::conversion::to_int32(b)),
+                    };
+                    self.replace_top2(Value::Number(v));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let v = self.apply_binary(op, l, r)?;
                 self.push(v);
             }
             Op::Lt | Op::Gt | Op::Le | Op::Ge => {
+                if let Some((a, b)) = self.top_numbers() {
+                    let v = match op {
+                        Op::Lt => a < b,
+                        Op::Gt => a > b,
+                        Op::Le => a <= b,
+                        _ => a >= b,
+                    };
+                    self.replace_top2(Value::Boolean(v));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let v = match op {
@@ -703,6 +752,11 @@ impl Agent {
                 self.push(Value::Boolean(if op == Op::Eq { eq } else { !eq }));
             }
             Op::StrictEq | Op::StrictNe => {
+                if let Some((a, b)) = self.top_numbers() {
+                    let eq = a == b;
+                    self.replace_top2(Value::Boolean(if op == Op::StrictEq { eq } else { !eq }));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let eq = self.is_strictly_equal(&l, &r);

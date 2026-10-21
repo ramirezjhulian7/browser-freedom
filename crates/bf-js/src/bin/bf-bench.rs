@@ -1,8 +1,10 @@
-//! `bf-bench [--filter texto] [--runs N] [--save archivo.tsv] [--compare archivo.tsv]`: corre
+//! `bf-bench [--filter texto] [--runs N] [--save archivo.tsv [--merge-min]] [--compare archivo.tsv]`: corre
 //! los programas de `crates/bf-js/bench/*.js` en un agente nuevo cada uno, toma el mejor de N
 //! corridas y muestra los tiempos. Con `--compare` muestra el speedup respecto de una línea
 //! base guardada con `--save` y su media geométrica. Cada programa valida su resultado con
-//! `check(valor, esperado)`; un resultado distinto es un error.
+//! `check(valor, esperado)`; un resultado distinto es un error. Con `--merge-min`, `--save`
+//! conserva el mínimo entre lo que ya tenía el archivo y lo nuevo (para alternar dos
+//! binarios en una máquina con carga y comparar los mejores tiempos de cada uno).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -114,6 +116,12 @@ fn real_main() -> ExitCode {
         );
     }
     if let Some(path) = opt("--save") {
+        if args.iter().any(|a| a == "--merge-min") {
+            for (k, v) in load_tsv(&path) {
+                let e = results.entry(k).or_insert(v);
+                *e = e.min(v);
+            }
+        }
         let text: String = results.iter().map(|(k, v)| format!("{k}\t{v:.3}\n")).collect();
         if let Err(e) = std::fs::write(&path, text) {
             eprintln!("no se pudo escribir {path}: {e}");
