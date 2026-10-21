@@ -13,8 +13,8 @@ use crate::dom::adopt::adopt_into;
 use crate::dom::collections::{html_collection, named_node_map, token_list};
 use crate::dom::insertion::{inserted, inserted_markup};
 use crate::dom::{
-    arg_node, classes, from_dom_string, from_opt_dom_string, mixins, mutated, this_node,
-    throw_dom, to_dom_string, to_opt_dom_string, wrap_node, wrap_opt,
+    arg_node, classes, from_dom_string, from_opt_dom_string, mixins, mutated, this_node, throw_dom,
+    to_dom_string, to_opt_dom_string, wrap_node, wrap_opt,
 };
 use crate::{NodeRef, with_doc, with_doc_mut};
 
@@ -361,7 +361,9 @@ pub fn get_elements_by_tag_name_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsRes
 pub fn get_elements_by_class_name(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let names = to_dom_string(agent, &a.arg(0))?;
-    let c = with_doc(agent, n.doc, |d| d.get_elements_by_class_name(n.node, &names));
+    let c = with_doc(agent, n.doc, |d| {
+        d.get_elements_by_class_name(n.node, &names)
+    });
     Ok(html_collection(agent, n.doc, c))
 }
 
@@ -393,7 +395,9 @@ fn insert_adjacent_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     let n = this_node(agent, a)?;
     let where_ = to_dom_string(agent, &a.arg(0))?.to_string();
     let data = to_dom_string(agent, &a.arg(1))?;
-    let r = with_doc_mut(agent, n.doc, |d| d.insert_adjacent_text(n.node, &where_, data));
+    let r = with_doc_mut(agent, n.doc, |d| {
+        d.insert_adjacent_text(n.node, &where_, data)
+    });
     done(agent, r)
 }
 
@@ -408,7 +412,9 @@ fn get_inner_html(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn set_inner_html(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let markup = legacy_null_to_empty(agent, &a.arg(0))?;
-    with_doc_mut(agent, n.doc, |d| bf_html::dom::set_inner_html(d, n.node, &markup));
+    with_doc_mut(agent, n.doc, |d| {
+        bf_html::dom::set_inner_html(d, n.node, &markup)
+    });
     mutated(agent);
     let roots = with_doc(agent, n.doc, |d| d.child_nodes(n.node));
     inserted_markup(agent, n.doc, &roots);
@@ -425,7 +431,9 @@ fn set_outer_html(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let markup = legacy_null_to_empty(agent, &a.arg(0))?;
     let parent = with_doc(agent, n.doc, |d| d.parent(n.node));
-    let r = with_doc_mut(agent, n.doc, |d| bf_html::dom::set_outer_html(d, n.node, &markup));
+    let r = with_doc_mut(agent, n.doc, |d| {
+        bf_html::dom::set_outer_html(d, n.node, &markup)
+    });
     let v = done(agent, r)?;
     if let Some(p) = parent {
         let roots = with_doc(agent, n.doc, |d| d.child_nodes(p));

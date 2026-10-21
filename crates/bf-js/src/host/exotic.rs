@@ -11,17 +11,24 @@ use crate::string::JsString;
 use crate::value::{PropertyKey, Value};
 use crate::vm::{Agent, JsResult};
 
+/// El getter indexado de [`HostExotic`].
+pub type ItemGetter = fn(&mut Agent, Gc<Object>, u32) -> Option<Value>;
+/// El getter con nombre de [`HostExotic`].
+pub type NamedGetter = fn(&mut Agent, Gc<Object>, &JsString) -> Option<Value>;
+/// Los nombres soportados de [`HostExotic`].
+pub type SupportedNames = fn(&mut Agent, Gc<Object>) -> Vec<JsString>;
+
 /// Los getters indexado y con nombre de una interfaz.
 #[derive(Clone, Copy, Default)]
 pub struct HostExotic {
     /// La cantidad de índices soportados (`length`).
     pub length: Option<fn(&mut Agent, Gc<Object>) -> usize>,
     /// El getter indexado: el valor del índice, o `None` si no está soportado.
-    pub item: Option<fn(&mut Agent, Gc<Object>, u32) -> Option<Value>>,
+    pub item: Option<ItemGetter>,
     /// El getter con nombre: el valor, o `None` si el nombre no está soportado.
-    pub named: Option<fn(&mut Agent, Gc<Object>, &JsString) -> Option<Value>>,
+    pub named: Option<NamedGetter>,
     /// Los nombres soportados, en orden.
-    pub names: Option<fn(&mut Agent, Gc<Object>) -> Vec<JsString>>,
+    pub names: Option<SupportedNames>,
     /// ¿Las propiedades con nombre son enumerables? (Falso con
     /// `[LegacyUnenumerableNamedProperties]`.)
     pub named_enumerable: bool,

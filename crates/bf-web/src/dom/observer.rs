@@ -14,9 +14,7 @@ use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, Throw};
 
 use crate::dom::state::state;
-use crate::dom::{
-    arg_node, classes, from_opt_dom_string, throw_dom, to_dom_string, wrap_opt,
-};
+use crate::dom::{arg_node, classes, from_opt_dom_string, throw_dom, to_dom_string, wrap_opt};
 use crate::{DocIndex, WebContextHandle, with_doc_mut};
 
 /// El payload de un `MutationObserver`: su id en cada documento observado.

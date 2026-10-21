@@ -79,7 +79,12 @@ fn children(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let coll = with_doc(agent, n.doc, |d| d.children_collection(n.node));
     let class = crate::dom::classes(agent).html_collection;
     let data = HtmlCollectionData { doc: n.doc, coll };
-    Ok(Value::Object(agent.host_wrap(realm, key, class, Box::new(data))))
+    Ok(Value::Object(agent.host_wrap(
+        realm,
+        key,
+        class,
+        Box::new(data),
+    )))
 }
 
 fn first_element_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -114,7 +119,11 @@ fn next_element_sibling(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
 
 /// `(Node or DOMString)...` en el documento `doc`: los nodos de otro documento se adoptan
 /// (como al insertarlos en el fragmento de "convert nodes into a node", §4.2.6).
-pub fn nodes_arg(agent: &mut Agent, a: &CallArgs<'_>, doc: DocIndex) -> JsResult<Vec<NodeOrString>> {
+pub fn nodes_arg(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    doc: DocIndex,
+) -> JsResult<Vec<NodeOrString>> {
     let mut out = Vec::with_capacity(a.args.len());
     for v in a.args {
         match unwrap_node(agent, v) {
@@ -203,7 +212,9 @@ fn selectors(agent: &mut Agent, v: &Value) -> JsResult<String> {
 fn query_selector(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let s = selectors(agent, &a.arg(0))?;
-    let r = with_doc(agent, n.doc, |d| bf_css::query::query_selector(d, n.node, &s));
+    let r = with_doc(agent, n.doc, |d| {
+        bf_css::query::query_selector(d, n.node, &s)
+    });
     match r {
         Ok(e) => Ok(wrap_opt(agent, n.doc, e)),
         Err(e) => throw_dom(agent, e),
@@ -213,7 +224,9 @@ fn query_selector(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn query_selector_all(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let s = selectors(agent, &a.arg(0))?;
-    let r = with_doc(agent, n.doc, |d| bf_css::query::query_selector_all(d, n.node, &s));
+    let r = with_doc(agent, n.doc, |d| {
+        bf_css::query::query_selector_all(d, n.node, &s)
+    });
     match r {
         Ok(list) => Ok(static_node_list(agent, n.doc, list)),
         Err(e) => throw_dom(agent, e),
@@ -224,7 +237,9 @@ fn query_selector_all(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 pub fn matches(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let s = selectors(agent, &a.arg(0))?;
-    let r = with_doc(agent, n.doc, |d| bf_css::query::element_matches(d, n.node, &s));
+    let r = with_doc(agent, n.doc, |d| {
+        bf_css::query::element_matches(d, n.node, &s)
+    });
     match r {
         Ok(b) => Ok(Value::Boolean(b)),
         Err(e) => throw_dom(agent, e),

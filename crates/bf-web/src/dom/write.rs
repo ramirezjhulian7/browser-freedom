@@ -6,7 +6,7 @@
 
 use bf_dom::events::{Event, ScriptHost as DomScriptHost};
 use bf_dom::{Document, DomException, NodeId};
-use bf_html::{Parser, ParseOptions, ScriptDisposition, ScriptHost};
+use bf_html::{ParseOptions, Parser, ScriptDisposition, ScriptHost};
 use bf_infra::DomString;
 use bf_js::vm::{Agent, JsResult, Throw};
 

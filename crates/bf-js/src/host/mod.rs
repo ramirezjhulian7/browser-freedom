@@ -201,6 +201,9 @@ pub struct ClassObjects {
     pub interface: Gc<Object>,
 }
 
+/// Ver [`HostState::rejection_notifier`].
+pub type RejectionNotifier = fn(&mut Agent, Vec<Gc<Object>>);
+
 /// El estado del host en el agente.
 pub struct HostState {
     pub hooks: Box<dyn HostHooks>,
@@ -223,7 +226,7 @@ pub struct HostState {
     realm_data: HashMap<(RealmId, std::any::TypeId), Box<dyn Any>>,
     /// HTML "notify about rejected promises" (§8.1.7.3): recibe las promesas que siguen
     /// rechazadas sin handler al vaciar la cola de microtasks.
-    pub rejection_notifier: Option<fn(&mut Agent, Vec<Gc<Object>>)>,
+    pub rejection_notifier: Option<RejectionNotifier>,
 }
 
 impl Default for HostState {

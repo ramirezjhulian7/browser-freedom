@@ -7,13 +7,13 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
+use crate::dom::adopt::prepare_insert;
+use crate::dom::insertion::{inserted, roots_of};
+use crate::dom::mixins;
 use crate::dom::{
     arg_node, arg_opt_node, from_dom_string, from_opt_dom_string, mutated, this_node, throw_dom,
     to_opt_dom_string, wrap_node, wrap_opt,
 };
-use crate::dom::adopt::prepare_insert;
-use crate::dom::insertion::{inserted, roots_of};
-use crate::dom::mixins;
 use crate::{NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
 pub fn node_class(event_target: HostClassId) -> HostClass {
@@ -281,7 +281,9 @@ fn normalize(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let deep = bf_js::host::webidl::to_boolean(agent, &a.arg(0));
-    let is_document = with_doc(agent, n.doc, |d| matches!(d.get(n.node).data, NodeData::Document));
+    let is_document = with_doc(agent, n.doc, |d| {
+        matches!(d.get(n.node).data, NodeData::Document)
+    });
     if is_document {
         return Ok(crate::dom::document::clone_document(agent, n.doc, deep));
     }

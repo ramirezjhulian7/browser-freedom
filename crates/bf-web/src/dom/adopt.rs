@@ -56,8 +56,11 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         {
             let wc = ctx.get_mut(agent);
             let mut target = std::mem::take(wc.doc_mut(to));
-            wc.doc_mut(from)
-                .move_listeners(EventTarget::Node(o), &mut target, EventTarget::Node(nw));
+            wc.doc_mut(from).move_listeners(
+                EventTarget::Node(o),
+                &mut target,
+                EventTarget::Node(nw),
+            );
             *wc.doc_mut(to) = target;
         }
         move_handlers(agent, (from, o), (to, nw));
@@ -119,7 +122,8 @@ pub fn prepare_insert(
     }
     // Paso 3: el hijo de referencia debe ser hijo del padre.
     if let Some(c) = child
-        && (c.doc != parent.doc || with_doc(agent, c.doc, |d| d.parent(c.node)) != Some(parent.node))
+        && (c.doc != parent.doc
+            || with_doc(agent, c.doc, |d| d.parent(c.node)) != Some(parent.node))
     {
         return throw_dom(agent, DomException::NotFoundError);
     }

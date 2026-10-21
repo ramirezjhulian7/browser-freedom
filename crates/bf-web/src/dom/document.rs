@@ -59,7 +59,11 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .method("createTextNode", 1, create_text_node)
         .method("createCDATASection", 1, create_cdata_section)
         .method("createComment", 1, create_comment)
-        .method("createProcessingInstruction", 2, create_processing_instruction)
+        .method(
+            "createProcessingInstruction",
+            2,
+            create_processing_instruction,
+        )
         .method("createAttribute", 1, create_attribute)
         .method("createAttributeNS", 2, create_attribute_ns)
         .method("createEvent", 1, create_event_method)
@@ -185,7 +189,9 @@ fn body(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn ready_state(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    Ok(Value::str(with_doc(agent, doc, |d| d.ready_state().as_str())))
+    Ok(Value::str(with_doc(agent, doc, |d| {
+        d.ready_state().as_str()
+    })))
 }
 
 /// `defaultView`: la ventana para el documento de la ventana; `null` para los demás.
@@ -267,10 +273,11 @@ fn get_dir(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             .and_then(|e| d.get_attribute(e, &"dir".into()))
             .map(|v| v.to_string().to_ascii_lowercase())
     });
-    Ok(Value::str(match v.as_deref() {
-        Some(v @ ("ltr" | "rtl" | "auto")) => v,
-        _ => "",
-    }))
+    let v = v
+        .as_deref()
+        .filter(|v| matches!(*v, "ltr" | "rtl" | "auto"))
+        .unwrap_or("");
+    Ok(Value::str(v))
 }
 
 fn set_dir(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -365,7 +372,9 @@ fn create_processing_instruction(agent: &mut Agent, a: &CallArgs<'_>) -> JsResul
     let doc = this_doc(agent, a)?;
     let target = to_dom_string(agent, &a.arg(0))?;
     let data = to_dom_string(agent, &a.arg(1))?;
-    let r = with_doc_mut(agent, doc, |d| d.create_processing_instruction(target, data));
+    let r = with_doc_mut(agent, doc, |d| {
+        d.create_processing_instruction(target, data)
+    });
     created(agent, doc, r)
 }
 

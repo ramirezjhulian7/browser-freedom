@@ -14,8 +14,7 @@ use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
 
 use crate::dom::{
-    classes, from_dom_string, mutated, throw_dom, to_dom_string, unwrap_node, wrap_node,
-    wrap_opt,
+    classes, from_dom_string, mutated, throw_dom, to_dom_string, unwrap_node, wrap_node, wrap_opt,
 };
 use crate::{DocIndex, NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
@@ -300,7 +299,9 @@ fn hc_named_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 pub fn token_list(agent: &mut Agent, el: NodeRef, attr: &str) -> Value {
     let realm = agent.current_realm;
     // La clave distingue el atributo (solo `class` y unos pocos de HTML).
-    let salt: u64 = attr.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let salt: u64 = attr
+        .bytes()
+        .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
     let key = bf_js::host::HostKey(el.key().0 ^ ((salt & 0x3fff) << 48) | (1 << 61));
     if let Some(o) = agent.host_lookup(realm, key) {
         return Value::Object(o);
@@ -331,9 +332,7 @@ fn tl_len(agent: &mut Agent, o: Gc<Object>) -> usize {
 
 fn tl_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
     let d = payload_of::<TokenListData>(agent, o)?;
-    tl_tokens(agent, &d)
-        .get(i as usize)
-        .map(from_dom_string)
+    tl_tokens(agent, &d).get(i as usize).map(from_dom_string)
 }
 
 fn tl_length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -462,7 +461,9 @@ fn nm_len(agent: &mut Agent, o: Gc<Object>) -> usize {
 
 fn nm_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
     let d = payload_of::<NamedNodeMapData>(agent, o)?;
-    let a = with_doc_mut(agent, d.doc, |doc| doc.attributes_item(d.element, i as usize))?;
+    let a = with_doc_mut(agent, d.doc, |doc| {
+        doc.attributes_item(d.element, i as usize)
+    })?;
     Some(wrap_node(agent, NodeRef::new(d.doc, a)))
 }
 
@@ -545,7 +546,9 @@ fn nm_set_named_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if attr.doc != d.doc {
         return throw_dom(agent, bf_dom::DomException::WrongDocumentError);
     }
-    let r = with_doc_mut(agent, d.doc, |doc| doc.set_attribute_node(d.element, attr.node));
+    let r = with_doc_mut(agent, d.doc, |doc| {
+        doc.set_attribute_node(d.element, attr.node)
+    });
     match r {
         Ok(old) => {
             mutated(agent);
@@ -579,7 +582,9 @@ fn nm_remove_named_item_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     let Some(node) = node else {
         return throw_dom(agent, bf_dom::DomException::NotFoundError);
     };
-    let r = with_doc_mut(agent, d.doc, |doc| doc.remove_attribute_node(d.element, node));
+    let r = with_doc_mut(agent, d.doc, |doc| {
+        doc.remove_attribute_node(d.element, node)
+    });
     match r {
         Ok(n) => {
             mutated(agent);

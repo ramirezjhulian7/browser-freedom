@@ -168,7 +168,10 @@ fn set_current(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn pointer_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_data(agent, a)?;
     Ok(Value::Boolean(
-        data(agent, &a.this).expect("traversal").pointer_before.get(),
+        data(agent, &a.this)
+            .expect("traversal")
+            .pointer_before
+            .get(),
     ))
 }
 
@@ -218,7 +221,7 @@ fn filter_node(agent: &mut Agent, this: &Value, n: NodeId) -> JsResult<u16> {
     };
     data(agent, this).expect("traversal").active.set(false);
     let v = r?;
-    Ok(bf_js::host::webidl::to_unsigned_short(agent, &v)?)
+    bf_js::host::webidl::to_unsigned_short(agent, &v)
 }
 
 fn with_doc<R>(agent: &Agent, doc: DocIndex, f: impl FnOnce(&Document) -> R) -> R {

@@ -12,11 +12,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use bf_dom::events::{
-    Event, EventInit, EventKind, EventTarget, InputEventData,
-    KeyboardEventData, Listener, ListenerOptions, MouseEventData, ScriptHost,
-};
 use bf_dom::Document;
+use bf_dom::events::{
+    Event, EventInit, EventKind, EventTarget, InputEventData, KeyboardEventData, Listener,
+    ListenerOptions, MouseEventData, ScriptHost,
+};
 use bf_infra::DomString;
 use bf_js::heap::Gc;
 use bf_js::host::{HostClass, HostClassId, HostHandle, HostKey};
@@ -28,8 +28,7 @@ use bf_js::vm::{Agent, JsResult, Throw};
 use crate::dom::state::{HandlerState, ListenerRec, state};
 use crate::dom::window::WindowData;
 use crate::dom::{
-    classes, from_dom_string, from_opt_dom_string, throw_dom, to_dom_string, unwrap_node,
-    wrap_node,
+    classes, from_dom_string, from_opt_dom_string, throw_dom, to_dom_string, unwrap_node, wrap_node,
 };
 use crate::{DocIndex, NodeRef, WebContextHandle};
 
@@ -92,10 +91,18 @@ pub fn event_class() -> HostClass {
         .attribute("srcElement", Some(ev_target), None)
         .attribute("currentTarget", Some(ev_current_target), None)
         .attribute("eventPhase", Some(ev_phase), None)
-        .attribute("cancelBubble", Some(ev_cancel_bubble), Some(ev_set_cancel_bubble))
+        .attribute(
+            "cancelBubble",
+            Some(ev_cancel_bubble),
+            Some(ev_set_cancel_bubble),
+        )
         .attribute("bubbles", Some(ev_bubbles), None)
         .attribute("cancelable", Some(ev_cancelable), None)
-        .attribute("returnValue", Some(ev_return_value), Some(ev_set_return_value))
+        .attribute(
+            "returnValue",
+            Some(ev_return_value),
+            Some(ev_set_return_value),
+        )
         .attribute("defaultPrevented", Some(ev_default_prevented), None)
         .attribute("composed", Some(ev_composed), None)
         .unforgeable("isTrusted", Some(ev_is_trusted), None)
@@ -220,9 +227,7 @@ pub fn event_target_of(agent: &Agent, v: &Value) -> Option<(DocIndex, EventTarge
     if agent.host_unwrap::<WindowData>(v).is_some() {
         return Some((0, EventTarget::Window));
     }
-    agent
-        .host_unwrap::<TargetRef>(v)
-        .map(|t| (t.doc, t.target))
+    agent.host_unwrap::<TargetRef>(v).map(|t| (t.doc, t.target))
 }
 
 /// El wrapper de un target (`null` si el objeto ya no existe).
@@ -419,13 +424,16 @@ fn event_data<'a>(agent: &'a Agent, v: &Value) -> Option<&'a EventData> {
     agent.host_unwrap::<EventData>(v)
 }
 
+/// El wrapper de un evento en dispatch: el objeto, su celda y el pin si se creó aquí.
+pub(crate) type EventWrapper = (Gc<Object>, Rc<RefCell<Event>>, Option<HostHandle>);
+
 /// Llama a los listeners de script desde el dispatch de `bf-dom`.
 pub(crate) struct JsHost<'a> {
     pub agent: &'a mut Agent,
     pub ctx: WebContextHandle,
     pub doc: DocIndex,
     /// El wrapper del evento (creado en el primer listener si el evento es nativo).
-    pub wrapper: Option<(Gc<Object>, Rc<RefCell<Event>>, Option<HostHandle>)>,
+    pub wrapper: Option<EventWrapper>,
 }
 
 impl JsHost<'_> {
@@ -492,7 +500,10 @@ pub fn dispatch_js_event(
         let ev = cell.borrow();
         sync_content_handlers(agent, doc, target, &ev.type_);
     }
-    let mut ev = std::mem::replace(&mut *cell.borrow_mut(), Event::new("", EventInit::default()));
+    let mut ev = std::mem::replace(
+        &mut *cell.borrow_mut(),
+        Event::new("", EventInit::default()),
+    );
     let mut document = std::mem::take(ctx.get_mut(agent).doc_mut(doc));
     let r = {
         let mut host = JsHost {
@@ -1069,7 +1080,11 @@ fn ev_set_return_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn ev_default_prevented(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Boolean(with_event(agent, a, Event::default_prevented)?))
+    Ok(Value::Boolean(with_event(
+        agent,
+        a,
+        Event::default_prevented,
+    )?))
 }
 
 fn ev_composed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1087,7 +1102,10 @@ fn ev_time_stamp(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn ev_composed_path(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let path = with_event(agent, a, Event::composed_path)?;
     let doc = event_doc(agent, a);
-    let values: Vec<Value> = path.into_iter().map(|t| wrap_target(agent, doc, t)).collect();
+    let values: Vec<Value> = path
+        .into_iter()
+        .map(|t| wrap_target(agent, doc, t))
+        .collect();
     Ok(Value::Object(agent.create_array_from_list(&values)?))
 }
 
@@ -1309,7 +1327,9 @@ fn kb_code(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn kb_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Number(f64::from(keyboard(agent, a, |k| k.location)?)))
+    Ok(Value::Number(f64::from(keyboard(agent, a, |k| {
+        k.location
+    })?)))
 }
 
 fn kb_repeat(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1407,36 +1427,151 @@ fn err_colno(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// GlobalEventHandlers (HTML §8.1.8.2).
 pub const GLOBAL_EVENT_HANDLERS: &[&str] = &[
-    "abort", "auxclick", "beforeinput", "beforematch", "beforetoggle", "blur", "cancel",
-    "canplay", "canplaythrough", "change", "click", "close", "contextlost", "contextmenu",
-    "contextrestored", "copy", "cuechange", "cut", "dblclick", "drag", "dragend", "dragenter",
-    "dragleave", "dragover", "dragstart", "drop", "durationchange", "emptied", "ended", "error",
-    "focus", "formdata", "input", "invalid", "keydown", "keypress", "keyup", "load",
-    "loadeddata", "loadedmetadata", "loadstart", "mousedown", "mouseenter", "mouseleave",
-    "mousemove", "mouseout", "mouseover", "mouseup", "paste", "pause", "play", "playing",
-    "progress", "ratechange", "reset", "resize", "scroll", "scrollend",
-    "securitypolicyviolation", "seeked", "seeking", "select", "slotchange", "stalled", "submit",
-    "suspend", "timeupdate", "toggle", "volumechange", "waiting", "webkitanimationend",
-    "webkitanimationiteration", "webkitanimationstart", "webkittransitionend", "wheel",
-    "animationstart", "animationiteration", "animationend", "animationcancel", "transitionrun",
-    "transitionstart", "transitionend", "transitioncancel", "pointerover", "pointerenter",
-    "pointerdown", "pointermove", "pointerup", "pointercancel", "pointerout", "pointerleave",
-    "gotpointercapture", "lostpointercapture", "selectstart", "selectionchange",
+    "abort",
+    "auxclick",
+    "beforeinput",
+    "beforematch",
+    "beforetoggle",
+    "blur",
+    "cancel",
+    "canplay",
+    "canplaythrough",
+    "change",
+    "click",
+    "close",
+    "contextlost",
+    "contextmenu",
+    "contextrestored",
+    "copy",
+    "cuechange",
+    "cut",
+    "dblclick",
+    "drag",
+    "dragend",
+    "dragenter",
+    "dragleave",
+    "dragover",
+    "dragstart",
+    "drop",
+    "durationchange",
+    "emptied",
+    "ended",
+    "error",
+    "focus",
+    "formdata",
+    "input",
+    "invalid",
+    "keydown",
+    "keypress",
+    "keyup",
+    "load",
+    "loadeddata",
+    "loadedmetadata",
+    "loadstart",
+    "mousedown",
+    "mouseenter",
+    "mouseleave",
+    "mousemove",
+    "mouseout",
+    "mouseover",
+    "mouseup",
+    "paste",
+    "pause",
+    "play",
+    "playing",
+    "progress",
+    "ratechange",
+    "reset",
+    "resize",
+    "scroll",
+    "scrollend",
+    "securitypolicyviolation",
+    "seeked",
+    "seeking",
+    "select",
+    "slotchange",
+    "stalled",
+    "submit",
+    "suspend",
+    "timeupdate",
+    "toggle",
+    "volumechange",
+    "waiting",
+    "webkitanimationend",
+    "webkitanimationiteration",
+    "webkitanimationstart",
+    "webkittransitionend",
+    "wheel",
+    "animationstart",
+    "animationiteration",
+    "animationend",
+    "animationcancel",
+    "transitionrun",
+    "transitionstart",
+    "transitionend",
+    "transitioncancel",
+    "pointerover",
+    "pointerenter",
+    "pointerdown",
+    "pointermove",
+    "pointerup",
+    "pointercancel",
+    "pointerout",
+    "pointerleave",
+    "gotpointercapture",
+    "lostpointercapture",
+    "selectstart",
+    "selectionchange",
 ];
 
 /// WindowEventHandlers (HTML §8.1.8.2).
 pub const WINDOW_EVENT_HANDLERS: &[&str] = &[
-    "afterprint", "beforeprint", "beforeunload", "hashchange", "languagechange", "message",
-    "messageerror", "offline", "online", "pagehide", "pagereveal", "pageshow", "pageswap",
-    "popstate", "rejectionhandled", "storage", "unhandledrejection", "unload",
+    "afterprint",
+    "beforeprint",
+    "beforeunload",
+    "hashchange",
+    "languagechange",
+    "message",
+    "messageerror",
+    "offline",
+    "online",
+    "pagehide",
+    "pagereveal",
+    "pageshow",
+    "pageswap",
+    "popstate",
+    "rejectionhandled",
+    "storage",
+    "unhandledrejection",
+    "unload",
 ];
 
 /// Los handlers de `body`/`frameset` que son de la ventana (HTML §8.1.8.2).
 const BODY_WINDOW_HANDLERS: &[&str] = &[
-    "blur", "error", "focus", "load", "resize", "scroll", "afterprint", "beforeprint",
-    "beforeunload", "hashchange", "languagechange", "message", "messageerror", "offline",
-    "online", "pagehide", "pagereveal", "pageshow", "pageswap", "popstate", "rejectionhandled",
-    "storage", "unhandledrejection", "unload",
+    "blur",
+    "error",
+    "focus",
+    "load",
+    "resize",
+    "scroll",
+    "afterprint",
+    "beforeprint",
+    "beforeunload",
+    "hashchange",
+    "languagechange",
+    "message",
+    "messageerror",
+    "offline",
+    "online",
+    "pagehide",
+    "pagereveal",
+    "pageshow",
+    "pageswap",
+    "popstate",
+    "rejectionhandled",
+    "storage",
+    "unhandledrejection",
+    "unload",
 ];
 
 /// Agrega los atributos `on…` de `names` a una clase (para `HTMLElement` de E1, `Document` y
@@ -1497,7 +1632,12 @@ fn content_element(agent: &Agent, doc: DocIndex, target: EventTarget) -> Option<
 
 /// "Get the current value of the event handler" (HTML §8.1.8.1): compila el atributo de
 /// contenido si cambió.
-fn handler_value(agent: &mut Agent, doc: DocIndex, target: EventTarget, type_: &DomString) -> Value {
+fn handler_value(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &DomString,
+) -> Value {
     let key = (doc, target, type_.clone());
     let st = state(agent).handlers.get(&key).cloned().unwrap_or_default();
     let attr_name: DomString = format!("on{type_}").into();
@@ -1511,7 +1651,9 @@ fn handler_value(agent: &mut Agent, doc: DocIndex, target: EventTarget, type_: &
     };
     if !changed {
         if let Some(idl) = st.idl {
-            return idl.and_then(|h| agent.host_pinned(h)).unwrap_or(Value::Null);
+            return idl
+                .and_then(|h| agent.host_pinned(h))
+                .unwrap_or(Value::Null);
         }
         if let (Some(_), Some((_, f))) = (&attr, &st.compiled) {
             return f.and_then(|h| agent.host_pinned(h)).unwrap_or(Value::Null);
@@ -1574,7 +1716,12 @@ fn compile_handler(
 }
 
 /// Registra (una vez) el listener de un event handler en `bf-dom`.
-fn ensure_handler_listener(agent: &mut Agent, doc: DocIndex, target: EventTarget, type_: &DomString) {
+fn ensure_handler_listener(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &DomString,
+) {
     let key = (doc, target, type_.clone());
     if state(agent).handler_listeners.contains(&key) {
         return;
@@ -1603,7 +1750,12 @@ fn ensure_handler_listener(agent: &mut Agent, doc: DocIndex, target: EventTarget
 
 /// Antes de un dispatch: registra los listeners de los atributos de contenido `on<type>` de
 /// los nodos del event path (los que nunca pasaron por el atributo IDL).
-pub fn sync_content_handlers(agent: &mut Agent, doc: DocIndex, target: EventTarget, type_: &DomString) {
+pub fn sync_content_handlers(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &DomString,
+) {
     let attr_name: DomString = format!("on{type_}").into();
     let found: Vec<EventTarget> = crate::with_doc(agent, doc, |d| {
         let mut out = Vec::new();
@@ -1690,15 +1842,16 @@ fn run_event_handler(
             Some(EventIface::Error { .. })
         );
     let result = if error_special {
-        let (message, filename, lineno, colno) = match event_data(agent, event).map(|d| d.iface.clone()) {
-            Some(EventIface::Error {
-                message,
-                filename,
-                lineno,
-                colno,
-            }) => (message, filename, lineno, colno),
-            _ => unreachable!("ErrorEvent"),
-        };
+        let (message, filename, lineno, colno) =
+            match event_data(agent, event).map(|d| d.iface.clone()) {
+                Some(EventIface::Error {
+                    message,
+                    filename,
+                    lineno,
+                    colno,
+                }) => (message, filename, lineno, colno),
+                _ => unreachable!("ErrorEvent"),
+            };
         let error = match event {
             Value::Object(o) => agent
                 .host_slots_mut(*o)
@@ -1728,7 +1881,6 @@ fn run_event_handler(
     }
     Ok(result)
 }
-
 
 /// `document.createEvent(interface)` (DOM §4.5): la tabla de interfaces heredadas, sin
 /// inicializar (`initEvent` lo hace utilizable).

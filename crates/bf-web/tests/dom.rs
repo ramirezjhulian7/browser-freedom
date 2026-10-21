@@ -441,7 +441,10 @@ fn init_event_and_create_event() {
         ),
         "w,true,true,true,true"
     );
-    assert!(p.error("document.createEvent('Nope')").contains("NotSupportedError"));
+    assert!(
+        p.error("document.createEvent('Nope')")
+            .contains("NotSupportedError")
+    );
 }
 
 #[test]
@@ -685,7 +688,9 @@ impl bf_web::WebHooks for Recorder {
         true
     }
     fn prompt(&mut self, message: &str, default: &str) -> Option<String> {
-        self.0.borrow_mut().push(format!("prompt:{message}:{default}"));
+        self.0
+            .borrow_mut()
+            .push(format!("prompt:{message}:{default}"));
         Some("respuesta".into())
     }
     fn open(&mut self, url: &str, target: &str, _features: &str) -> bool {
@@ -888,7 +893,10 @@ fn selectors() {
         ),
         "a,true,dos,a,,2,true"
     );
-    assert!(p.error("document.querySelector('##')").contains("SyntaxError"));
+    assert!(
+        p.error("document.querySelector('##')")
+            .contains("SyntaxError")
+    );
 }
 
 #[test]
@@ -936,7 +944,10 @@ fn insert_adjacent() {
         ),
         "EM,t,HR,HR"
     );
-    assert!(p.error("a.insertAdjacentText('nope', 'x')").contains("SyntaxError"));
+    assert!(
+        p.error("a.insertAdjacentText('nope', 'x')")
+            .contains("SyntaxError")
+    );
 }
 
 #[test]
@@ -952,7 +963,10 @@ fn namespaced_attributes() {
         ),
         "svg,rect,svg:rect,http://www.w3.org/2000/svg,#a,true,xlink:href"
     );
-    assert!(p.error("document.createElementNS(null, 'a:b')").contains("NamespaceError"));
+    assert!(
+        p.error("document.createElementNS(null, 'a:b')")
+            .contains("NamespaceError")
+    );
 }
 
 #[test]
@@ -1028,7 +1042,10 @@ fn adopt_node_between_documents() {
         ),
         "true,true,,,uno,true,1"
     );
-    assert!(p.error("document.adoptNode(document)").contains("NotSupportedError"));
+    assert!(
+        p.error("document.adoptNode(document)")
+            .contains("NotSupportedError")
+    );
 }
 
 #[test]

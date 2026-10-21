@@ -106,8 +106,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let dom_exception = agent.register_host_class(exception::dom_exception_class());
         let n = agent.register_host_class(node::node_class(event_target));
         let document = agent.register_host_class(document::document_class(n));
-        let document_fragment =
-            agent.register_host_class(document::document_fragment_class(n));
+        let document_fragment = agent.register_host_class(document::document_fragment_class(n));
         let document_type = agent.register_host_class(node::document_type_class(n));
         let element = agent.register_host_class(element::element_class(n));
         let character_data = agent.register_host_class(node::character_data_class(n));

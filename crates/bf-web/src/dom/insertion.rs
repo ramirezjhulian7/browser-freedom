@@ -57,19 +57,19 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
     });
     for el in work {
         let name = with_doc(agent, doc, |d| {
-            d.element(el).map(|e| e.name.to_string()).unwrap_or_default()
+            d.element(el)
+                .map(|e| e.name.to_string())
+                .unwrap_or_default()
         });
         match name.as_str() {
             "script" if scripts => prepare_script(agent, doc, el),
             "img" => resource(agent, doc, el, "src", ResourceKind::Image),
             "link" => {
                 let stylesheet = with_doc(agent, doc, |d| {
-                    d.element(el)
-                        .and_then(|e| e.attr("rel"))
-                        .is_some_and(|r| {
-                            r.split_ascii_whitespace()
-                                .any(|t| t.eq_ignore_ascii_case("stylesheet"))
-                        })
+                    d.element(el).and_then(|e| e.attr("rel")).is_some_and(|r| {
+                        r.split_ascii_whitespace()
+                            .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+                    })
                 });
                 if stylesheet {
                     resource(agent, doc, el, "href", ResourceKind::Stylesheet);
@@ -129,10 +129,7 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
         return;
     }
     // "Execute the script element" (§4.12.1.3) para un script clásico inline.
-    let old = with_doc_mut(agent, doc, |d| {
-        let s = d.scripts_mut();
-        std::mem::replace(&mut s.current_script, Some(el))
-    });
+    let old = with_doc_mut(agent, doc, |d| d.scripts_mut().current_script.replace(el));
     let name = WebContextHandle::current(agent)
         .get(agent)
         .url
