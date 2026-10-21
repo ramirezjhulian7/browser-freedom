@@ -1,8 +1,9 @@
 //! `Document` (DOM §4.5, HTML §3.1) y los constructores de `Document`, `DocumentFragment`,
-//! `Text` y `Comment`.
+//! `Text` y `Comment`. Los miembros de la carga y del BOM (`cookie`, `referrer`,
+//! `lastModified`, `readyState`, `currentScript`, `visibilityState`, `hidden`, `hasFocus` y
+//! `write`/`writeln`/`open`/`close`) los agrega E4 en `bom::document`.
 
 use bf_dom::{Document, NodeData};
-use bf_infra::DomString;
 use bf_js::host::{HostClass, HostClassId};
 use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
@@ -15,7 +16,6 @@ use crate::dom::element::{
     namespace_arg,
 };
 use crate::dom::events::{GLOBAL_EVENT_HANDLERS, create_event, with_event_handlers};
-use crate::dom::write::{WriteOp, document_write};
 use crate::dom::{
     arg_node, classes, from_dom_string, implementation, mixins, mutated, this_node, throw_dom,
     to_dom_string, traversal, wrap_node, wrap_opt,
@@ -39,14 +39,8 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .attribute("title", Some(get_title), Some(set_title))
         .attribute("head", Some(head), None)
         .attribute("body", Some(body), None)
-        .attribute("readyState", Some(ready_state), None)
         .attribute("defaultView", Some(default_view), None)
         .attribute("activeElement", Some(active_element), None)
-        .attribute("currentScript", Some(current_script), None)
-        .attribute("visibilityState", Some(visibility_state), None)
-        .attribute("hidden", Some(hidden), None)
-        .attribute("referrer", Some(empty_string), None)
-        .attribute("lastModified", Some(last_modified), None)
         .attribute("dir", Some(get_dir), Some(set_dir))
         .method("getElementsByTagName", 1, get_elements_by_tag_name)
         .method("getElementsByTagNameNS", 2, get_elements_by_tag_name_ns)
@@ -70,12 +64,8 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .method("createNodeIterator", 1, create_node_iterator)
         .method("createTreeWalker", 1, create_tree_walker)
         .method("importNode", 1, import_node)
-        .method("adoptNode", 1, adopt_node)
-        .method("hasFocus", 0, has_focus)
-        .method("open", 0, open)
-        .method("close", 0, close)
-        .method("write", 0, write)
-        .method("writeln", 0, writeln);
+        .method("adoptNode", 1, adopt_node);
+
     let c = mixins::parent_node(c);
     let mut names: Vec<&'static str> = GLOBAL_EVENT_HANDLERS.to_vec();
     names.extend(["readystatechange", "visibilitychange"]);
@@ -111,6 +101,8 @@ fn document_ctor(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
 /// `cloneNode()` de un documento: un documento nuevo en el contexto (con o sin hijos).
 pub fn clone_document(agent: &mut Agent, doc: DocIndex, deep: bool) -> Value {
     let mut d = with_doc(agent, doc, |d| d.clone());
+    // Clonar no copia los listeners (DOM §4.4 "clone a node").
+    d.erase_all_event_listeners();
     if !deep {
         let root = d.root();
         d.replace_all(None, root);
@@ -187,13 +179,6 @@ fn body(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(wrap_opt(agent, doc, e))
 }
 
-fn ready_state(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    Ok(Value::str(with_doc(agent, doc, |d| {
-        d.ready_state().as_str()
-    })))
-}
-
 /// `defaultView`: la ventana para el documento de la ventana; `null` para los demás.
 fn default_view(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
@@ -210,59 +195,6 @@ fn active_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     let e = with_doc(agent, doc, |d| d.body().or_else(|| d.document_element()));
     Ok(wrap_opt(agent, doc, e))
-}
-
-fn current_script(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    let e = with_doc(agent, doc, |d| d.scripts().current_script);
-    Ok(wrap_opt(agent, doc, e))
-}
-
-fn visibility_state(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_doc(agent, a)?;
-    Ok(Value::str("visible"))
-}
-
-fn hidden(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_doc(agent, a)?;
-    Ok(Value::Boolean(false))
-}
-
-fn empty_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_doc(agent, a)?;
-    Ok(Value::str(""))
-}
-
-/// `lastModified` (HTML §3.1.3): sin cabecera `Last-Modified`, la hora actual en el formato
-/// `MM/DD/YYYY hh:mm:ss`.
-fn last_modified(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_doc(agent, a)?;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let days = (secs / 86400) as i64;
-    let rem = secs % 86400;
-    let (y, m, d) = civil_from_days(days);
-    Ok(Value::str(&format!(
-        "{m:02}/{d:02}/{y:04} {:02}:{:02}:{:02}",
-        rem / 3600,
-        (rem / 60) % 60,
-        rem % 60
-    )))
-}
-
-/// Días desde 1970-01-01 a (año, mes, día) del calendario gregoriano.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
 }
 
 /// `dir` refleja el atributo `dir` del elemento raíz (`ltr`/`rtl`/`auto` o vacío).
@@ -439,6 +371,9 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         *wc.doc_mut(doc) = target;
         copy
     };
+    let old = with_doc(agent, n.doc, |d| d.inclusive_descendants(n.node));
+    let new = with_doc(agent, doc, |d| d.inclusive_descendants(copy));
+    crate::dom::insertion::copy_script_state(agent, (n.doc, &old), (doc, &new));
     Ok(wrap_node(agent, NodeRef::new(doc, copy)))
 }
 
@@ -447,53 +382,6 @@ fn adopt_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = arg_node(agent, &a.arg(0), "parameter 1")?;
     let r = adopt_into(agent, n, doc)?;
     Ok(wrap_node(agent, r))
-}
-
-fn has_focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    Ok(Value::Boolean(doc == 0))
-}
-
-/// `(DOMString or TrustedHTML)...` concatenados.
-fn text_args(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<DomString> {
-    let mut out = DomString::new();
-    for v in a.args {
-        out.push_dom_str(&to_dom_string(agent, v)?);
-    }
-    Ok(out)
-}
-
-fn open(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    // `open(url, name, features)` con tres argumentos es `window.open`.
-    if a.args.len() >= 3 {
-        let realm = WebContextHandle::current(agent).realm;
-        let g = agent.realms[realm].global_object;
-        let f = agent.get(g, &"open".into(), Value::Object(g))?;
-        return agent.call(&f, Value::Object(g), a.args);
-    }
-    document_write(agent, doc, WriteOp::Open)?;
-    Ok(a.this.clone())
-}
-
-fn close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    document_write(agent, doc, WriteOp::Close)?;
-    Ok(Value::Undefined)
-}
-
-fn write(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    let text = text_args(agent, a)?;
-    document_write(agent, doc, WriteOp::Write(text))?;
-    Ok(Value::Undefined)
-}
-
-fn writeln(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let doc = this_doc(agent, a)?;
-    let text = text_args(agent, a)?;
-    document_write(agent, doc, WriteOp::Writeln(text))?;
-    Ok(Value::Undefined)
 }
 
 /// `new DocumentFragment()`: en el documento de la ventana del constructor.

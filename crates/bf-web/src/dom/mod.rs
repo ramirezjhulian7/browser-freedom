@@ -19,7 +19,6 @@ pub mod observer;
 pub mod state;
 pub mod traversal;
 pub mod window;
-pub mod write;
 
 use std::collections::HashMap;
 

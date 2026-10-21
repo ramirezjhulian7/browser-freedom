@@ -45,6 +45,7 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         copy
     };
     let new: Vec<NodeId> = with_doc(agent, to, |d| d.inclusive_descendants(copy));
+    crate::dom::insertion::copy_script_state(agent, (from, &old), (to, &new));
     let realm = ctx.realm;
     for (&o, &nw) in old.iter().zip(new.iter()) {
         let (old_ref, new_ref) = (NodeRef::new(from, o), NodeRef::new(to, nw));

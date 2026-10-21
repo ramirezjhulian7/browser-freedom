@@ -165,6 +165,7 @@ pub fn mouse_event_class(ui: HostClassId) -> HostClass {
         .attribute("buttons", Some(mouse_buttons), None)
         .attribute("relatedTarget", Some(mouse_related), None)
         .method("getModifierState", 1, get_modifier_state)
+        .method("initMouseEvent", 1, init_mouse_event)
 }
 
 pub fn keyboard_event_class(ui: HostClassId) -> HostClass {
@@ -183,6 +184,7 @@ pub fn keyboard_event_class(ui: HostClassId) -> HostClass {
         .attribute("charCode", Some(kb_char_code), None)
         .attribute("keyCode", Some(kb_key_code), None)
         .method("getModifierState", 1, get_modifier_state)
+        .method("initKeyboardEvent", 1, init_keyboard_event)
         .constant("DOM_KEY_LOCATION_STANDARD", 0.0)
         .constant("DOM_KEY_LOCATION_LEFT", 1.0)
         .constant("DOM_KEY_LOCATION_RIGHT", 2.0)
@@ -387,7 +389,14 @@ fn add_event_listener(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn remove_event_listener(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, target) = this_target(agent, a)?;
     let type_ = to_dom_string(agent, &a.arg(0))?;
-    let (opts, _) = listener_options(agent, &a.arg(2))?;
+    // `EventListenerOptions` (DOM §2.7): solo `capture`.
+    let capture = match a.arg(2) {
+        Value::Object(o) => {
+            let v = agent.get(o, &PropertyKey::from("capture"), Value::Object(o))?;
+            bf_js::host::webidl::to_boolean(agent, &v)
+        }
+        other => bf_js::host::webidl::to_boolean(agent, &other),
+    };
     let Value::Object(cbo) = a.arg(1) else {
         return Ok(Value::Undefined);
     };
@@ -395,7 +404,7 @@ fn remove_event_listener(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value>
         return Ok(Value::Undefined);
     };
     crate::with_doc_mut(agent, doc, |d| {
-        d.remove_event_listener(target, &type_, &Listener::Script(id), opts.capture);
+        d.remove_event_listener(target, &type_, &Listener::Script(id), capture);
     });
     Ok(Value::Undefined)
 }
@@ -441,15 +450,7 @@ impl JsHost<'_> {
         if let Some((o, c, _)) = &self.wrapper {
             return (*o, c.clone());
         }
-        let iface = match &event.kind {
-            EventKind::Event => EventIface::Event,
-            EventKind::Custom { .. } => EventIface::Custom,
-            EventKind::Ui { .. } => EventIface::Ui,
-            EventKind::Mouse(_) => EventIface::Mouse,
-            EventKind::Keyboard(_) => EventIface::Keyboard,
-            EventKind::Focus { .. } => EventIface::Focus,
-            EventKind::Input(_) => EventIface::Input,
-        };
+        let iface = iface_of(&event.kind);
         let cell = Rc::new(RefCell::new(Event::new("", EventInit::default())));
         let o = create_event_object(self.agent, iface, cell.clone(), self.doc);
         let h = self.agent.host_pin(Value::Object(o));
@@ -733,6 +734,8 @@ fn construct_event(
     event: Event,
     slots: [Value; 2],
 ) -> JsResult<Value> {
+    let mut event = event;
+    event.time_stamp = high_res_now(agent);
     let class = class_for_iface(agent, &iface);
     let nt = a.new_target.expect("new.target");
     let o = agent.host_create_from_new_target(
@@ -1126,6 +1129,7 @@ fn ev_prevent_default(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// `initEvent(type, bubbles = false, cancelable = false)` (DOM §2.2, legacy).
 fn ev_init_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    required(agent, a, 1, "initEvent")?;
     let type_ = to_dom_string(agent, &a.arg(0))?;
     let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
@@ -1153,6 +1157,7 @@ fn slot1(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// `initCustomEvent(type, bubbles, cancelable, detail)`.
 fn init_custom_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    required(agent, a, 1, "initCustomEvent")?;
     let type_ = to_dom_string(agent, &a.arg(0))?;
     let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
@@ -1175,6 +1180,7 @@ fn init_custom_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// `initUIEvent(type, bubbles, cancelable, view, detail)`.
 fn init_ui_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    required(agent, a, 1, "initUIEvent")?;
     let type_ = to_dom_string(agent, &a.arg(0))?;
     let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
@@ -1904,9 +1910,180 @@ pub fn create_event(agent: &mut Agent, doc: DocIndex, interface: &str) -> JsResu
             EventIface::Keyboard,
             EventKind::Keyboard(KeyboardEventData::default()),
         ),
+        // Interfaces sin implementar: la más cercana de las que hay (`DragEvent` hereda de
+        // `MouseEvent`; `CompositionEvent`, `TextEvent` y `TouchEvent` de `UIEvent`).
+        "dragevent" => (
+            EventIface::Mouse,
+            EventKind::Mouse(MouseEventData::default()),
+        ),
+        "compositionevent" | "textevent" | "touchevent" => {
+            (EventIface::Ui, EventKind::Ui { detail: 0 })
+        }
+        "beforeunloadevent"
+        | "devicemotionevent"
+        | "deviceorientationevent"
+        | "hashchangeevent"
+        | "messageevent"
+        | "storageevent" => (EventIface::Event, EventKind::Event),
         _ => return throw_dom(agent, bf_dom::DomException::NotSupportedError),
     };
-    let cell = Rc::new(RefCell::new(Event::uninitialized(kind)));
+    let mut ev = Event::uninitialized(kind);
+    ev.time_stamp = high_res_now(agent);
+    let cell = Rc::new(RefCell::new(ev));
     let o = create_event_object(agent, iface, cell, doc);
     Ok(Value::Object(o))
+}
+
+/// La interfaz del wrapper de un evento nativo.
+fn iface_of(kind: &EventKind) -> EventIface {
+    match kind {
+        EventKind::Event => EventIface::Event,
+        EventKind::Custom { .. } => EventIface::Custom,
+        EventKind::Ui { .. } => EventIface::Ui,
+        EventKind::Mouse(_) => EventIface::Mouse,
+        EventKind::Keyboard(_) => EventIface::Keyboard,
+        EventKind::Focus { .. } => EventIface::Focus,
+        EventKind::Input(_) => EventIface::Input,
+    }
+}
+
+/// Cuántos wrappers de eventos nativos en curso se recuerdan (dispatch anidados).
+const NATIVE_WRAPPERS: usize = 8;
+
+/// Llama a un listener de script desde un dispatch que empezó fuera de `bf-web::dom` (el
+/// parser y los hosts de página de E1 y E4: `DOMContentLoaded`, `load`…), con el documento
+/// ya devuelto al contexto y el realm de la ventana en curso. El wrapper del evento es el mismo para
+/// todos los listeners del dispatch (se reconoce por la dirección y el `timeStamp` del evento).
+pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> bool {
+    let key = (
+        std::ptr::from_mut(event) as usize,
+        event.time_stamp.to_bits(),
+    );
+    let cached = state(agent)
+        .native_events
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, h)| *h);
+    let wrapper = match cached.and_then(|h| agent.host_pinned(h)) {
+        Some(Value::Object(o)) => o,
+        _ => {
+            let cell = Rc::new(RefCell::new(Event::new("", EventInit::default())));
+            let o = create_event_object(agent, iface_of(&event.kind), cell, 0);
+            let h = agent.host_pin(Value::Object(o));
+            let st = state(agent);
+            st.native_events.push((key, h));
+            if st.native_events.len() > NATIVE_WRAPPERS {
+                let (_, old) = st.native_events.remove(0);
+                agent.host_unpin(old);
+            }
+            o
+        }
+    };
+    let cell = event_data(agent, &Value::Object(wrapper))
+        .expect("evento")
+        .cell
+        .clone();
+    std::mem::swap(&mut *cell.borrow_mut(), event);
+    let threw = call_script_listener(agent, 0, handle, wrapper);
+    std::mem::swap(&mut *cell.borrow_mut(), event);
+    threw
+}
+
+/// El tiempo de alta resolución actual (HR-Time §4): ms desde el `timeOrigin` de la ventana,
+/// el mismo reloj que `performance.now()`.
+pub fn high_res_now(agent: &mut Agent) -> f64 {
+    let realm = WebContextHandle::current(agent).realm;
+    let origin = agent
+        .realm_data::<crate::bom::BomState>(realm)
+        .map_or(0.0, |s| s.now_origin);
+    agent.host.hooks.now() - origin
+}
+
+/// WebIDL: menos argumentos que los obligatorios es un `TypeError`.
+fn required(agent: &mut Agent, a: &CallArgs<'_>, n: usize, op: &str) -> JsResult<()> {
+    if a.args.len() < n {
+        return agent.type_error(&format!(
+            "Failed to execute '{op}': {n} argument required, but only {} present.",
+            a.args.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Guarda `view` en el slot 0 de `this`.
+fn set_view_slot(agent: &mut Agent, a: &CallArgs<'_>) {
+    if let Value::Object(o) = a.this
+        && let Some(s) = agent.host_slots_mut(o)
+    {
+        s[0] = if a.arg(3).is_undefined() {
+            Value::Null
+        } else {
+            a.arg(3)
+        };
+    }
+}
+
+/// `initMouseEvent(type, bubbles, cancelable, view, detail, screenX, screenY, clientX,
+/// clientY, ctrlKey, altKey, shiftKey, metaKey, button, relatedTarget)` (UI Events §7.1).
+fn init_mouse_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    required(agent, a, 1, "initMouseEvent")?;
+    let type_ = to_dom_string(agent, &a.arg(0))?;
+    let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
+    let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
+    let detail = bf_js::host::webidl::to_long(agent, &a.arg(4))?;
+    let mut n = [0.0; 4];
+    for (i, v) in n.iter_mut().enumerate() {
+        *v = f64::from(bf_js::host::webidl::to_long(agent, &a.arg(5 + i))?);
+    }
+    let mut m = [false; 4];
+    for (i, v) in m.iter_mut().enumerate() {
+        *v = bf_js::host::webidl::to_boolean(agent, &a.arg(9 + i));
+    }
+    let button = bf_js::host::webidl::to_long(agent, &a.arg(13))? as i16;
+    let related = event_target_of(agent, &a.arg(14)).map(|(_, t)| t);
+    let dispatching = with_event(agent, a, Event::is_dispatching)?;
+    if dispatching {
+        return Ok(Value::Undefined);
+    }
+    with_event_mut(agent, a, |e| {
+        e.init_event(type_, bubbles, cancelable);
+        if let EventKind::Mouse(d) = &mut e.kind {
+            d.detail = detail;
+            (d.screen_x, d.screen_y, d.client_x, d.client_y) = (n[0], n[1], n[2], n[3]);
+            (d.ctrl_key, d.alt_key, d.shift_key, d.meta_key) = (m[0], m[1], m[2], m[3]);
+            d.button = button;
+            d.related_target = related;
+        }
+    })?;
+    set_view_slot(agent, a);
+    Ok(Value::Undefined)
+}
+
+/// `initKeyboardEvent(type, bubbles, cancelable, view, key, location, ctrlKey, altKey,
+/// shiftKey, metaKey)` (UI Events §7.2).
+fn init_keyboard_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    required(agent, a, 1, "initKeyboardEvent")?;
+    let type_ = to_dom_string(agent, &a.arg(0))?;
+    let bubbles = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
+    let cancelable = bf_js::host::webidl::to_boolean(agent, &a.arg(2));
+    let key = to_dom_string(agent, &a.arg(4))?;
+    let location = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(5))?;
+    let mut m = [false; 4];
+    for (i, v) in m.iter_mut().enumerate() {
+        *v = bf_js::host::webidl::to_boolean(agent, &a.arg(6 + i));
+    }
+    let dispatching = with_event(agent, a, Event::is_dispatching)?;
+    if dispatching {
+        return Ok(Value::Undefined);
+    }
+    with_event_mut(agent, a, |e| {
+        e.init_event(type_, bubbles, cancelable);
+        if let EventKind::Keyboard(d) = &mut e.kind {
+            d.key = key;
+            d.location = location;
+            (d.ctrl_key, d.alt_key, d.shift_key, d.meta_key) = (m[0], m[1], m[2], m[3]);
+        }
+    })?;
+    set_view_slot(agent, a);
+    Ok(Value::Undefined)
 }
