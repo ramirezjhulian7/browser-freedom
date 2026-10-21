@@ -89,11 +89,12 @@ impl Agent {
                     let mut n = 0u64;
                     let mut back = false;
                     {
-                        let f = frame!(self);
+                        let heap = &mut self.heap;
+                        let f = self.frames.last_mut().expect("frame");
                         loop {
                             let op = f.code.ops[f.pc];
                             f.pc += 1;
-                            match fast_op(f, op) {
+                            match fast_op(f, heap, op) {
                                 Fast::Done => n += 1,
                                 Fast::BackJump => {
                                     n += 1;
@@ -2467,7 +2468,7 @@ fn primitive_truthiness(v: &Value) -> Option<bool> {
 /// Las instrucciones más frecuentes que no necesitan el agente (locales, constantes, pila,
 /// saltos y aritmética Number × Number). Deja el frame igual si devuelve [`Fast::Slow`].
 #[inline]
-fn fast_op(f: &mut Frame, op: Op) -> Fast {
+fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, op: Op) -> Fast {
     use crate::abstract_ops::conversion::{to_int32, to_uint32};
     macro_rules! jump {
         ($t:expr) => {{
@@ -2515,6 +2516,103 @@ fn fast_op(f: &mut Frame, op: Op) -> Fast {
             }
             None => return Fast::Slow,
         },
+        Op::ToNumeric => {
+            if !matches!(f.stack.last(), Some(Value::Number(_))) {
+                return Fast::Slow;
+            }
+        }
+        Op::SetLocalChecked(s, _) => {
+            if f.locals[s as usize].is_none() {
+                return Fast::Slow;
+            }
+            let v = f.stack.last().expect("pila").clone();
+            f.locals[s as usize] = Some(v);
+        }
+        Op::Swap => {
+            let n = f.stack.len();
+            f.stack.swap(n - 1, n - 2);
+        }
+        Op::GetEnv(h, s) | Op::GetEnvChecked(h, s, _) => {
+            let Some(v) = env_slot(heap, f.env, h, s).and_then(|v| v.clone()) else {
+                return Fast::Slow;
+            };
+            f.stack.push(v);
+        }
+        Op::SetEnv(h, s) | Op::SetEnvChecked(h, s, _) | Op::InitEnv(h, s) => {
+            let e = env_at_heap(heap, f.env, h);
+            let Some(d) = heap[e].decl_mut() else {
+                return Fast::Slow;
+            };
+            let slot = &mut d.slots[s as usize];
+            if matches!(op, Op::SetEnvChecked(..)) && slot.is_none() {
+                return Fast::Slow;
+            }
+            *slot = Some(if matches!(op, Op::InitEnv(..)) {
+                f.stack.pop().expect("pila")
+            } else {
+                f.stack.last().expect("pila").clone()
+            });
+        }
+        Op::GetElem | Op::GetElemKeep => {
+            let n = f.stack.len();
+            let v = match (&f.stack[n - 2], &f.stack[n - 1]) {
+                (Value::Object(o), Value::Number(i)) => match dense_index(heap, *o, *i) {
+                    Some(v) => v,
+                    None => return Fast::Slow,
+                },
+                _ => return Fast::Slow,
+            };
+            f.stack.pop();
+            if op == Op::GetElem {
+                *f.stack.last_mut().expect("pila") = v;
+            } else {
+                f.stack.push(v);
+            }
+        }
+        Op::SetElem(_) => {
+            let n = f.stack.len();
+            let (Value::Object(o), Value::Number(i)) = (&f.stack[n - 3], &f.stack[n - 2]) else {
+                return Fast::Slow;
+            };
+            let (o, i) = (*o, *i);
+            let ObjectKind::Array(d) = &mut heap[o].kind else {
+                return Fast::Slow;
+            };
+            let idx = i as usize;
+            if i < 0.0 || i.fract() != 0.0 || idx >= d.dense.len() || d.dense[idx].is_none() {
+                return Fast::Slow;
+            }
+            let v = f.stack.pop().expect("pila");
+            d.dense[idx] = Some(v.clone());
+            f.stack.truncate(n - 3);
+            f.stack.push(v);
+        }
+        Op::GetProp(c) | Op::GetPropKeep(c) => {
+            let Some(Value::Object(o)) = f.stack.last() else {
+                return Fast::Slow;
+            };
+            let o = *o;
+            let Some(v) = fast_ic_get(heap, &f.code, c, o) else {
+                return Fast::Slow;
+            };
+            if op == Op::GetProp(c) {
+                *f.stack.last_mut().expect("pila") = v;
+            } else {
+                f.stack.push(v);
+            }
+        }
+        Op::SetProp(c, _) => {
+            let n = f.stack.len();
+            let Value::Object(o) = &f.stack[n - 2] else {
+                return Fast::Slow;
+            };
+            let o = *o;
+            if !fast_ic_set(heap, &f.code, c, o, &f.stack[n - 1]) {
+                return Fast::Slow;
+            }
+            let v = f.stack.pop().expect("pila");
+            *f.stack.last_mut().expect("pila") = v;
+        }
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
         Op::True => f.stack.push(Value::Boolean(true)),
@@ -2618,5 +2716,132 @@ fn name_key(code: &FunctionCode, n: u32) -> &PropertyKey {
     match &code.consts[n as usize] {
         Constant::Name(_, k) => k,
         other => unreachable!("se esperaba un nombre: {other:?}"),
+    }
+}
+
+/// El environment a `hops` saltos de `env` (solo con el heap).
+#[inline]
+fn env_at_heap(heap: &crate::heap::Heap, mut env: Gc<Env>, hops: u32) -> Gc<Env> {
+    for _ in 0..hops {
+        env = heap[env].outer.expect("environment externo");
+    }
+    env
+}
+
+/// El slot `s` del environment declarativo a `hops` saltos.
+#[inline]
+fn env_slot(heap: &crate::heap::Heap, env: Gc<Env>, hops: u32, s: u32) -> Option<&Option<Value>> {
+    let e = env_at_heap(heap, env, hops);
+    heap[e].decl().map(|d| &d.slots[s as usize])
+}
+
+/// El elemento `i` de un Array denso (un índice entero dentro del vector, sin hueco).
+#[inline]
+fn dense_index(heap: &crate::heap::Heap, o: Gc<Object>, i: f64) -> Option<Value> {
+    let ObjectKind::Array(d) = &heap[o].kind else {
+        return None;
+    };
+    if i < 0.0 || i.fract() != 0.0 {
+        return None;
+    }
+    d.dense.get(i as usize)?.clone()
+}
+
+/// ¿El `[[Get]]`/`[[Set]]` con nombre de `o` es el ordinario sin mirar el agente (los objetos
+/// host van por `step`)?
+#[inline]
+fn fast_named(heap: &crate::heap::Heap, o: Gc<Object>, key: &PropertyKey) -> bool {
+    match &heap[o].kind {
+        ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Builtin(_) | ObjectKind::Error => true,
+        ObjectKind::Array(_) => !matches!(key, PropertyKey::String(s) if s.units() == [108, 101, 110, 103, 116, 104]),
+        _ => false,
+    }
+}
+
+/// Un acierto de la inline cache de `GetProp` con una propiedad de datos (sin el agente).
+#[inline]
+fn fast_ic_get(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>) -> Option<Value> {
+    use crate::vm::ic::Ic;
+    let key = name_key(code, c);
+    if !fast_named(heap, o, key) {
+        return None;
+    }
+    let shape = heap[o].props.shape_id();
+    code.ics
+        .with(c, |site| {
+            site.ways.iter().find_map(|w| match w {
+                Ic::Own { shape: s, slot } if *s == shape => match heap[o].props.slot(*slot as usize) {
+                    Some(crate::object::Prop {
+                        value: crate::object::PropValue::Data { value, .. },
+                        ..
+                    }) => Some(value.clone()),
+                    _ => None,
+                },
+                Ic::Proto {
+                    shape: s,
+                    proto,
+                    proto_shape,
+                    slot,
+                } if *s == shape
+                    && heap[o].proto == Some(*proto)
+                    && fast_named(heap, *proto, key)
+                    && heap[*proto].props.shape_id() == *proto_shape =>
+                {
+                    match heap[*proto].props.slot(*slot as usize) {
+                        Some(crate::object::Prop {
+                            value: crate::object::PropValue::Data { value, .. },
+                            ..
+                        }) => Some(value.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        })
+        .flatten()
+}
+
+/// Un acierto de la inline cache de `SetProp` (propiedad de datos escribible, o la
+/// transición que la agrega) sin el agente.
+#[inline]
+fn fast_ic_set(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>, v: &Value) -> bool {
+    use crate::vm::ic::Ic;
+    let key = name_key(code, c);
+    if !fast_named(heap, o, key) {
+        return false;
+    }
+    let shape = heap[o].props.shape_id();
+    enum Hit {
+        Own(u32),
+        Add(Option<Gc<Object>>, u64, Rc<crate::object::Shape>),
+    }
+    let hit = code.ics.with(c, |site| {
+        site.ways.iter().find_map(|w| match w {
+            Ic::Own { shape: s, slot } if *s == shape => Some(Hit::Own(*slot)),
+            Ic::Add { from, proto, epoch, to } if *from == shape => Some(Hit::Add(*proto, *epoch, to.clone())),
+            _ => None,
+        })
+    });
+    match hit.flatten() {
+        Some(Hit::Own(slot)) => match heap[o].props.slot_mut(slot as usize) {
+            Some(crate::object::Prop {
+                value: crate::object::PropValue::Data { value, writable: true },
+                ..
+            }) => {
+                *value = v.clone();
+                true
+            }
+            _ => false,
+        },
+        Some(Hit::Add(proto, epoch, to)) => {
+            let obj = &mut heap[o];
+            if obj.proto != proto || !obj.extensible || epoch != crate::object::setter_epoch() {
+                return false;
+            }
+            obj.props
+                .push_with_shape(to, crate::object::Prop::data(v.clone(), true, true, true));
+            true
+        }
+        None => false,
     }
 }
