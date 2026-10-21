@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Freedom — arquitectura del navegador",
+    "output": "arquitectura.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/ramirezjhulian7/browser-freedom",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "d92782ec14f8c3fac867a810edb38fdca69fa4cc"
+    },
+    "summary": {
+      "headline": "Un navegador web con motor propio, escrito desde cero en Rust",
+      "body": "Freedom es un navegador independiente: red, HTML, CSS, layout, pintura y JavaScript son propios, sin Chromium, WebKit ni Gecko. Es para cualquier persona que quiera navegar libre y para quien quiera ver cómo funciona un navegador por dentro. El diagrama sigue una página desde la ventana hasta el hilo de su pestaña, que la carga, ejecuta y maqueta, y de vuelta a la pantalla.",
+      "facts": [
+        {
+          "label": "Lenguaje",
+          "value": "Rust · 14 crates bf-*"
+        },
+        {
+          "label": "Plataformas",
+          "value": "Windows · macOS · Linux"
+        },
+        {
+          "label": "Estado",
+          "value": "Vista previa 0.1"
+        },
+        {
+          "label": "Licencia",
+          "value": "MIT o Apache-2.0"
+        }
+      ]
+    },
+    "views": [
+      {
+        "id": "pagina",
+        "label": "Cargar una página",
+        "focus": [
+          "ventana",
+          "red",
+          "html",
+          "estilo",
+          "layout",
+          "pintura"
+        ],
+        "note": "De la URL escrita en la barra a la lista de visualización que pinta la ventana."
+      },
+      {
+        "id": "javascript",
+        "label": "JavaScript",
+        "focus": [
+          "html",
+          "js",
+          "estilo",
+          "almacen"
+        ],
+        "note": "Los scripts corren mientras se parsea y cada cambio al DOM vuelve a maquetar."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "persona",
+      "type": "external",
+      "label": "Persona usuaria",
+      "sublabel": "clics y teclado",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        160,
+        60
+      ]
+    },
+    {
+      "id": "ventana",
+      "type": "frontend",
+      "label": "Ventana y cromo",
+      "sublabel": "bf-shell · winit",
+      "pos": [
+        270,
+        70
+      ],
+      "size": [
+        180,
+        60
+      ],
+      "tag": "UI",
+      "sources": [
+        {
+          "path": "crates/bf-shell/src/window/mod.rs",
+          "label": "ventana"
+        },
+        {
+          "path": "crates/bf-shell/src/window/chrome.rs",
+          "label": "cromo"
+        }
+      ]
+    },
+    {
+      "id": "sitios",
+      "type": "external",
+      "label": "Sitios web",
+      "sublabel": "https · file · data",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        160,
+        60
+      ]
+    },
+    {
+      "id": "red",
+      "type": "backend",
+      "label": "Red",
+      "sublabel": "bf-net · HTTP/1.1 · TLS",
+      "pos": [
+        270,
+        250
+      ],
+      "size": [
+        180,
+        60
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-net/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "id": "html",
+      "type": "backend",
+      "label": "Parser HTML",
+      "sublabel": "bf-html → bf-dom",
+      "pos": [
+        500,
+        250
+      ],
+      "size": [
+        170,
+        60
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-html/src/tree_builder/mod.rs"
+        }
+      ]
+    },
+    {
+      "id": "estilo",
+      "type": "backend",
+      "label": "Estilo",
+      "sublabel": "bf-css · bf-style",
+      "pos": [
+        720,
+        250
+      ],
+      "size": [
+        160,
+        60
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-style/src/cascade.rs"
+        }
+      ]
+    },
+    {
+      "id": "layout",
+      "type": "backend",
+      "label": "Layout",
+      "sublabel": "bf-layout",
+      "pos": [
+        930,
+        250
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-layout/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "id": "pintura",
+      "type": "backend",
+      "label": "Pintura",
+      "sublabel": "bf-paint · tiny-skia",
+      "pos": [
+        1130,
+        250
+      ],
+      "size": [
+        170,
+        60
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-paint/src/display_list.rs"
+        }
+      ]
+    },
+    {
+      "id": "js",
+      "type": "backend",
+      "label": "Motor JavaScript",
+      "sublabel": "bf-js + bf-web",
+      "pos": [
+        500,
+        420
+      ],
+      "size": [
+        170,
+        60
+      ],
+      "tag": "JS",
+      "sources": [
+        {
+          "path": "crates/bf-shell/src/script.rs",
+          "label": "motor por documento"
+        },
+        {
+          "path": "crates/bf-web/src/lib.rs",
+          "label": "DOM · BOM · CSSOM"
+        }
+      ]
+    },
+    {
+      "id": "almacen",
+      "type": "database",
+      "label": "localStorage",
+      "sublabel": "por origen, en disco",
+      "pos": [
+        270,
+        420
+      ],
+      "size": [
+        180,
+        60
+      ]
+    },
+    {
+      "id": "recursos",
+      "type": "backend",
+      "label": "Fuentes e imágenes",
+      "sublabel": "bf-font · bf-image",
+      "pos": [
+        930,
+        420
+      ],
+      "size": [
+        150,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Hilo de la pestaña (uno por pestaña)",
+      "wraps": [
+        "red",
+        "html",
+        "estilo",
+        "layout",
+        "pintura",
+        "js",
+        "recursos"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "persona-ventana",
+      "from": "persona",
+      "to": "ventana",
+      "label": "entrada",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ventana-red",
+      "from": "ventana",
+      "to": "red",
+      "label": "cargar URL",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "red-sitios",
+      "from": "red",
+      "to": "sitios",
+      "label": "fetch"
+    },
+    {
+      "id": "red-html",
+      "from": "red",
+      "to": "html",
+      "variant": "emphasis"
+    },
+    {
+      "id": "html-js",
+      "from": "html",
+      "to": "js",
+      "label": "<script>",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "js-almacen",
+      "from": "js",
+      "to": "almacen",
+      "variant": "dashed"
+    },
+    {
+      "id": "html-estilo",
+      "from": "html",
+      "to": "estilo",
+      "label": "DOM",
+      "variant": "emphasis"
+    },
+    {
+      "id": "js-estilo",
+      "from": "js",
+      "to": "estilo",
+      "label": "cambios",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "estilo-layout",
+      "from": "estilo",
+      "to": "layout",
+      "variant": "emphasis"
+    },
+    {
+      "id": "recursos-layout",
+      "from": "recursos",
+      "to": "layout",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "layout-pintura",
+      "from": "layout",
+      "to": "pintura",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pintura-ventana",
+      "from": "pintura",
+      "to": "ventana",
+      "label": "lista de visualización",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "right"
+    }
+  ]
+}
