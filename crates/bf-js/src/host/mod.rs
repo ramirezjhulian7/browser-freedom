@@ -221,6 +221,9 @@ pub struct HostState {
     embedder: HashMap<std::any::TypeId, Box<dyn Any>>,
     /// Datos del embebedor por realm y tipo (p. ej. el `WebContext` de cada ventana).
     realm_data: HashMap<(RealmId, std::any::TypeId), Box<dyn Any>>,
+    /// HTML "notify about rejected promises" (§8.1.7.3): recibe las promesas que siguen
+    /// rechazadas sin handler al vaciar la cola de microtasks.
+    pub rejection_notifier: Option<fn(&mut Agent, Vec<Gc<Object>>)>,
 }
 
 impl Default for HostState {
@@ -237,6 +240,7 @@ impl Default for HostState {
             event_loop: event_loop::EventLoop::default(),
             embedder: HashMap::new(),
             realm_data: HashMap::new(),
+            rejection_notifier: None,
         }
     }
 }
@@ -570,6 +574,14 @@ impl Agent {
         }
     }
 
+    /// ¿La promesa `p` tiene handler (`[[PromiseIsHandled]]`)? y su `[[PromiseResult]]`.
+    pub fn promise_handled_and_result(&self, p: Gc<Object>) -> Option<(bool, Value)> {
+        match &self.heap[p].kind {
+            ObjectKind::Promise(d) => Some((d.is_handled, d.result.clone())),
+            _ => None,
+        }
+    }
+
     /// El wrapper de `key` en `realm`, si existe todavía.
     pub fn host_lookup(&self, realm: RealmId, key: HostKey) -> Option<Gc<Object>> {
         self.host
@@ -577,6 +589,18 @@ impl Agent {
             .get(&(realm, key))
             .copied()
             .filter(|o| self.heap.is_alive(*o))
+    }
+
+    /// Cambia la clave de identidad del wrapper de `old` en `realm` a `new` (p. ej. un nodo
+    /// que el embebedor movió a otra arena); devuelve el wrapper si existía.
+    pub fn host_rekey(&mut self, realm: RealmId, old: HostKey, new: HostKey) -> Option<Gc<Object>> {
+        let o = self.host_lookup(realm, old)?;
+        self.host.wrappers.remove(&(realm, old));
+        if let ObjectKind::Host(h) = &mut self.heap[o].kind {
+            h.key = Some(new);
+        }
+        self.host.wrappers.insert((realm, new), o);
+        Some(o)
     }
 
     /// El wrapper de `key` en `realm`: el existente (y `payload` se descarta) o uno nuevo de

@@ -1729,3 +1729,32 @@ fn run_event_handler(
     Ok(result)
 }
 
+
+/// `document.createEvent(interface)` (DOM §4.5): la tabla de interfaces heredadas, sin
+/// inicializar (`initEvent` lo hace utilizable).
+pub fn create_event(agent: &mut Agent, doc: DocIndex, interface: &str) -> JsResult<Value> {
+    let lower = interface.to_ascii_lowercase();
+    let (iface, kind) = match lower.as_str() {
+        "event" | "events" | "htmlevents" | "svgevents" => (EventIface::Event, EventKind::Event),
+        "customevent" => (EventIface::Custom, EventKind::Custom { detail: None }),
+        "uievent" | "uievents" => (EventIface::Ui, EventKind::Ui { detail: 0 }),
+        "focusevent" => (
+            EventIface::Focus,
+            EventKind::Focus {
+                related_target: None,
+            },
+        ),
+        "mouseevent" | "mouseevents" => (
+            EventIface::Mouse,
+            EventKind::Mouse(MouseEventData::default()),
+        ),
+        "keyboardevent" => (
+            EventIface::Keyboard,
+            EventKind::Keyboard(KeyboardEventData::default()),
+        ),
+        _ => return throw_dom(agent, bf_dom::DomException::NotSupportedError),
+    };
+    let cell = Rc::new(RefCell::new(Event::uninitialized(kind)));
+    let o = create_event_object(agent, iface, cell, doc);
+    Ok(Value::Object(o))
+}

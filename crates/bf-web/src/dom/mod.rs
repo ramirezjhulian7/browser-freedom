@@ -5,17 +5,21 @@
 //! [`unwrap_node`] / [`this_node`], las conversiones de strings y [`throw_dom`].
 
 pub mod abort;
+pub mod adopt;
 pub mod collections;
 pub mod document;
 pub mod element;
 pub mod events;
 pub mod exception;
 pub mod implementation;
+pub mod insertion;
+pub mod mixins;
 pub mod node;
 pub mod observer;
 pub mod state;
 pub mod traversal;
 pub mod window;
+pub mod write;
 
 use std::collections::HashMap;
 
@@ -102,19 +106,12 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let dom_exception = agent.register_host_class(exception::dom_exception_class());
         let n = agent.register_host_class(node::node_class(event_target));
         let document = agent.register_host_class(document::document_class(n));
-        let document_fragment = agent.register_host_class(
-            bf_js::host::HostClass::new("DocumentFragment")
-                .parent(n)
-                .constructor(document::document_fragment_ctor, 0),
-        );
+        let document_fragment =
+            agent.register_host_class(document::document_fragment_class(n));
         let document_type = agent.register_host_class(node::document_type_class(n));
         let element = agent.register_host_class(element::element_class(n));
         let character_data = agent.register_host_class(node::character_data_class(n));
-        let text = agent.register_host_class(
-            bf_js::host::HostClass::new("Text")
-                .parent(character_data)
-                .constructor(document::text_ctor, 0),
-        );
+        let text = agent.register_host_class(node::text_class(character_data));
         let cdata_section =
             agent.register_host_class(bf_js::host::HostClass::new("CDATASection").parent(text));
         let comment = agent.register_host_class(
