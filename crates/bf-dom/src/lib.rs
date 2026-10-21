@@ -33,6 +33,7 @@ pub mod mutation;
 mod names;
 mod node;
 pub mod observer;
+pub mod script;
 mod serialize;
 
 use std::collections::HashMap;
@@ -246,6 +247,7 @@ pub struct Document {
     pub(crate) observers: observer::Observers,
     pub(crate) listeners: events::Listeners,
     pub(crate) aborts: abort::AbortState,
+    pub(crate) scripts: script::ScriptLists,
 }
 
 impl Default for Document {
@@ -271,6 +273,7 @@ impl Document {
             observers: observer::Observers::default(),
             listeners: events::Listeners::default(),
             aborts: abort::AbortState::default(),
+            scripts: script::ScriptLists::default(),
         };
         doc.push(NodeData::Document);
         doc

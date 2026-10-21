@@ -155,8 +155,17 @@ impl TreeBuilder {
                 self.mode = Mode::InHeadNoscript;
             }
             Tok::Start(ref t) if t.name == "script" => {
+                let location = self.appropriate_place(None);
                 let script = self.create_element_for_token(t, bf_infra::Namespace::Html);
-                self.insert_element_at(script, None);
+                // El *parser document* es este documento y *force async* es false; en el
+                // parseo de fragmentos, *already started* es true.
+                let state = self.doc.script_state_mut(script);
+                state.parser_inserted = true;
+                state.force_async = false;
+                if self.context.is_some() {
+                    state.already_started = true;
+                }
+                self.insert_element_at(script, Some(location));
                 self.open.push(script);
                 self.tokenizer.set_state(State::ScriptData);
                 self.original_mode = self.mode;
@@ -288,12 +297,26 @@ impl TreeBuilder {
             Tok::Char(c) => self.insert_char(c),
             Tok::Eof => {
                 self.error();
+                if self.current_is_html("script") {
+                    let script = self.current();
+                    self.doc.script_state_mut(script).already_started = true;
+                }
                 self.pop();
                 self.mode = self.original_mode;
                 return Flow::Reprocess(tok);
             }
-            // "script" y cualquier otro end tag: sin ejecución de scripts, ambos casos se
-            // reducen a sacar el elemento y volver al original insertion mode.
+            Tok::End(ref t) if t.name == "script" => {
+                // 1. Sin parser especulativo; la pila de ejecución de JS está vacía fuera de
+                // los scripts que corre el parser.
+                if self.nesting == 0 {
+                    self.doc.perform_microtask_checkpoint();
+                }
+                // 2-4. El resto (insertion point, prepare, pausa) lo hace el parser al volver.
+                let script = self.current();
+                self.pop();
+                self.mode = self.original_mode;
+                self.script_end = Some(script);
+            }
             Tok::End(_) => {
                 self.pop();
                 self.mode = self.original_mode;

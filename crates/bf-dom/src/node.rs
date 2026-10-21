@@ -290,6 +290,7 @@ impl Document {
         let copy = self.create(data);
         // 3. Cloning steps: `option` (selectedness) y `template` (template contents).
         self.clone_element_state(node, copy);
+        self.clone_script_state(node, copy);
         if subtree
             && let (Some(source), Some(target)) = (
                 template_source,

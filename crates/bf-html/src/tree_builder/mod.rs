@@ -9,12 +9,14 @@
 //! configuration* (siempre null), declarative shadow roots y content patching (`allow
 //! declarative shadow roots` es false, así que `<template shadowrootmode>` y `<template for>`
 //! se insertan como templates normales), custom elements, form owners, el parser
-//! especulativo y la ejecución de scripts.
+//! especulativo y los scripts SVG. El procesamiento de los `script` HTML (pausa en
+//! `</script>`, `document.write()`, "the end") está en [`script`].
 
 mod foreign;
 mod in_body;
 mod modes;
 mod quirks;
+pub mod script;
 
 use std::collections::HashMap;
 
@@ -39,11 +41,12 @@ pub struct FragmentContext<'a> {
     pub name: &'a str,
 }
 
-/// Parsea un documento completo.
+/// Parsea un documento completo, sin motor de script (los `script` se preparan y "ejecutan" sin
+/// efecto; ver [`script::Parser`] para el parseo incremental con un [`script::ScriptHost`]).
 pub fn parse_document(input: &str, opts: &ParseOptions) -> (Document, Vec<ParseError>) {
-    let mut builder = TreeBuilder::new(input, opts);
-    builder.run();
-    builder.finish()
+    let mut parser = script::Parser::with_input(input, opts);
+    parser.finish(&mut bf_dom::events::NoScript);
+    parser.into_document()
 }
 
 /// HTML fragment parsing algorithm (13.4). El resultado es un documento cuyo único hijo es el
@@ -197,6 +200,18 @@ struct TreeBuilder {
     template_hosts: HashMap<NodeId, NodeId>,
     stopped: bool,
     errors: Vec<ParseError>,
+    /// El `script` cuyo end tag se acaba de procesar en el modo text: el parser corre los
+    /// pasos que siguen a sacarlo de la stack (13.2.6.4.8) apenas vuelve del dispatcher.
+    script_end: Option<NodeId>,
+    /// *Script nesting level* (13.2.4.4 "parser pause flag" y 13.2.6.4.8).
+    nesting: u32,
+    /// *Parser pause flag*.
+    paused: bool,
+    /// *Insertion point* (13.2.3.5): índice en la entrada del tokenizador.
+    insertion_point: Option<usize>,
+    /// Los *old insertion points* guardados por las invocaciones anidadas (se corren cuando
+    /// `document.write()` inserta antes de ellos).
+    saved_insertion_points: Vec<Option<usize>>,
 }
 
 impl TreeBuilder {
@@ -222,7 +237,19 @@ impl TreeBuilder {
             template_hosts: HashMap::new(),
             stopped: false,
             errors: Vec::new(),
+            script_end: None,
+            nesting: 0,
+            paused: false,
+            insertion_point: None,
+            saved_insertion_points: Vec::new(),
         }
+    }
+
+    /// Tree builder sobre una entrada que llega por partes.
+    fn streaming(opts: &ParseOptions) -> Self {
+        let mut builder = TreeBuilder::new("", opts);
+        builder.tokenizer = Tokenizer::streaming();
+        builder
     }
 
     /// Pasos de 13.4 posteriores a crear el parser.
@@ -269,15 +296,30 @@ impl TreeBuilder {
         }
     }
 
+    /// Parseo de un fragmento (13.4): sus `script` ya vienen con *already started*.
     fn run(&mut self) {
         while !self.stopped {
+            let Some(tok) = self.next_tok() else {
+                break;
+            };
+            self.process_token(tok);
+            self.script_end = None;
+        }
+        // 13.2.7 The end: "Pop all the nodes off the stack of open elements." Después el event
+        // loop corre los microtasks pendientes.
+        self.truncate_open(0);
+        self.doc.perform_microtask_checkpoint();
+    }
+
+    /// El próximo token para el tree builder, o `None` si la entrada disponible no alcanza
+    /// (o ya se emitió el EOF).
+    fn next_tok(&mut self) -> Option<Tok> {
+        loop {
             let cdata = self
                 .adjusted_current_node()
                 .is_some_and(|n| self.elem(n).ns != Namespace::Html);
             self.tokenizer.set_cdata_allowed(cdata);
-            let Some(token) = self.tokenizer.next_token() else {
-                break;
-            };
+            let token = self.tokenizer.next_token()?;
             self.surrogate = match token {
                 Token::LoneSurrogate(u) => Some(u),
                 _ => None,
@@ -286,12 +328,8 @@ impl TreeBuilder {
             if std::mem::take(&mut self.skip_next_lf) && tok == Tok::Char('\n') {
                 continue;
             }
-            self.process_token(tok);
+            return Some(tok);
         }
-        // 13.2.7 The end: "Pop all the nodes off the stack of open elements." Después el event
-        // loop corre los microtasks pendientes.
-        self.truncate_open(0);
-        self.doc.perform_microtask_checkpoint();
     }
 
     fn finish(mut self) -> (Document, Vec<ParseError>) {
