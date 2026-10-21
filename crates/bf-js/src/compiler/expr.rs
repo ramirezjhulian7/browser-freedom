@@ -262,13 +262,13 @@ impl<'t> Codegen<'t> {
             Expr::Import {
                 source, options, ..
             } => {
+                // E1: EvaluateImportCall (§13.3.10.2).
                 self.expr(source);
-                if let Some(o) = options {
-                    self.expr(o);
-                    self.emit(Op::Pop);
+                match options {
+                    Some(o) => self.expr(o),
+                    None => self.emit(Op::Undefined),
                 }
-                self.emit(Op::Pop);
-                self.unsupported("import() (módulos, paso 5)");
+                self.emit(Op::ImportCall);
             }
             Expr::PrivateName(_) => {
                 self.throw_error(ErrorKind::SyntaxError, "Unexpected private name");

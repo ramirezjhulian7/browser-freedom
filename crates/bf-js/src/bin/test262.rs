@@ -253,13 +253,14 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
     };
     let phase = meta.negative_phase.as_deref();
     let module = meta.flags.iter().any(|f| f == "module");
+    // Los scripts también cargan módulos con `import()`: su referrer es la URL del test.
+    agent.set_module_loader(Rc::new(FileModuleLoader));
+    let url = FileModuleLoader::path_to_url(path);
     let code = if module {
         // ParseModule del test; después la carga del grafo y Link (fase `resolution`).
-        agent.set_module_loader(Rc::new(FileModuleLoader));
-        let url = FileModuleLoader::path_to_url(path);
         agent.parse_module_record(&url, src).map(Err)
     } else {
-        agent.compile_script_text(&text, "test.js").map(Ok)
+        agent.compile_script_text(&text, &url).map(Ok)
     };
     let result = match code {
         Err(Throw::Value(v)) => {
@@ -309,10 +310,17 @@ fn run_once(root: &Path, meta: &Meta, path: &Path, src: &str, strict: bool) -> S
                             }
                         }
                     }
-                    agent
-                        .evaluate_module(m)
-                        .and_then(|_| agent.run_jobs())
-                        .map(|_| Value::Undefined)
+                    // Evaluate devuelve una promesa: con top-level await se resuelve al
+                    // vaciar la cola de jobs.
+                    match agent.evaluate_module(m) {
+                        Ok(p) => agent
+                            .run_jobs()
+                            .and_then(|_| match agent.promise_outcome(p) {
+                                Some(Err(e)) => Err(Throw::Value(e)),
+                                _ => Ok(Value::Undefined),
+                            }),
+                        Err(e) => Err(e),
+                    }
                 }
             }
         }

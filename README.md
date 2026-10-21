@@ -129,8 +129,8 @@ motor JavaScript.
     `encodeURI`, `escape` de Annex B…);
   - módulos ECMAScript (§16.2): Source Text Module Records, ResolveExport con ciclos y
     ambigüedad, Link y Evaluate (Tarjan del spec), bindings de import vivos, el namespace
-    exótico, `export * as ns`, módulos JSON (`with { type: "json" }`) e `import.meta`;
-    `import()` y top-level await esperan a Promise;
+    exótico, `export * as ns`, módulos JSON (`with { type: "json" }`), `import.meta`,
+    `import()` dinámico (también desde scripts y `eval`) y top-level await;
   - `bf-js run archivo.js [--module]` ejecuta un script o un módulo (con sus imports desde
     el sistema de archivos) con `print`.
 
