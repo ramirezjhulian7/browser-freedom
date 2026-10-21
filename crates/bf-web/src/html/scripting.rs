@@ -47,12 +47,6 @@ impl PageResources {
     }
 }
 
-/// Cómo se llama a un listener de script desde un evento que dispara el parser (DOMContentLoaded,
-/// `load`, `error` de los scripts): lo registra el área del DOM, dueña de `addEventListener`,
-/// con `agent.set_embedder_data(ListenerInvoker(f))`. `f` devuelve `true` si el listener lanzó.
-#[derive(Clone, Copy)]
-pub struct ListenerInvoker(pub fn(&mut Agent, u64, &mut Event) -> bool);
-
 /// Un `ScriptHost` sobre el agente: lo crea [`with_parser`].
 pub struct PageHost<'a> {
     pub agent: &'a mut Agent,
@@ -148,13 +142,8 @@ fn lend_and_invoke(
         &mut ctx(agent, realm).documents[index as usize],
         DocumentOwner::Document(Box::new(real)),
     );
-    let threw = match agent.embedder_data::<ListenerInvoker>() {
-        Some(ListenerInvoker(f)) => {
-            let f = *f;
-            f(agent, handle, event)
-        }
-        None => false,
-    };
+    // El listener lo llama el DOM (E3), dueño de `addEventListener`.
+    let threw = crate::dom::events::invoke_listener(agent, handle, event);
     let back = std::mem::replace(&mut ctx(agent, realm).documents[index as usize], saved);
     if let DocumentOwner::Document(d) = back {
         *doc = *d;

@@ -1950,9 +1950,9 @@ fn iface_of(kind: &EventKind) -> EventIface {
 /// Cuántos wrappers de eventos nativos en curso se recuerdan (dispatch anidados).
 const NATIVE_WRAPPERS: usize = 8;
 
-/// El [`crate::html::scripting::ListenerInvoker`] del DOM: llama a un listener de script
-/// desde un dispatch que empezó fuera de `bf-web::dom` (el parser: `DOMContentLoaded`,
-/// `load`…), con el documento ya devuelto al contexto. El wrapper del evento es el mismo para
+/// Llama a un listener de script desde un dispatch que empezó fuera de `bf-web::dom` (el
+/// parser y los hosts de página de E1 y E4: `DOMContentLoaded`, `load`…), con el documento
+/// ya devuelto al contexto y el realm de la ventana en curso. El wrapper del evento es el mismo para
 /// todos los listeners del dispatch (se reconoce por la dirección y el `timeStamp` del evento).
 pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> bool {
     let key = (

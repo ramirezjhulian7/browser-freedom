@@ -56,8 +56,6 @@ pub struct DomState {
     /// razones de abort).
     pub values: HashMap<u64, HostHandle>,
     pub next_value: u64,
-    /// ¿Hay un `document.write()` en curso (el parser está fuera del contexto)?
-    pub parser_busy: bool,
     /// Los wrappers de los eventos nativos en dispatch, por (dirección, `timeStamp`).
     pub native_events: Vec<((usize, u64), HostHandle)>,
 }
