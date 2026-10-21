@@ -148,6 +148,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let tree_walker = agent.register_host_class(traversal::tree_walker_class());
         let dom_implementation =
             agent.register_host_class(implementation::dom_implementation_class());
+        // Los dispatch que empieza el parser (E1) llaman a los listeners por aquí.
+        agent.set_embedder_data(crate::html::scripting::ListenerInvoker(
+            events::invoke_listener,
+        ));
         agent.set_embedder_data(DomClasses {
             event_target,
             node: n,

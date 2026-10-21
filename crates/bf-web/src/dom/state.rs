@@ -58,8 +58,8 @@ pub struct DomState {
     pub next_value: u64,
     /// ¿Hay un `document.write()` en curso (el parser está fuera del contexto)?
     pub parser_busy: bool,
-    /// `window.name`.
-    pub window_name: String,
+    /// Los wrappers de los eventos nativos en dispatch, por (dirección, `timeStamp`).
+    pub native_events: Vec<((usize, u64), HostHandle)>,
 }
 
 /// El estado del DOM de la ventana actual.

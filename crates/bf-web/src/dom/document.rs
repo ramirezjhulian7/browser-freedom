@@ -111,6 +111,8 @@ fn document_ctor(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
 /// `cloneNode()` de un documento: un documento nuevo en el contexto (con o sin hijos).
 pub fn clone_document(agent: &mut Agent, doc: DocIndex, deep: bool) -> Value {
     let mut d = with_doc(agent, doc, |d| d.clone());
+    // Clonar no copia los listeners (DOM §4.4 "clone a node").
+    d.erase_all_event_listeners();
     if !deep {
         let root = d.root();
         d.replace_all(None, root);
@@ -439,6 +441,9 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         *wc.doc_mut(doc) = target;
         copy
     };
+    let old = with_doc(agent, n.doc, |d| d.inclusive_descendants(n.node));
+    let new = with_doc(agent, doc, |d| d.inclusive_descendants(copy));
+    crate::dom::insertion::copy_script_state(agent, (n.doc, &old), (doc, &new));
     Ok(wrap_node(agent, NodeRef::new(doc, copy)))
 }
 

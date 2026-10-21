@@ -721,7 +721,7 @@ fn dialogs_go_to_hooks() {
     );
     assert_eq!(
         log.borrow().join("|"),
-        "alert:hola|confirm:¿?|prompt:n:d|open:x.html:_blank"
+        "alert:hola|confirm:¿?|prompt:n:d|open:https://example.com/dir/x.html:_blank"
     );
 }
 

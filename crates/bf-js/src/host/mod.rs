@@ -227,7 +227,13 @@ pub struct HostState {
     /// HTML "notify about rejected promises" (§8.1.7.3): recibe las promesas que siguen
     /// rechazadas sin handler al vaciar la cola de microtasks.
     pub rejection_notifier: Option<RejectionNotifier>,
+    /// Los getters/setters de los atributos `[LegacyUnforgeable]` por realm, clase y nombre:
+    /// todas las instancias comparten las mismas funciones (WebIDL §3.7.6).
+    unforgeable_fns: UnforgeableFns,
 }
+
+type UnforgeableFns =
+    HashMap<(RealmId, u32, &'static str), (Option<Gc<Object>>, Option<Gc<Object>>)>;
 
 impl Default for HostState {
     fn default() -> HostState {
@@ -244,6 +250,7 @@ impl Default for HostState {
             embedder: HashMap::new(),
             realm_data: HashMap::new(),
             rejection_notifier: None,
+            unforgeable_fns: HashMap::new(),
         }
     }
 }
@@ -256,6 +263,11 @@ impl Trace for HostState {
         }
         for v in self.pins.values().chain(self.running.iter()) {
             t.value(v);
+        }
+        for (g, s) in self.unforgeable_fns.values() {
+            for f in g.iter().chain(s.iter()) {
+                t.gc(*f);
+            }
         }
         self.event_loop.trace(t);
     }
@@ -637,8 +649,31 @@ impl Agent {
         }
         for id in chain.into_iter().rev() {
             let attrs = self.host.classes[id.0 as usize].unforgeable.clone();
+            let realm = self.current_realm;
             for attr in &attrs {
-                define_attribute(self, o, attr, id, CALL_METHOD, false);
+                let (name, get, set) = *attr;
+                let key = (realm, id.0, name);
+                let (g, st) = match self.host.unforgeable_fns.get(&key) {
+                    Some(fns) => *fns,
+                    None => {
+                        let g = get.map(|f| {
+                            host_function(self, f, 0, &format!("get {name}"), id, CALL_METHOD)
+                        });
+                        let st = set.map(|f| {
+                            host_function(self, f, 1, &format!("set {name}"), id, CALL_METHOD)
+                        });
+                        self.host.unforgeable_fns.insert(key, (g, st));
+                        (g, st)
+                    }
+                };
+                self.heap[o].props.insert(
+                    PropertyKey::from(name),
+                    Prop {
+                        value: PropValue::Accessor { get: g, set: st },
+                        enumerable: true,
+                        configurable: false,
+                    },
+                );
             }
         }
     }

@@ -62,7 +62,9 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
                 .unwrap_or_default()
         });
         match name.as_str() {
-            "script" if scripts => prepare_script(agent, doc, el),
+            // Los documentos sin browsing context (todos menos el de la ventana) tienen el
+            // scripting deshabilitado (HTML §8.1.3.4).
+            "script" if scripts && doc == 0 => prepare_script(agent, doc, el),
             "img" => resource(agent, doc, el, "src", ResourceKind::Image),
             "link" => {
                 let stylesheet = with_doc(agent, doc, |d| {
@@ -142,4 +144,25 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
     if let Err(Throw::Value(e)) = r {
         report_exception(agent, &e);
     }
+}
+
+/// Copia *already started* de los `script` de `old` (en `from`) a sus copias `new` (en `to`)
+/// ("cloning steps" del `script`, HTML §4.12.1): las copias entre arenas no lo traen.
+pub fn copy_script_state(
+    agent: &mut Agent,
+    (from, old): (DocIndex, &[NodeId]),
+    (to, new): (DocIndex, &[NodeId]),
+) {
+    let started: Vec<NodeId> = with_doc(agent, from, |d| {
+        old.iter()
+            .zip(new)
+            .filter(|(o, _)| d.script_state(**o).already_started)
+            .map(|(_, n)| *n)
+            .collect()
+    });
+    with_doc_mut(agent, to, |d| {
+        for n in started {
+            d.script_state_mut(n).already_started = true;
+        }
+    });
 }
