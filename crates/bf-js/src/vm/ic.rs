@@ -132,6 +132,8 @@ pub fn named_ordinary(agent: &Agent, o: Gc<Object>, key: &PropertyKey) -> bool {
         | ObjectKind::Promise(_) => true,
         // `length` de un Array no está en su `PropertyMap`.
         ObjectKind::Array(_) => !matches!(key, PropertyKey::String(s) if s.units() == LENGTH),
+        // Un String exótico solo agrega los índices (excluidos arriba) y `length`.
+        ObjectKind::String(_) => !matches!(key, PropertyKey::String(s) if s.units() == LENGTH),
         ObjectKind::Host(_) => agent.host_exotic(o).is_none(),
         _ => false,
     }

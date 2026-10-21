@@ -82,9 +82,23 @@ impl Parser<'_> {
         }
     }
 
+    /// El tramo sin escapes de un string que empieza en la posición actual (después de la
+    /// comilla), si termina en una comilla: se copia de una vez (E3).
+    fn plain_span(&self) -> Option<(usize, usize)> {
+        let start = self.pos;
+        let len = self.s[start..]
+            .iter()
+            .position(|&c| c == 0x22 || c == 0x5C || c < 0x20)?;
+        (self.s[start + len] == 0x22).then_some((start, start + len))
+    }
+
     fn string(&mut self) -> Option<JsString> {
         if !self.eat(b'"') {
             return None;
+        }
+        if let Some((a, b)) = self.plain_span() {
+            self.pos = b + 1;
+            return Some(JsString::from_slice(&self.s[a..b]));
         }
         let mut out = Vec::new();
         loop {
@@ -125,6 +139,17 @@ impl Parser<'_> {
 
     /// Una clave de objeto (internada: la misma clave da el mismo string).
     fn key(&mut self) -> Option<JsString> {
+        if self.peek() == Some(0x22) {
+            self.pos += 1;
+            let span = self.plain_span();
+            self.pos -= 1;
+            if let Some((a, b)) = span
+                && let Some(e) = self.keys.get(&self.s[a..b])
+            {
+                self.pos = b + 1;
+                return Some(e.clone());
+            }
+        }
         let k = self.string()?;
         if let Some(e) = self.keys.get(k.units()) {
             return Some(e.clone());
@@ -175,6 +200,95 @@ impl Parser<'_> {
         }
         let text = String::from_utf16(span).ok()?;
         text.parse().ok()
+    }
+
+    /// Un valor construido directamente, sin el árbol (sin reviver; E3). Crear objetos no
+    /// recolecta (la recolección es en los safepoints), así que los valores a medio armar no
+    /// necesitan enraizarse.
+    fn value_direct(&mut self, agent: &mut Agent) -> JsResult<Option<Value>> {
+        if agent.stack_exhausted() {
+            return agent.range_error("Maximum call stack size exceeded");
+        }
+        self.ws();
+        let Some(c) = self.peek() else {
+            return Ok(None);
+        };
+        let v = match c {
+            0x7B => {
+                self.pos += 1;
+                let o = agent.new_plain_object();
+                self.ws();
+                if !self.eat(b'}') {
+                    loop {
+                        self.ws();
+                        let Some(k) = self.key() else {
+                            return Ok(None);
+                        };
+                        self.ws();
+                        if !self.eat(b':') {
+                            return Ok(None);
+                        }
+                        let Some(v) = self.value_direct(agent)? else {
+                            return Ok(None);
+                        };
+                        // Un objeto ordinario nuevo: definir es agregar (o reemplazar una
+                        // clave repetida).
+                        agent.heap[o].props.insert(
+                            PropertyKey::from_js_string(k),
+                            crate::object::Prop::data(v, true, true, true),
+                        );
+                        self.ws();
+                        if self.eat(b',') {
+                            continue;
+                        }
+                        if self.eat(b'}') {
+                            break;
+                        }
+                        return Ok(None);
+                    }
+                }
+                Value::Object(o)
+            }
+            0x5B => {
+                self.pos += 1;
+                let mut elems = Vec::new();
+                self.ws();
+                if !self.eat(b']') {
+                    loop {
+                        let Some(v) = self.value_direct(agent)? else {
+                            return Ok(None);
+                        };
+                        elems.push(Some(v));
+                        self.ws();
+                        if self.eat(b',') {
+                            continue;
+                        }
+                        if self.eat(b']') {
+                            break;
+                        }
+                        return Ok(None);
+                    }
+                }
+                let a = agent.array_create(0, None)?;
+                if let ObjectKind::Array(d) = &mut agent.heap[a].kind {
+                    d.length = elems.len() as u32;
+                    d.dense = elems;
+                }
+                Value::Object(a)
+            }
+            0x22 => match self.string() {
+                Some(s) => Value::String(s),
+                None => return Ok(None),
+            },
+            0x74 if self.literal("true") => Value::Boolean(true),
+            0x66 if self.literal("false") => Value::Boolean(false),
+            0x6E if self.literal("null") => Value::Null,
+            _ => match self.number() {
+                Some(n) => Value::Number(n),
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(v))
     }
 
     fn value(&mut self, agent: &mut Agent) -> JsResult<Option<Node>> {
@@ -277,6 +391,22 @@ fn parse_text(agent: &mut Agent, s: &[u16], keep_source: bool) -> JsResult<Node>
     }
 }
 
+/// Parsea y construye los valores sin el árbol (sin reviver; E3).
+fn parse_direct(agent: &mut Agent, s: &[u16]) -> JsResult<Value> {
+    let mut p = Parser {
+        s,
+        pos: 0,
+        keep_source: false,
+        keys: std::collections::HashMap::new(),
+    };
+    let v = p.value_direct(agent)?;
+    p.ws();
+    match v {
+        Some(v) if p.pos == s.len() => Ok(v),
+        _ => agent.syntax_error("Unexpected token in JSON"),
+    }
+}
+
 /// Construye los valores ECMAScript del árbol.
 fn materialize(agent: &mut Agent, n: &Node) -> JsResult<Value> {
     match n {
@@ -310,15 +440,16 @@ fn materialize(agent: &mut Agent, n: &Node) -> JsResult<Value> {
 
 /// ParseJSON (§25.5.1 pasos 2–10 sin reviver): para los módulos JSON (ParseJSONModule).
 pub fn parse_json(agent: &mut Agent, s: &[u16]) -> JsResult<Value> {
-    let node = parse_text(agent, s, false)?;
-    materialize(agent, &node)
+    parse_direct(agent, s)
 }
 
 /// JSON.parse (§25.5.1).
 fn parse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = agent.to_string(&a.arg(0))?;
-    let reviver_present = agent.is_callable(&a.arg(1));
-    let node = parse_text(agent, text.units(), reviver_present)?;
+    if !agent.is_callable(&a.arg(1)) {
+        return parse_direct(agent, text.units());
+    }
+    let node = parse_text(agent, text.units(), true)?;
     let unfiltered = materialize(agent, &node)?;
     let reviver = a.arg(1);
     if !agent.is_callable(&reviver) {
@@ -535,7 +666,10 @@ fn serialize_property(
     holder: Gc<Object>,
     out: &mut Vec<u16>,
 ) -> JsResult<bool> {
-    let mut value = agent.get(holder, key, Value::Object(holder))?;
+    let mut value = match own_data(agent, holder, key) {
+        Some(v) => v,
+        None => agent.get(holder, key, Value::Object(holder))?,
+    };
     if matches!(value, Value::Object(_) | Value::BigInt(_)) {
         let to_json = agent.get_value_of(&value, &state.to_json)?;
         if agent.is_callable(&to_json) {
@@ -585,6 +719,20 @@ fn serialize_property(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// `Get(holder, key)` sin el agente cuando es una propiedad de datos propia de un objeto
+/// ordinario o un elemento de un Array denso (E3); `None` si hace falta el `[[Get]]` completo.
+fn own_data(agent: &Agent, holder: Gc<Object>, key: &PropertyKey) -> Option<Value> {
+    let obj = &agent.heap[holder];
+    match (&obj.kind, key) {
+        (ObjectKind::Array(d), PropertyKey::Index(i)) => d.dense.get(*i as usize)?.clone(),
+        (ObjectKind::Ordinary, _) => match &obj.props.get(key)?.value {
+            crate::object::PropValue::Data { value, .. } => Some(value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// QuoteJSONString (§25.5.2.3).
@@ -668,6 +816,13 @@ fn serialize_object(
     let stepback = enter(agent, state, o)?;
     let keys: Vec<PropertyKey> = match &state.property_list {
         Some(list) => list.clone(),
+        // Un objeto ordinario: sus claves y atributos se leen directo (E3).
+        None if matches!(agent.heap[o].kind, ObjectKind::Ordinary) => {
+            let props = &agent.heap[o].props;
+            let mut keys = props.keys();
+            keys.retain(|k| !k.is_symbol() && props.get(k).is_some_and(|p| p.enumerable));
+            keys
+        }
         None => {
             // EnumerableOwnProperties(O, key): las claves string enumerables.
             let mut keys = Vec::new();

@@ -218,7 +218,7 @@ fn unit_string(u: u16) -> Value {
 }
 
 fn sub_string(s: &JsString, from: usize, to: usize) -> Value {
-    Value::String(JsString::from_units(s.units()[from..to].to_vec()))
+    Value::String(JsString::from_slice(&s.units()[from..to]))
 }
 
 /// String.prototype.at (§22.1.3.1).
@@ -644,7 +644,7 @@ pub fn get_substitution(
                         i += 1;
                     }
                     Some(e) => {
-                        let name = JsString::from_units(t[i + 2..i + 2 + e].to_vec());
+                        let name = JsString::from_slice(&t[i + 2..i + 2 + e]);
                         let v = agent.get_value_of(named, &PropertyKey::from_js_string(name))?;
                         if !v.is_undefined() {
                             let vs = agent.to_string(&v)?;
@@ -842,14 +842,14 @@ fn split(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut p = 0;
     let mut q = 0;
     while let Some(e) = string_index_of(su, ru, q) {
-        out.push(Value::String(JsString::from_units(su[p..e].to_vec())));
+        out.push(Value::String(JsString::from_slice(&su[p..e])));
         if out.len() as u32 == lim {
             return Ok(Value::Object(agent.create_array_from_list(&out)?));
         }
         p = e + ru.len();
         q = p;
     }
-    out.push(Value::String(JsString::from_units(su[p..].to_vec())));
+    out.push(Value::String(JsString::from_slice(&su[p..])));
     Ok(Value::Object(agent.create_array_from_list(&out)?))
 }
 
@@ -954,7 +954,7 @@ fn trim_start(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = this_str(agent, a)?;
     let u = s.units();
     let first = u.iter().position(|&c| !is_ws(c)).unwrap_or(u.len());
-    Ok(Value::String(JsString::from_units(u[first..].to_vec())))
+    Ok(Value::String(JsString::from_slice(&u[first..])))
 }
 
 /// String.prototype.trimEnd (§22.1.3.33).
@@ -962,7 +962,7 @@ fn trim_end(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = this_str(agent, a)?;
     let u = s.units();
     let end = u.iter().rposition(|&c| !is_ws(c)).map_or(0, |e| e + 1);
-    Ok(Value::String(JsString::from_units(u[..end].to_vec())))
+    Ok(Value::String(JsString::from_slice(&u[..end])))
 }
 
 /// String.prototype [ @@iterator ] (§22.1.3.36).

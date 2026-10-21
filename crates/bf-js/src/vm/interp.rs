@@ -111,6 +111,7 @@ impl Agent {
                         let realm = &self.realms[self.current_realm];
                         let cx = FastCx {
                             genv: realm.global_env,
+                            string_proto: realm.intrinsics.string_prototype,
                             object_proto: realm.intrinsics.object_prototype,
                             array_proto: realm.intrinsics.array_prototype,
                         };
@@ -2713,12 +2714,33 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             f.stack.push(v);
         }
         Op::GetProp(c) | Op::GetPropKeep(c) => {
-            let Some(Value::Object(o)) = f.stack.last() else {
-                return Fast::Slow;
-            };
-            let o = *o;
-            let Some(v) = fast_ic_get(heap, &f.code, c, o) else {
-                return Fast::Slow;
+            let v = match f.stack.last() {
+                Some(Value::Object(o)) => {
+                    let o = *o;
+                    match fast_ic_get(heap, &f.code, c, o) {
+                        Some(v) => v,
+                        // `length` de un Array (no está en su `PropertyMap`).
+                        None => match &heap[o].kind {
+                            ObjectKind::Array(d) if is_length(name_key(&f.code, c)) => {
+                                Value::Number(f64::from(d.length))
+                            }
+                            _ => return Fast::Slow,
+                        },
+                    }
+                }
+                // Un string primitivo: su `length`, o lo demás desde String.prototype (la
+                // inline cache del sitio apunta a él).
+                Some(Value::String(st)) => {
+                    if is_length(name_key(&f.code, c)) {
+                        Value::Number(st.len() as f64)
+                    } else {
+                        match fast_ic_get(heap, &f.code, c, cx.string_proto) {
+                            Some(v) => v,
+                            None => return Fast::Slow,
+                        }
+                    }
+                }
+                _ => return Fast::Slow,
             };
             if op == Op::GetProp(c) {
                 *f.stack.last_mut().expect("pila") = v;
@@ -2788,6 +2810,14 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             }
             f.stack.pop();
         }
+        Op::ToStringOp => match f.stack.last() {
+            Some(Value::String(_)) => {}
+            Some(Value::Number(n)) => {
+                let s = crate::abstract_ops::number::number_to_string(*n);
+                *f.stack.last_mut().expect("pila") = Value::String(s);
+            }
+            _ => return Fast::Slow,
+        },
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
         Op::True => f.stack.push(Value::Boolean(true)),
@@ -2937,9 +2967,17 @@ fn dense_index(heap: &crate::heap::Heap, o: Gc<Object>, i: f64) -> Option<Value>
 fn fast_named(heap: &crate::heap::Heap, o: Gc<Object>, key: &PropertyKey) -> bool {
     match &heap[o].kind {
         ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Builtin(_) | ObjectKind::Error => true,
-        ObjectKind::Array(_) => !matches!(key, PropertyKey::String(s) if s.units() == [108, 101, 110, 103, 116, 104]),
+        ObjectKind::Array(_) => !is_length(key),
+        // Un String exótico: sus propiedades propias extra son los índices y `length`.
+        ObjectKind::String(_) => !is_length(key) && !matches!(key, PropertyKey::Index(_)),
         _ => false,
     }
+}
+
+/// ¿Es la clave `"length"`?
+#[inline]
+fn is_length(key: &PropertyKey) -> bool {
+    matches!(key, PropertyKey::String(s) if s.units() == [108, 101, 110, 103, 116, 104])
 }
 
 /// Un acierto de la inline cache de `GetProp` con una propiedad de datos (sin el agente).
@@ -3122,6 +3160,7 @@ fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
 /// Lo que la ruta rápida necesita del realm.
 struct FastCx {
     genv: Gc<Env>,
+    string_proto: Gc<Object>,
     object_proto: Gc<Object>,
     array_proto: Gc<Object>,
 }

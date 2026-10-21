@@ -330,6 +330,27 @@ fn present(agent: &mut Agent, o: Gc<Object>, p: &PropertyKey) -> JsResult<Option
     Ok(None)
 }
 
+/// CreateDataPropertyOrThrow(A, p, v) (§7.3.7); si `p` es la posición siguiente al vector
+/// denso de un Array extensible sin índices propios fuera de él, definirla es agregarla al
+/// vector (E3). Una definición no mira la cadena de prototipos.
+fn define_append(agent: &mut Agent, a: Gc<Object>, p: PropertyKey, v: Value) -> JsResult<()> {
+    if let PropertyKey::Index(i) = p {
+        let obj = &mut agent.heap[a];
+        let plain = obj.extensible && obj.props.index_keys().next().is_none();
+        if let ObjectKind::Array(d) = &mut obj.kind
+            && plain
+            && d.dense.len() == i as usize
+            && (i < d.length || (d.length_writable && i < u32::MAX - 1))
+        {
+            d.dense.push(Some(v));
+            d.length = d.length.max(i + 1);
+            return Ok(());
+        }
+    }
+    agent.create_data_property_or_throw(a, p, v)?;
+    Ok(())
+}
+
 /// ¿Agregar elementos al final de `o` con `[[Set]]` equivale a extender su vector denso? Un
 /// Array denso, extensible, con `length` escribible y sin índices propios fuera del vector, y
 /// una cadena de prototipos sin propiedades indexadas (ningún setter ni propiedad de solo
@@ -516,7 +537,7 @@ fn filter(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 &[v.clone(), Value::Number(k), Value::Object(o)],
             )?;
             if crate::abstract_ops::conversion::to_boolean(agent, &r) {
-                agent.create_data_property_or_throw(arr, key(to), v)?;
+                define_append(agent, arr, key(to), v)?;
                 to += 1.0;
             }
         }
@@ -649,7 +670,7 @@ fn map(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 this_arg.clone(),
                 &[v, Value::Number(k), Value::Object(o)],
             )?;
-            agent.create_data_property_or_throw(arr, p, r)?;
+            define_append(agent, arr, p, r)?;
         }
         k += 1.0;
     }
