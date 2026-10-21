@@ -58,7 +58,23 @@
         ],
         "note": "Los scripts corren mientras se parsea y cada cambio al DOM vuelve a maquetar."
       }
-    ]
+    ],
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "Interfaz"
+        },
+        "backend": {
+          "label": "Motor"
+        },
+        "database": {
+          "label": "Almacenamiento"
+        },
+        "external": {
+          "label": "Fuera de Freedom"
+        }
+      }
+    }
   },
   "components": [
     {

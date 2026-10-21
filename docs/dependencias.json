@@ -1,0 +1,424 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Freedom — dependencias entre crates",
+    "output": "dependencias.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/ramirezjhulian7/browser-freedom",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "d92782ec14f8c3fac867a810edb38fdca69fa4cc"
+    },
+    "summary": {
+      "headline": "Catorce crates propios, de la URL a la ventana",
+      "body": "Cada flecha va de un crate al que usa directamente. Se muestran solo las dependencias necesarias: si A usa B y B usa C, la flecha de A a C se omite. bf-url y bf-infra (tipos comunes, encodings, cargadores e identidad del navegador) los usan casi todos, así que van aparte, sin flechas.",
+      "facts": [
+        {
+          "label": "Crates",
+          "value": "14 · todos propios"
+        },
+        {
+          "label": "Ejecutable",
+          "value": "freedom (bf-shell)"
+        },
+        {
+          "label": "Externos",
+          "value": "solo de plataforma"
+        }
+      ]
+    },
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "Aplicación"
+        },
+        "backend": {
+          "label": "Motor de render"
+        },
+        "messagebus": {
+          "label": "JavaScript"
+        },
+        "cloud": {
+          "label": "Red"
+        },
+        "database": {
+          "label": "Base común"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "shell",
+      "type": "frontend",
+      "label": "bf-shell",
+      "sublabel": "ventana · pestañas",
+      "pos": [
+        40,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-shell/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "paint",
+      "type": "backend",
+      "label": "bf-paint",
+      "sublabel": "pintura · raster",
+      "pos": [
+        230,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-paint/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "font",
+      "type": "backend",
+      "label": "bf-font",
+      "sublabel": "fuentes · shaping",
+      "pos": [
+        420,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-font/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "layout",
+      "type": "backend",
+      "label": "bf-layout",
+      "sublabel": "cajas · fragmentos",
+      "pos": [
+        610,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-layout/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "style",
+      "type": "backend",
+      "label": "bf-style",
+      "sublabel": "cascada",
+      "pos": [
+        800,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-style/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "css",
+      "type": "backend",
+      "label": "bf-css",
+      "sublabel": "sintaxis · selectores",
+      "pos": [
+        990,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-css/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "dom",
+      "type": "backend",
+      "label": "bf-dom",
+      "sublabel": "árbol del documento",
+      "pos": [
+        1180,
+        200
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-dom/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "html",
+      "type": "backend",
+      "label": "bf-html",
+      "sublabel": "parser",
+      "pos": [
+        1180,
+        60
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-html/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "image",
+      "type": "backend",
+      "label": "bf-image",
+      "sublabel": "PNG · JPEG · GIF",
+      "pos": [
+        230,
+        320
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-image/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "web",
+      "type": "messagebus",
+      "label": "bf-web",
+      "sublabel": "DOM · BOM · CSSOM",
+      "pos": [
+        420,
+        440
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-web/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "js",
+      "type": "messagebus",
+      "label": "bf-js",
+      "sublabel": "motor ECMAScript",
+      "pos": [
+        420,
+        560
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-js/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "net",
+      "type": "cloud",
+      "label": "bf-net",
+      "sublabel": "HTTP · TLS · cookies",
+      "pos": [
+        230,
+        560
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-net/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "infra",
+      "type": "database",
+      "label": "bf-infra",
+      "sublabel": "tipos · encodings",
+      "pos": [
+        800,
+        560
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-infra/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    },
+    {
+      "id": "url",
+      "type": "database",
+      "label": "bf-url",
+      "sublabel": "URL · IDNA",
+      "pos": [
+        990,
+        560
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "crates/bf-url/Cargo.toml",
+          "label": "dependencias"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Base común (la usan casi todos)",
+      "wraps": [
+        "infra",
+        "url"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "shell-paint",
+      "from": "shell",
+      "to": "paint",
+      "variant": "emphasis"
+    },
+    {
+      "id": "shell-web",
+      "from": "shell",
+      "to": "web"
+    },
+    {
+      "id": "paint-font",
+      "from": "paint",
+      "to": "font",
+      "variant": "emphasis"
+    },
+    {
+      "id": "paint-html",
+      "from": "paint",
+      "to": "html"
+    },
+    {
+      "id": "paint-image",
+      "from": "paint",
+      "to": "image"
+    },
+    {
+      "id": "font-layout",
+      "from": "font",
+      "to": "layout",
+      "variant": "emphasis"
+    },
+    {
+      "id": "layout-style",
+      "from": "layout",
+      "to": "style",
+      "variant": "emphasis"
+    },
+    {
+      "id": "style-css",
+      "from": "style",
+      "to": "css",
+      "variant": "emphasis"
+    },
+    {
+      "id": "css-dom",
+      "from": "css",
+      "to": "dom",
+      "variant": "emphasis"
+    },
+    {
+      "id": "html-dom",
+      "from": "html",
+      "to": "dom"
+    },
+    {
+      "id": "web-html",
+      "from": "web",
+      "to": "html",
+      "fromSide": "right",
+      "toSide": "right"
+    },
+    {
+      "id": "web-layout",
+      "from": "web",
+      "to": "layout"
+    },
+    {
+      "id": "web-js",
+      "from": "web",
+      "to": "js"
+    },
+    {
+      "id": "web-net",
+      "from": "web",
+      "to": "net"
+    }
+  ]
+}
