@@ -49,8 +49,8 @@ impl Timing {
     }
 }
 
-/// Marca la carga del documento de `realm` como terminada (`domInteractive` … `loadEventEnd`
-/// pasan a ahora).
+/// El parseo del documento de `realm` terminó (`domInteractive` … `domComplete` pasan a
+/// ahora).
 pub fn document_loaded(agent: &mut Agent, realm: bf_js::vm::RealmId) {
     let now = epoch_ms();
     if let Some(s) = agent.realm_data_mut::<super::BomState>(realm) {
@@ -59,8 +59,19 @@ pub fn document_loaded(agent: &mut Agent, realm: bf_js::vm::RealmId) {
             &mut t.dom_interactive,
             &mut t.dom_content_loaded,
             &mut t.dom_complete,
-            &mut t.load_event,
         ] {
+            if *f == 0.0 {
+                *f = now;
+            }
+        }
+    }
+}
+
+/// El evento `load` del documento de `realm` (`loadEventStart`/`End`).
+pub fn load_finished(agent: &mut Agent, realm: bf_js::vm::RealmId) {
+    let now = epoch_ms();
+    if let Some(s) = agent.realm_data_mut::<super::BomState>(realm) {
+        for f in [&mut s.timing.load_event] {
             if *f == 0.0 {
                 *f = now;
             }

@@ -54,6 +54,10 @@ pub enum Job {
     },
     /// Una entrada del usuario para el documento.
     Input(Box<super::events::UserInput>),
+    /// La pestaña se mostró (`true`) u ocultó.
+    Visibility(bool),
+    /// Otra pestaña cambió el `localStorage` de un origen.
+    Storage(Box<crate::script::StorageNotice>),
 }
 
 /// Un documento maquetado.
@@ -172,6 +176,8 @@ impl Documents {
 
 enum Msg {
     Job(Job),
+    /// Llegó una respuesta de red (`fetch`/XHR): hay tareas que correr.
+    NetWake,
     /// Cambió el desplazamiento o la escala (ver [`Documents::set_scroll`]).
     ViewChanged,
     Stop,
@@ -215,6 +221,8 @@ struct State {
     fonts: Arc<FontDb>,
     tx: Sender<FromDoc>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// El canal de este mismo hilo (para que la red lo despierte).
+    me: Sender<Msg>,
     view: Arc<Mutex<View>>,
     current: Option<Current>,
     last_frame: Instant,
@@ -235,6 +243,7 @@ impl DocumentThread {
         let (jobs, rx) = channel::<Msg>();
         let view = Arc::new(Mutex::new(View::default()));
         let shared = view.clone();
+        let me = jobs.clone();
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
@@ -245,6 +254,7 @@ impl DocumentThread {
                     fonts,
                     tx,
                     wake,
+                    me,
                     view: shared,
                     current: None,
                     last_frame: Instant::now(),
@@ -369,6 +379,8 @@ impl State {
             && engine.take_dirty()
             && let Some(doc) = engine.render_copy()
         {
+            // Los `<iframe>` nuevos o con otro `src`.
+            engine.sync_frames();
             let mut loaded = (*current.loaded).clone();
             loaded.doc = doc;
             current.loaded = Arc::new(loaded);
@@ -415,9 +427,16 @@ impl State {
                     },
                 };
                 match msg {
-                    Some(Msg::Stop) => break,
+                    Some(Msg::Stop) => {
+                        self.unload_current();
+                        break;
+                    }
                     Some(Msg::ViewChanged) => {
                         self.view_changed();
+                        continue;
+                    }
+                    Some(Msg::NetWake) => {
+                        self.run_tasks();
                         continue;
                     }
                     Some(Msg::Job(j)) => queue.push_back(j),
@@ -432,10 +451,12 @@ impl State {
                 match next {
                     Msg::Job(j) => queue.push_back(j),
                     Msg::ViewChanged => self.view_changed(),
+                    Msg::NetWake => {}
                     Msg::Stop => stop = true,
                 }
             }
             if stop {
+                self.unload_current();
                 break;
             }
             coalesce(&mut queue);
@@ -445,6 +466,18 @@ impl State {
             match job {
                 Job::Load(job) => self.load(*job),
                 Job::Input(input) => self.input(*input),
+                Job::Visibility(visible) => {
+                    if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+                        e.set_visibility(visible);
+                    }
+                    self.refresh();
+                }
+                Job::Storage(notice) => {
+                    if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+                        e.storage_event(&notice);
+                    }
+                    self.refresh();
+                }
                 Job::Relayout { id, loaded } => {
                     if let (Some(l), Some(c)) = (loaded, self.current.as_mut()) {
                         if let Some(engine) = &mut c.engine {
@@ -501,7 +534,18 @@ impl State {
             referrer,
             screen,
         } = job;
+        let net_waker: Arc<dyn Fn() + Send + Sync> = {
+            let me = Mutex::new(self.me.clone());
+            Arc::new(move || {
+                let _ = me
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .send(Msg::NetWake);
+            })
+        };
         let env = PageEnv {
+            net_waker: Some(net_waker),
+            defer_load: true,
             fonts: Some(self.fonts.clone()),
             net: net.clone(),
             requests: Some(self.request_sink()),
@@ -517,7 +561,8 @@ impl State {
             theme,
             post,
         };
-        // El documento anterior (y su motor) se descartan.
+        // El documento anterior recibe `unload` y se descarta (con su motor).
+        self.unload_current();
         self.current = None;
         self.input.reset();
         self.last_viewport = None;
@@ -538,6 +583,18 @@ impl State {
             canvas_version: 0,
         });
         self.layout(id, Some(ctx));
+        // El primer layout cargó imágenes y hojas: ya puede salir `load` (13.2.7 paso 8).
+        if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            e.resources_loaded();
+        }
+        self.refresh();
+    }
+
+    /// `beforeunload`, `pagehide` y `unload` en el documento actual.
+    fn unload_current(&mut self) {
+        if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            e.unload();
+        }
     }
 
     /// Estilo, layout y lista de visualización del documento actual; `Done` a la ventana.
@@ -689,7 +746,7 @@ mod tests {
             .map(|j| match j {
                 Job::Load(l) => l.id,
                 Job::Relayout { id, .. } => *id,
-                Job::Input(_) => 0,
+                Job::Input(_) | Job::Visibility(_) | Job::Storage(_) => 0,
             })
             .collect();
         assert_eq!(ids, [3, 5]);

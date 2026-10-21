@@ -78,6 +78,9 @@ pub enum PageRequest {
     Close,
     /// `window.scrollTo` y compañía: desplazar la página a (x, y) px CSS.
     ScrollTo(f32, f32),
+    /// El documento cambió el `localStorage` de su origen: las otras pestañas reciben
+    /// `storage`.
+    StorageChanged(StorageNotice),
     /// Un diálogo: la interfaz responde por `reply` (`None`: cancelado; para `alert` y
     /// `confirm`, `Some("")` es aceptar).
     Dialog {
@@ -85,6 +88,17 @@ pub enum PageRequest {
         message: String,
         reply: Sender<Option<String>>,
     },
+}
+
+/// Un cambio de `localStorage` (HTML §12.2.1) para las otras pestañas del origen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageNotice {
+    pub origin: String,
+    /// `None`: `clear()`.
+    pub key: Option<String>,
+    pub old: Option<String>,
+    pub new: Option<String>,
+    pub url: String,
 }
 
 /// A dónde van las peticiones de un documento (en la línea de comandos, a ningún lado).
@@ -102,6 +116,12 @@ pub struct PageEnv {
     /// Las fuentes del sistema, para maquetar cuando JavaScript pide geometría con el layout
     /// desactualizado (sin ellas, el CSSOM usa métricas de prueba).
     pub fonts: Option<Arc<bf_font::FontDb>>,
+    /// El navegador avisa cuándo terminaron de cargar imágenes y hojas
+    /// ([`Engine::resources_loaded`]); si no (línea de comandos), `load` sale al parsear.
+    pub defer_load: bool,
+    /// Quién despierta el bucle del documento cuando llega una respuesta de `fetch`/XHR; sin
+    /// él (línea de comandos), las peticiones bloquean.
+    pub net_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl PageEnv {
@@ -113,6 +133,8 @@ impl PageEnv {
             referrer: String::new(),
             screen: ScreenInfo::default(),
             fonts: None,
+            defer_load: false,
+            net_waker: None,
         }
     }
 }
@@ -295,6 +317,23 @@ impl BomHooks for ShellBom {
             .unwrap_or_default()
     }
 
+    fn storage_changed(
+        &mut self,
+        origin: &str,
+        key: Option<&str>,
+        old: Option<&str>,
+        new: Option<&str>,
+        url: &str,
+    ) {
+        self.request(PageRequest::StorageChanged(StorageNotice {
+            origin: origin.to_owned(),
+            key: key.map(str::to_owned),
+            old: old.map(str::to_owned),
+            new: new.map(str::to_owned),
+            url: url.to_owned(),
+        }));
+    }
+
     fn save_storage(&mut self, origin: &str, items: &[(String, String)]) {
         let Some(path) = storage_path(origin) else {
             return;
@@ -325,6 +364,18 @@ impl BomHooks for ShellBom {
 
     fn referrer(&self) -> String {
         self.env.referrer.clone()
+    }
+
+    /// Los marcos usan la misma red, almacenamiento, pantalla y diálogos que la pestaña.
+    fn child_hooks(&self) -> Option<(Box<dyn BomHooks>, Box<dyn WebHooks>)> {
+        Some((
+            Box::new(ShellBom {
+                env: self.env.clone(),
+            }),
+            Box::new(ShellWeb {
+                requests: self.env.requests.clone(),
+            }),
+        ))
     }
 }
 
@@ -522,6 +573,16 @@ impl Engine {
             Box::new(ShellBom { env: env.clone() }),
         );
         bf_web::bom::script::install_scripting(&mut self.rt.agent, realm, url, loader);
+        // `fetch`/XHR con la red (y la jarra de cookies) de la pestaña.
+        bf_web::bom::script::install_net(
+            &mut self.rt.agent,
+            realm,
+            bf_web::bom::script::NetHookup {
+                backend: env.net.clone(),
+                threaded: env.net_waker.is_some(),
+                waker: env.net_waker.clone(),
+            },
+        );
         if let Some(db) = &env.fonts {
             let provider = ShellLayout {
                 fonts: bf_font::Fonts::new(db.clone()),
@@ -610,9 +671,52 @@ impl Engine {
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
+        bf_web::bom::frames::sync_frames(agent, realm);
+        if !env.defer_load {
+            bf_web::bom::script::resources_loaded(agent, realm);
+        }
         self.flush_rejections();
         self.take_dirty();
         self.document().cloned().unwrap_or_default()
+    }
+
+    /// El navegador cargó las imágenes y hojas del documento: `load`.
+    pub fn resources_loaded(&mut self) {
+        if self.has_window() {
+            bf_web::bom::script::resources_loaded(&mut self.rt.agent, self.realm);
+            self.flush_rejections();
+        }
+    }
+
+    /// El documento se va (otra navegación, se cierra la pestaña): `beforeunload`,
+    /// `pagehide` y `unload`.
+    pub fn unload(&mut self) {
+        if self.has_window() {
+            bf_web::bom::script::unload_document(&mut self.rt.agent, self.realm);
+        }
+    }
+
+    /// La pestaña se mostró u ocultó (`visibilitychange`).
+    pub fn set_visibility(&mut self, visible: bool) {
+        if self.has_window() {
+            bf_web::bom::script::set_visibility(&mut self.rt.agent, self.realm, visible);
+        }
+    }
+
+    /// Otra pestaña cambió el `localStorage` de un origen (`storage` si es el de esta).
+    pub fn storage_event(&mut self, n: &StorageNotice) {
+        if self.has_window() {
+            bf_web::bom::script::storage_event(
+                &mut self.rt.agent,
+                self.realm,
+                &n.origin,
+                n.key.as_deref(),
+                n.old.as_deref(),
+                n.new.as_deref(),
+                &n.url,
+            );
+            self.flush_rejections();
+        }
     }
 
     /// Los bitmaps de los `<canvas>` del documento (E1), para pintarlos como imágenes.
@@ -737,6 +841,14 @@ impl Engine {
         }
     }
 
+    /// Pone al día los marcos (`<iframe>`) del documento.
+    pub fn sync_frames(&mut self) {
+        if self.has_window() {
+            bf_web::bom::frames::sync_frames(&mut self.rt.agent, self.realm);
+            self.flush_rejections();
+        }
+    }
+
     /// ¿Los scripts cambiaron el DOM desde la última vez? (Y se limpia la marca.)
     pub fn take_dirty(&mut self) -> bool {
         self.rt
@@ -753,6 +865,12 @@ impl Engine {
 
     /// Corre las tareas que vencieron (temporizadores, async, …). Devuelve cuántas corrió.
     pub fn run_due_tasks(&mut self) -> usize {
+        // Las respuestas de red que llegaron (de esta ventana y de sus marcos).
+        for realm in 0..self.rt.agent.realms.len() {
+            if self.rt.agent.realm_data::<WebContext>(realm).is_some() {
+                bf_web::net::pump(&mut self.rt.agent, realm);
+            }
+        }
         let mut n = 0;
         loop {
             self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);

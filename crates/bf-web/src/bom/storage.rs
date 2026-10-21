@@ -138,6 +138,25 @@ fn persist(agent: &mut Agent, this: &Value) {
     }
 }
 
+/// "Broadcast" (HTML §12.2.1): el cambio de `localStorage` se avisa a las otras ventanas del
+/// mismo origen, que reciben `storage`.
+fn broadcast(
+    agent: &mut Agent,
+    this: &Value,
+    key: Option<&str>,
+    old: Option<&str>,
+    new: Option<&str>,
+) {
+    if !is_local(agent, this) {
+        return;
+    }
+    let url = window_url(agent);
+    let origin = origin_of(&url);
+    state_mut(agent)
+        .hooks
+        .storage_changed(&origin, key, old, new, &url.href());
+}
+
 fn length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Number(area(agent, &a.this).items.len() as f64))
 }
@@ -170,23 +189,27 @@ fn set_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     match next.items.iter_mut().find(|(key, _)| *key == k) {
         Some((_, old)) if *old == v => return Ok(Value::Undefined),
         Some((_, old)) => *old = v,
-        None => next.items.push((k, v)),
+        None => next.items.push((k.clone(), v)),
     }
     if next.size() > QUOTA {
         return crate::dom::throw_dom(agent, bf_dom::DomException::QuotaExceededError);
     }
+    let old = area.get(&k).map(str::to_owned);
+    let new = next.get(&k).map(str::to_owned);
     *area = next;
     persist(agent, &a.this);
+    broadcast(agent, &a.this, Some(&k), old.as_deref(), new.as_deref());
     Ok(Value::Undefined)
 }
 
 fn remove_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let k = to_rust_string(agent, &a.arg(0))?;
     let area = area(agent, &a.this);
-    let before = area.items.len();
+    let old = area.get(&k).map(str::to_owned);
     area.items.retain(|(key, _)| *key != k);
-    if area.items.len() != before {
+    if old.is_some() {
         persist(agent, &a.this);
+        broadcast(agent, &a.this, Some(&k), old.as_deref(), None);
     }
     Ok(Value::Undefined)
 }
@@ -196,6 +219,7 @@ fn clear(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if !area.items.is_empty() {
         area.items.clear();
         persist(agent, &a.this);
+        broadcast(agent, &a.this, None, None, None);
     }
     Ok(Value::Undefined)
 }

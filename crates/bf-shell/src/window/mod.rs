@@ -17,6 +17,7 @@
 //! Los atajos están en [`crate::internal::SHORTCUTS`] (y en `about:home`).
 
 mod chrome;
+mod dialog;
 mod edit;
 mod events;
 mod hit;
@@ -191,6 +192,14 @@ struct App {
     edited: bool,
     /// El foco que ya conoce el documento (pestaña, nodo).
     focus_sent: (u64, Option<NodeId>),
+    /// El diálogo de una página abierto (pestaña, diálogo) y los que esperan su turno.
+    dialog: Option<(u64, dialog::Dialog)>,
+    pending_dialogs: std::collections::VecDeque<(
+        u64,
+        crate::script::DialogKind,
+        String,
+        std::sync::mpsc::Sender<Option<String>>,
+    )>,
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
     scroll: (f32, f32),
@@ -631,6 +640,8 @@ impl App {
             consoles: HashMap::new(),
             edited: false,
             focus_sent: (0, None),
+            dialog: None,
+            pending_dialogs: std::collections::VecDeque::new(),
             current: None,
             page: None,
             scroll: (0.0, 0.0),
@@ -888,6 +899,9 @@ impl App {
         let Some(mut incoming) = self.tabs[i].take() else {
             return;
         };
+        // `visibilitychange`: la que se oculta y la que se muestra.
+        self.worker.send(self.tab_key, Job::Visibility(false));
+        self.worker.send(incoming.tab_key, Job::Visibility(true));
         self.swap_state(&mut incoming);
         self.tabs[self.active] = Some(incoming);
         self.active = i;
@@ -916,8 +930,13 @@ impl App {
             self.activate_tab(next);
         }
         if let Some(Some(t)) = self.tabs.get(i) {
-            self.worker.close(t.tab_key);
-            self.consoles.remove(&t.tab_key);
+            let key = t.tab_key;
+            self.worker.close(key);
+            self.consoles.remove(&key);
+            if self.dialog.as_ref().is_some_and(|(k, _)| *k == key) {
+                self.close_dialog(false);
+            }
+            self.pending_dialogs.retain(|(k, ..)| *k != key);
         }
         self.tabs.remove(i);
         if self.active > i {
@@ -1110,7 +1129,7 @@ impl App {
     /// pide abrir el menú del navegador ([`Self::open_context_menu`]).
     fn context_menu(&mut self) {
         let (x, y) = self.mouse;
-        if self.area_at(x, y) != Area::Page {
+        if self.area_at(x, y) != Area::Page || self.dialog.is_some() {
             return;
         }
         self.send_mouse(events::MouseKind::ContextMenu, 2, 0);
@@ -1705,6 +1724,14 @@ impl App {
         }
     }
 
+    /// La clave del hilo de documento de la pestaña `i`.
+    fn key_of_tab(&self, i: usize) -> Option<u64> {
+        if i == self.active {
+            return Some(self.tab_key);
+        }
+        self.tabs.get(i)?.as_ref().map(|t| t.tab_key)
+    }
+
     /// La pestaña cuyo hilo de documento tiene la clave `key`.
     fn tab_with_key(&self, key: u64) -> Option<usize> {
         if self.tab_key == key {
@@ -1766,6 +1793,9 @@ impl App {
     /// (con su activation behavior en el documento).
     fn release(&mut self) {
         self.drag = None;
+        if self.dialog.is_some() {
+            return;
+        }
         if self.menu.is_none() && self.area_at(self.mouse.0, self.mouse.1) == Area::Page {
             let detail = self.last_click.map_or(1, |(_, _, n)| i32::from(n));
             self.send_mouse(events::MouseKind::Up, 0, 0);
@@ -1882,6 +1912,17 @@ impl App {
                 }
             }
             PageRequest::Close => self.close_tab(i),
+            PageRequest::StorageChanged(notice) => {
+                // Las otras pestañas (de cualquier origen: cada una filtra el suyo).
+                let keys: Vec<u64> = (0..self.tabs.len())
+                    .filter(|&j| j != i)
+                    .filter_map(|j| self.key_of_tab(j))
+                    .collect();
+                for key in keys {
+                    self.worker
+                        .send(key, Job::Storage(Box::new(notice.clone())));
+                }
+            }
             PageRequest::ScrollTo(x, y) => self.with_tab(i, |app| {
                 app.scroll = (x, y);
                 app.clamp_scroll();
@@ -1891,11 +1932,7 @@ impl App {
                 kind,
                 message,
                 reply,
-            } => {
-                self.activate_tab(i);
-                let answer = self.show_dialog(&kind, &message);
-                let _ = reply.send(answer);
-            }
+            } => self.open_dialog(tab, kind, message, reply),
         }
     }
 
@@ -1931,46 +1968,69 @@ impl App {
         self.refresh_chrome();
     }
 
-    /// Un diálogo modal de la página (`alert`, `confirm`, `prompt`); `None` es cancelar.
-    fn show_dialog(&mut self, kind: &crate::script::DialogKind, message: &str) -> Option<String> {
-        use crate::script::DialogKind;
-        use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+    /// Abre (o encola, si ya hay uno abierto) un diálogo de la página de la pestaña `tab`.
+    fn open_dialog(
+        &mut self,
+        tab: u64,
+        kind: crate::script::DialogKind,
+        message: String,
+        reply: std::sync::mpsc::Sender<Option<String>>,
+    ) {
+        if self.dialog.is_some() {
+            self.pending_dialogs.push_back((tab, kind, message, reply));
+            return;
+        }
+        if let Some(i) = self.tab_with_key(tab) {
+            self.activate_tab(i);
+        }
         let host = self
             .current
             .as_ref()
             .map(|c| c.url.host_string())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "Esta página".to_owned());
-        let title = format!("{host} dice");
-        match kind {
-            DialogKind::Alert => {
-                MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title(&title)
-                    .set_description(message)
-                    .set_buttons(MessageButtons::Ok)
-                    .show();
-                Some(String::new())
+        let dialog = dialog::Dialog::new(
+            kind,
+            &host,
+            &message,
+            reply,
+            self.logical_size(),
+            self.fonts.clone(),
+            self.chrome.theme,
+        );
+        self.dialog = Some((tab, dialog));
+        self.menu = None;
+        self.set_cursor(CursorIcon::Default);
+        self.redraw_later();
+    }
+
+    /// Responde el diálogo abierto y pasa al siguiente encolado.
+    fn close_dialog(&mut self, ok: bool) {
+        if let Some((_, d)) = self.dialog.take() {
+            d.answer(ok);
+        }
+        self.redraw_later();
+        if let Some((tab, kind, message, reply)) = self.pending_dialogs.pop_front() {
+            self.open_dialog(tab, kind, message, reply);
+        }
+    }
+
+    /// Una tecla con un diálogo abierto (Enter acepta, Esc cancela; el resto, al campo).
+    fn dialog_key(&mut self, key: &Key, text: Option<&str>) {
+        match key {
+            Key::Named(NamedKey::Enter) => self.close_dialog(true),
+            Key::Named(NamedKey::Escape) => self.close_dialog(false),
+            Key::Named(NamedKey::Backspace) => {
+                if let Some((_, d)) = &mut self.dialog {
+                    d.backspace();
+                }
+                self.redraw_later();
             }
-            DialogKind::Confirm => {
-                let r = MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title(&title)
-                    .set_description(message)
-                    .set_buttons(MessageButtons::OkCancel)
-                    .show();
-                matches!(r, MessageDialogResult::Ok | MessageDialogResult::Yes).then(String::new)
-            }
-            // Sin campo de texto en el diálogo nativo: aceptar devuelve el valor por defecto.
-            DialogKind::Prompt(default) => {
-                let r = MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title(&title)
-                    .set_description(format!("{message}\n\n[{default}]"))
-                    .set_buttons(MessageButtons::OkCancel)
-                    .show();
-                matches!(r, MessageDialogResult::Ok | MessageDialogResult::Yes)
-                    .then(|| default.clone())
+            _ => {
+                if let (Some((_, d)), Some(t)) = (&mut self.dialog, text) {
+                    d.type_text(t);
+                    self.redraw_later();
+                }
             }
         }
     }
@@ -2095,6 +2155,10 @@ impl App {
 
     /// El viewport cambió (ventana, panel o zoom): se rehace el layout (en el hilo) y el cromo.
     fn resized(&mut self) {
+        let window = self.logical_size();
+        if let Some((_, d)) = &mut self.dialog {
+            d.resize(window);
+        }
         trace(&format!(
             "resized viewport={:?} loading={}",
             self.viewport(),
@@ -2315,6 +2379,10 @@ impl App {
             let layer = render(menu.display_list(), menu.size(), dpi, Rgba::TRANSPARENT);
             blit(&mut frame, &layer, menu.origin.0 * dpi, menu.origin.1 * dpi);
         }
+        if let Some((_, d)) = &self.dialog {
+            let layer = render(d.display_list(), d.size(), dpi, Rgba::TRANSPARENT);
+            blit(&mut frame, &layer, 0.0, 0.0);
+        }
         frame
     }
 
@@ -2368,6 +2436,19 @@ impl App {
 
     fn mouse_moved(&mut self) {
         let (x, y) = self.mouse;
+        if let Some((_, d)) = &mut self.dialog {
+            let hover = d.button_at(x, y);
+            if d.set_hover(hover) {
+                self.redraw_later();
+            }
+            let cursor = if hover.is_some() {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            };
+            self.set_cursor(cursor);
+            return;
+        }
         if let Some(drag) = self.drag {
             self.drag_to(drag);
         }
@@ -2442,6 +2523,12 @@ impl App {
 
     fn click(&mut self) {
         let (x, y) = self.mouse;
+        if let Some((_, d)) = &self.dialog {
+            if let Some(ok) = d.button_at(x, y) {
+                self.close_dialog(ok);
+            }
+            return;
+        }
         if let Some(menu) = &self.menu {
             let action = menu
                 .item_at(x, y)
@@ -2682,6 +2769,9 @@ impl App {
 
     fn wheel(&mut self, dx: f32, dy: f32) {
         let (x, y) = self.mouse;
+        if self.dialog.is_some() {
+            return;
+        }
         if self.area_at(x, y) == Area::Panel {
             self.chrome.panel_scroll += dy;
             self.chrome.clamp_panel_scroll();
@@ -2760,6 +2850,12 @@ impl App {
     }
 
     fn key(&mut self, event: &KeyEvent) {
+        if self.dialog.is_some() {
+            if event.state == ElementState::Pressed {
+                self.dialog_key(&event.logical_key, event.text.as_deref());
+            }
+            return;
+        }
         // Las teclas sobre la página (no en el campo de URL ni en un menú) van al documento.
         if !self.chrome.field.focused && self.menu.is_none() {
             let key = match &event.logical_key {
@@ -3229,6 +3325,22 @@ impl App {
             "move" => {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
+            }
+            // `dialog:ok`, `dialog:ok:texto` (para `prompt`) o `dialog:cancel`.
+            "dialog" => {
+                self.receive();
+                let (answer, text) = arg.split_once(':').unwrap_or((arg, ""));
+                if self.dialog.is_none() {
+                    return Err("no hay un diálogo abierto".to_owned());
+                }
+                if let Some((_, d)) = &mut self.dialog
+                    && !text.is_empty()
+                {
+                    d.input.clear();
+                    d.type_text(text);
+                }
+                self.close_dialog(answer == "ok");
+                self.settle_input();
             }
             // `drag:x,y>x,y`: apretar, mover y soltar el botón izquierdo.
             "drag" => {

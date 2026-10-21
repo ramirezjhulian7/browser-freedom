@@ -900,3 +900,19 @@ fn dom_string_write_api() {
     p.close(&mut host).unwrap();
     assert_eq!(text(p.document()), "A");
 }
+
+#[test]
+fn load_waits_for_browser_resources() {
+    let mut host = TestHost::new();
+    let mut p = parser_for("<img src=a.png>", &opts());
+    listen(&mut p, &mut host, EventTarget::Window, "load", "win");
+    p.delay_load_event();
+    p.finish(&mut host);
+    // `DOMContentLoaded` ya pasó, pero `load` espera las imágenes.
+    assert_eq!(p.status(), ParserStatus::Finishing);
+    assert_eq!(p.document().ready_state(), DocumentReadiness::Interactive);
+    assert!(host.log.is_empty());
+    p.release_load_event(&mut host);
+    assert_eq!(p.status(), ParserStatus::Complete);
+    assert_eq!(host.log, ["win:load@document(complete)"]);
+}

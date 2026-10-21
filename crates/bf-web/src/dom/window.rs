@@ -41,8 +41,8 @@ pub fn window_class(event_target: HostClassId) -> HostClass {
         .unforgeable("document", Some(document), None)
         .attribute("self", Some(window_self), Some(replaceable_self))
         .attribute("frames", Some(window_self), Some(replaceable_frames))
-        .attribute("parent", Some(window_self), Some(replaceable_parent))
-        .unforgeable("top", Some(window_self), None)
+        .attribute("parent", Some(window_parent), Some(replaceable_parent))
+        .unforgeable("top", Some(window_top), None)
         .attribute("frameElement", Some(null), None)
         .attribute("event", Some(current_event), Some(replaceable_event))
         .method("postMessage", 1, post_message)
@@ -88,6 +88,15 @@ pub fn install(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
 fn window_self(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     let realm = WebContextHandle::current(agent).realm;
     Ok(Value::Object(agent.realms[realm].global_object))
+}
+
+/// `window.parent` y `window.top`: los de los marcos (`crate::bom::frames`, E4).
+fn window_parent(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(crate::bom::frames::window_parent(agent))
+}
+
+fn window_top(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(crate::bom::frames::window_top(agent))
 }
 
 /// `[Replaceable]` (WebIDL §3.7.6): el setter crea una propiedad de datos propia.
