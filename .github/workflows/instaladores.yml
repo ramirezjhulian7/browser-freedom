@@ -3,8 +3,10 @@
 # - A mano (Actions → Instaladores → Run workflow): arma los paquetes y los deja como
 #   artefactos del run, para probarlos.
 # - Al subir una etiqueta `v*` (p. ej. `git tag v0.1.0 && git push origin v0.1.0`): además
-#   crea un release en BORRADOR con los paquetes y las notas de packaging/NOTAS-DEL-RELEASE.md.
-#   Se revisa y se publica desde GitHub.
+#   crea un release en BORRADOR con los paquetes, SHA256SUMS y las notas de
+#   packaging/NOTAS-DEL-RELEASE.md, y una atestación de procedencia de GitHub por paquete
+#   (prueba que salió de este repositorio y de este workflow). Se revisa y se publica desde
+#   GitHub.
 name: Instaladores
 
 on:
@@ -82,12 +84,31 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [windows, linux, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Atestaciones de procedencia (Sigstore, a través de GitHub).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Sumas SHA-256
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Atestación de procedencia
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.deb
+            dist/*.tar.gz
       - name: Release en borrador
         env:
           GH_TOKEN: ${{ github.token }}

@@ -15,7 +15,10 @@ Cómo se arman los paquetes de Windows, Linux y macOS, y cómo se publica un rel
    ```
 
 4. El workflow [`instaladores.yml`](../.github/workflows/instaladores.yml) compila en
-   Windows, Linux y macOS, arma los paquetes y crea un **release en borrador** con todos.
+   Windows, Linux y macOS, arma los paquetes y crea un **release en borrador** con todos,
+   más `SHA256SUMS` y una atestación de procedencia de GitHub por paquete (gratis: no quita
+   los avisos de Windows ni de macOS, pero permite verificar que el archivo salió de este
+   repositorio con `gh attestation verify`).
 5. En GitHub → Releases, revisa el borrador (prueba los instaladores) y publícalo.
 
 Para probar los paquetes sin crear un release: Actions → Instaladores → **Run workflow**; los
@@ -52,10 +55,18 @@ dibuja en la barra de tareas.
 
 ## Pendiente
 
-- **Firma de código.** Sin firma, Windows SmartScreen y macOS Gatekeeper piden confirmar la
-  primera apertura. Para firmar hacen falta un certificado de firma de código (Windows) y una
-  cuenta de Apple Developer con notarización (macOS); los dos se agregarían como secretos del
-  repositorio y un paso más en el workflow.
+- **Firma de código.** Sin firma, Windows SmartScreen pide confirmar la apertura (y en cada
+  versión nueva otra vez), Smart App Control de Windows 11 la bloquea sin opción de abrirla
+  igual, y macOS la bloquea hasta «Abrir igualmente» en Privacidad y seguridad. Opciones:
+  - Windows, gratis: [SignPath Foundation](https://signpath.org) para proyectos de código
+    abierto. Pide un release ya publicado, licencia OSI en el repositorio (archivos
+    `LICENSE`), una sección «Política de firma de código» con los roles del equipo y la
+    declaración de privacidad, nombre y versión del producto dentro de `freedom.exe`, 2FA y
+    aprobar cada firma; el firmante visible es «SignPath Foundation».
+  - Windows, de pago: Certum Open Source (unos USD 25–30 al año) o Azure Artifact Signing
+    (unos USD 10 al mes; para personas, solo EE. UU. y Canadá).
+  - macOS: notarización con Apple Developer Program (USD 99 al año); no hay opción gratis.
+  - La Microsoft Store no es opción: su política 10.2.1 exige motor Chromium o Gecko.
 - **Icono dentro de `freedom.exe`.** El instalador y los accesos usan `freedom.ico`, y la
   ventana dibuja el suyo; el ejecutable suelto todavía muestra el icono genérico en el
   Explorador.

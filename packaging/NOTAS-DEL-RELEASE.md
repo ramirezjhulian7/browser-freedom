@@ -41,6 +41,17 @@ tu usuario, sin sudo; `sudo ./install.sh --system` lo instala para todos.
 - Seleccionar, copiar y pegar texto de las páginas, de la barra y de los formularios.
 - Privacidad: el historial y las cookies se borran al cerrar Freedom, y no envía datos de uso.
 
+## Verificar la descarga (opcional)
+
+Para comprobar que el archivo no fue alterado, compara su huella con la de `SHA256SUMS`:
+
+- Windows (PowerShell): `Get-FileHash .\Freedom-…-setup.exe`
+- macOS: `shasum -a 256 Freedom-…-macos-universal.dmg`
+- Linux: `sha256sum -c SHA256SUMS --ignore-missing`
+
+Cada paquete tiene además una atestación de GitHub que prueba que se compiló en este
+repositorio: `gh attestation verify <archivo> --repo ramirezjhulian7/browser-freedom`.
+
 ¿Algo no funciona? Repórtalo en
 [Issues](https://github.com/ramirezjhulian7/browser-freedom/issues) con la dirección de la
 página.
