@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bf_dom::events::Event;
+use bf_dom::events::{Event, EventInit, EventKind, EventTarget};
 use bf_dom::script::ScriptType;
 use bf_dom::{Document, NodeId};
 use bf_html::{ParseOptions, Parser, ScriptDisposition, ScriptHost};
@@ -23,7 +23,7 @@ use bf_infra::Url;
 use bf_infra::resource::ResourceLoader;
 use bf_js::vm::{Agent, RealmId, Throw};
 
-use crate::{DocumentOwner, WebContext};
+use crate::{DocIndex, DocumentOwner, WebContext, WebContextHandle};
 
 /// Los recursos de la página: el loader y los scripts externos ya descargados.
 pub struct PageResources {
@@ -134,27 +134,75 @@ impl PageHost<'_> {
     }
 }
 
+/// Presta `doc` al contexto (como el documento `index`) mientras corre el listener `handle`.
+fn lend_and_invoke(
+    agent: &mut Agent,
+    realm: RealmId,
+    index: DocIndex,
+    doc: &mut Document,
+    handle: u64,
+    event: &mut Event,
+) -> bool {
+    let real = std::mem::replace(doc, Document::new());
+    let saved = std::mem::replace(
+        &mut ctx(agent, realm).documents[index as usize],
+        DocumentOwner::Document(Box::new(real)),
+    );
+    let threw = match agent.embedder_data::<ListenerInvoker>() {
+        Some(ListenerInvoker(f)) => {
+            let f = *f;
+            f(agent, handle, event)
+        }
+        None => false,
+    };
+    let back = std::mem::replace(&mut ctx(agent, realm).documents[index as usize], saved);
+    if let DocumentOwner::Document(d) = back {
+        *doc = *d;
+    }
+    threw
+}
+
 impl bf_dom::events::ScriptHost for PageHost<'_> {
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
-        // El documento vuelve al contexto mientras corre el listener.
-        let real = std::mem::replace(doc, Document::new());
-        let saved = std::mem::replace(
-            &mut ctx(self.agent, self.realm).documents[0],
-            DocumentOwner::Document(Box::new(real)),
-        );
-        let threw = match self.agent.embedder_data::<ListenerInvoker>() {
-            Some(ListenerInvoker(f)) => {
-                let f = *f;
-                f(self.agent, handle, event)
-            }
-            None => false,
-        };
-        let back = std::mem::replace(&mut ctx(self.agent, self.realm).documents[0], saved);
-        if let DocumentOwner::Document(d) = back {
-            *doc = *d;
-        }
-        threw
+        lend_and_invoke(self.agent, self.realm, 0, doc, handle, event)
     }
+}
+
+/// El host de un despacho que empieza en una función nativa: el documento `doc` del
+/// contexto sale mientras se despacha y vuelve para cada listener.
+struct LendHost<'a> {
+    agent: &'a mut Agent,
+    realm: RealmId,
+    doc: DocIndex,
+}
+
+impl bf_dom::events::ScriptHost for LendHost<'_> {
+    fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
+        lend_and_invoke(self.agent, self.realm, self.doc, doc, handle, event)
+    }
+}
+
+/// "Fire an event" (DOM §2.10) desde una función nativa: `type_` con `init` y `kind` en
+/// `target` del documento `doc`. Los eventos de esta API son sintéticos (`isTrusted` es
+/// `false`, como los de `click()`). Devuelve `false` si se canceló.
+pub fn fire_event(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &str,
+    init: EventInit,
+    kind: EventKind,
+) -> bool {
+    let realm = WebContextHandle::current(agent).realm;
+    let mut owner = std::mem::replace(
+        &mut ctx(agent, realm).documents[doc as usize],
+        placeholder(),
+    );
+    let mut event = Event::with_kind(type_, init, kind);
+    let mut host = LendHost { agent, realm, doc };
+    let r = owner.doc_mut().dispatch(target, &mut event, &mut host);
+    ctx(host.agent, realm).documents[doc as usize] = owner;
+    r
 }
 
 impl ScriptHost for PageHost<'_> {
