@@ -48,6 +48,7 @@ const WPT: &str = include_str!("../pages/wpt.html");
 const ABOUT: &str = include_str!("../pages/about.html");
 pub const BAR: &str = include_str!("../pages/bar.html");
 pub const MENU: &str = include_str!("../pages/menu.html");
+pub const DIALOG: &str = include_str!("../pages/dialog.html");
 pub const SOURCE: &str = include_str!("../pages/source.html");
 pub const STATUS: &str = include_str!("../pages/status.html");
 /// El estado de compatibilidad al compilar (lo regenera la corrida de reftests).
