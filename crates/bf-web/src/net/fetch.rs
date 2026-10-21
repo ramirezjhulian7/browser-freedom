@@ -13,7 +13,9 @@ use bf_js::vm::{Agent, JsResult, RealmId, Throw};
 
 use super::body::{self, Body, ConsumeKind};
 use super::headers::{self, Guard, HeaderList, HeadersData};
+use super::streams;
 use super::{NetRequest, NetResult, classes, state};
+use bf_js::builtins::promise::{Capability, Handler};
 
 // --- Request ---
 
@@ -221,17 +223,33 @@ fn make_request(
     d: RequestData,
     headers: HeadersData,
     signal: Value,
+    stream: Option<Value>,
 ) -> JsResult<Value> {
     let class = classes(agent).request;
+    let bytes = d.body.source.clone();
     let o = match nt {
         Some(nt) => agent.host_create_from_new_target(nt, class, None, Box::new(d))?,
         None => agent.host_create(class, Box::new(d)),
     };
     let h = headers::create(agent, headers.list, headers.guard);
-    if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![h, signal];
+    let s = body_stream_for(agent, bytes, stream)?;
+    if let Some(slots) = agent.host_slots_mut(o) {
+        *slots = vec![h, signal, s];
     }
     Ok(Value::Object(o))
+}
+
+/// El stream de un cuerpo: el del autor, uno con los bytes, o `null`.
+fn body_stream_for(
+    agent: &mut Agent,
+    bytes: Option<std::sync::Arc<Vec<u8>>>,
+    stream: Option<Value>,
+) -> JsResult<Value> {
+    match (stream, bytes) {
+        (Some(s), _) => Ok(s),
+        (None, Some(b)) => streams::from_bytes(agent, b.to_vec()),
+        (None, None) => Ok(Value::Null),
+    }
 }
 
 /// `new Request(input, init)` (Fetch §5.4).
@@ -239,16 +257,14 @@ fn request_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(nt) = a.new_target else {
         return agent.type_error("Illegal constructor");
     };
-    let (r, h, s) = build_request(agent, &a.arg(0), &a.arg(1))?;
-    make_request(agent, Some(nt), r, h, s)
+    let (r, h, s, st) = build_request(agent, &a.arg(0), &a.arg(1))?;
+    make_request(agent, Some(nt), r, h, s, st)
 }
 
 /// Los pasos del constructor de `Request`: los datos, sus cabeceras y su señal.
-fn build_request(
-    agent: &mut Agent,
-    input: &Value,
-    init: &Value,
-) -> JsResult<(RequestData, HeadersData, Value)> {
+type Built = (RequestData, HeadersData, Value, Option<Value>);
+
+fn build_request(agent: &mut Agent, input: &Value, init: &Value) -> JsResult<Built> {
     if !matches!(init, Value::Undefined | Value::Null | Value::Object(_)) {
         return agent.type_error(
             "Failed to construct 'Request': The provided value is not of type 'RequestInit'.",
@@ -391,7 +407,6 @@ fn build_request(
     {
         return agent.type_error("Failed to construct 'Request': 'window' must be null.");
     }
-    let _ = duplex;
     let init_nonempty =
         matches!(init, Value::Object(o) if !agent.own_property_keys(*o)?.is_empty());
     if init_nonempty && r.mode == "navigate" {
@@ -503,42 +518,76 @@ fn build_request(
         }
     }
     // El cuerpo.
-    let input_body = input_req.as_ref().map(|ir| ir.body.clone());
+    let input_stream = if input_req.is_some() {
+        slot(agent, input, 2)
+    } else {
+        Value::Null
+    };
     let has_init_body = body_init.as_ref().is_some_and(|b| !b.is_null());
-    if (has_init_body || input_body.as_ref().is_some_and(|b| b.source.is_some()))
-        && matches!(r.method.as_str(), "GET" | "HEAD")
-    {
+    let has_input_body = !input_stream.is_null();
+    if (has_init_body || has_input_body) && matches!(r.method.as_str(), "GET" | "HEAD") {
         return agent.type_error(
             "Failed to construct 'Request': Request with GET/HEAD method cannot have body.",
         );
     }
-    if let Some(b) = &input_body
-        && b.used
-        && (has_init_body || b.source.is_some())
-    {
-        return agent.type_error("Failed to construct 'Request': Cannot construct a Request with a Request object that has already been used.");
-    }
+    let mut stream = None;
     if has_init_body {
-        let (bytes, ct) = body::extract(agent, body_init.as_ref().expect("body"))?;
-        if let Some(ct) = ct
-            && !hd.list.contains("content-type")
-        {
-            hd.list.append("Content-Type", &ct);
+        let init_body = body_init.clone().expect("body");
+        if streams::is_stream(agent, &init_body) {
+            if r.keepalive {
+                return agent.type_error("Failed to construct 'Request': keepalive cannot be set with a ReadableStream body.");
+            }
+            if duplex.is_none() {
+                return agent.type_error("Failed to construct 'Request': The `duplex` member must be specified for a request with a streaming body.");
+            }
+            if streams::is_locked(agent, &init_body) || streams::is_disturbed(agent, &init_body) {
+                return agent.type_error(
+                    "Failed to construct 'Request': The body stream is locked or disturbed.",
+                );
+            }
+            r.body = Body {
+                source: None,
+                used: false,
+                stream_only: true,
+            };
+            stream = Some(init_body);
+        } else {
+            let (bytes, ct) = body::extract(agent, &init_body)?;
+            if let Some(ct) = ct
+                && !hd.list.contains("content-type")
+            {
+                hd.list.append("Content-Type", &ct);
+            }
+            r.body = Body::new(Some(bytes));
         }
-        r.body = Body::new(Some(bytes));
-    } else if let Some(b) = input_body {
-        r.body = Body {
-            source: b.source,
-            used: false,
-        };
-        // El cuerpo pasa al nuevo Request: el de entrada queda usado.
-        if r.body.source.is_some()
-            && let Some(ir) = agent.host_unwrap_mut::<RequestData>(input)
-        {
-            ir.body.used = true;
+    } else if has_input_body {
+        if streams::is_locked(agent, &input_stream) || streams::is_disturbed(agent, &input_stream) {
+            return agent.type_error("Failed to construct 'Request': Cannot construct a Request with a Request object that has already been used.");
+        }
+        let ib = input_req
+            .as_ref()
+            .map(|ir| ir.body.clone())
+            .unwrap_or_default();
+        r.body = ib.clone();
+        // El cuerpo pasa al nuevo Request: el stream de entrada queda leído (disturbed).
+        if ib.source.is_some() {
+            let p = streams::read_all(agent, &input_stream)?;
+            if let Value::Object(po) = p {
+                agent.perform_promise_then(po, Handler::Empty, Handler::Empty, None);
+            }
+        } else {
+            stream = Some(input_stream.clone());
+            let empty = streams::from_bytes(agent, Vec::new())?;
+            let _ = streams::read_all(agent, &empty);
+            if let Value::Object(o) = input
+                && let Some(s) = agent.host_slots_mut(*o)
+                && s.len() > 2
+            {
+                s[2] = empty;
+            }
         }
     }
-    Ok((r, hd, signal))
+    Ok((r, hd, signal, stream))
 }
 
 fn req_method(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -593,55 +642,133 @@ fn req_duplex(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn req_clone(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_req(agent, a)?;
-    if r.body.used {
+    let Some(branch) = tee_body(agent, &a.this, 2)? else {
         return agent
             .type_error("Failed to execute 'clone' on 'Request': Request body is already used");
-    }
+    };
     let h = header_list(agent, &a.this);
     let hv = slot(agent, &a.this, 0);
     let guard = headers::data(agent, &hv).map_or(Guard::Request, |d| d.guard);
     let signal = slot(agent, &a.this, 1);
-    make_request(agent, None, r, HeadersData { list: h, guard }, signal)
+    make_request(
+        agent,
+        None,
+        r,
+        HeadersData { list: h, guard },
+        signal,
+        branch,
+    )
+}
+
+/// "Clone a body" (Fetch §2.2.7): `this` se queda con una rama del tee y devuelve la otra
+/// (`Some(None)` sin cuerpo; `None` si el cuerpo ya no se puede usar).
+fn tee_body(agent: &mut Agent, this: &Value, i: usize) -> JsResult<Option<Option<Value>>> {
+    let s = slot(agent, this, i);
+    if s.is_null() {
+        return Ok(Some(None));
+    }
+    if streams::is_locked(agent, &s) || streams::is_disturbed(agent, &s) {
+        return Ok(None);
+    }
+    let (b1, b2) = streams::tee(agent, &s)?;
+    if let Value::Object(o) = this
+        && let Some(sl) = agent.host_slots_mut(*o)
+    {
+        sl[i] = b1;
+    }
+    Ok(Some(Some(b2)))
 }
 
 // --- Body mixin (Fetch §5.1) ---
 
-/// El cuerpo y el `Content-Type` de `this` (un `Request` o un `Response`).
-fn with_body<R>(
-    agent: &mut Agent,
-    a: &CallArgs<'_>,
-    f: impl FnOnce(&mut Agent, &mut Body, Option<String>) -> JsResult<R>,
-) -> JsResult<R> {
-    let mime = header_list(agent, &a.this).mime_type();
-    let mut b = if let Some(r) = agent.host_unwrap::<RequestData>(&a.this) {
-        r.body.clone()
-    } else if let Some(r) = agent.host_unwrap::<ResponseData>(&a.this) {
-        r.body.clone()
+/// El slot del stream del cuerpo de `this` (2 en un `Request`, 1 en un `Response`).
+fn stream_index(agent: &mut Agent, this: &Value) -> JsResult<usize> {
+    if agent.host_unwrap::<RequestData>(this).is_some() {
+        Ok(2)
+    } else if agent.host_unwrap::<ResponseData>(this).is_some() {
+        Ok(1)
     } else {
-        return agent.type_error("Illegal invocation");
-    };
-    let out = f(agent, &mut b, mime)?;
-    if let Some(r) = agent.host_unwrap_mut::<RequestData>(&a.this) {
-        r.body = b;
-    } else if let Some(r) = agent.host_unwrap_mut::<ResponseData>(&a.this) {
-        r.body = b;
+        agent.type_error("Illegal invocation")
     }
-    Ok(out)
 }
 
-/// `body`: `null` (no hay Streams todavía; ver la documentación del módulo).
+/// `body` (Fetch §5.1): el `ReadableStream` del cuerpo, o `null`.
 fn body_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    with_body(agent, a, |_, _, _| Ok(Value::Null))
+    let i = stream_index(agent, &a.this)?;
+    Ok(slot(agent, &a.this, i))
 }
 
+/// `bodyUsed`: el stream está "disturbed".
 fn body_used(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    with_body(agent, a, |_, b, _| Ok(Value::Boolean(b.used)))
+    let i = stream_index(agent, &a.this)?;
+    let s = slot(agent, &a.this, i);
+    Ok(Value::Boolean(
+        !s.is_null() && streams::is_disturbed(agent, &s),
+    ))
 }
 
+const KINDS: [ConsumeKind; 6] = [
+    ConsumeKind::Text,
+    ConsumeKind::Json,
+    ConsumeKind::ArrayBuffer,
+    ConsumeKind::Bytes,
+    ConsumeKind::Blob,
+    ConsumeKind::FormData,
+];
+
+/// La reacción de "consume body": empaqueta los bytes leídos.
+fn package_cb(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (kind, mime) = match &agent.heap[a.callee].kind {
+        bf_js::object::ObjectKind::Builtin(b) => (
+            b.slots.first().and_then(Value::as_number).unwrap_or(0.0) as usize,
+            b.slots.get(1).cloned().unwrap_or(Value::Undefined),
+        ),
+        _ => (0, Value::Undefined),
+    };
+    let mime = match mime {
+        Value::String(s) => Some(s.to_string()),
+        _ => None,
+    };
+    let bytes =
+        bf_js::builtins::web::encoding::buffer_source_bytes(agent, &a.arg(0)).unwrap_or_default();
+    body::package(agent, &bytes, KINDS[kind.min(5)], mime.as_deref())
+}
+
+/// "Consume body" (Fetch §5.1): lee todo el stream y empaqueta los bytes.
 fn consume(agent: &mut Agent, a: &CallArgs<'_>, kind: ConsumeKind) -> JsResult<Value> {
-    with_body(agent, a, |agent, b, mime| {
-        body::consume(agent, b, kind, mime.as_deref())
-    })
+    let i = stream_index(agent, &a.this)?;
+    let mime = header_list(agent, &a.this).mime_type();
+    let s = slot(agent, &a.this, i);
+    if s.is_null() {
+        let r = body::package(agent, &[], kind, mime.as_deref());
+        return body::settled(agent, r);
+    }
+    if streams::is_locked(agent, &s) || streams::is_disturbed(agent, &s) {
+        let e = agent.type_error::<Value>("Body has already been consumed.");
+        return body::settled(agent, e);
+    }
+    let p = streams::read_all(agent, &s)?;
+    let Value::Object(po) = p else {
+        return agent.type_error("readAll");
+    };
+    let k = KINDS.iter().position(|x| *x == kind).unwrap_or(0);
+    let cb = agent.create_builtin_with_slots(
+        package_cb,
+        1,
+        "",
+        vec![
+            Value::Number(k as f64),
+            mime.map_or(Value::Undefined, |m| Value::str(&m)),
+        ],
+    );
+    let out = agent.new_internal_promise();
+    agent.perform_promise_then(
+        po,
+        Handler::Callback(Value::Object(cb)),
+        Handler::Empty,
+        Some(Capability::Internal(out)),
+    );
+    Ok(Value::Object(out))
 }
 
 fn body_array_buffer(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -677,15 +804,18 @@ pub fn make_response(
     d: ResponseData,
     list: HeaderList,
     guard: Guard,
+    stream: Option<Value>,
 ) -> JsResult<Value> {
     let class = classes(agent).response;
+    let bytes = d.body.source.clone();
     let o = match nt {
         Some(nt) => agent.host_create_from_new_target(nt, class, None, Box::new(d))?,
         None => agent.host_create(class, Box::new(d)),
     };
     let h = headers::create(agent, list, guard);
-    if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![h];
+    let s = body_stream_for(agent, bytes, stream)?;
+    if let Some(slots) = agent.host_slots_mut(o) {
+        *slots = vec![h, s];
     }
     Ok(Value::Object(o))
 }
@@ -771,13 +901,27 @@ fn response_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     let b = a.arg(0);
+    let mut stream = None;
     let body = if b.is_nullish() {
         None
+    } else if streams::is_stream(agent, &b) {
+        if streams::is_locked(agent, &b) || streams::is_disturbed(agent, &b) {
+            return agent.type_error("Failed to construct 'Response': Response body object should not be disturbed or locked");
+        }
+        stream = Some(b.clone());
+        Some((Vec::new(), None))
     } else {
         Some(body::extract(agent, &b)?)
     };
-    let (d, list) = init_response(agent, &a.arg(1), body)?;
-    make_response(agent, Some(nt), d, list, Guard::Response)
+    let (mut d, list) = init_response(agent, &a.arg(1), body)?;
+    if stream.is_some() {
+        d.body = Body {
+            source: None,
+            used: false,
+            stream_only: true,
+        };
+    }
+    make_response(agent, Some(nt), d, list, Guard::Response, stream)
 }
 
 /// `Response.error()`.
@@ -790,7 +934,14 @@ fn response_error(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
         status_text: String::new(),
         body: Body::default(),
     };
-    make_response(agent, None, d, HeaderList::default(), Guard::Immutable)
+    make_response(
+        agent,
+        None,
+        d,
+        HeaderList::default(),
+        Guard::Immutable,
+        None,
+    )
 }
 
 /// `Response.redirect(url, status)`.
@@ -826,7 +977,7 @@ fn response_redirect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         status_text: String::new(),
         body: Body::default(),
     };
-    make_response(agent, None, d, list, Guard::Immutable)
+    make_response(agent, None, d, list, Guard::Immutable, None)
 }
 
 /// `Response.json(data, init)`.
@@ -841,7 +992,7 @@ fn response_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         &a.arg(1),
         Some((text.into_bytes(), Some("application/json".into()))),
     )?;
-    make_response(agent, None, d, list, Guard::Response)
+    make_response(agent, None, d, list, Guard::Response, None)
 }
 
 fn res_type(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -875,14 +1026,14 @@ fn res_status_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn res_clone(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let d = this_res(agent, a)?;
-    if d.body.used {
+    let Some(branch) = tee_body(agent, &a.this, 1)? else {
         return agent
             .type_error("Failed to execute 'clone' on 'Response': Response body is already used");
-    }
+    };
     let list = header_list(agent, &a.this);
     let hv = slot(agent, &a.this, 0);
     let guard = headers::data(agent, &hv).map_or(Guard::Response, |h| h.guard);
-    make_response(agent, None, d, list, guard)
+    make_response(agent, None, d, list, guard, branch)
 }
 
 // --- fetch() (Fetch §5.6) ---
@@ -1077,7 +1228,7 @@ pub fn to_response(
 fn fetch(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let p = agent.new_internal_promise();
     let built = build_request(agent, &a.arg(0), &a.arg(1));
-    let (r, hd, signal) = match built {
+    let (r, hd, signal, body_stream) = match built {
         Ok(x) => x,
         Err(Throw::Value(e)) => {
             agent.reject_promise(p, e);
@@ -1132,7 +1283,71 @@ fn fetch(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             )?;
         }
     }
-    let req = net_request(agent, &r, &hd.list);
+    // Un cuerpo `ReadableStream`: se lee entero antes de mandar la petición.
+    if let Some(st) = body_stream {
+        PENDING.with(|m| m.borrow_mut().insert(id, (r, hd.list)));
+        let rp = streams::read_all(agent, &st)?;
+        if let Value::Object(po) = rp {
+            let ok =
+                agent.create_builtin_with_slots(body_read, 1, "", vec![Value::Number(id as f64)]);
+            let err =
+                agent.create_builtin_with_slots(body_failed, 1, "", vec![Value::Number(id as f64)]);
+            agent.perform_promise_then(
+                po,
+                Handler::Callback(Value::Object(ok)),
+                Handler::Callback(Value::Object(err)),
+                None,
+            );
+        }
+        return Ok(Value::Object(p));
+    }
+    start_network(agent, id, r, &hd.list);
+    Ok(Value::Object(p))
+}
+
+thread_local! {
+    /// Las peticiones de `fetch()` que esperan a leer su cuerpo `ReadableStream`.
+    static PENDING: std::cell::RefCell<std::collections::HashMap<u64, (RequestData, HeaderList)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn call_id(agent: &Agent, a: &CallArgs<'_>) -> u64 {
+    match &agent.heap[a.callee].kind {
+        bf_js::object::ObjectKind::Builtin(b) => {
+            b.slots.first().and_then(Value::as_number).unwrap_or(0.0) as u64
+        }
+        _ => 0,
+    }
+}
+
+/// El cuerpo `ReadableStream` de un `fetch()` se leyó: sale la petición.
+fn body_read(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let id = call_id(agent, a);
+    let Some((mut r, list)) = PENDING.with(|m| m.borrow_mut().remove(&id)) else {
+        return Ok(Value::Undefined);
+    };
+    let bytes =
+        bf_js::builtins::web::encoding::buffer_source_bytes(agent, &a.arg(0)).unwrap_or_default();
+    r.body = Body::new(Some(bytes));
+    if CALLS.with(|c| c.borrow().contains_key(&id)) {
+        start_network(agent, id, r, &list);
+    }
+    Ok(Value::Undefined)
+}
+
+/// Leer el cuerpo falló: el `fetch()` se rechaza con el error.
+fn body_failed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let id = call_id(agent, a);
+    PENDING.with(|m| m.borrow_mut().remove(&id));
+    if let Some(p) = finish_call(agent, id) {
+        reject(agent, p, a.arg(0));
+    }
+    Ok(Value::Undefined)
+}
+
+/// Manda la petición de un `fetch()` y resuelve su promesa con la respuesta.
+fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList) {
+    let req = net_request(agent, &r, list);
     let rd = r.clone();
     let net = super::start(
         agent,
@@ -1142,13 +1357,15 @@ fn fetch(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 return;
             };
             match to_response(agent, &rd, result) {
-                Ok((d, list)) => match make_response(agent, None, d, list, Guard::Immutable) {
-                    Ok(v) => {
-                        let _ = agent.resolve_promise(p, v);
+                Ok((d, list)) => {
+                    match make_response(agent, None, d, list, Guard::Immutable, None) {
+                        Ok(v) => {
+                            let _ = agent.resolve_promise(p, v);
+                        }
+                        Err(Throw::Value(e)) => reject(agent, p, e),
+                        Err(_) => {}
                     }
-                    Err(Throw::Value(e)) => reject(agent, p, e),
-                    Err(_) => {}
-                },
+                }
                 Err(msg) => {
                     if let Err(Throw::Value(e)) = agent.type_error::<Value>(&msg) {
                         reject(agent, p, e);
@@ -1163,7 +1380,6 @@ fn fetch(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
     });
     let _ = state(agent);
-    Ok(Value::Object(p))
 }
 
 // --- navigator.sendBeacon (Beacon §3.1) ---

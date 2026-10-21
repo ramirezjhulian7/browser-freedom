@@ -98,6 +98,17 @@ pub struct PageContext<'a> {
 
 /// Estilo → layout → lista de visualización.
 pub fn prepare_page(doc: &Document, ctx: &PageContext<'_>, viewport: Size) -> Page {
+    prepare_page_with_canvases(doc, ctx, viewport, &[])
+}
+
+/// [`prepare_page`] con los bitmaps de los `<canvas>` del documento (E1): cada uno se
+/// muestra como la imagen `canvas:<id>` del elemento, con su tamaño natural.
+pub fn prepare_page_with_canvases(
+    doc: &Document,
+    ctx: &PageContext<'_>,
+    viewport: Size,
+    canvases: &[(bf_dom::NodeId, std::sync::Arc<tiny_skia::Pixmap>)],
+) -> Page {
     let (base, extra, loader, db) = (ctx.base, ctx.extra, ctx.loader.clone(), ctx.fonts.clone());
     let start = Instant::now();
     let media = MediaContext {
@@ -124,7 +135,10 @@ pub fn prepare_page(doc: &Document, ctx: &PageContext<'_>, viewport: Size) -> Pa
         style_document_with_sheets(doc, &sheets, extra, &media, &match_ctx, Some(&metrics));
     let style = start.elapsed();
     let start = Instant::now();
-    let images = load_images(doc, &styles, base, &*loader);
+    let mut images = load_images(doc, &styles, base, &*loader);
+    for (node, pixmap) in canvases {
+        images.insert_canvas(*node, pixmap.clone());
+    }
     let images_time = start.elapsed();
     let start = Instant::now();
     let tree =

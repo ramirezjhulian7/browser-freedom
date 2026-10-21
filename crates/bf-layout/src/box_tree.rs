@@ -243,6 +243,26 @@ fn replaced_size(doc: &Document, node: NodeId, images: &ImageSizes) -> Option<(S
         let ratio = (s.width > 0.0 && s.height > 0.0).then(|| s.width / s.height);
         return Some((*s, ratio));
     }
+    // E1: las dimensiones naturales de un `canvas` son las de su bitmap (HTML §4.12.5), y sin
+    // bitmap publicado, las de sus atributos `width`/`height` (300×150 por defecto).
+    if el.is_html("canvas") {
+        let s = match images.get(&node) {
+            Some(ImageState::Loaded(s)) => *s,
+            _ => {
+                let dim = |name: &str, d: f32| {
+                    el.attr(name)
+                        .and_then(|v| v.trim().parse::<u32>().ok())
+                        .map_or(d, |v| v as f32)
+                };
+                Size {
+                    width: dim("width", 300.0),
+                    height: dim("height", 150.0),
+                }
+            }
+        };
+        let ratio = (s.width > 0.0 && s.height > 0.0).then(|| s.width / s.height);
+        return Some((s, ratio));
+    }
     let no_ratio = |s: Option<Size>| s.map(|s| (s, None));
     no_ratio(replaced_default(el))
 }

@@ -1,0 +1,12 @@
+alloc	509.163
+arrays	292.221
+closures	547.940
+dict	124.080
+fib	226.240
+json	144.872
+loops	820.204
+methods	451.154
+nbody	1717.927
+poly	683.603
+props	349.654
+strings	70.462

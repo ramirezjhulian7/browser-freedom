@@ -1099,6 +1099,9 @@ fn symbol_split(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         agent.create_data_property_or_throw(arr, PropertyKey::Index(0), Value::String(s))?;
         return Ok(Value::Object(arr));
     }
+    if c == default && pristine_exec(agent, splitter) {
+        return split_fast(agent, splitter, &s, arr, lim);
+    }
     let mut p = 0usize;
     let mut q = p;
     while q < size {
@@ -1141,6 +1144,90 @@ fn symbol_split(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let t = JsString::from_units(units[p.min(size)..].to_vec());
     agent.create_data_property_or_throw(arr, PropertyKey::from(length_a), Value::String(t))?;
+    Ok(Value::Object(arr))
+}
+
+/// ¿`exec` de `r` es el %RegExp.prototype.exec% original, como propiedad de datos de su
+/// prototipo (sin getters ni propiedad propia)? (E3)
+fn pristine_exec(agent: &Agent, r: Gc<Object>) -> bool {
+    let key = PropertyKey::from("exec");
+    let obj = &agent.heap[r];
+    if regexp_data(agent, r).is_none_or(|d| d.matcher.is_none()) || obj.props.get(&key).is_some() {
+        return false;
+    }
+    let Some(proto) = obj.proto else {
+        return false;
+    };
+    match agent.heap[proto].props.get(&key).map(|p| &p.value) {
+        Some(crate::object::PropValue::Data {
+            value: Value::Object(f),
+            ..
+        }) => matches!(&agent.heap[*f].kind, ObjectKind::Builtin(b)
+            if std::ptr::fn_addr_eq(b.func, exec as crate::vm::function::NativeFn)),
+        _ => false,
+    }
+}
+
+/// Los pasos 19-21 de @@split (§22.2.6.14) cuando el splitter es un RegExp creado por el
+/// %RegExp% intrínseco con el `exec` original (E3): nadie más lo ve, así que sus `lastIndex`
+/// y sus resultados intermedios no son observables. En vez de probar un match sticky en cada
+/// posición `q`, se busca el siguiente match desde `q` (el primero que la prueba posición a
+/// posición encontraría).
+fn split_fast(
+    agent: &mut Agent,
+    splitter: Gc<Object>,
+    s: &JsString,
+    arr: Gc<Object>,
+    lim: u32,
+) -> JsResult<Value> {
+    let matcher = regexp_data(agent, splitter)
+        .and_then(|d| d.matcher.clone())
+        .expect("RegExpMatcher");
+    let deadline = agent.options.deadline;
+    let units = s.units();
+    let size = units.len();
+    let mut length_a: u32 = 0;
+    let mut push = |agent: &mut Agent, v: Value| -> JsResult<bool> {
+        agent.create_data_property_or_throw(arr, PropertyKey::from(length_a), v)?;
+        length_a += 1;
+        Ok(length_a == lim)
+    };
+    let (mut p, mut q) = (0usize, 0usize);
+    while q < size {
+        let found = matcher
+            .search_from(units, q, false, deadline)
+            .map_err(|e| match_error(agent, e))?;
+        let Some((start, caps)) = found.filter(|(start, _)| *start < size) else {
+            break;
+        };
+        let (_, e) = caps[0].expect("match");
+        let e = e.min(size);
+        if e == p {
+            q = advance_index(s, start as f64, matcher.flags.either_unicode()) as usize;
+            continue;
+        }
+        if push(
+            agent,
+            Value::String(JsString::from_slice(&units[p..start.max(p)])),
+        )? {
+            return Ok(Value::Object(arr));
+        }
+        p = e;
+        for cap in caps.iter().skip(1) {
+            let v = match cap {
+                Some((cs, ce)) => Value::String(JsString::from_slice(&units[*cs..*ce])),
+                None => Value::Undefined,
+            };
+            if push(agent, v)? {
+                return Ok(Value::Object(arr));
+            }
+        }
+        q = p;
+    }
+    push(
+        agent,
+        Value::String(JsString::from_slice(&units[p.min(size)..])),
+    )?;
     Ok(Value::Object(arr))
 }
 

@@ -315,6 +315,75 @@ fn callback(agent: &mut Agent, a: &CallArgs<'_>, name: &str) -> JsResult<Value> 
     Ok(f)
 }
 
+/// HasProperty + Get del índice `p` de `o`: directo si es un elemento de un Array denso (una
+/// propiedad propia de datos: HasProperty es verdadero y Get la devuelve). E3.
+fn present(agent: &mut Agent, o: Gc<Object>, p: &PropertyKey) -> JsResult<Option<Value>> {
+    if let PropertyKey::Index(i) = p
+        && let ObjectKind::Array(d) = &agent.heap[o].kind
+        && let Some(Some(v)) = d.dense.get(*i as usize)
+    {
+        return Ok(Some(v.clone()));
+    }
+    if agent.has_property(o, p)? {
+        return Ok(Some(agent.get(o, p, Value::Object(o))?));
+    }
+    Ok(None)
+}
+
+/// CreateDataPropertyOrThrow(A, p, v) (§7.3.7); si `p` es la posición siguiente al vector
+/// denso de un Array extensible sin índices propios fuera de él, definirla es agregarla al
+/// vector (E3). Una definición no mira la cadena de prototipos.
+fn define_append(agent: &mut Agent, a: Gc<Object>, p: PropertyKey, v: Value) -> JsResult<()> {
+    if let PropertyKey::Index(i) = p {
+        let obj = &mut agent.heap[a];
+        let plain = obj.extensible && obj.props.index_keys().next().is_none();
+        if let ObjectKind::Array(d) = &mut obj.kind
+            && plain
+            && d.dense.len() == i as usize
+            && (i < d.length || (d.length_writable && i < u32::MAX - 1))
+        {
+            d.dense.push(Some(v));
+            d.length = d.length.max(i + 1);
+            return Ok(());
+        }
+    }
+    agent.create_data_property_or_throw(a, p, v)?;
+    Ok(())
+}
+
+/// ¿Agregar elementos al final de `o` con `[[Set]]` equivale a extender su vector denso? Un
+/// Array denso, extensible, con `length` escribible y sin índices propios fuera del vector, y
+/// una cadena de prototipos sin propiedades indexadas (ningún setter ni propiedad de solo
+/// lectura para esos índices). E3.
+fn plain_append(agent: &Agent, o: Gc<Object>, n: usize) -> bool {
+    let obj = &agent.heap[o];
+    let ObjectKind::Array(d) = &obj.kind else {
+        return false;
+    };
+    if !obj.extensible
+        || !d.length_writable
+        || d.dense.len() != d.length as usize
+        || (d.length as u64) + (n as u64) >= u64::from(u32::MAX)
+        || obj.props.index_keys().next().is_some()
+    {
+        return false;
+    }
+    let mut p = obj.proto;
+    while let Some(x) = p {
+        let px = &agent.heap[x];
+        match &px.kind {
+            ObjectKind::Ordinary => {}
+            ObjectKind::Array(d) if d.dense.iter().all(Option::is_none) => {}
+            _ => return false,
+        }
+        if px.props.index_keys().next().is_some() {
+            return false;
+        }
+        p = px.proto;
+    }
+    true
+}
+
 fn set_length(agent: &mut Agent, o: Gc<Object>, len: f64) -> JsResult<()> {
     let k = agent.keys.length.clone();
     agent.set_or_throw(o, k, Value::Number(len), true)
@@ -409,8 +478,7 @@ fn iterate(
     let mut k = 0.0;
     while k < len {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             let r = agent.call(
                 &cb,
                 this_arg.clone(),
@@ -462,15 +530,14 @@ fn filter(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut k = 0.0;
     while k < len {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             let r = agent.call(
                 &cb,
                 this_arg.clone(),
                 &[v.clone(), Value::Number(k), Value::Object(o)],
             )?;
             if crate::abstract_ops::conversion::to_boolean(agent, &r) {
-                agent.create_data_property_or_throw(arr, key(to), v)?;
+                define_append(agent, arr, key(to), v)?;
                 to += 1.0;
             }
         }
@@ -554,11 +621,10 @@ fn index_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let target = a.arg(0);
     while k < len {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
-            if agent.is_strictly_equal(&v, &target) {
-                return Ok(Value::Number(k));
-            }
+        if let Some(v) = present(agent, o, &p)?
+            && agent.is_strictly_equal(&v, &target)
+        {
+            return Ok(Value::Number(k));
         }
         k += 1.0;
     }
@@ -598,14 +664,13 @@ fn map(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut k = 0.0;
     while k < len {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             let r = agent.call(
                 &cb,
                 this_arg.clone(),
                 &[v, Value::Number(k), Value::Object(o)],
             )?;
-            agent.create_data_property_or_throw(arr, p, r)?;
+            define_append(agent, arr, p, r)?;
         }
         k += 1.0;
     }
@@ -628,6 +693,15 @@ fn pop(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// Array.prototype.push (§23.1.3.23).
 fn push(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    // Ruta rápida (E3): extender el vector denso (el mismo resultado que los [[Set]]).
+    if let Value::Object(o) = a.this
+        && plain_append(agent, o, a.len())
+        && let ObjectKind::Array(d) = &mut agent.heap[o].kind
+    {
+        d.dense.extend(a.args.iter().cloned().map(Some));
+        d.length += a.len() as u32;
+        return Ok(Value::Number(f64::from(d.length)));
+    }
     let (o, len) = this_obj(agent, a)?;
     let n = a.len() as f64;
     if len + n > 9007199254740991.0 {
@@ -656,8 +730,8 @@ fn reduce(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let mut found = None;
         while found.is_none() && k < len {
             let p = key(k);
-            if agent.has_property(o, &p)? {
-                found = Some(agent.get(o, &p, Value::Object(o))?);
+            if let Some(v) = present(agent, o, &p)? {
+                found = Some(v);
             }
             k += 1.0;
         }
@@ -668,8 +742,7 @@ fn reduce(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     while k < len {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             acc = agent.call(
                 &cb,
                 Value::Undefined,
@@ -717,8 +790,7 @@ fn slice(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut n = 0.0;
     while k < fin {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             agent.create_data_property_or_throw(arr, key(n), v)?;
         }
         k += 1.0;
@@ -988,11 +1060,10 @@ fn last_index_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let target = a.arg(0);
     while k >= 0.0 {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
-            if agent.is_strictly_equal(&v, &target) {
-                return Ok(Value::Number(k));
-            }
+        if let Some(v) = present(agent, o, &p)?
+            && agent.is_strictly_equal(&v, &target)
+        {
+            return Ok(Value::Number(k));
         }
         k -= 1.0;
     }
@@ -1013,8 +1084,8 @@ fn reduce_right(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let mut found = None;
         while found.is_none() && k >= 0.0 {
             let p = key(k);
-            if agent.has_property(o, &p)? {
-                found = Some(agent.get(o, &p, Value::Object(o))?);
+            if let Some(v) = present(agent, o, &p)? {
+                found = Some(v);
             }
             k -= 1.0;
         }
@@ -1025,8 +1096,7 @@ fn reduce_right(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     while k >= 0.0 {
         let p = key(k);
-        if agent.has_property(o, &p)? {
-            let v = agent.get(o, &p, Value::Object(o))?;
+        if let Some(v) = present(agent, o, &p)? {
             acc = agent.call(
                 &cb,
                 Value::Undefined,

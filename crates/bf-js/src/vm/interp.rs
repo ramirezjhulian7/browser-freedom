@@ -13,7 +13,7 @@ use crate::object::{Object, ObjectKind, PrivateElement, PropertyDescriptor};
 use crate::string::{Atom, JsString};
 use crate::value::{PropertyKey, Value};
 use crate::vm::env::{Env, EnvKind, FunctionEnvData};
-use crate::vm::frame::{Handler, HandlerKind};
+use crate::vm::frame::{Frame, Handler, HandlerKind};
 use crate::vm::function::{ClassData, ClassField, Closure, FieldName};
 use crate::vm::{Agent, ErrorType, JsResult, Throw};
 
@@ -53,6 +53,25 @@ macro_rules! frame {
 
 impl Agent {
     pub(crate) fn run(&mut self, resume: Resume) -> JsResult<FrameExit> {
+        let base = self.frames.len();
+        let r = self.run_loop(resume);
+        if r.is_err() {
+            // Una salida anticipada (terminación) con llamadas en línea pendientes.
+            while self.frames.len() > base {
+                self.pop_inline_frame();
+            }
+        }
+        r
+    }
+
+    /// Saca el frame de una llamada en línea (E3) y restaura el realm del llamador.
+    fn pop_inline_frame(&mut self) {
+        let f = self.frames.pop().expect("frame");
+        self.current_realm = f.caller_realm;
+        self.recycle_frame(f);
+    }
+
+    fn run_loop(&mut self, resume: Resume) -> JsResult<FrameExit> {
         let mut pending: Option<JsResult<Flow>> = None;
         if !matches!(resume, Resume::Normal) {
             let f = frame!(self);
@@ -83,20 +102,101 @@ impl Agent {
         loop {
             let r = match pending.take() {
                 Some(r) => r,
-                None => self.step(),
+                None => {
+                    // Una ráfaga de instrucciones que solo tocan el frame (sin llamar a
+                    // `step`); la primera que necesita el agente va por `step`.
+                    let mut n = 0u64;
+                    let mut back = false;
+                    {
+                        let realm = &self.realms[self.current_realm];
+                        let cx = FastCx {
+                            genv: realm.global_env,
+                            string_proto: realm.intrinsics.string_prototype,
+                            object_proto: realm.intrinsics.object_prototype,
+                            array_proto: realm.intrinsics.array_prototype,
+                        };
+                        let heap = &mut self.heap;
+                        let f = self.frames.last_mut().expect("frame");
+                        loop {
+                            let op = f.code.ops[f.pc];
+                            f.pc += 1;
+                            match fast_op(f, heap, &cx, op) {
+                                Fast::Done => n += 1,
+                                Fast::BackJump => {
+                                    n += 1;
+                                    back = true;
+                                    break;
+                                }
+                                Fast::Slow => {
+                                    f.pc -= 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    self.instructions += n;
+                    if back {
+                        self.safepoint()?;
+                        continue;
+                    }
+                    let f = frame!(self);
+                    match f.code.ops[f.pc] {
+                        Op::Return => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            let v = f.stack.pop().expect("pila vacía");
+                            Ok(Flow::Return(v))
+                        }
+                        Op::Call(argc, t) => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            self.op_call(argc, t)
+                        }
+                        Op::New(argc, t) => {
+                            f.pc += 1;
+                            self.instructions += 1;
+                            self.op_new(argc, t)
+                        }
+                        _ => self.step(),
+                    }
+                }
             };
             match r {
                 Ok(Flow::Next) => {}
                 Ok(Flow::Return(v)) => {
                     if !self.unwind_return(&v) {
-                        return Ok(FrameExit::Return(v));
+                        if !frame!(self).inline {
+                            return Ok(FrameExit::Return(v));
+                        }
+                        // La vuelta de una llamada en línea: el resultado al llamador (en un
+                        // `new`, el objeto devuelto o `this`).
+                        let v = match frame!(self).construct {
+                            Some(t) if !v.is_object() => Value::Object(t),
+                            _ => v,
+                        };
+                        self.pop_inline_frame();
+                        self.push(v);
+                        self.safepoint()?;
                     }
                 }
                 Ok(Flow::Yield(v, raw)) => return Ok(FrameExit::Yield(v, raw)),
                 Ok(Flow::GenStart(g)) => return Ok(FrameExit::GeneratorStart(g)),
                 Ok(Flow::Await(v)) => return Ok(FrameExit::Await(v)),
                 Err(Throw::Value(e)) => {
-                    if !self.unwind_throw(&e) {
+                    // Se busca un handler en el frame actual y, si es una llamada en línea,
+                    // en los de abajo.
+                    let mut handled = false;
+                    loop {
+                        if self.unwind_throw(&e) {
+                            handled = true;
+                            break;
+                        }
+                        if !frame!(self).inline {
+                            break;
+                        }
+                        self.pop_inline_frame();
+                    }
+                    if !handled {
                         return Err(Throw::Value(e));
                     }
                 }
@@ -108,7 +208,9 @@ impl Agent {
     fn restore_handler(&mut self, h: &Handler) {
         let f = frame!(self);
         f.stack.truncate(h.stack_len as usize);
-        f.refs.truncate(h.refs_len as usize);
+        if let Some(rare) = &mut f.rare {
+            rare.refs.truncate(h.refs_len as usize);
+        }
         f.env = h.env;
         f.pc = h.pc as usize;
     }
@@ -159,6 +261,26 @@ impl Agent {
 
     fn push(&mut self, v: Value) {
         frame!(self).stack.push(v);
+    }
+
+    /// Los dos valores del tope (`a` debajo, `b` arriba) si los dos son `Number`.
+    #[inline]
+    fn top_numbers(&mut self) -> Option<(f64, f64)> {
+        let s = &frame!(self).stack;
+        match s.len().checked_sub(2).map(|i| (&s[i], &s[i + 1])) {
+            Some((Value::Number(a), Value::Number(b))) => Some((*a, *b)),
+            _ => None,
+        }
+    }
+
+    /// Reemplaza los dos valores del tope por `v`.
+    #[inline]
+    fn replace_top2(&mut self, v: Value) {
+        let s = &mut frame!(self).stack;
+        s.pop();
+        if let Some(top) = s.last_mut() {
+            *top = v;
+        }
     }
 
     fn peek(&self, depth: usize) -> &Value {
@@ -253,11 +375,99 @@ impl Agent {
 
     // --- Instrucciones ---
 
+    /// `Call(argc, t)` (fuera de `step`: las llamadas son frecuentes y `step` es grande). E3.
+    #[inline(never)]
+    fn op_call(&mut self, argc: u32, t: u32) -> JsResult<Flow> {
+        let n = argc as usize;
+        let len = frame!(self).stack.len();
+        let base = len - n - 2;
+        let callee = frame!(self).stack[base].clone();
+        if !self.is_callable(&callee) {
+            return self.not_callable(t, &callee, "a function");
+        }
+        let closure = matches!(&callee, Value::Object(o)
+            if matches!(self.heap[*o].kind, ObjectKind::Function(_)));
+        let r = if closure {
+            // Una función ECMAScript recibe los argumentos sin copiarlos (E3): salen de
+            // la pila y pasan a su frame (no hay recolección hasta que el frame entra en
+            // la pila de frames).
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            let s = &mut frame!(self).stack;
+            args.extend(s.drain(base + 2..));
+            let this = s.pop().expect("this");
+            s.pop();
+            // Una función simple corre en este mismo bucle (sin recursión de Rust).
+            if let Value::Object(fo) = callee
+                && let Some(frame) = self.inline_frame(fo, this.clone(), &args)?
+            {
+                let mut frame = frame;
+                frame.args = args;
+                self.frames.push(frame);
+                return Ok(Flow::Next);
+            }
+            self.call_internal_vec(&callee, this, args)?
+        } else {
+            // Los argumentos de una builtin van a un vector del pool (siguen también en la
+            // pila, que los enraíza mientras corre).
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            let this = {
+                let s = &frame!(self).stack;
+                args.extend_from_slice(&s[base + 2..]);
+                s[base + 1].clone()
+            };
+            let r = self.call_internal(&callee, this, &args);
+            args.clear();
+            if self.value_pool.len() < 64 {
+                self.value_pool.push(args);
+            }
+            let r = r?;
+            frame!(self).stack.truncate(base);
+            r
+        };
+        self.push(r);
+        self.safepoint()?;
+        Ok(Flow::Next)
+    }
+
+    /// `New(argc, t)` (fuera de `step`). E3.
+    #[inline(never)]
+    fn op_new(&mut self, argc: u32, t: u32) -> JsResult<Flow> {
+        let n = argc as usize;
+        let len = frame!(self).stack.len();
+        let base = len - n - 1;
+        // Un constructor ECMAScript corre en este mismo bucle (E3). `this` se crea
+        // antes de sacar los argumentos de la pila (que siguen enraizados si corre JS).
+        if let Value::Object(fo) = frame!(self).stack[base]
+            && let Some(mut frame) = self.inline_construct_frame(fo)?
+        {
+            let mut args = self.value_pool.pop().unwrap_or_default();
+            let s = &mut frame!(self).stack;
+            args.extend(s.drain(base + 1..));
+            s.pop();
+            frame.args = args;
+            self.current_realm = frame.realm;
+            self.frames.push(frame);
+            return Ok(Flow::Next);
+        }
+        let (callee, args) = {
+            let s = &frame!(self).stack;
+            (s[base].clone(), s[base + 1..].to_vec())
+        };
+        if !self.is_constructor(&callee) {
+            return self.not_callable(t, &callee, "a constructor");
+        }
+        let r = self.new_operator(&callee, &args)?;
+        frame!(self).stack.truncate(base);
+        self.push(r);
+        self.safepoint()?;
+        Ok(Flow::Next)
+    }
+
     fn step(&mut self) -> JsResult<Flow> {
+        self.instructions += 1;
         let f = frame!(self);
         let op = f.code.ops[f.pc];
         f.pc += 1;
-        self.instructions += 1;
         match op {
             Op::Pop => {
                 self.pop();
@@ -412,6 +622,19 @@ impl Agent {
                 let (name, _) = self.name_const(n);
                 return self.type_error(&format!("Assignment to constant variable '{name}'"));
             }
+            Op::GetGlobal(n) | Op::GetGlobalForCall(n)
+                if let Some(r) = {
+                    let code = frame!(self).code.clone();
+                    self.ic_get_global(&code, n)
+                } =>
+            {
+                // Inline cache (E3) de una propiedad propia del objeto global.
+                let v = r?;
+                self.push(v);
+                if matches!(op, Op::GetGlobalForCall(_)) {
+                    self.push(Value::Undefined);
+                }
+            }
             Op::GetName(n) | Op::GetGlobal(n) => {
                 let start = match op {
                     Op::GetGlobal(_) => self.global_env(),
@@ -422,6 +645,10 @@ impl Agent {
                     Some(env) => {
                         let strict = self.strict_code();
                         let v = self.env_get_binding_value(env, &name, &key, strict)?;
+                        if matches!(op, Op::GetGlobal(_)) {
+                            let code = frame!(self).code.clone();
+                            self.ic_fill_global(&code, n, &name, &key);
+                        }
                         self.push(v);
                     }
                     None => return self.reference_error(&format!("{name} is not defined")),
@@ -450,10 +677,10 @@ impl Agent {
                 };
                 let (name, key) = self.name_const(n);
                 let r = self.resolve_binding_from(start, &name, &key)?;
-                frame!(self).refs.push(r);
+                frame!(self).rare_mut().refs.push(r);
             }
             Op::GetRefValue(n) => {
-                let r = *frame!(self).refs.last().expect("referencia");
+                let r = *frame!(self).rare_mut().refs.last().expect("referencia");
                 let (name, key) = self.name_const(n);
                 match r {
                     Some(env) => {
@@ -465,7 +692,7 @@ impl Agent {
                 }
             }
             Op::PutRef(n, strict) => {
-                let r = frame!(self).refs.pop().expect("referencia");
+                let r = frame!(self).rare_mut().refs.pop().expect("referencia");
                 let (name, key) = self.name_const(n);
                 let v = self.peek(0).clone();
                 match r {
@@ -480,7 +707,7 @@ impl Agent {
                 }
             }
             Op::InitRef(n) => {
-                let r = frame!(self).refs.pop().expect("referencia");
+                let r = frame!(self).rare_mut().refs.pop().expect("referencia");
                 let (name, key) = self.name_const(n);
                 let v = self.pop();
                 match r {
@@ -492,7 +719,7 @@ impl Agent {
                 }
             }
             Op::PopRef => {
-                frame!(self).refs.pop();
+                frame!(self).rare_mut().refs.pop();
             }
             Op::DeleteName(n) => {
                 let (name, key) = self.name_const(n);
@@ -514,6 +741,10 @@ impl Agent {
                         let strict = self.strict_code();
                         let v = self.env_get_binding_value(env, &name, &key, strict)?;
                         let this = self.env_with_base_object(env);
+                        if matches!(op, Op::GetGlobalForCall(_)) {
+                            let code = frame!(self).code.clone();
+                            self.ic_fill_global(&code, n, &name, &key);
+                        }
                         self.push(v);
                         self.push(this);
                     }
@@ -680,12 +911,59 @@ impl Agent {
             | Op::BitAnd
             | Op::BitOr
             | Op::BitXor => {
+                // Ruta rápida: Number × Number (el resultado de §6.1.6.1 sin conversiones).
+                if let Some((a, b)) = self.top_numbers() {
+                    let v = match op {
+                        Op::Add => a + b,
+                        Op::Sub => a - b,
+                        Op::Mul => a * b,
+                        Op::Div => a / b,
+                        Op::Mod => crate::abstract_ops::number::remainder(a, b),
+                        Op::Exp => crate::abstract_ops::number::exponentiate(a, b),
+                        Op::Shl => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                .wrapping_shl(crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::Shr => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                >> (crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::UShr => f64::from(
+                            crate::abstract_ops::conversion::to_uint32(a)
+                                >> (crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::BitAnd => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                & crate::abstract_ops::conversion::to_int32(b),
+                        ),
+                        Op::BitOr => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                | crate::abstract_ops::conversion::to_int32(b),
+                        ),
+                        _ => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                ^ crate::abstract_ops::conversion::to_int32(b),
+                        ),
+                    };
+                    self.replace_top2(Value::Number(v));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let v = self.apply_binary(op, l, r)?;
                 self.push(v);
             }
             Op::Lt | Op::Gt | Op::Le | Op::Ge => {
+                if let Some((a, b)) = self.top_numbers() {
+                    let v = match op {
+                        Op::Lt => a < b,
+                        Op::Gt => a > b,
+                        Op::Le => a <= b,
+                        _ => a >= b,
+                    };
+                    self.replace_top2(Value::Boolean(v));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let v = match op {
@@ -703,6 +981,11 @@ impl Agent {
                 self.push(Value::Boolean(if op == Op::Eq { eq } else { !eq }));
             }
             Op::StrictEq | Op::StrictNe => {
+                if let Some((a, b)) = self.top_numbers() {
+                    let eq = a == b;
+                    self.replace_top2(Value::Boolean(if op == Op::StrictEq { eq } else { !eq }));
+                    return Ok(Flow::Next);
+                }
                 let r = self.pop();
                 let l = self.pop();
                 let eq = self.is_strictly_equal(&l, &r);
@@ -842,16 +1125,35 @@ impl Agent {
             }
 
             // --- Propiedades ---
-            Op::GetProp(n) => {
-                let obj = self.pop();
-                let (_, key) = self.name_const(n);
-                let v = self.get_value_of(&obj, &key)?;
-                self.push(v);
-            }
-            Op::GetPropKeep(n) => {
-                let obj = self.peek(0).clone();
-                let (_, key) = self.name_const(n);
-                let v = self.get_value_of(&obj, &key)?;
+            Op::GetProp(n) | Op::GetPropKeep(n) => {
+                let obj = if matches!(op, Op::GetProp(_)) {
+                    self.pop()
+                } else {
+                    self.peek(0).clone()
+                };
+                let code = frame!(self).code.clone();
+                let key = name_key(&code, n);
+                // Inline cache (E3): la disposición ya vista en este sitio. Para un primitivo
+                // (salvo `length` de un string) se busca en su prototipo.
+                let target = match &obj {
+                    Value::Object(o) => Some(*o),
+                    Value::String(_) if *key != self.keys.length => {
+                        Some(self.intrinsics().string_prototype)
+                    }
+                    Value::Number(_) => Some(self.intrinsics().number_prototype),
+                    _ => None,
+                };
+                let v = match target {
+                    Some(o) => match self.ic_get(&code, n, o, key, &obj) {
+                        Some(r) => r?,
+                        None => {
+                            let v = self.get_value_of(&obj, key)?;
+                            self.ic_fill_get(&code, n, o, key);
+                            v
+                        }
+                    },
+                    None => self.get_value_of(&obj, key)?,
+                };
                 self.push(v);
             }
             Op::GetElem | Op::GetElemKeep => {
@@ -871,8 +1173,19 @@ impl Agent {
             Op::SetProp(n, strict) => {
                 let v = self.pop();
                 let obj = self.pop();
-                let (_, key) = self.name_const(n);
-                self.put_value_of(&obj, key, v.clone(), strict)?;
+                let code = frame!(self).code.clone();
+                let key = name_key(&code, n);
+                match obj {
+                    // Inline cache (E3): escribir o agregar con la disposición ya vista.
+                    Value::Object(o) => {
+                        if !self.ic_set(&code, n, o, key, &v) {
+                            let before = self.ic_before_set(o);
+                            self.put_value_of(&obj, key.clone(), v.clone(), strict)?;
+                            self.ic_fill_set(&code, n, o, key, before);
+                        }
+                    }
+                    _ => self.put_value_of(&obj, key.clone(), v.clone(), strict)?,
+                }
                 self.push(v);
             }
             Op::SetElem(strict) => {
@@ -910,8 +1223,14 @@ impl Agent {
             Op::InitProp(n) => {
                 let v = self.pop();
                 let obj = self.peek(0).as_object().expect("objeto literal");
-                let (_, key) = self.name_const(n);
-                self.create_data_property_or_throw(obj, key, v)?;
+                let code = frame!(self).code.clone();
+                // Inline cache (E3): la transición ya vista en este literal.
+                if !self.ic_init(&code, n, obj, &v) {
+                    let key = name_key(&code, n);
+                    let before = self.heap[obj].props.shape().cloned();
+                    self.create_data_property_or_throw(obj, key.clone(), v)?;
+                    self.ic_fill_init(&code, n, obj, key, before);
+                }
             }
             Op::InitElem => {
                 let v = self.pop();
@@ -1032,22 +1351,7 @@ impl Agent {
             }
 
             // --- Llamadas ---
-            Op::Call(argc, t) => {
-                let n = argc as usize;
-                let len = frame!(self).stack.len();
-                let base = len - n - 2;
-                let (callee, this, args) = {
-                    let s = &frame!(self).stack;
-                    (s[base].clone(), s[base + 1].clone(), s[base + 2..].to_vec())
-                };
-                if !self.is_callable(&callee) {
-                    return self.not_callable(t, &callee, "a function");
-                }
-                let r = self.call_internal(&callee, this, &args)?;
-                frame!(self).stack.truncate(base);
-                self.push(r);
-                self.safepoint()?;
-            }
+            Op::Call(argc, t) => return self.op_call(argc, t),
             Op::CallSpread(t) => {
                 let arr = self.peek(0).clone();
                 let this = self.peek(1).clone();
@@ -1086,22 +1390,7 @@ impl Agent {
                 s.truncate(n - 3);
                 self.push(r);
             }
-            Op::New(argc, t) => {
-                let n = argc as usize;
-                let len = frame!(self).stack.len();
-                let base = len - n - 1;
-                let (callee, args) = {
-                    let s = &frame!(self).stack;
-                    (s[base].clone(), s[base + 1..].to_vec())
-                };
-                if !self.is_constructor(&callee) {
-                    return self.not_callable(t, &callee, "a constructor");
-                }
-                let r = self.new_operator(&callee, &args)?;
-                frame!(self).stack.truncate(base);
-                self.push(r);
-                self.safepoint()?;
-            }
+            Op::New(argc, t) => return self.op_new(argc, t),
             Op::NewSpread(t) => {
                 let arr = self.peek(0).clone();
                 let callee = self.peek(1).clone();
@@ -1269,7 +1558,7 @@ impl Agent {
                     kind: HandlerKind::Catch,
                     pc: t,
                     stack_len: f.stack.len() as u32,
-                    refs_len: f.refs.len() as u32,
+                    refs_len: f.refs_len() as u32,
                     env: f.env,
                 };
                 f.handlers.push(h);
@@ -1287,7 +1576,7 @@ impl Agent {
                     },
                     pc: target,
                     stack_len: f.stack.len() as u32,
-                    refs_len: f.refs.len() as u32,
+                    refs_len: f.refs_len() as u32,
                     env: f.env,
                 };
                 f.handlers.push(h);
@@ -1770,10 +2059,7 @@ impl Agent {
             }
             Op::IsHoisted(n) => {
                 let (name, _) = self.name_const(n);
-                let h = frame!(self)
-                    .hoisted
-                    .as_ref()
-                    .is_some_and(|s| s.contains(&name));
+                let h = frame!(self).hoisted().is_some_and(|s| s.contains(&name));
                 self.push(Value::Boolean(h));
             }
             // E1
@@ -2281,5 +2567,793 @@ impl Agent {
         let _ = YS_THROW;
         self.push(v);
         Ok(Flow::Next)
+    }
+}
+
+/// El resultado de [`fast_op`].
+enum Fast {
+    /// Hecho.
+    Done,
+    /// Hecho; fue un salto hacia atrás (hay que pasar por el safepoint).
+    BackJump,
+    /// La instrucción necesita el agente: la resuelve el `match` general de `step`.
+    Slow,
+}
+
+/// ToBoolean (§7.1.2) con solo el heap (E3): un objeto es truthy salvo con [[IsHTMLDDA]]
+/// (B.3.6.1).
+#[inline]
+fn truthiness(heap: &crate::heap::Heap, v: &Value) -> bool {
+    match v {
+        Value::Object(o) => !matches!(heap[*o].kind, ObjectKind::HtmlDda),
+        Value::BigInt(b) => !heap[*b].is_zero(),
+        _ => primitive_truthiness(v).unwrap_or(true),
+    }
+}
+
+/// Valor de verdad de los primitivos (ToBoolean, §7.1.2); `None` para objetos y BigInt (los
+/// objetos con `[[IsHTMLDDA]]` y los BigInt los resuelve el agente).
+#[inline]
+fn primitive_truthiness(v: &Value) -> Option<bool> {
+    match v {
+        Value::Undefined | Value::Null => Some(false),
+        Value::Boolean(b) => Some(*b),
+        Value::Number(n) => Some(!(*n == 0.0 || n.is_nan())),
+        Value::String(s) => Some(!s.is_empty()),
+        Value::Symbol(_) => Some(true),
+        Value::Object(_) | Value::BigInt(_) => None,
+    }
+}
+
+/// Las instrucciones más frecuentes que no necesitan el agente (locales, constantes, pila,
+/// saltos y aritmética Number × Number). Deja el frame igual si devuelve [`Fast::Slow`].
+/// Siempre en línea en el bucle del intérprete: si LLVM decide no hacerlo (pasa al crecer el
+/// código), cada instrucción paga una llamada y todo va ~50 % más lento.
+#[inline(always)]
+fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> Fast {
+    let genv = cx.genv;
+    use crate::abstract_ops::conversion::{to_int32, to_uint32};
+    macro_rules! jump {
+        ($t:expr) => {{
+            let t = $t as usize;
+            let back = t < f.pc;
+            f.pc = t;
+            if back { Fast::BackJump } else { Fast::Done }
+        }};
+    }
+    match op {
+        Op::GetLocal(s) => {
+            let v = f.locals[s as usize].clone().unwrap_or_default();
+            f.stack.push(v);
+        }
+        Op::GetLocalChecked(s, _) => match &f.locals[s as usize] {
+            Some(v) => {
+                let v = v.clone();
+                f.stack.push(v);
+            }
+            None => return Fast::Slow,
+        },
+        Op::SetLocal(s) => {
+            let v = f.stack.last().expect("pila").clone();
+            f.locals[s as usize] = Some(v);
+        }
+        Op::InitLocal(s) => {
+            let v = f.stack.pop().expect("pila");
+            f.locals[s as usize] = Some(v);
+        }
+        Op::Pop => {
+            f.stack.pop();
+        }
+        Op::Dup => {
+            let v = f.stack.last().expect("pila").clone();
+            f.stack.push(v);
+        }
+        Op::GetArg(i) => {
+            let v = f.args.get(i as usize).cloned().unwrap_or_default();
+            f.stack.push(v);
+        }
+        Op::Ctx(CtxWhat::This, CtxLoc::Frame) => match &f.this {
+            Some(v) => {
+                let v = v.clone();
+                f.stack.push(v);
+            }
+            None => return Fast::Slow,
+        },
+        Op::ToNumeric => {
+            if !matches!(f.stack.last(), Some(Value::Number(_))) {
+                return Fast::Slow;
+            }
+        }
+        Op::SetLocalChecked(s, _) => {
+            if f.locals[s as usize].is_none() {
+                return Fast::Slow;
+            }
+            let v = f.stack.last().expect("pila").clone();
+            f.locals[s as usize] = Some(v);
+        }
+        Op::Swap => {
+            let n = f.stack.len();
+            f.stack.swap(n - 1, n - 2);
+        }
+        Op::GetEnv(h, s) | Op::GetEnvChecked(h, s, _) => {
+            let Some(v) = env_slot(heap, f.env, h, s).and_then(|v| v.clone()) else {
+                return Fast::Slow;
+            };
+            f.stack.push(v);
+        }
+        Op::SetEnv(h, s) | Op::SetEnvChecked(h, s, _) | Op::InitEnv(h, s) => {
+            let e = env_at_heap(heap, f.env, h);
+            let Some(d) = heap[e].decl_mut() else {
+                return Fast::Slow;
+            };
+            let slot = &mut d.slots[s as usize];
+            if matches!(op, Op::SetEnvChecked(..)) && slot.is_none() {
+                return Fast::Slow;
+            }
+            *slot = Some(if matches!(op, Op::InitEnv(..)) {
+                f.stack.pop().expect("pila")
+            } else {
+                f.stack.last().expect("pila").clone()
+            });
+        }
+        Op::GetElem | Op::GetElemKeep => {
+            let n = f.stack.len();
+            let v = match (&f.stack[n - 2], &f.stack[n - 1]) {
+                (Value::Object(o), Value::Number(i)) => match dense_index(heap, *o, *i) {
+                    Some(v) => v,
+                    None => return Fast::Slow,
+                },
+                (Value::Object(o), Value::String(k)) => match fast_get_named(heap, *o, k) {
+                    Some(v) => v,
+                    None => return Fast::Slow,
+                },
+                _ => return Fast::Slow,
+            };
+            f.stack.pop();
+            if op == Op::GetElem {
+                *f.stack.last_mut().expect("pila") = v;
+            } else {
+                f.stack.push(v);
+            }
+        }
+        Op::SetElem(_) => {
+            let n = f.stack.len();
+            if let (Value::Object(o), Value::String(k)) = (&f.stack[n - 3], &f.stack[n - 2]) {
+                if !fast_set_named(heap, *o, k, &f.stack[n - 1]) {
+                    return Fast::Slow;
+                }
+                let v = f.stack.pop().expect("pila");
+                f.stack.truncate(n - 3);
+                f.stack.push(v);
+                return Fast::Done;
+            }
+            let (Value::Object(o), Value::Number(i)) = (&f.stack[n - 3], &f.stack[n - 2]) else {
+                return Fast::Slow;
+            };
+            let (o, i) = (*o, *i);
+            let ObjectKind::Array(d) = &mut heap[o].kind else {
+                return Fast::Slow;
+            };
+            let idx = i as usize;
+            if i < 0.0 || i.fract() != 0.0 || idx >= d.dense.len() || d.dense[idx].is_none() {
+                return Fast::Slow;
+            }
+            let v = f.stack.pop().expect("pila");
+            d.dense[idx] = Some(v.clone());
+            f.stack.truncate(n - 3);
+            f.stack.push(v);
+        }
+        Op::GetProp(c) | Op::GetPropKeep(c) => {
+            let v = match f.stack.last() {
+                Some(Value::Object(o)) => {
+                    let o = *o;
+                    match fast_ic_get(heap, &f.code, c, o) {
+                        Some(v) => v,
+                        // `length` de un Array (no está en su `PropertyMap`).
+                        None => match &heap[o].kind {
+                            ObjectKind::Array(d) if is_length(name_key(&f.code, c)) => {
+                                Value::Number(f64::from(d.length))
+                            }
+                            _ => return Fast::Slow,
+                        },
+                    }
+                }
+                // Un string primitivo: su `length`, o lo demás desde String.prototype (la
+                // inline cache del sitio apunta a él).
+                Some(Value::String(st)) => {
+                    if is_length(name_key(&f.code, c)) {
+                        Value::Number(st.len() as f64)
+                    } else {
+                        match fast_ic_get(heap, &f.code, c, cx.string_proto) {
+                            Some(v) => v,
+                            None => return Fast::Slow,
+                        }
+                    }
+                }
+                _ => return Fast::Slow,
+            };
+            if op == Op::GetProp(c) {
+                *f.stack.last_mut().expect("pila") = v;
+            } else {
+                f.stack.push(v);
+            }
+        }
+        Op::SetProp(c, _) => {
+            let n = f.stack.len();
+            let Value::Object(o) = &f.stack[n - 2] else {
+                return Fast::Slow;
+            };
+            let o = *o;
+            if !fast_ic_set(heap, &f.code, c, o, &f.stack[n - 1]) {
+                return Fast::Slow;
+            }
+            let v = f.stack.pop().expect("pila");
+            *f.stack.last_mut().expect("pila") = v;
+        }
+        Op::GetGlobal(c) | Op::GetGlobalForCall(c) => {
+            let Some(v) = fast_ic_global(heap, &f.code, c, genv) else {
+                return Fast::Slow;
+            };
+            f.stack.push(v);
+            if matches!(op, Op::GetGlobalForCall(_)) {
+                f.stack.push(Value::Undefined);
+            }
+        }
+        // Literales: crear un objeto no recolecta (la recolección es en los safepoints).
+        Op::NewObject => {
+            let o = heap.alloc(Object::ordinary(Some(cx.object_proto)));
+            f.stack.push(Value::Object(o));
+        }
+        Op::NewArray => {
+            let a = heap.alloc(Object::new(
+                Some(cx.array_proto),
+                ObjectKind::Array(crate::object::ArrayData {
+                    dense: Vec::new(),
+                    length: 0,
+                    length_writable: true,
+                }),
+            ));
+            f.stack.push(Value::Object(a));
+        }
+        Op::ArrayPush => {
+            let v = f.stack.pop().expect("pila");
+            let Some(Value::Object(a)) = f.stack.last() else {
+                f.stack.push(v);
+                return Fast::Slow;
+            };
+            if let ObjectKind::Array(d) = &mut heap[*a].kind {
+                d.dense.push(Some(v));
+                d.length += 1;
+            } else {
+                f.stack.push(v);
+                return Fast::Slow;
+            }
+        }
+        Op::InitProp(c) => {
+            let n = f.stack.len();
+            let Value::Object(o) = &f.stack[n - 2] else {
+                return Fast::Slow;
+            };
+            let o = *o;
+            if !fast_ic_init(heap, &f.code, c, o, &f.stack[n - 1]) {
+                return Fast::Slow;
+            }
+            f.stack.pop();
+        }
+        Op::ToStringOp => match f.stack.last() {
+            Some(Value::String(_)) => {}
+            Some(Value::Number(n)) => {
+                let s = crate::abstract_ops::number::number_to_string(*n);
+                *f.stack.last_mut().expect("pila") = Value::String(s);
+            }
+            _ => return Fast::Slow,
+        },
+        // `for…of` sobre un Array con el `next` original (E3): los pasos de
+        // %ArrayIteratorPrototype%.next (§23.1.5.2.1) sin el objeto resultado; un hueco va por
+        // la ruta lenta (su [[Get]] mira la cadena de prototipos).
+        Op::IterStep { slot, done } => {
+            let s = slot as usize;
+            let (Some(Value::Object(it)), Some(Value::Object(next))) =
+                (&f.locals[s], &f.locals[s + 1])
+            else {
+                return Fast::Slow;
+            };
+            let (it, next) = (*it, *next);
+            if !crate::builtins::iterator::is_array_iterator_next(heap, next) {
+                return Fast::Slow;
+            }
+            let ObjectKind::ArrayIterator(d) = &heap[it].kind else {
+                return Fast::Slow;
+            };
+            if !matches!(d.kind, crate::object::IterKind::Values) {
+                return Fast::Slow;
+            }
+            let (object, index) = (d.object, d.next_index);
+            let step = match object {
+                None => None,
+                Some(o) => match &heap[o].kind {
+                    ObjectKind::Array(a) if index >= f64::from(a.length) => None,
+                    ObjectKind::Array(a) => match a.dense.get(index as usize) {
+                        Some(Some(v)) => Some(v.clone()),
+                        _ => return Fast::Slow,
+                    },
+                    _ => return Fast::Slow,
+                },
+            };
+            let ObjectKind::ArrayIterator(d) = &mut heap[it].kind else {
+                return Fast::Slow;
+            };
+            match step {
+                Some(v) => {
+                    d.next_index = index + 1.0;
+                    f.stack.push(v);
+                }
+                None => {
+                    d.object = None;
+                    f.locals[s + 2] = Some(Value::Boolean(true));
+                    return jump!(done);
+                }
+            }
+        }
+        Op::Undefined => f.stack.push(Value::Undefined),
+        Op::Null => f.stack.push(Value::Null),
+        Op::True => f.stack.push(Value::Boolean(true)),
+        Op::False => f.stack.push(Value::Boolean(false)),
+        Op::Int(i) => f.stack.push(Value::Number(f64::from(i))),
+        Op::Const(i) => match &f.code.consts[i as usize] {
+            Constant::Number(n) => {
+                let n = *n;
+                f.stack.push(Value::Number(n));
+            }
+            Constant::String(s) => {
+                let s = s.clone();
+                f.stack.push(Value::String(s));
+            }
+            _ => return Fast::Slow,
+        },
+        Op::Jump(t) => return jump!(t),
+        Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
+                return Fast::Slow;
+            };
+            f.stack.pop();
+            if b == matches!(op, Op::JumpIfTrue(_)) {
+                return jump!(t);
+            }
+        }
+        Op::JumpIfTrueKeep(t) | Op::JumpIfFalseKeep(t) => {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
+                return Fast::Slow;
+            };
+            // Salta sin sacar; si no salta, saca.
+            if b == matches!(op, Op::JumpIfTrueKeep(_)) {
+                return jump!(t);
+            }
+            f.stack.pop();
+        }
+        Op::Inc | Op::Dec => match f.stack.last_mut() {
+            Some(Value::Number(n)) => {
+                *n = if op == Op::Inc { *n + 1.0 } else { *n - 1.0 };
+            }
+            _ => return Fast::Slow,
+        },
+        Op::Not => {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
+                return Fast::Slow;
+            };
+            *f.stack.last_mut().expect("pila") = Value::Boolean(!b);
+        }
+        Op::Add
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Shl
+        | Op::Shr
+        | Op::UShr
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::Lt
+        | Op::Gt
+        | Op::Le
+        | Op::Ge
+        | Op::StrictEq
+        | Op::StrictNe => {
+            let n = f.stack.len();
+            let (a, b) = match (
+                f.stack.get(n.wrapping_sub(2)),
+                f.stack.get(n.wrapping_sub(1)),
+            ) {
+                (Some(Value::Number(a)), Some(Value::Number(b))) => (*a, *b),
+                // Concatenación de primitivos sin conversiones con efectos (§13.15.3).
+                (Some(l), Some(r)) if op == Op::Add => {
+                    let Some(v) = fast_concat(l, r) else {
+                        return Fast::Slow;
+                    };
+                    f.stack.pop();
+                    *f.stack.last_mut().expect("pila") = v;
+                    return Fast::Done;
+                }
+                _ => return Fast::Slow,
+            };
+            let v = match op {
+                Op::Add => Value::Number(a + b),
+                Op::Sub => Value::Number(a - b),
+                Op::Mul => Value::Number(a * b),
+                Op::Div => Value::Number(a / b),
+                Op::Mod => Value::Number(crate::abstract_ops::number::remainder(a, b)),
+                Op::Shl => Value::Number(f64::from(to_int32(a).wrapping_shl(to_uint32(b) & 31))),
+                Op::Shr => Value::Number(f64::from(to_int32(a) >> (to_uint32(b) & 31))),
+                Op::UShr => Value::Number(f64::from(to_uint32(a) >> (to_uint32(b) & 31))),
+                Op::BitAnd => Value::Number(f64::from(to_int32(a) & to_int32(b))),
+                Op::BitOr => Value::Number(f64::from(to_int32(a) | to_int32(b))),
+                Op::BitXor => Value::Number(f64::from(to_int32(a) ^ to_int32(b))),
+                Op::Lt => Value::Boolean(a < b),
+                Op::Gt => Value::Boolean(a > b),
+                Op::Le => Value::Boolean(a <= b),
+                Op::Ge => Value::Boolean(a >= b),
+                Op::StrictEq => Value::Boolean(a == b),
+                _ => Value::Boolean(a != b),
+            };
+            f.stack.pop();
+            *f.stack.last_mut().expect("pila") = v;
+        }
+        _ => return Fast::Slow,
+    }
+    Fast::Done
+}
+
+/// La clave de la constante de nombre `n` (prestada del código).
+#[inline]
+fn name_key(code: &FunctionCode, n: u32) -> &PropertyKey {
+    match &code.consts[n as usize] {
+        Constant::Name(_, k) => k,
+        other => unreachable!("se esperaba un nombre: {other:?}"),
+    }
+}
+
+/// El environment a `hops` saltos de `env` (solo con el heap).
+#[inline]
+fn env_at_heap(heap: &crate::heap::Heap, mut env: Gc<Env>, hops: u32) -> Gc<Env> {
+    for _ in 0..hops {
+        env = heap[env].outer.expect("environment externo");
+    }
+    env
+}
+
+/// El slot `s` del environment declarativo a `hops` saltos.
+#[inline]
+fn env_slot(heap: &crate::heap::Heap, env: Gc<Env>, hops: u32, s: u32) -> Option<&Option<Value>> {
+    let e = env_at_heap(heap, env, hops);
+    heap[e].decl().map(|d| &d.slots[s as usize])
+}
+
+/// El elemento `i` de un Array denso (un índice entero dentro del vector, sin hueco).
+#[inline]
+fn dense_index(heap: &crate::heap::Heap, o: Gc<Object>, i: f64) -> Option<Value> {
+    let ObjectKind::Array(d) = &heap[o].kind else {
+        return None;
+    };
+    if i < 0.0 || i.fract() != 0.0 {
+        return None;
+    }
+    d.dense.get(i as usize)?.clone()
+}
+
+/// ¿El `[[Get]]`/`[[Set]]` con nombre de `o` es el ordinario sin mirar el agente (los objetos
+/// host van por `step`)?
+#[inline]
+fn fast_named(heap: &crate::heap::Heap, o: Gc<Object>, key: &PropertyKey) -> bool {
+    match &heap[o].kind {
+        ObjectKind::Ordinary
+        | ObjectKind::Function(_)
+        | ObjectKind::Builtin(_)
+        | ObjectKind::Error => true,
+        ObjectKind::Array(_) => !is_length(key),
+        // Un String exótico: sus propiedades propias extra son los índices y `length`.
+        ObjectKind::String(_) => !is_length(key) && !matches!(key, PropertyKey::Index(_)),
+        _ => false,
+    }
+}
+
+/// ¿Es la clave `"length"`?
+#[inline]
+fn is_length(key: &PropertyKey) -> bool {
+    matches!(key, PropertyKey::String(s) if s.units() == [108, 101, 110, 103, 116, 104])
+}
+
+/// Un acierto de la inline cache de `GetProp` con una propiedad de datos (sin el agente).
+#[inline]
+fn fast_ic_get(
+    heap: &crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+) -> Option<Value> {
+    use crate::vm::ic::Ic;
+    let key = name_key(code, c);
+    if !fast_named(heap, o, key) {
+        return None;
+    }
+    let shape = heap[o].props.shape_id();
+    code.ics
+        .with(c, |site| {
+            site.ways.iter().find_map(|w| match w {
+                Ic::Own { shape: s, slot } if *s == shape => {
+                    match heap[o].props.slot(*slot as usize) {
+                        Some(crate::object::Prop {
+                            value: crate::object::PropValue::Data { value, .. },
+                            ..
+                        }) => Some(value.clone()),
+                        _ => None,
+                    }
+                }
+                Ic::Missing {
+                    shape: s,
+                    proto,
+                    proto_shape,
+                } if *s == shape
+                    && heap[o].proto == Some(*proto)
+                    && heap[*proto].proto.is_none()
+                    && fast_named(heap, *proto, key)
+                    && heap[*proto].props.shape_id() == *proto_shape =>
+                {
+                    Some(Value::Undefined)
+                }
+                Ic::Proto {
+                    shape: s,
+                    proto,
+                    proto_shape,
+                    slot,
+                } if *s == shape
+                    && heap[o].proto == Some(*proto)
+                    && fast_named(heap, *proto, key)
+                    && heap[*proto].props.shape_id() == *proto_shape =>
+                {
+                    match heap[*proto].props.slot(*slot as usize) {
+                        Some(crate::object::Prop {
+                            value: crate::object::PropValue::Data { value, .. },
+                            ..
+                        }) => Some(value.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        })
+        .flatten()
+}
+
+/// Un acierto de la inline cache de `SetProp` (propiedad de datos escribible, o la
+/// transición que la agrega) sin el agente.
+#[inline]
+fn fast_ic_set(
+    heap: &mut crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+    v: &Value,
+) -> bool {
+    use crate::vm::ic::Ic;
+    let key = name_key(code, c);
+    if !fast_named(heap, o, key) {
+        return false;
+    }
+    let shape = heap[o].props.shape_id();
+    enum Hit {
+        Own(u32),
+        Add(Option<Gc<Object>>, u64, Rc<crate::object::Shape>),
+    }
+    let hit = code.ics.with(c, |site| {
+        site.ways.iter().find_map(|w| match w {
+            Ic::Own { shape: s, slot } if *s == shape => Some(Hit::Own(*slot)),
+            Ic::Add {
+                from,
+                proto,
+                epoch,
+                to,
+            } if *from == shape => Some(Hit::Add(*proto, *epoch, to.clone())),
+            _ => None,
+        })
+    });
+    match hit.flatten() {
+        Some(Hit::Own(slot)) => match heap[o].props.slot_mut(slot as usize) {
+            Some(crate::object::Prop {
+                value:
+                    crate::object::PropValue::Data {
+                        value,
+                        writable: true,
+                    },
+                ..
+            }) => {
+                *value = v.clone();
+                true
+            }
+            _ => false,
+        },
+        Some(Hit::Add(proto, epoch, to)) => {
+            let obj = &mut heap[o];
+            if obj.proto != proto || !obj.extensible || epoch != crate::object::setter_epoch() {
+                return false;
+            }
+            obj.props
+                .push_with_shape(to, crate::object::Prop::data(v.clone(), true, true, true));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Un acierto de la inline cache de `GetGlobal` con una propiedad de datos del objeto global.
+#[inline]
+fn fast_ic_global(
+    heap: &crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    genv: Gc<Env>,
+) -> Option<Value> {
+    use crate::vm::ic::Ic;
+    let g = heap[genv].global()?;
+    let (object, decl_len) = (g.object, g.decl.len() as u32);
+    let props = &heap[object].props;
+    let shape = props.shape_id();
+    code.ics
+        .with(c, |site| {
+            site.ways.iter().find_map(|w| match w {
+                Ic::Global {
+                    shape: s,
+                    slot,
+                    decl_len: d,
+                } if *s == shape && *d == decl_len => match props.slot(*slot as usize) {
+                    Some(crate::object::Prop {
+                        value: crate::object::PropValue::Data { value, .. },
+                        ..
+                    }) => Some(value.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+        })
+        .flatten()
+}
+
+/// `l + r` con un string y un string o un número (ToString del número, §6.1.6.1.20).
+#[inline]
+fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
+    use crate::abstract_ops::number::number_to_string;
+    // Un entero corto se escribe directo (sus dígitos decimales son su ToString).
+    let mut buf = [0u16; 20];
+    let mut digits = |n: f64| -> Option<std::ops::Range<usize>> {
+        if n.fract() != 0.0 || n.abs() >= 1e15 {
+            return None;
+        }
+        let (neg, mut m) = (n < 0.0, n.abs() as u64);
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = 0x30 + (m % 10) as u16;
+            m /= 10;
+            if m == 0 {
+                break;
+            }
+        }
+        if neg {
+            i -= 1;
+            buf[i] = u16::from(b'-');
+        }
+        Some(i..buf.len())
+    };
+    // Un string largo no se copia: el resultado es un rope (o `None` si supera el máximo;
+    // el error lo da la ruta lenta).
+    const SHORT: usize = 64;
+    let s = match (l, r) {
+        (Value::String(a), Value::String(b)) => JsString::concat_strings(a, b)?,
+        (Value::String(a), Value::Number(n)) if a.len() < SHORT => match digits(*n) {
+            Some(d) => JsString::concat(a.units(), &buf[d]),
+            None => JsString::concat(a.units(), number_to_string(*n).units()),
+        },
+        (Value::Number(n), Value::String(b)) if b.len() < SHORT => match digits(*n) {
+            Some(d) => JsString::concat(&buf[d], b.units()),
+            None => JsString::concat(number_to_string(*n).units(), b.units()),
+        },
+        (Value::String(a), Value::Number(n)) => JsString::concat_strings(a, &number_to_string(*n))?,
+        (Value::Number(n), Value::String(b)) => JsString::concat_strings(&number_to_string(*n), b)?,
+        _ => return None,
+    };
+    Some(Value::String(s))
+}
+
+/// Lo que la ruta rápida necesita del realm.
+struct FastCx {
+    genv: Gc<Env>,
+    string_proto: Gc<Object>,
+    object_proto: Gc<Object>,
+    array_proto: Gc<Object>,
+}
+
+/// Un acierto de la inline cache de `InitProp` (la transición del literal).
+#[inline]
+fn fast_ic_init(
+    heap: &mut crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+    v: &Value,
+) -> bool {
+    use crate::vm::ic::Ic;
+    let obj = &heap[o];
+    if !matches!(obj.kind, ObjectKind::Ordinary) || !obj.extensible {
+        return false;
+    }
+    let shape = obj.props.shape_id();
+    let to = code.ics.with(c, |site| {
+        site.ways.iter().find_map(|w| match w {
+            Ic::Init { from, to } if *from == shape => Some(to.clone()),
+            _ => None,
+        })
+    });
+    let Some(Some(to)) = to else {
+        return false;
+    };
+    heap[o]
+        .props
+        .push_with_shape(to, crate::object::Prop::data(v.clone(), true, true, true));
+    true
+}
+
+/// `o[k]` con una clave string que no es un índice (E3): el `[[Get]]` ordinario recorriendo
+/// la cadena de prototipos por las propiedades de datos. `None` si hace falta el agente (un
+/// getter, un objeto exótico o un índice).
+#[inline]
+fn fast_get_named(heap: &crate::heap::Heap, o: Gc<Object>, k: &JsString) -> Option<Value> {
+    let key = PropertyKey::from_js_string(k.clone());
+    if matches!(key, PropertyKey::Index(_)) {
+        return None;
+    }
+    let mut cur = o;
+    loop {
+        if !fast_named(heap, cur, &key) {
+            return None;
+        }
+        let obj = &heap[cur];
+        if let Some(slot) = obj.props.find_slot(&key) {
+            return match &obj.props.slot(slot)?.value {
+                crate::object::PropValue::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            };
+        }
+        match obj.proto {
+            Some(p) => cur = p,
+            None => return Some(Value::Undefined),
+        }
+    }
+}
+
+/// `o[k] = v` sobre una propiedad de datos propia y escribible ya existente, con una clave
+/// string que no es un índice (E3): el `[[Set]]` ordinario solo cambia el valor (§10.1.9.2).
+#[inline]
+fn fast_set_named(heap: &mut crate::heap::Heap, o: Gc<Object>, k: &JsString, v: &Value) -> bool {
+    let key = PropertyKey::from_js_string(k.clone());
+    if matches!(key, PropertyKey::Index(_)) || !fast_named(heap, o, &key) {
+        return false;
+    }
+    let props = &mut heap[o].props;
+    let Some(slot) = props.find_slot(&key) else {
+        return false;
+    };
+    match props.slot_mut(slot) {
+        Some(crate::object::Prop {
+            value:
+                crate::object::PropValue::Data {
+                    value,
+                    writable: true,
+                },
+            ..
+        }) => {
+            *value = v.clone();
+            true
+        }
+        _ => false,
     }
 }

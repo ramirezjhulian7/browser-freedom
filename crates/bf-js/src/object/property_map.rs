@@ -2,11 +2,72 @@
 //! array index en orden numérico ascendente, después los strings en orden de creación y al
 //! final los símbolos en orden de creación. Redefinir una propiedad no cambia su posición.
 
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::rc::{Rc, Weak};
 
 use crate::heap::{Gc, Trace, Tracer};
 use crate::object::Object;
 use crate::value::{PropertyKey, Value};
+
+/// Las tablas de claves de los shapes y diccionarios (E3): un hash multiplicativo rápido (al
+/// estilo Fx) en lugar de SipHash. Las claves de un objeto las elige la página, que a lo sumo
+/// se hace lenta a sí misma.
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<KeyHasher>>;
+
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(Self::K);
+    }
+}
+
+impl Hasher for KeyHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.add(u64::from_le_bytes(*c));
+        }
+        if !rest.is_empty() {
+            let mut b = [0u8; 8];
+            b[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(b));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
 
 /// Una propiedad propia (§6.1.7.1).
 #[derive(Debug, Clone)]
@@ -163,16 +224,275 @@ impl Trace for PropertyDescriptor {
     }
 }
 
-/// Más de esta cantidad de propiedades con nombre usa un índice hash.
-const LINEAR_LIMIT: usize = 8;
+// --- Shapes (E3: rendimiento de la VM) ---
+//
+// Las propiedades con nombre de un objeto son un [`Shape`] (las claves en orden de creación)
+// más un vector de valores paralelo. Los objetos que reciben las mismas claves en el mismo
+// orden comparten el shape (un árbol de transiciones desde el shape vacío), así que el `id`
+// del shape identifica la disposición de las propiedades: las inline caches de la VM guardan
+// `(id, posición)` y leen el valor sin buscar la clave. Borrar una clave o tener muchas pasa
+// el objeto a *modo diccionario* (entradas propias con un índice hash) con un `id` que cambia
+// en cada cambio de claves. Cambiar el valor o los atributos de una propiedad existente no
+// cambia el `id`.
 
-#[derive(Debug, Default, Clone)]
+/// Más de esta cantidad de claves en un shape usa un índice hash.
+const LINEAR_LIMIT: usize = 8;
+/// Más de esta cantidad de claves pasa el objeto a modo diccionario.
+const DICTIONARY_LIMIT: usize = 64;
+
+thread_local! {
+    static NEXT_SHAPE_ID: Cell<u64> = const { Cell::new(1) };
+    static ROOT_SHAPE: Rc<Shape> = Rc::new(Shape::empty());
+    static SETTER_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+fn next_shape_id() -> u64 {
+    NEXT_SHAPE_ID.with(|c| {
+        let id = c.get();
+        c.set(id + 1);
+        id
+    })
+}
+
+/// Un contador que avanza cada vez que aparece en algún objeto una propiedad accessor o no
+/// escribible, o cambia un prototipo: las caches que agregan propiedades (que suponen que la
+/// cadena de prototipos no tiene un setter ni una propiedad de solo lectura para la clave)
+/// solo valen con el mismo epoch.
+pub fn setter_epoch() -> u64 {
+    SETTER_EPOCH.with(Cell::get)
+}
+
+/// Avanza [`setter_epoch`] (un `[[SetPrototypeOf]]`, o un cambio que la VM no ve).
+pub fn bump_setter_epoch() {
+    SETTER_EPOCH.with(|c| c.set(c.get() + 1));
+}
+
+/// La disposición compartida de las propiedades con nombre.
+pub struct Shape {
+    id: u64,
+    keys: Vec<PropertyKey>,
+    lookup: Option<HashMap<PropertyKey, u32>>,
+    /// La primera transición (la mayoría de los shapes tiene una sola): sin hash.
+    first: RefCell<Option<(PropertyKey, Weak<Shape>)>>,
+    /// Las demás transiciones: clave agregada → shape hijo.
+    transitions: RefCell<HashMap<PropertyKey, Weak<Shape>>>,
+}
+
+impl fmt::Debug for Shape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Shape#{}({} claves)", self.id, self.keys.len())
+    }
+}
+
+impl Shape {
+    fn empty() -> Shape {
+        Shape {
+            id: next_shape_id(),
+            keys: Vec::new(),
+            lookup: None,
+            first: RefCell::new(None),
+            transitions: RefCell::new(HashMap::default()),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// La última clave agregada.
+    pub fn last_key(&self) -> Option<&PropertyKey> {
+        self.keys.last()
+    }
+
+    /// La posición de `key`.
+    pub fn find(&self, key: &PropertyKey) -> Option<usize> {
+        match &self.lookup {
+            Some(map) => map.get(key).map(|&i| i as usize),
+            None => self.keys.iter().position(|k| k == key),
+        }
+    }
+
+    /// El shape con `key` agregada al final (lo crea la primera vez).
+    pub fn transition(self: &Rc<Shape>, key: &PropertyKey) -> Rc<Shape> {
+        if let Some((k, w)) = &*self.first.borrow()
+            && k == key
+            && let Some(s) = w.upgrade()
+        {
+            return s;
+        }
+        if let Some(s) = self.transitions.borrow().get(key).and_then(Weak::upgrade) {
+            return s;
+        }
+        let mut keys = Vec::with_capacity(self.keys.len() + 1);
+        keys.extend(self.keys.iter().cloned());
+        keys.push(key.clone());
+        let lookup = (keys.len() > LINEAR_LIMIT).then(|| {
+            keys.iter()
+                .enumerate()
+                .map(|(i, k)| (k.clone(), i as u32))
+                .collect()
+        });
+        let child = Rc::new(Shape {
+            id: next_shape_id(),
+            keys,
+            lookup,
+            first: RefCell::new(None),
+            transitions: RefCell::new(HashMap::default()),
+        });
+        let mut first = self.first.borrow_mut();
+        let free = first.as_ref().is_none_or(|(_, w)| w.strong_count() == 0);
+        if free {
+            *first = Some((key.clone(), Rc::downgrade(&child)));
+        } else {
+            self.transitions
+                .borrow_mut()
+                .insert(key.clone(), Rc::downgrade(&child));
+        }
+        child
+    }
+}
+
+/// Las propiedades con nombre de un objeto en modo diccionario.
+#[derive(Debug, Clone)]
+struct Dictionary {
+    /// Cambia en cada cambio de claves (como un shape propio).
+    id: u64,
+    /// En orden de creación; `None` son las borradas.
+    entries: Vec<Option<(PropertyKey, Prop)>>,
+    lookup: HashMap<PropertyKey, usize>,
+    removed: usize,
+}
+
+impl Dictionary {
+    fn compact(&mut self) {
+        self.entries.retain(|e| e.is_some());
+        self.removed = 0;
+        self.lookup = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|(k, _)| (k.clone(), i)))
+            .collect();
+    }
+}
+
+/// Cuántas propiedades con nombre van dentro del objeto, sin otra reserva de memoria (E3).
+const INLINE: usize = 3;
+
+/// El relleno de las posiciones inline sin usar.
+const FILLER: Prop = Prop {
+    value: PropValue::Data {
+        value: Value::Undefined,
+        writable: false,
+    },
+    enumerable: false,
+    configurable: false,
+};
+
+/// Los valores de un objeto con shape: los primeros [`INLINE`] dentro del objeto (la
+/// mayoría de los objetos tiene pocas propiedades y vive poco).
+#[derive(Debug, Clone)]
+enum PropVec {
+    Inline { len: u8, items: [Prop; INLINE] },
+    Heap(Vec<Prop>),
+}
+
+impl Default for PropVec {
+    fn default() -> PropVec {
+        PropVec::Inline {
+            len: 0,
+            items: [FILLER; INLINE],
+        }
+    }
+}
+
+impl std::ops::Deref for PropVec {
+    type Target = [Prop];
+
+    #[inline]
+    fn deref(&self) -> &[Prop] {
+        match self {
+            PropVec::Inline { len, items } => &items[..*len as usize],
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for PropVec {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Prop] {
+        match self {
+            PropVec::Inline { len, items } => &mut items[..*len as usize],
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
+impl PropVec {
+    #[inline]
+    fn push(&mut self, prop: Prop) {
+        match self {
+            PropVec::Inline { len, items } if (*len as usize) < INLINE => {
+                items[*len as usize] = prop;
+                *len += 1;
+            }
+            PropVec::Inline { .. } => {
+                let mut v = std::mem::take(self).into_vec();
+                v.reserve(INLINE + 1);
+                v.push(prop);
+                *self = PropVec::Heap(v);
+            }
+            PropVec::Heap(v) => v.push(prop),
+        }
+    }
+
+    fn into_vec(self) -> Vec<Prop> {
+        match self {
+            PropVec::Inline { len, items } => items.into_iter().take(len as usize).collect(),
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Named {
+    Shaped { shape: Rc<Shape>, values: PropVec },
+    Dict(Box<Dictionary>),
+}
+
+#[derive(Debug, Clone)]
 pub struct PropertyMap {
     indexed: BTreeMap<u32, Prop>,
-    /// Strings y símbolos en orden de creación; `None` son las borradas.
-    named: Vec<Option<(PropertyKey, Prop)>>,
-    lookup: Option<HashMap<PropertyKey, usize>>,
-    removed: usize,
+    named: Named,
+}
+
+impl Default for PropertyMap {
+    fn default() -> PropertyMap {
+        PropertyMap {
+            indexed: BTreeMap::new(),
+            named: Named::Shaped {
+                shape: ROOT_SHAPE.with(Rc::clone),
+                values: PropVec::default(),
+            },
+        }
+    }
+}
+
+/// ¿Agregar o cambiar `prop` puede alterar una asignación cacheada (un setter o una
+/// propiedad de solo lectura)?
+fn affects_sets(prop: &Prop) -> bool {
+    match &prop.value {
+        PropValue::Accessor { .. } => true,
+        PropValue::Data { writable, .. } => !writable,
+    }
 }
 
 impl PropertyMap {
@@ -180,13 +500,66 @@ impl PropertyMap {
         PropertyMap::default()
     }
 
-    fn find(&self, key: &PropertyKey) -> Option<usize> {
-        match &self.lookup {
-            Some(map) => map.get(key).copied(),
-            None => self
-                .named
-                .iter()
-                .position(|e| matches!(e, Some((k, _)) if k == key)),
+    /// El shape compartido (`None` en modo diccionario).
+    pub fn shape(&self) -> Option<&Rc<Shape>> {
+        match &self.named {
+            Named::Shaped { shape, .. } => Some(shape),
+            Named::Dict(_) => None,
+        }
+    }
+
+    /// El `id` de la disposición de las claves con nombre.
+    pub fn shape_id(&self) -> u64 {
+        match &self.named {
+            Named::Shaped { shape, .. } => shape.id,
+            Named::Dict(d) => d.id,
+        }
+    }
+
+    pub fn is_dictionary(&self) -> bool {
+        matches!(self.named, Named::Dict(_))
+    }
+
+    /// Cuántas claves con nombre hay.
+    pub fn named_len(&self) -> usize {
+        match &self.named {
+            Named::Shaped { values, .. } => values.len(),
+            Named::Dict(d) => d.entries.len() - d.removed,
+        }
+    }
+
+    /// La propiedad con nombre de la posición `slot`.
+    pub fn slot(&self, slot: usize) -> Option<&Prop> {
+        match &self.named {
+            Named::Shaped { values, .. } => values.get(slot),
+            Named::Dict(d) => d.entries.get(slot)?.as_ref().map(|(_, p)| p),
+        }
+    }
+
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Prop> {
+        match &mut self.named {
+            Named::Shaped { values, .. } => values.get_mut(slot),
+            Named::Dict(d) => d.entries.get_mut(slot)?.as_mut().map(|(_, p)| p),
+        }
+    }
+
+    /// La posición de una clave con nombre.
+    pub fn find_slot(&self, key: &PropertyKey) -> Option<usize> {
+        match &self.named {
+            Named::Shaped { shape, .. } => shape.find(key),
+            Named::Dict(d) => d.lookup.get(key).copied(),
+        }
+    }
+
+    /// Agrega una clave nueva con la transición ya conocida `to` (la de una inline cache):
+    /// `to` debe ser la transición del shape actual con esa clave.
+    pub fn push_with_shape(&mut self, to: Rc<Shape>, prop: Prop) {
+        if affects_sets(&prop) {
+            bump_setter_epoch();
+        }
+        if let Named::Shaped { shape, values } = &mut self.named {
+            *shape = to;
+            values.push(prop);
         }
     }
 
@@ -194,20 +567,51 @@ impl PropertyMap {
         if let PropertyKey::Index(i) = key {
             return self.indexed.get(i);
         }
-        let i = self.find(key)?;
-        self.named[i].as_ref().map(|(_, p)| p)
+        let i = self.find_slot(key)?;
+        self.slot(i)
     }
 
     pub fn get_mut(&mut self, key: &PropertyKey) -> Option<&mut Prop> {
         if let PropertyKey::Index(i) = key {
             return self.indexed.get_mut(i);
         }
-        let i = self.find(key)?;
-        self.named[i].as_mut().map(|(_, p)| p)
+        let i = self.find_slot(key)?;
+        // Un cambio de atributos por esta vía no pasa por `insert`.
+        bump_setter_epoch();
+        self.slot_mut(i)
     }
 
     pub fn contains(&self, key: &PropertyKey) -> bool {
         self.get(key).is_some()
+    }
+
+    /// Pasa a modo diccionario.
+    fn make_dictionary(&mut self) -> &mut Dictionary {
+        if let Named::Shaped { shape, values } = &mut self.named {
+            let entries: Vec<Option<(PropertyKey, Prop)>> = shape
+                .keys
+                .iter()
+                .cloned()
+                .zip(std::mem::take(values).into_vec())
+                .map(Some)
+                .collect();
+            let lookup = shape
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.clone(), i))
+                .collect();
+            self.named = Named::Dict(Box::new(Dictionary {
+                id: next_shape_id(),
+                entries,
+                lookup,
+                removed: 0,
+            }));
+        }
+        match &mut self.named {
+            Named::Dict(d) => d,
+            Named::Shaped { .. } => unreachable!("diccionario"),
+        }
     }
 
     /// Crea o reemplaza (conservando la posición).
@@ -216,46 +620,45 @@ impl PropertyMap {
             self.indexed.insert(i, prop);
             return;
         }
-        if let Some(i) = self.find(&key) {
-            self.named[i] = Some((key, prop));
+        if affects_sets(&prop) {
+            bump_setter_epoch();
+        }
+        if let Some(i) = self.find_slot(&key) {
+            if let Some(p) = self.slot_mut(i) {
+                *p = prop;
+            }
             return;
         }
-        let pos = self.named.len();
-        if let Some(map) = &mut self.lookup {
-            map.insert(key.clone(), pos);
+        let to_dict = matches!(&self.named, Named::Shaped { shape, .. } if shape.keys.len() >= DICTIONARY_LIMIT);
+        if to_dict {
+            self.make_dictionary();
         }
-        self.named.push(Some((key, prop)));
-        if self.lookup.is_none() && self.named.len() - self.removed > LINEAR_LIMIT {
-            self.rebuild_lookup();
-        }
-    }
-
-    fn rebuild_lookup(&mut self) {
-        let mut map = HashMap::new();
-        for (i, e) in self.named.iter().enumerate() {
-            if let Some((k, _)) = e {
-                map.insert(k.clone(), i);
+        match &mut self.named {
+            Named::Shaped { shape, values } => {
+                *shape = shape.transition(&key);
+                values.push(prop);
+            }
+            Named::Dict(d) => {
+                d.id = next_shape_id();
+                d.lookup.insert(key.clone(), d.entries.len());
+                d.entries.push(Some((key, prop)));
             }
         }
-        self.lookup = Some(map);
     }
 
     pub fn remove(&mut self, key: &PropertyKey) -> Option<Prop> {
         if let PropertyKey::Index(i) = key {
             return self.indexed.remove(i);
         }
-        let i = self.find(key)?;
-        let (_, prop) = self.named[i].take()?;
-        if let Some(map) = &mut self.lookup {
-            map.remove(key);
-        }
-        self.removed += 1;
-        if self.removed > 16 && self.removed * 2 > self.named.len() {
-            self.named.retain(|e| e.is_some());
-            self.removed = 0;
-            if self.lookup.is_some() {
-                self.rebuild_lookup();
-            }
+        self.find_slot(key)?;
+        // Borrar pasa el objeto a modo diccionario.
+        let d = self.make_dictionary();
+        let i = d.lookup.remove(key)?;
+        let (_, prop) = d.entries[i].take()?;
+        d.id = next_shape_id();
+        d.removed += 1;
+        if d.removed > 16 && d.removed * 2 > d.entries.len() {
+            d.compact();
         }
         Some(prop)
     }
@@ -273,15 +676,16 @@ impl PropertyMap {
 
     /// Los strings y después los símbolos (sin los índices).
     pub fn push_named_keys(&self, out: &mut Vec<PropertyKey>) {
-        for (k, _) in self.named.iter().flatten() {
-            if !k.is_symbol() {
-                out.push(k.clone());
-            }
+        fn push<'a>(
+            out: &mut Vec<PropertyKey>,
+            keys: impl Iterator<Item = &'a PropertyKey> + Clone,
+        ) {
+            out.extend(keys.clone().filter(|k| !k.is_symbol()).cloned());
+            out.extend(keys.filter(|k| k.is_symbol()).cloned());
         }
-        for (k, _) in self.named.iter().flatten() {
-            if k.is_symbol() {
-                out.push(k.clone());
-            }
+        match &self.named {
+            Named::Shaped { shape, .. } => push(out, shape.keys.iter()),
+            Named::Dict(d) => push(out, d.entries.iter().flatten().map(|(k, _)| k)),
         }
     }
 
@@ -296,34 +700,64 @@ impl PropertyMap {
     }
 
     pub fn len(&self) -> usize {
-        self.indexed.len() + self.named.len() - self.removed
+        self.indexed.len() + self.named_len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub fn values(&self) -> impl Iterator<Item = &Prop> {
-        self.indexed
-            .values()
-            .chain(self.named.iter().flatten().map(|(_, p)| p))
+    pub fn values(&self) -> Box<dyn Iterator<Item = &Prop> + '_> {
+        match &self.named {
+            Named::Shaped { values, .. } => Box::new(self.indexed.values().chain(values.iter())),
+            Named::Dict(d) => Box::new(
+                self.indexed
+                    .values()
+                    .chain(d.entries.iter().flatten().map(|(_, p)| p)),
+            ),
+        }
     }
 
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Prop> {
-        self.indexed
-            .values_mut()
-            .chain(self.named.iter_mut().flatten().map(|(_, p)| p))
+    pub fn values_mut(&mut self) -> Box<dyn Iterator<Item = &mut Prop> + '_> {
+        // Puede cambiar atributos sin pasar por `insert`.
+        bump_setter_epoch();
+        match &mut self.named {
+            Named::Shaped { values, .. } => {
+                Box::new(self.indexed.values_mut().chain(values.iter_mut()))
+            }
+            Named::Dict(d) => Box::new(
+                self.indexed
+                    .values_mut()
+                    .chain(d.entries.iter_mut().flatten().map(|(_, p)| p)),
+            ),
+        }
     }
 }
 
 impl Trace for PropertyMap {
     fn trace(&self, t: &mut Tracer) {
-        for p in self.values() {
+        for p in self.indexed.values() {
             p.trace(t);
         }
-        for (k, _) in self.named.iter().flatten() {
+        let trace_key = |t: &mut Tracer, k: &PropertyKey| {
             if let PropertyKey::Symbol(s) = k {
                 t.gc(*s);
+            }
+        };
+        match &self.named {
+            Named::Shaped { shape, values } => {
+                for p in values.iter() {
+                    p.trace(t);
+                }
+                for k in &shape.keys {
+                    trace_key(t, k);
+                }
+            }
+            Named::Dict(d) => {
+                for (k, p) in d.entries.iter().flatten() {
+                    p.trace(t);
+                    trace_key(t, k);
+                }
             }
         }
     }

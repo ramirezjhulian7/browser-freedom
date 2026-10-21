@@ -787,6 +787,18 @@ impl<'t> Codegen<'t> {
         }
     }
 
+    /// Una expresión cuyo valor se descarta (E3): `x++` es `++x` (el mismo efecto: un solo
+    /// ToNumeric y el mismo PutValue; solo cambia el valor descartado).
+    pub(crate) fn expr_discard(&mut self, e: &Expr) {
+        match e {
+            Expr::Update {
+                operator, argument, ..
+            } => self.update(operator == &"++", true, argument),
+            _ => self.expr(e),
+        }
+        self.emit(Op::Pop);
+    }
+
     fn update(&mut self, inc: bool, prefix: bool, arg: &Expr) {
         let r = self.emit_ref(arg);
         self.emit_ref_get(&r);

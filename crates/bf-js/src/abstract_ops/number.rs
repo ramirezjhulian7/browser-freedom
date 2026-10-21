@@ -6,6 +6,23 @@ use crate::string::JsString;
 /// Number::toString(x, 10) (§6.1.6.1.20): los dígitos más cortos que vuelven a `x` (los da
 /// el formateo de `f64` de Rust) con las reglas de exponente del spec.
 pub fn number_to_string(x: f64) -> JsString {
+    // Ruta rápida (E3): un entero (los dígitos de §6.1.6.1.20 sin exponente ni decimales).
+    if x.fract() == 0.0 && x.abs() < 1e18 && x != 0.0 {
+        let mut n = x.abs() as u64;
+        let mut digits = [0u16; 20];
+        let mut i = digits.len();
+        while n > 0 {
+            i -= 1;
+            digits[i] = u16::from(b'0') + (n % 10) as u16;
+            n /= 10;
+        }
+        let mut units = Vec::with_capacity(digits.len() - i + 1);
+        if x < 0.0 {
+            units.push(u16::from(b'-'));
+        }
+        units.extend_from_slice(&digits[i..]);
+        return JsString::from_units(units);
+    }
     JsString::from(number_to_std_string(x).as_str())
 }
 

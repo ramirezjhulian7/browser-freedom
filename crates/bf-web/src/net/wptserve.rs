@@ -247,6 +247,45 @@ impl WptServe {
                 }
                 resp(200, "OK", &h, out.into_bytes())
             }
+            "message.py" if dir.ends_with("/eventsource/resources") => {
+                let mime = req.param("mime").unwrap_or("text/event-stream").to_owned();
+                let mut body = req
+                    .param("message")
+                    .unwrap_or("data: data")
+                    .as_bytes()
+                    .to_vec();
+                if req.param("newline") != Some("none") {
+                    body.extend_from_slice(b"\n\n");
+                }
+                body.push(b'\n');
+                resp(200, "OK", &[("Content-Type", mime)], body)
+            }
+            "last-event-id.py" if dir.ends_with("/eventsource/resources") => {
+                let ct = [("Content-Type", "text/event-stream".to_owned())];
+                match req.headers.get("last-event-id") {
+                    Some(id) if !id.is_empty() => {
+                        resp(200, "OK", &ct, format!("data: {id}\n\n").into_bytes())
+                    }
+                    _ => {
+                        let idv = req.param("idvalue").unwrap_or("\u{2026}");
+                        let body = format!("id: {idv}\nretry: 200\ndata: hello\n\n");
+                        resp(200, "OK", &ct, body.into_bytes())
+                    }
+                }
+            }
+            "status-error.py" if dir.ends_with("/eventsource/resources") => {
+                let status = req
+                    .param("status")
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(404);
+                let body: &[u8] = if matches!(status, 204 | 205) {
+                    b""
+                } else {
+                    b"data: data\n\n"
+                };
+                let ct = [("Content-Type", "text/event-stream".to_owned())];
+                resp(status, "HAHAHAHA", &ct, body.to_vec())
+            }
             "parse-headers.py" => {
                 let mut h: Vec<(&str, String)> = Vec::new();
                 if let Some(v) = req.param("my-custom-header") {

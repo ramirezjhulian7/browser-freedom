@@ -20,9 +20,13 @@
 
 pub mod blob;
 pub mod body;
+pub mod channels;
+pub mod eventsource;
 pub mod fetch;
 pub mod formdata;
 pub mod headers;
+pub mod streams;
+pub mod websocket;
 pub mod wptserve;
 pub mod xhr;
 
@@ -63,6 +67,16 @@ pub type NetResult = Result<NetResponse, String>;
 /// Quien hace las peticiones (bloqueante; se puede llamar desde cualquier hilo).
 pub trait NetBackend: Send + Sync {
     fn fetch(&self, req: &NetRequest) -> NetResult;
+    /// La cabecera `Cookie` para `url` (WebSocket, EventSource), si el backend tiene jarra.
+    fn cookie_header(&self, _url: &Url) -> Option<String> {
+        None
+    }
+    /// Guarda los `Set-Cookie` de una respuesta que no pasó por [`NetBackend::fetch`].
+    fn store_cookies(&self, _url: &Url, _set_cookies: &[String]) {}
+    /// ¿Puede abrir conexiones de red reales? (WebSocket y EventSource por partes.)
+    fn network(&self) -> bool {
+        false
+    }
 }
 
 fn from_bf_net(r: Result<(bf_net::Response, Vec<Url>), bf_net::FetchError>) -> NetResult {
@@ -80,12 +94,140 @@ impl NetBackend for bf_net::Fetcher {
     fn fetch(&self, req: &NetRequest) -> NetResult {
         from_bf_net(self.fetch_request(&req.url, &req.options))
     }
+    fn cookie_header(&self, url: &Url) -> Option<String> {
+        self.cookies.cookie_header(url)
+    }
+    fn store_cookies(&self, url: &Url, set_cookies: &[String]) {
+        for c in set_cookies {
+            self.cookies.set_cookie(url, c);
+        }
+    }
+    fn network(&self) -> bool {
+        true
+    }
 }
 
 impl NetBackend for bf_net::NetLoader {
     fn fetch(&self, req: &NetRequest) -> NetResult {
         NetBackend::fetch(&self.fetcher, req)
     }
+    fn cookie_header(&self, url: &Url) -> Option<String> {
+        NetBackend::cookie_header(&self.fetcher, url)
+    }
+    fn store_cookies(&self, url: &Url, set_cookies: &[String]) {
+        NetBackend::store_cookies(&self.fetcher, url, set_cookies);
+    }
+    fn network(&self) -> bool {
+        true
+    }
+}
+
+/// Un evento de una conexión que sigue abierta (WebSocket, EventSource), desde su hilo.
+#[derive(Debug, Clone)]
+pub enum NetEvent {
+    Ws(bf_net::websocket::WsEvent),
+    /// La cabecera de una respuesta por partes.
+    Head {
+        url: Url,
+        status: u16,
+        headers: HeaderList,
+    },
+    Chunk(Vec<u8>),
+    /// Fin de la respuesta (`Err` = error de red).
+    End(Result<(), String>),
+}
+
+/// Quien recibe los eventos de una conexión.
+pub type NetListener = Box<dyn FnMut(&mut Agent, NetEvent)>;
+
+type Listener = std::rc::Rc<std::cell::RefCell<NetListener>>;
+
+/// Por dónde un hilo de red manda los eventos de una conexión.
+#[derive(Clone)]
+pub struct EventSink {
+    id: u64,
+    events: Arc<Mutex<Vec<(u64, NetEvent)>>>,
+    waker: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl EventSink {
+    pub fn push(&self, e: NetEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((self.id, e));
+        if let Some(w) = &self.waker {
+            w();
+        }
+    }
+}
+
+/// Registra una conexión: `listener` recibe sus eventos en tareas *networking*. Devuelve el
+/// `EventSink` para el hilo de la conexión.
+pub fn listen(agent: &mut Agent, listener: NetListener) -> EventSink {
+    let realm = WebContextHandle::current(agent).realm;
+    let s = state_of(agent, realm);
+    s.next_id += 1;
+    let id = s.next_id;
+    s.listeners
+        .insert(id, std::rc::Rc::new(std::cell::RefCell::new(listener)));
+    let sink = EventSink {
+        id,
+        events: s.events.clone(),
+        waker: s.waker.clone(),
+    };
+    ensure_polling(agent, realm);
+    sink
+}
+
+/// Deja de escuchar una conexión.
+pub fn unlisten(agent: &mut Agent, id: u64) {
+    state(agent).listeners.remove(&id);
+}
+
+impl EventSink {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+/// Sin waker (tests, runner, shell sin enganche) un temporizador interno reparte los
+/// eventos mientras haya conexiones abiertas.
+fn ensure_polling(agent: &mut Agent, realm: RealmId) {
+    let s = state_of(agent, realm);
+    if s.waker.is_some() || s.poll_timer.is_some() {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let f = agent.create_builtin_with_slots(poll_tick, 0, "", vec![Value::Number(realm as f64)]);
+    agent.current_realm = saved;
+    let t = agent.set_timer(
+        realm,
+        bf_js::host::TimerHandler::Callback(Value::Object(f)),
+        4.0,
+        Vec::new(),
+        true,
+    );
+    state_of(agent, realm).poll_timer = Some(t);
+}
+
+fn poll_tick(agent: &mut Agent, a: &bf_js::vm::function::CallArgs<'_>) -> JsResult<Value> {
+    let realm = match &agent.heap[a.callee].kind {
+        bf_js::object::ObjectKind::Builtin(b) => {
+            b.slots.first().and_then(Value::as_number).unwrap_or(0.0) as RealmId
+        }
+        _ => return Ok(Value::Undefined),
+    };
+    pump(agent, realm);
+    let s = state_of(agent, realm);
+    let idle = s.listeners.is_empty()
+        && s.pending.is_empty()
+        && s.events.lock().map(|e| e.is_empty()).unwrap_or(true);
+    if idle && let Some(t) = s.poll_timer.take() {
+        agent.clear_timer(t);
+    }
+    Ok(Value::Undefined)
 }
 
 /// Un backend sobre un `ResourceLoader` (archivos montados, `data:`): `200 OK` con el tipo
@@ -162,6 +304,13 @@ pub struct NetState {
     /// Los XMLHttpRequest y FileReader por id de target.
     pub(crate) xhrs: HashMap<u64, xhr::XhrState>,
     pub(crate) readers: HashMap<u64, blob::ReaderState>,
+    /// Los eventos de las conexiones abiertas y quién los recibe.
+    events: Arc<Mutex<Vec<(u64, NetEvent)>>>,
+    listeners: HashMap<u64, Listener>,
+    poll_timer: Option<bf_js::host::TimerId>,
+    pub(crate) sockets: HashMap<u64, websocket::SocketState>,
+    pub(crate) sources: HashMap<u64, eventsource::SourceState>,
+    pub(crate) ports: channels::Ports,
 }
 
 impl Default for NetState {
@@ -175,6 +324,12 @@ impl Default for NetState {
             next_id: 0,
             xhrs: HashMap::new(),
             readers: HashMap::new(),
+            events: Arc::new(Mutex::new(Vec::new())),
+            listeners: HashMap::new(),
+            poll_timer: None,
+            sockets: HashMap::new(),
+            sources: HashMap::new(),
+            ports: channels::Ports::default(),
         }
     }
 }
@@ -226,7 +381,31 @@ pub fn pump(agent: &mut Agent, realm: RealmId) -> usize {
         queue_result(agent, realm, cb, result);
         n += 1;
     }
+    let events: Vec<(u64, NetEvent)> = {
+        let s = state_of(agent, realm);
+        std::mem::take(&mut *s.events.lock().unwrap_or_else(|e| e.into_inner()))
+    };
+    for (id, e) in events {
+        agent.queue_task(
+            TaskSource::Networking,
+            Box::new(move |agent: &mut Agent| {
+                let saved = agent.current_realm;
+                agent.current_realm = realm;
+                let l = state_of(agent, realm).listeners.get(&id).cloned();
+                if let Some(l) = l {
+                    (l.borrow_mut())(agent, e);
+                }
+                agent.current_realm = saved;
+            }),
+        );
+        n += 1;
+    }
     n
+}
+
+/// El backend de la ventana en curso (para las conexiones abiertas).
+pub fn current_backend(agent: &mut Agent) -> Arc<dyn NetBackend> {
+    backend(agent)
 }
 
 /// Las peticiones en vuelo de `realm` (para que el embebedor sepa que debe esperar).
@@ -439,6 +618,12 @@ pub struct NetClasses {
     pub xhr_event_target: HostClassId,
     pub xhr: HostClassId,
     pub xhr_upload: HostClassId,
+    pub close_event: HostClassId,
+    pub message_port: HostClassId,
+    pub message_channel: HostClassId,
+    pub broadcast_channel: HostClassId,
+    pub websocket: HostClassId,
+    pub event_source: HostClassId,
 }
 
 pub fn classes(agent: &Agent) -> &NetClasses {
@@ -463,6 +648,15 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             agent.register_host_class(xhr::xhr_event_target_class(dom.event_target));
         let xhr = agent.register_host_class(xhr::xhr_class(xhr_event_target));
         let xhr_upload = agent.register_host_class(xhr::upload_class(xhr_event_target));
+        let close_event = agent.register_host_class(websocket::close_event_class(dom.event));
+        let message_port =
+            agent.register_host_class(channels::message_port_class(dom.event_target));
+        let message_channel = agent.register_host_class(channels::message_channel_class());
+        let broadcast_channel =
+            agent.register_host_class(channels::broadcast_channel_class(dom.event_target));
+        let websocket = agent.register_host_class(websocket::websocket_class(dom.event_target));
+        let event_source =
+            agent.register_host_class(eventsource::event_source_class(dom.event_target));
         agent.set_embedder_data(NetClasses {
             headers,
             request,
@@ -475,6 +669,12 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             xhr_event_target,
             xhr,
             xhr_upload,
+            close_event,
+            message_port,
+            message_channel,
+            broadcast_channel,
+            websocket,
+            event_source,
         });
         agent.host_extend_class(dom.window, fetch::window_partial());
     }
@@ -490,6 +690,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
         set_iterator(agent, realm, name, f);
     }
     blob::install_object_urls(agent, realm);
+    streams::install(agent, realm);
     fetch::install_send_beacon(agent, realm);
     agent.current_realm = saved;
 }

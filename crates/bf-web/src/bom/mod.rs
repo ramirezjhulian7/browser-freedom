@@ -34,6 +34,11 @@ pub trait BomHooks {
     /// Navegar la ventana a `url` (`location.href = …`, `location.assign`); `replace` para
     /// `location.replace` (no agrega una entrada al historial).
     fn navigate(&mut self, _url: &Url, _replace: bool) {}
+    /// E1: el envío POST de un formulario (HTML §4.10.21.3): navegar a `url` con `body` de
+    /// tipo `content_type`. Sin implementarlo, navega sin cuerpo.
+    fn navigate_post(&mut self, url: &Url, _body: Vec<u8>, _content_type: &str) {
+        self.navigate(url, false);
+    }
     /// La URL del documento cambió sin cargar otro (fragmento, `pushState`, traversal dentro
     /// del documento); `replace` si no se agregó una entrada al historial.
     fn same_document_navigation(&mut self, _url: &Url, _replace: bool) {}

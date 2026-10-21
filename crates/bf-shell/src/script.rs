@@ -270,6 +270,15 @@ impl BomHooks for ShellBom {
         });
     }
 
+    // E1: el envío POST de un formulario desde script.
+    fn navigate_post(&mut self, url: &Url, body: Vec<u8>, content_type: &str) {
+        self.request(PageRequest::Navigate {
+            url: url.clone(),
+            replace: false,
+            post: Some((body, content_type.to_owned())),
+        });
+    }
+
     fn same_document_navigation(&mut self, url: &Url, replace: bool) {
         self.request(PageRequest::SameDocument {
             url: url.clone(),
@@ -600,6 +609,18 @@ impl Engine {
         snapshot.scroll = scroll;
         snapshot.device_pixel_ratio = device_pixel_ratio;
         *self.images.borrow_mut() = page.images.sizes.clone();
+        // E1: las imágenes decodificadas de la página, para `drawImage`/`createPattern` con
+        // `<img>` (los bitmaps de los canvas no: esos ya los tiene el motor).
+        let bitmaps: std::collections::HashMap<String, Arc<bf_paint::Pixmap>> = page
+            .images
+            .by_url
+            .iter()
+            .filter(|(url, _)| !url.starts_with("canvas:"))
+            .map(|(url, p)| (url.clone(), p.clone()))
+            .collect();
+        self.rt
+            .agent
+            .set_realm_data(realm, bf_web::html::canvas::ImageBitmaps(bitmaps));
         if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
             ctx.layout = Some(snapshot);
         }
@@ -696,6 +717,30 @@ impl Engine {
             );
             self.flush_rejections();
         }
+    }
+
+    /// Los bitmaps de los `<canvas>` del documento (E1), para pintarlos como imágenes.
+    pub fn canvases(&self) -> Vec<(bf_dom::NodeId, Arc<bf_paint::Pixmap>)> {
+        bf_web::html::canvas::snapshot(&self.rt.agent, self.realm)
+            .into_iter()
+            .map(|(n, _, p)| (n, p))
+            .collect()
+    }
+
+    /// Completa una activación del documento de la ventana (E1: `label`, `summary`).
+    pub fn run_activation(&mut self, a: bf_dom::events::Activation) {
+        let realm = self.realm;
+        let agent = &mut self.rt.agent;
+        let saved = agent.current_realm;
+        agent.current_realm = realm;
+        bf_web::html::activation::run(agent, 0, a);
+        agent.current_realm = saved;
+        self.flush_rejections();
+    }
+
+    /// Cambia cada vez que un script dibuja en un `<canvas>` (E1).
+    pub fn canvas_version(&self) -> u64 {
+        bf_web::html::canvas::version(&self.rt.agent, self.realm)
     }
 
     /// El documento de la ventana.

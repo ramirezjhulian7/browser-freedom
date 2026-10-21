@@ -319,6 +319,9 @@ pub(crate) struct Listeners {
     map: HashMap<EventTarget, Vec<ListenerEntry>>,
     next_object: u64,
     activations: Vec<Activation>,
+    /// E1: los `details` cuyo atributo `open` apareció o desapareció (HTML §4.11.1), con su
+    /// estado nuevo.
+    details_toggles: Vec<(NodeId, bool)>,
 }
 
 /// Una acción de *activation behavior* que debe completar el navegador.
@@ -330,6 +333,10 @@ pub enum Activation {
     Submit(NodeId),
     /// Resetear el formulario del botón.
     Reset(NodeId),
+    /// E1: un `label` reenvía el click a su control (HTML §4.10.4).
+    Label(NodeId),
+    /// E1: el `summary` de un `details` abre o cierra su `details` (HTML §4.11.2).
+    Summary(NodeId),
 }
 
 /// Ejecuta los listeners de script.
@@ -434,6 +441,77 @@ impl Document {
     /// Acciones de activación pendientes.
     pub fn take_activations(&mut self) -> Vec<Activation> {
         std::mem::take(&mut self.listeners.activations)
+    }
+
+    /// E1: los cambios de `open` de los `details` pendientes de su evento `toggle`.
+    pub fn take_details_toggles(&mut self) -> Vec<(NodeId, bool)> {
+        std::mem::take(&mut self.listeners.details_toggles)
+    }
+
+    /// E1: "the summary for its parent details" (HTML §4.11.2): el primer hijo `summary` de
+    /// un `details`.
+    pub fn is_summary_for_parent_details(&self, n: NodeId) -> bool {
+        if !self.element(n).is_some_and(|e| e.is_html("summary")) {
+            return false;
+        }
+        let Some(p) = self.parent(n) else {
+            return false;
+        };
+        self.element(p).is_some_and(|e| e.is_html("details"))
+            && self
+                .children(p)
+                .find(|&c| self.element(c).is_some_and(|e| e.is_html("summary")))
+                == Some(n)
+    }
+
+    /// E1: ¿Es `n` contenido interactivo (HTML §3.2.5.2.7)?
+    fn is_interactive_content(&self, n: NodeId) -> bool {
+        let Some(e) = self.element(n) else {
+            return false;
+        };
+        let local = e.name.to_string();
+        if e.ns != bf_infra::Namespace::Html {
+            return false;
+        }
+        match local.as_str() {
+            "a" => e.attr("href").is_some(),
+            "audio" | "video" => e.attr("controls").is_some(),
+            "img" => e.attr("usemap").is_some(),
+            "input" => !e
+                .attr("type")
+                .is_some_and(|t| t.eq_ignore_ascii_case("hidden")),
+            "button" | "details" | "embed" | "iframe" | "label" | "select" | "textarea" => true,
+            _ => false,
+        }
+    }
+
+    /// E1: el *activation behavior* de `label`: nada si el click fue en un descendiente
+    /// interactivo (o dentro de uno).
+    fn label_activation(&mut self, n: NodeId, event: &Event) {
+        if let Some(EventTarget::Node(t)) = event.target {
+            let mut cur = Some(t);
+            while let Some(c) = cur {
+                if c == n {
+                    break;
+                }
+                if self.is_interactive_content(c) {
+                    return;
+                }
+                cur = self.parent(c);
+            }
+        }
+        self.listeners.activations.push(Activation::Label(n));
+    }
+
+    /// E1: anota un cambio de presencia del atributo `open` de un `details`.
+    pub(crate) fn details_open_changed(&mut self, el: NodeId, was_present: bool) {
+        if !self.element(el).is_some_and(|e| e.is_html("details")) {
+            return;
+        }
+        let now = self.element(el).is_some_and(|e| e.attr("open").is_some());
+        if now != was_present {
+            self.listeners.details_toggles.push((el, now));
+        }
     }
 
     /// "Get the parent" de un target (§2.9).
@@ -682,8 +760,17 @@ impl Document {
         let Some(e) = self.element(n) else {
             return false;
         };
+        // E1: sin `href` no son hipervínculos ni targets de activación (como en los
+        // navegadores; el `label` que los contiene sí se activa).
         if e.is_html("a") || e.is_html("area") {
+            return e.attr("href").is_some();
+        }
+        // E1: `label` y el `summary` de un `details`.
+        if e.is_html("label") {
             return true;
+        }
+        if e.is_html("summary") {
+            return self.is_summary_for_parent_details(n);
         }
         if e.is_html("input") {
             let t = e.attr("type").unwrap_or("").to_ascii_lowercase();
@@ -772,10 +859,19 @@ impl Document {
     }
 
     /// "Activation behavior" de `a`, `area`, `input` y `button`.
-    fn activation_behavior(&mut self, n: NodeId, _event: &Event, host: &mut dyn ScriptHost) {
+    fn activation_behavior(&mut self, n: NodeId, event: &Event, host: &mut dyn ScriptHost) {
         let Some(e) = self.element(n) else {
             return;
         };
+        // E1.
+        if e.is_html("label") {
+            self.label_activation(n, event);
+            return;
+        }
+        if e.is_html("summary") {
+            self.listeners.activations.push(Activation::Summary(n));
+            return;
+        }
         if e.is_html("a") || e.is_html("area") {
             if e.attr("href").is_some() {
                 self.listeners

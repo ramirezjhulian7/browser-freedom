@@ -1,0 +1,3 @@
+# E3: `JsString` aplana sus ropes de forma perezosa (mutabilidad interior), pero su hash y su
+# igualdad dependen solo de los code units, que no cambian: es una clave válida.
+ignore-interior-mutability = ["bf_js::string::JsString"]

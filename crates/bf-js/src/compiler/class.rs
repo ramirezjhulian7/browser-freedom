@@ -357,6 +357,8 @@ impl<'t> Codegen<'t> {
             has_prototype: false,
             decls: None,
             dynamic: false,
+
+            ics: Default::default(),
         })
     }
 }

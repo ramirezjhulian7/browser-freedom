@@ -456,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "bf-css",
  "bf-dom",
+ "bf-font",
  "bf-html",
  "bf-infra",
  "bf-js",
@@ -463,6 +464,7 @@ dependencies = [
  "bf-net",
  "bf-style",
  "bf-url",
+ "tiny-skia",
 ]
 
 [[package]]
