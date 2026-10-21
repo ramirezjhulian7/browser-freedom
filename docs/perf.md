@@ -32,7 +32,37 @@ ROUNDS=5 BASE=target/base-target/release/bf-bench NEW=target/release/bf-bench ba
 
 ## Resultados
 
-TABLA
+Mejor de 5 rondas alternadas (base = `master` `2eac3c1`), en ms:
+
+| benchmark | qué mide | master | E3 | speedup |
+|---|---|---:|---:|---:|
+| `fib` ★ | fib(30): llamadas recursivas, enteros | 2786.8 | 718.9 | 3.88× |
+| `props` ★ | bucle de lecturas y escrituras de propiedades | 350.7 | 93.3 | 3.76× |
+| `concat` ★ | `s += …`, templates, concatenación en bucle | 2531.7 | 62.9 | 40.25× |
+| `arrays` ★ | `push`, suma por índice, `map`/`filter`/`reduce` | 265.3 | 91.7 | 2.89× |
+| `closures` ★ | clausuras y variables capturadas | 476.1 | 153.5 | 3.10× |
+| `json` ★ | `JSON.stringify` + `JSON.parse` | 142.5 | 41.9 | 3.40× |
+| `regexp` ★ | `match`/`exec`/`replace`/`split`/`test` sobre 168 KB | 1422.8 | 506.7 | 2.81× (\*) |
+| `dom` ★ | objetos tipo nodo del DOM con 18 propiedades: árbol, layout, recorridos | 3897.0 | 800.4 | 4.87× |
+| `alloc` | literales de objetos y arrays, GC | 479.2 | 153.1 | 3.13× |
+| `dict` | objetos como diccionario (5000 claves, `delete`) | 122.4 | 31.2 | 3.92× |
+| `loops` | bucles con locales y aritmética | 791.6 | 175.9 | 4.50× |
+| `methods` | clases, métodos del prototipo, `this` | 524.0 | 144.0 | 3.64× |
+| `nbody` | coma flotante y propiedades | 1778.6 | 400.1 | 4.45× |
+| `poly` | accesos polimórficos (4 formas) | 728.7 | 199.9 | 3.65× |
+| `strings` | `join`, `indexOf`, `slice`, `split` | 68.4 | 20.9 | 3.28× |
+
+★ = los 8 del pedido. **Media geométrica: 4.25× (los 15), 4.72× (los 8 pedidos); 3.47× en
+los 8 sin `concat`** (los ropes lo vuelven lineal y dominaría la media).
+
+(\*) `regexp` se midió aparte (3 rondas) después de la ruta rápida de `@@split`, que en ese
+programa pasó de 190 ms a 8 ms; lo que queda es `exec` en bucle (~4 µs por match: el objeto
+resultado y `lastIndex` van por las operaciones genéricas) y el propio matcher.
+
+Verificación: test262 sin regresiones (52 018 tests, 84.2 %, dos `timeout` pasan a
+`passed`); WPT testharness (`dom/events`, `dom/nodes`, `dom/ranges`, `dom/traversal`, `url`)
+sin cambios de estado por subtest, con tres subtests nuevos que antes no terminaban
+(`NodeList-static-length-getter-tampered-{1,2,3}`); la corrida pasó de 78 s a 60 s.
 
 ## Qué cambió
 
@@ -98,7 +128,17 @@ Umbral adaptativo (la próxima recolección llega después de asignar tantos obj
 vivos, mínimo 100 000). Ahora se miden las pausas: `GcStats` tiene `pause_total` y
 `pause_max` (`bf-js bench --gc`).
 
-PAUSAS
+Pausas medidas con `bf-js bench --gc` (una corrida; solo los programas que recolectan):
+
+| benchmark | recolecciones | liberados | pausa total | pausa máxima |
+|---|---:|---:|---:|---:|
+| `alloc` | 6 | 599 223 | 28.4 ms | 5.3 ms |
+| `methods` | 1 | 99 208 | 3.1 ms | 3.1 ms |
+| `regexp` | 1 | 99 211 | 32.5 ms | 32.5 ms |
+| `dom` | 1 | 0 | 22.8 ms | 22.8 ms |
+
+La pausa crece con lo vivo (marcado completo): `dom` tiene ~100 000 objetos vivos. Un GC
+generacional (o incremental) es lo que la bajaría.
 
 ## Profundidad
 
@@ -107,6 +147,20 @@ niveles de paréntesis, arrays, bloques, objetos y funciones anidadas con la con
 navegador (`bf-shell`: 64 MB de pila de JS). El parser usa ~3 KB de pila por nivel de
 paréntesis y ~10 KB por función anidada; con el límite por defecto de `parse_script`
 (512 KB) llega a ~170 paréntesis, y con el del agente (4 MB) a ~1300.
+
+## Decisiones
+
+- **Shapes en `object/property_map.rs`** (no en un `shape.rs` aparte): el shape y el mapa de
+  propiedades comparten invariantes (posición del slot, modo diccionario) y quedan juntos.
+- **Cambio de atributos sin transición**: los atributos viajan con cada valor, así que
+  cambiarlos no cambia la disposición de las claves; las caches de asignación se invalidan
+  con una época global (que también avanza con `[[SetPrototypeOf]]`).
+- **Sin enteros `i32` etiquetados**: `Value::Number` sigue siendo `f64` (cambiarlo toca todo
+  el motor y los host bindings). La aritmética y las comparaciones Number × Number van por la
+  ruta rápida en una instrucción de máquina; los enteros tienen rutas propias donde importa
+  (ToString, concatenación, `JSON.parse`, índices de Arrays).
+- **Sin IC propia para `Call`**: la llamada a un método es `GetPropKeep` (con cache) + `Call`,
+  y `Call` a una función ECMAScript ya no sale del bucle del intérprete.
 
 ## Pendiente
 
