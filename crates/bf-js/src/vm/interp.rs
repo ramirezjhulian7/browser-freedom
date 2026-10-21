@@ -53,6 +53,25 @@ macro_rules! frame {
 
 impl Agent {
     pub(crate) fn run(&mut self, resume: Resume) -> JsResult<FrameExit> {
+        let base = self.frames.len();
+        let r = self.run_loop(resume);
+        if r.is_err() {
+            // Una salida anticipada (terminación) con llamadas en línea pendientes.
+            while self.frames.len() > base {
+                self.pop_inline_frame();
+            }
+        }
+        r
+    }
+
+    /// Saca el frame de una llamada en línea (E3) y restaura el realm del llamador.
+    fn pop_inline_frame(&mut self) {
+        let f = self.frames.pop().expect("frame");
+        self.current_realm = f.caller_realm;
+        self.recycle_frame(f);
+    }
+
+    fn run_loop(&mut self, resume: Resume) -> JsResult<FrameExit> {
         let mut pending: Option<JsResult<Flow>> = None;
         if !matches!(resume, Resume::Normal) {
             let f = frame!(self);
@@ -89,12 +108,13 @@ impl Agent {
                     let mut n = 0u64;
                     let mut back = false;
                     {
+                        let genv = self.realms[self.current_realm].global_env;
                         let heap = &mut self.heap;
                         let f = self.frames.last_mut().expect("frame");
                         loop {
                             let op = f.code.ops[f.pc];
                             f.pc += 1;
-                            match fast_op(f, heap, op) {
+                            match fast_op(f, heap, genv, op) {
                                 Fast::Done => n += 1,
                                 Fast::BackJump => {
                                     n += 1;
@@ -120,14 +140,33 @@ impl Agent {
                 Ok(Flow::Next) => {}
                 Ok(Flow::Return(v)) => {
                     if !self.unwind_return(&v) {
-                        return Ok(FrameExit::Return(v));
+                        if !frame!(self).inline {
+                            return Ok(FrameExit::Return(v));
+                        }
+                        // La vuelta de una llamada en línea: el resultado al llamador.
+                        self.pop_inline_frame();
+                        self.push(v);
+                        self.safepoint()?;
                     }
                 }
                 Ok(Flow::Yield(v, raw)) => return Ok(FrameExit::Yield(v, raw)),
                 Ok(Flow::GenStart(g)) => return Ok(FrameExit::GeneratorStart(g)),
                 Ok(Flow::Await(v)) => return Ok(FrameExit::Await(v)),
                 Err(Throw::Value(e)) => {
-                    if !self.unwind_throw(&e) {
+                    // Se busca un handler en el frame actual y, si es una llamada en línea,
+                    // en los de abajo.
+                    let mut handled = false;
+                    loop {
+                        if self.unwind_throw(&e) {
+                            handled = true;
+                            break;
+                        }
+                        if !frame!(self).inline {
+                            break;
+                        }
+                        self.pop_inline_frame();
+                    }
+                    if !handled {
                         return Err(Throw::Value(e));
                     }
                 }
@@ -1192,6 +1231,15 @@ impl Agent {
                     let args = s.split_off(base + 2);
                     let this = s.pop().expect("this");
                     s.pop();
+                    // Una función simple corre en este mismo bucle (sin recursión de Rust).
+                    if let Value::Object(fo) = callee
+                        && let Some(frame) = self.inline_frame(fo, this.clone(), &args)?
+                    {
+                        let mut frame = frame;
+                        frame.args = args;
+                        self.frames.push(frame);
+                        return Ok(Flow::Next);
+                    }
                     self.call_internal_vec(&callee, this, args)?
                 } else {
                     let (this, args) = {
@@ -2468,7 +2516,7 @@ fn primitive_truthiness(v: &Value) -> Option<bool> {
 /// Las instrucciones más frecuentes que no necesitan el agente (locales, constantes, pila,
 /// saltos y aritmética Number × Number). Deja el frame igual si devuelve [`Fast::Slow`].
 #[inline]
-fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, op: Op) -> Fast {
+fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, genv: Gc<Env>, op: Op) -> Fast {
     use crate::abstract_ops::conversion::{to_int32, to_uint32};
     macro_rules! jump {
         ($t:expr) => {{
@@ -2612,6 +2660,15 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, op: Op) -> Fast {
             }
             let v = f.stack.pop().expect("pila");
             *f.stack.last_mut().expect("pila") = v;
+        }
+        Op::GetGlobal(c) | Op::GetGlobalForCall(c) => {
+            let Some(v) = fast_ic_global(heap, &f.code, c, genv) else {
+                return Fast::Slow;
+            };
+            f.stack.push(v);
+            if matches!(op, Op::GetGlobalForCall(_)) {
+                f.stack.push(Value::Undefined);
+            }
         }
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
@@ -2844,4 +2901,32 @@ fn fast_ic_set(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<
         }
         None => false,
     }
+}
+
+/// Un acierto de la inline cache de `GetGlobal` con una propiedad de datos del objeto global.
+#[inline]
+fn fast_ic_global(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, genv: Gc<Env>) -> Option<Value> {
+    use crate::vm::ic::Ic;
+    let g = heap[genv].global()?;
+    let (object, decl_len) = (g.object, g.decl.len() as u32);
+    let props = &heap[object].props;
+    let shape = props.shape_id();
+    code.ics
+        .with(c, |site| {
+            site.ways.iter().find_map(|w| match w {
+                Ic::Global {
+                    shape: s,
+                    slot,
+                    decl_len: d,
+                } if *s == shape && *d == decl_len => match props.slot(*slot as usize) {
+                    Some(crate::object::Prop {
+                        value: crate::object::PropValue::Data { value, .. },
+                        ..
+                    }) => Some(value.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+        })
+        .flatten()
 }

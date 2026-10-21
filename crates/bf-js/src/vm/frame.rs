@@ -54,6 +54,11 @@ pub struct Frame {
     pub realm: RealmId,
     /// Funciones de bloque elevadas por B.3.2.2/B.3.2.3 en este código.
     pub hoisted: Option<Rc<HashSet<Atom>>>,
+    /// ¿Lo empujó un `Call` del intérprete en el mismo bucle (E3)? Al volver, su resultado
+    /// va a la pila del frame de abajo.
+    pub inline: bool,
+    /// El realm en curso antes de la llamada (para restaurarlo al volver).
+    pub caller_realm: RealmId,
 }
 
 impl Frame {
@@ -81,6 +86,8 @@ impl Frame {
             args: Vec::new(),
             realm,
             hoisted: None,
+            inline: false,
+            caller_realm: realm,
         }
     }
 
@@ -102,6 +109,8 @@ impl Frame {
             args: Vec::new(),
             realm,
             hoisted: None,
+            inline: false,
+            caller_realm: realm,
         }
     }
 }

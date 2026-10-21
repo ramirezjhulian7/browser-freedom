@@ -397,6 +397,51 @@ impl Agent {
         }
     }
 
+    /// El frame de una llamada en línea a `f` (E3): una función ECMAScript que no es
+    /// generadora, async ni constructor de clase, con espacio en la pila. `None` si no
+    /// corresponde (la llamada va por [`Agent::call_internal_vec`]).
+    pub(crate) fn inline_frame(
+        &mut self,
+        f: Gc<Object>,
+        this: Value,
+        _args: &[Value],
+    ) -> JsResult<Option<Frame>> {
+        let (code, env, realm) = match &self.heap[f].kind {
+            ObjectKind::Function(c)
+                if !c.code.is_async
+                    && !c.code.is_generator
+                    && !matches!(c.code.kind, CodeKind::ClassConstructor { .. }) =>
+            {
+                (c.code.clone(), c.env, c.realm)
+            }
+            _ => return Ok(None),
+        };
+        if self.stack_exhausted() {
+            return Ok(None);
+        }
+        // OrdinaryCallBindThis (§10.2.1.2).
+        let this_value = if code.kind == CodeKind::Arrow {
+            None
+        } else if code.strict {
+            Some(this)
+        } else if this.is_nullish() {
+            Some(Value::Object(self.realms[realm].global_object))
+        } else {
+            let saved = self.current_realm;
+            self.current_realm = realm;
+            let o = self.to_object(&this);
+            self.current_realm = saved;
+            Some(Value::Object(o?))
+        };
+        let mut frame = self.new_frame(code, env, realm);
+        frame.this = this_value;
+        frame.callee = Some(f);
+        frame.inline = true;
+        frame.caller_realm = self.current_realm;
+        self.current_realm = realm;
+        Ok(Some(frame))
+    }
+
     /// `[[Call]]` con los argumentos ya en un vector propio: a una función ECMAScript se le
     /// pasan sin copiarlos (E3).
     pub(crate) fn call_internal_vec(
