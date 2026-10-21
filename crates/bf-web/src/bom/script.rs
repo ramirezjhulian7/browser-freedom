@@ -377,6 +377,34 @@ fn json_parse(agent: &mut Agent, text: &str) -> JsResult<Value> {
     agent.call(&parse, Value::Object(json), &[Value::str(text)])
 }
 
+/// Presta `doc` al contexto (como `window.document`) mientras corre el listener `handle`, que
+/// llama el DOM de E3 (dueño de `addEventListener`).
+fn lend_and_invoke(
+    agent: &mut Agent,
+    realm: RealmId,
+    doc: &mut Document,
+    handle: u64,
+    event: &mut bf_dom::events::Event,
+) -> bool {
+    let real = std::mem::take(doc);
+    let saved = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        DocumentOwner::Document(Box::new(real)),
+    );
+    let saved_realm = agent.current_realm;
+    agent.current_realm = realm;
+    let threw = crate::dom::events::invoke_listener(agent, handle, event);
+    agent.current_realm = saved_realm;
+    let back = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        saved,
+    );
+    if let DocumentOwner::Document(d) = back {
+        *doc = *d;
+    }
+    threw
+}
+
 impl bf_dom::events::ScriptHost for WebScripts<'_> {
     /// Los listeners de JavaScript (del DOM de E3): el documento vuelve al contexto mientras
     /// corre el listener (el parser lo tiene prestado durante `feed`).
@@ -386,15 +414,51 @@ impl bf_dom::events::ScriptHost for WebScripts<'_> {
         handle: u64,
         event: &mut bf_dom::events::Event,
     ) -> bool {
-        let h = WebContextHandle { realm: self.realm };
-        std::mem::swap(h.get_mut(self.agent).doc_mut(0), doc);
-        let saved = self.agent.current_realm;
-        self.agent.current_realm = self.realm;
-        let threw = crate::dom::events::invoke_listener(self.agent, handle, event);
-        self.agent.current_realm = saved;
-        std::mem::swap(h.get_mut(self.agent).doc_mut(0), doc);
-        threw
+        lend_and_invoke(self.agent, self.realm, doc, handle, event)
     }
+}
+
+/// El host de un despacho que empieza fuera de un script (un evento del usuario): el
+/// documento de la ventana sale del contexto mientras se despacha y vuelve para cada
+/// listener.
+struct LendHost<'a> {
+    agent: &'a mut Agent,
+    realm: RealmId,
+}
+
+impl bf_dom::events::ScriptHost for LendHost<'_> {
+    fn call_listener(
+        &mut self,
+        doc: &mut Document,
+        handle: u64,
+        event: &mut bf_dom::events::Event,
+    ) -> bool {
+        lend_and_invoke(self.agent, self.realm, doc, handle, event)
+    }
+}
+
+/// Despacha un evento de confianza (`isTrusted`: lo produjo el navegador) en `target` del
+/// documento de la ventana de `realm`. Devuelve `false` si se canceló.
+pub fn dispatch_trusted(
+    agent: &mut Agent,
+    realm: RealmId,
+    target: bf_dom::events::EventTarget,
+    event: &mut bf_dom::events::Event,
+) -> bool {
+    event.is_trusted = true;
+    let mut owner = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        DocumentOwner::Document(Box::default()),
+    );
+    let mut host = LendHost { agent, realm };
+    let r = owner.doc_mut().dispatch(target, event, &mut host);
+    WebContextHandle { realm }.get_mut(host.agent).documents[0] = owner;
+    if host.agent.frames.is_empty()
+        && let Err(Throw::Value(e)) = host.agent.perform_microtask_checkpoint()
+    {
+        host.agent.report_exception(&e);
+    }
+    r
 }
 
 impl bf_html::ScriptHost for WebScripts<'_> {
