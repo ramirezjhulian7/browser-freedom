@@ -152,6 +152,10 @@ pub fn is_test_file(rel: &str) -> bool {
     if name.ends_with(".any.js") || name.ends_with(".window.js") {
         return true;
     }
+    // E3: un test que corre en un worker dedicado (wptserve le genera la página).
+    if name.ends_with(".worker.js") {
+        return true;
+    }
     name.ends_with(".html") || name.ends_with(".htm")
 }
 
@@ -204,6 +208,19 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
     };
     let src = String::from_utf8_lossy(&bytes).into_owned();
     let is_any = rel.ends_with(".any.js");
+    // E3: `x.worker.js` corre en un worker dedicado desde `x.worker.html`.
+    if rel.ends_with(".worker.js") && !is_any {
+        let base = rel.trim_end_matches(".js");
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        return vec![TestDoc {
+            path: format!("{base}.html"),
+            url: format!("{ORIGIN}/{base}.html"),
+            html: worker_page(&format!("new Worker({:?})", name)),
+            long: meta_lines(&src)
+                .iter()
+                .any(|(k, v)| k == "timeout" && v == "long"),
+        }];
+    }
     if !(is_any || rel.ends_with(".window.js")) {
         if !uses_testharness(&src) {
             return Vec::new();
@@ -216,12 +233,41 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         }];
     }
     let metas = meta_lines(&src);
-    if is_any && !includes_window(&metas) {
-        return Vec::new();
-    }
     let long = metas.iter().any(|(k, v)| k == "timeout" && v == "long");
     let base = rel.trim_end_matches(".js");
     let script_name = rel.rsplit('/').next().unwrap_or(rel);
+    let mut variants: Vec<String> = metas
+        .iter()
+        .filter(|(k, _)| k == "variant")
+        .map(|(_, v)| v.clone())
+        .collect();
+    if variants.is_empty() {
+        variants.push(String::new());
+    }
+    // E3: las variantes en workers (`.any.worker.html`, `.any.sharedworker.html`).
+    let mut docs = Vec::new();
+    if is_any {
+        let worker_js = format!("{}.worker.js", script_name.trim_end_matches(".js"));
+        for (global, page, ctor) in [
+            ("dedicatedworker", "worker", "Worker"),
+            ("sharedworker", "sharedworker", "SharedWorker"),
+        ] {
+            if !includes_global(&metas, global) {
+                continue;
+            }
+            for v in &variants {
+                docs.push(TestDoc {
+                    path: format!("{base}.{page}.html{v}"),
+                    url: format!("{ORIGIN}/{base}.{page}.html{v}"),
+                    html: worker_page(&format!("new {ctor}({:?})", format!("{worker_js}{v}"))),
+                    long,
+                });
+            }
+        }
+    }
+    if is_any && !includes_window(&metas) {
+        return docs;
+    }
     let mut html = String::from("<!doctype html>\n<meta charset=utf-8>\n");
     if let Some((_, t)) = metas.iter().find(|(k, _)| k == "title") {
         html.push_str(&format!("<title>{}</title>\n", html_escape(t)));
@@ -245,23 +291,57 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         "<script src=\"{}\"></script>\n",
         html_escape(script_name)
     ));
-    let mut variants: Vec<String> = metas
+    docs.extend(variants.into_iter().map(|v| TestDoc {
+        path: format!("{base}.html{v}"),
+        url: format!("{ORIGIN}/{base}.html{v}"),
+        html: html.clone(),
+        long,
+    }));
+    docs
+}
+
+/// E3: ¿Las globals de `META: global=` incluyen `global` (`dedicatedworker` o
+/// `sharedworker`)? `worker` las incluye a todas; sin la línea, `window` y
+/// `dedicatedworker`.
+fn includes_global(metas: &[(String, String)], global: &str) -> bool {
+    let globals: Vec<&str> = metas
         .iter()
-        .filter(|(k, _)| k == "variant")
-        .map(|(_, v)| v.clone())
+        .filter(|(k, _)| k == "global")
+        .flat_map(|(_, v)| v.split(','))
+        .map(str::trim)
         .collect();
-    if variants.is_empty() {
-        variants.push(String::new());
+    if globals.is_empty() {
+        return global == "dedicatedworker";
     }
-    variants
-        .into_iter()
-        .map(|v| TestDoc {
-            path: format!("{base}.html{v}"),
-            url: format!("{ORIGIN}/{base}.html{v}"),
-            html: html.clone(),
-            long,
-        })
-        .collect()
+    globals.iter().any(|g| *g == global || *g == "worker")
+}
+
+/// E3: la página de un test que corre en un worker (como la genera wptserve).
+fn worker_page(worker: &str) -> String {
+    format!(
+        "<!doctype html>\n<meta charset=utf-8>\n\
+         <script src=\"/resources/testharness.js\"></script>\n\
+         <script src=\"/resources/testharnessreport.js\"></script>\n\
+         <div id=log></div>\n<script>\nfetch_tests_from_worker({worker});\n</script>\n"
+    )
+}
+
+/// E3: el `x.any.worker.js` que genera wptserve para `x.any.js` (`any_path`, la ruta del
+/// `.any.js` en el servidor; `src`, su texto).
+pub fn any_worker_script(src: &str, any_path: &str) -> String {
+    let mut out = String::from(
+        "self.GLOBAL = {\n  isWindow: function() { return false; },\n  \
+         isWorker: function() { return true; },\n  \
+         isShadowRealm: function() { return false; },\n};\n\
+         importScripts(\"/resources/testharness.js\");\n",
+    );
+    for (k, v) in meta_lines(src) {
+        if k == "script" {
+            out.push_str(&format!("importScripts({v:?});\n"));
+        }
+    }
+    out.push_str(&format!("importScripts({any_path:?});\ndone();\n"));
+    out
 }
 
 /// El `testharnessreport.js` del runner.
@@ -381,6 +461,8 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         TESTHARNESS_REPORT.to_owned(),
     );
     rt.agent.set_realm_data(realm, resources);
+    // E3: el runner vacía la bandeja de los workers y los espera en tiempo real.
+    crate::workers::set_manual_pump(&mut rt.agent);
 
     with_parser(&mut rt.agent, realm, |p, host| {
         p.feed(&doc.html, host);
@@ -402,6 +484,7 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         if terminated || Instant::now() > deadline {
             return result(Harness::NoResult("tiempo agotado".into()), vec![]);
         }
+        crate::workers::pump(&mut rt.agent); // E3
         match rt.agent.run_until_idle() {
             Ok(_) => {}
             Err(Throw::Terminate(_)) => {
@@ -416,6 +499,19 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             .is_some_and(|r| r.0.is_some())
         {
             break;
+        }
+        // E3: mientras haya workers trabajando, se esperan sus mensajes en tiempo real y el
+        // reloj virtual avanza lo que pasó de verdad (sin pasar del próximo temporizador).
+        if crate::workers::busy(&rt.agent) {
+            let start = Instant::now();
+            crate::workers::wait_for_events(
+                &rt.agent,
+                (start + Duration::from_millis(20)).min(deadline),
+            );
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let next = rt.agent.next_wake().unwrap_or(f64::INFINITY);
+            clock.set((clock.get() + elapsed).min(next.max(clock.get())));
+            continue;
         }
         match rt.agent.next_wake() {
             Some(t) if t > clock.get() => clock.set(t),
