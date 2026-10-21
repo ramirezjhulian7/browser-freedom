@@ -7,15 +7,14 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
+use crate::dom::adopt::prepare_insert;
+use crate::dom::insertion::{inserted, roots_of};
+use crate::dom::mixins;
 use crate::dom::{
     arg_node, arg_opt_node, from_dom_string, from_opt_dom_string, mutated, this_node, throw_dom,
     to_opt_dom_string, wrap_node, wrap_opt,
 };
 use crate::{NodeRef, WebContextHandle, with_doc, with_doc_mut};
-
-pub fn event_target_class() -> HostClass {
-    HostClass::new("EventTarget")
-}
 
 pub fn node_class(event_target: HostClassId) -> HostClass {
     let mut c = HostClass::new("Node")
@@ -31,6 +30,7 @@ pub fn node_class(event_target: HostClassId) -> HostClass {
         .attribute("lastChild", Some(last_child), None)
         .attribute("previousSibling", Some(previous_sibling), None)
         .attribute("nextSibling", Some(next_sibling), None)
+        .attribute("childNodes", Some(child_nodes), None)
         .attribute("nodeValue", Some(get_node_value), Some(set_node_value))
         .attribute(
             "textContent",
@@ -97,15 +97,17 @@ pub fn node_class(event_target: HostClassId) -> HostClass {
 }
 
 pub fn document_type_class(node: HostClassId) -> HostClass {
-    HostClass::new("DocumentType")
-        .parent(node)
-        .attribute("name", Some(doctype_name), None)
-        .attribute("publicId", Some(doctype_public_id), None)
-        .attribute("systemId", Some(doctype_system_id), None)
+    mixins::child_node(
+        HostClass::new("DocumentType")
+            .parent(node)
+            .attribute("name", Some(doctype_name), None)
+            .attribute("publicId", Some(doctype_public_id), None)
+            .attribute("systemId", Some(doctype_system_id), None),
+    )
 }
 
 pub fn character_data_class(node: HostClassId) -> HostClass {
-    HostClass::new("CharacterData")
+    let c = HostClass::new("CharacterData")
         .parent(node)
         .attribute("data", Some(get_data), Some(set_data))
         .attribute("length", Some(data_length), None)
@@ -113,7 +115,35 @@ pub fn character_data_class(node: HostClassId) -> HostClass {
         .method("appendData", 1, append_data)
         .method("insertData", 2, insert_data)
         .method("deleteData", 2, delete_data)
-        .method("replaceData", 3, replace_data)
+        .method("replaceData", 3, replace_data);
+    mixins::child_node(mixins::non_document_type_child_node(c))
+}
+
+/// `Text` (§4.11).
+pub fn text_class(character_data: HostClassId) -> HostClass {
+    HostClass::new("Text")
+        .parent(character_data)
+        .constructor(crate::dom::document::text_ctor, 0)
+        .attribute("wholeText", Some(whole_text), None)
+        .method("splitText", 1, split_text)
+}
+
+fn whole_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let s = with_doc(agent, n.doc, |d| d.whole_text(n.node));
+    Ok(from_dom_string(&s))
+}
+
+fn split_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
+    let r = with_doc_mut(agent, n.doc, |d| d.split_text(n.node, offset));
+    after_insert(agent, n.doc, r)
+}
+
+fn child_nodes(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(crate::dom::collections::child_nodes(agent, n))
 }
 
 pub fn attr_class(node: HostClassId) -> HostClass {
@@ -251,6 +281,12 @@ fn normalize(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let deep = bf_js::host::webidl::to_boolean(agent, &a.arg(0));
+    let is_document = with_doc(agent, n.doc, |d| {
+        matches!(d.get(n.node).data, NodeData::Document)
+    });
+    if is_document {
+        return Ok(crate::dom::document::clone_document(agent, n.doc, deep));
+    }
     let r = with_doc_mut(agent, n.doc, |d| d.clone_node_checked(n.node, deep));
     match r {
         Ok(c) => Ok(wrap_node(agent, NodeRef::new(n.doc, c))),
@@ -337,49 +373,47 @@ fn is_default_namespace(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     Ok(Value::Boolean(r))
 }
 
-/// Verifica que dos nodos sean del mismo documento (los de otro documento se adoptan en
-/// `bf-dom`, que no mueve nodos entre arenas: aquí se rechazan).
-fn same_doc(agent: &mut Agent, a: NodeRef, b: NodeRef) -> JsResult<()> {
-    if a.doc != b.doc {
-        return throw_dom(agent, bf_dom::DomException::WrongDocumentError);
-    }
-    Ok(())
-}
-
 fn insert_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
     let node = arg_node(agent, &a.arg(0), "parameter 1")?;
     let child = arg_opt_node(agent, &a.arg(1), "parameter 2")?;
-    same_doc(agent, parent, node)?;
-    if let Some(c) = child {
-        same_doc(agent, parent, c)?;
+    if let Some(c) = child
+        && c.doc != parent.doc
+    {
+        return throw_dom(agent, bf_dom::DomException::NotFoundError);
     }
+    let node = prepare_insert(agent, parent, node, child)?;
+    let roots = roots_of(agent, parent.doc, node.node);
     let r = with_doc_mut(agent, parent.doc, |d| {
         d.insert_before_checked(parent.node, node.node, child.map(|c| c.node))
     });
-    after_insert(agent, parent.doc, r)
+    after_insert_roots(agent, parent.doc, r, &roots)
 }
 
 fn append_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
     let node = arg_node(agent, &a.arg(0), "parameter 1")?;
-    same_doc(agent, parent, node)?;
+    let node = prepare_insert(agent, parent, node, None)?;
+    let roots = roots_of(agent, parent.doc, node.node);
     let r = with_doc_mut(agent, parent.doc, |d| {
         d.append_child(parent.node, node.node)
     });
-    after_insert(agent, parent.doc, r)
+    after_insert_roots(agent, parent.doc, r, &roots)
 }
 
 fn replace_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
     let node = arg_node(agent, &a.arg(0), "parameter 1")?;
     let child = arg_node(agent, &a.arg(1), "parameter 2")?;
-    same_doc(agent, parent, node)?;
-    same_doc(agent, parent, child)?;
+    if child.doc != parent.doc {
+        return throw_dom(agent, bf_dom::DomException::NotFoundError);
+    }
+    let node = prepare_insert(agent, parent, node, Some(child))?;
+    let roots = roots_of(agent, parent.doc, node.node);
     let r = with_doc_mut(agent, parent.doc, |d| {
         d.replace_child(parent.node, node.node, child.node)
     });
-    after_insert(agent, parent.doc, r)
+    after_insert_roots(agent, parent.doc, r, &roots)
 }
 
 fn remove_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -392,6 +426,21 @@ fn remove_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.remove_child(parent.node, child.node)
     });
     after_insert(agent, parent.doc, r)
+}
+
+/// Como [`after_insert`], y además procesa los nodos conectados (`script`, `img`…).
+fn after_insert_roots(
+    agent: &mut Agent,
+    doc: crate::DocIndex,
+    r: Result<bf_dom::NodeId, bf_dom::DomException>,
+    roots: &[bf_dom::NodeId],
+) -> JsResult<Value> {
+    let ok = r.is_ok();
+    let v = after_insert(agent, doc, r)?;
+    if ok {
+        inserted(agent, doc, roots);
+    }
+    Ok(v)
 }
 
 /// El resultado de una mutación del árbol: el nodo o el `DOMException`.

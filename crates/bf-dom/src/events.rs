@@ -839,3 +839,13 @@ enum Phase {
     Capturing,
     Bubbling,
 }
+
+// E3: mover los listeners de un nodo a otro documento (adopción entre arenas en bf-web).
+impl Document {
+    /// Mueve los listeners de `from` (en este documento) a `to` en `other`.
+    pub fn move_listeners(&mut self, from: EventTarget, other: &mut Document, to: EventTarget) {
+        if let Some(list) = self.listeners.map.remove(&from) {
+            other.listeners.map.entry(to).or_default().extend(list);
+        }
+    }
+}
