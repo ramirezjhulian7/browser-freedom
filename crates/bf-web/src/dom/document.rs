@@ -64,7 +64,9 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .method("createNodeIterator", 1, create_node_iterator)
         .method("createTreeWalker", 1, create_tree_walker)
         .method("importNode", 1, import_node)
-        .method("adoptNode", 1, adopt_node);
+        .method("adoptNode", 1, adopt_node)
+        .method("createRange", 0, crate::dom::range::document_create_range)
+        .method("getSelection", 0, crate::dom::range::document_get_selection);
 
     let c = mixins::parent_node(c);
     let mut names: Vec<&'static str> = GLOBAL_EVENT_HANDLERS.to_vec();
@@ -94,6 +96,7 @@ fn document_ctor(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     d.url = bf_infra::Url::parse("about:blank", None).expect("about:blank");
     let ctx = WebContextHandle::current(agent);
     let i = ctx.get_mut(agent).add_document(d);
+    crate::dom::state::state(agent).plain_documents.insert(i);
     let r = root_of(agent, i);
     Ok(wrap_node(agent, r))
 }
@@ -103,6 +106,7 @@ pub fn clone_document(agent: &mut Agent, doc: DocIndex, deep: bool) -> Value {
     let mut d = with_doc(agent, doc, |d| d.clone());
     // Clonar no copia los listeners (DOM §4.4 "clone a node").
     d.erase_all_event_listeners();
+    d.clear_live_ranges();
     if !deep {
         let root = d.root();
         d.replace_all(None, root);

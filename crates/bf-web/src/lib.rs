@@ -47,6 +47,7 @@ pub mod bom;
 pub mod cssom;
 pub mod dom;
 pub mod html;
+pub mod net; // E2: fetch, XMLHttpRequest, FormData, Blob
 
 pub use bf_dom::{Document, NodeId};
 pub use bf_html::Parser;
@@ -147,6 +148,9 @@ pub struct WebContext {
     pub mutations: u64,
     /// ¿Hay que volver a maquetar?
     pub pending_dirty: bool,
+    /// La versión del documento de la ventana en el último [`WebContext::take_dirty`]: un
+    /// cambio que no pasó por [`WebContext::mutated`] también pide re-render.
+    pub rendered_version: u64,
     /// El último layout (lo llena el shell; lo usa el CSSOM View de E2).
     pub layout: Option<LayoutSnapshot>,
     pub hooks: Box<dyn WebHooks>,
@@ -156,12 +160,14 @@ impl WebContext {
     /// Un contexto con `document` como documento de la ventana (su URL pasa a ser `url`).
     pub fn new(mut document: DocumentOwner, url: Url) -> WebContext {
         document.doc_mut().url = url.clone();
+        let rendered_version = document.doc().version();
         WebContext {
             documents: vec![document],
             base: url.clone(),
             url,
             mutations: 0,
             pending_dirty: false,
+            rendered_version,
             layout: None,
             hooks: Box::new(NoWebHooks),
         }
@@ -188,6 +194,15 @@ impl WebContext {
     pub fn add_document(&mut self, doc: Document) -> DocIndex {
         self.documents.push(DocumentOwner::Document(Box::new(doc)));
         (self.documents.len() - 1) as DocIndex
+    }
+
+    /// ¿Cambió el DOM desde la última vez? (Y se limpia la marca.) Cubre las mutaciones
+    /// registradas con [`WebContext::mutated`] y cualquier cambio del árbol o de atributos.
+    pub fn take_dirty(&mut self) -> bool {
+        let version = self.document().version();
+        let dirty = std::mem::take(&mut self.pending_dirty) || version != self.rendered_version;
+        self.rendered_version = version;
+        dirty
     }
 
     /// Registra una mutación del DOM hecha desde JavaScript.
@@ -254,4 +269,5 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     html::register(agent, realm, ctx); // E1
     bom::register(agent, realm, ctx); // E4
     cssom::register(agent, realm, ctx); // E2
+    net::register(agent, realm, ctx); // E2
 }

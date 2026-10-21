@@ -1,7 +1,8 @@
 //! Lo que pasa cuando JavaScript conecta nodos al documento: los `script` se preparan y los
 //! inline se ejecutan (HTML §4.12.1.1, "prepare the script element", con el *parser document*
 //! nulo), y los `img`/`link` piden su recurso al navegador ([`crate::WebHooks::resource_needed`]).
-//! Los `script` externos también se piden por ahí; su carga y ejecución es del shell.
+//! Los `script` externos se buscan y se ejecutan con el entorno de scripts de la ventana
+//! (`bom::script`, E4) en una tarea; sin ese entorno se piden al shell por el mismo hook.
 
 use bf_dom::events::{EventInit, EventKind, EventTarget};
 use bf_dom::script::ScriptType;
@@ -105,41 +106,124 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
     let Some(info) = with_doc_mut(agent, doc, |d| d.begin_prepare_script(el, true)) else {
         return;
     };
-    if info.type_ != ScriptType::Classic {
-        return;
-    }
+    let module = match info.type_ {
+        ScriptType::Classic => false,
+        ScriptType::Module => true,
+        ScriptType::ImportMap => return,
+    };
+    let realm = WebContextHandle::current(agent).realm;
+    // Con el entorno de scripts de la ventana (E4) se carga y se ejecuta como el parser; sin
+    // él (un contexto sin navegador) el recurso se le pide al shell.
+    let has_env = crate::bom::script::script_env(agent, realm).is_some();
     if info.src.is_some() {
-        match &info.url {
-            // La búsqueda y la ejecución de los scripts externos son de E4 (`bom::script`).
-            Some(url) => crate::bom::script::run_inserted_script(agent, el, url.clone()),
-            // Paso 31.5: `src` vacío o inválido → `error` en el elemento.
-            None => {
-                fire_event(
-                    agent,
-                    doc,
-                    EventTarget::Node(el),
-                    "error",
-                    EventInit::default(),
-                    EventKind::Event,
-                );
-            }
+        let Some(url) = info.url.clone() else {
+            // Paso 31.5: `src` vacío o inválido → `error` en el elemento (en una tarea).
+            queue_element_event(agent, doc, el, "error");
+            return;
+        };
+        if !has_env {
+            WebContextHandle::current(agent)
+                .get_mut(agent)
+                .hooks
+                .resource_needed(&url.serialize(false), ResourceKind::Script);
+            return;
         }
+        // Los scripts que inserta el DOM son async (*force async*): se buscan y se ejecutan
+        // en una tarea, en orden de inserción.
+        let charset = info.encoding;
+        agent.queue_task(
+            bf_js::host::TaskSource::Networking,
+            Box::new(move |agent: &mut Agent| {
+                let saved = agent.current_realm;
+                agent.current_realm = realm;
+                match crate::bom::script::fetch_script(agent, realm, &url, charset) {
+                    Some((source, final_url)) => {
+                        execute(agent, doc, el, &source, &final_url, module, true);
+                        fire_simple(agent, doc, el, "load");
+                    }
+                    None => fire_simple(agent, doc, el, "error"),
+                }
+                agent.current_realm = saved;
+            }),
+        );
         return;
     }
-    // "Execute the script element" (§4.12.1.3) para un script clásico inline.
-    let old = with_doc_mut(agent, doc, |d| d.scripts_mut().current_script.replace(el));
     let name = WebContextHandle::current(agent)
         .get(agent)
         .url
         .serialize(false);
     let source = info.source_text.to_string();
-    let r = agent
-        .compile_script_text(&source, &name)
-        .and_then(|code| agent.script_evaluation(code));
-    with_doc_mut(agent, doc, |d| d.scripts_mut().current_script = old);
-    if let Err(Throw::Value(e)) = r {
-        report_exception(agent, &e);
+    if module {
+        if has_env {
+            // Un módulo inline está listo cuando carga su grafo: se ejecuta en una tarea.
+            agent.queue_task(
+                bf_js::host::TaskSource::DomManipulation,
+                Box::new(move |agent: &mut Agent| {
+                    let saved = agent.current_realm;
+                    agent.current_realm = realm;
+                    execute(agent, doc, el, &source, &name, true, true);
+                    agent.current_realm = saved;
+                }),
+            );
+        }
+        return;
     }
+    execute(agent, doc, el, &source, &name, false, has_env);
+}
+
+/// "Execute the script element" (§4.12.1.3): `currentScript` es el elemento (solo para los
+/// clásicos) mientras corre.
+fn execute(
+    agent: &mut Agent,
+    doc: DocIndex,
+    el: NodeId,
+    source: &str,
+    url: &str,
+    module: bool,
+    with_env: bool,
+) {
+    let current = (!module).then_some(el);
+    let old = with_doc_mut(agent, doc, |d| {
+        std::mem::replace(&mut d.scripts_mut().current_script, current)
+    });
+    if with_env {
+        let realm = WebContextHandle::current(agent).realm;
+        crate::bom::script::run_script(agent, realm, source, url, module);
+    } else {
+        let r = agent
+            .compile_script_text(source, url)
+            .and_then(|code| agent.script_evaluation(code));
+        if let Err(Throw::Value(e)) = r {
+            report_exception(agent, &e);
+        }
+    }
+    with_doc_mut(agent, doc, |d| d.scripts_mut().current_script = old);
+}
+
+/// Dispara un evento simple (sin burbujeo ni cancelable) en el elemento.
+fn fire_simple(agent: &mut Agent, doc: DocIndex, el: NodeId, type_: &str) {
+    fire_event(
+        agent,
+        doc,
+        EventTarget::Node(el),
+        type_,
+        EventInit::default(),
+        EventKind::Event,
+    );
+}
+
+/// "Queue an element task" que dispara `type_` en el elemento.
+fn queue_element_event(agent: &mut Agent, doc: DocIndex, el: NodeId, type_: &'static str) {
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        bf_js::host::TaskSource::DomManipulation,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            fire_simple(agent, doc, el, type_);
+            agent.current_realm = saved;
+        }),
+    );
 }
 
 /// Copia *already started* de los `script` de `old` (en `from`) a sus copias `new` (en `to`)

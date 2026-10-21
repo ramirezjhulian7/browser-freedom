@@ -49,6 +49,8 @@ pub enum EventIface {
         colno: u32,
     },
     PromiseRejection,
+    /// Una interfaz de `event_types` (los miembros propios van en los slots desde el 2).
+    Class(HostClassId),
 }
 
 /// El payload de un wrapper de `Event`. Los valores de script (`detail`, `view`, `error`,
@@ -429,7 +431,7 @@ fn dispatch_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 // --- El puente con el dispatch de bf-dom ---
 
 /// El payload de un wrapper de evento.
-fn event_data<'a>(agent: &'a Agent, v: &Value) -> Option<&'a EventData> {
+pub(crate) fn event_data<'a>(agent: &'a Agent, v: &Value) -> Option<&'a EventData> {
     agent.host_unwrap::<EventData>(v)
 }
 
@@ -441,22 +443,20 @@ pub(crate) struct JsHost<'a> {
     pub agent: &'a mut Agent,
     pub ctx: WebContextHandle,
     pub doc: DocIndex,
-    /// El wrapper del evento (creado en el primer listener si el evento es nativo).
+    /// El wrapper del evento que se despacha desde script.
     pub wrapper: Option<EventWrapper>,
+    /// La identidad (dirección y `timeStamp`) del `Event` de `wrapper`: los eventos que
+    /// `bf-dom` dispara durante ese dispatch (`input`/`change` de la activación) tienen su
+    /// propio wrapper.
+    pub main: Option<(usize, u64)>,
 }
 
-impl JsHost<'_> {
-    fn ensure_wrapper(&mut self, event: &Event) -> (Gc<Object>, Rc<RefCell<Event>>) {
-        if let Some((o, c, _)) = &self.wrapper {
-            return (*o, c.clone());
-        }
-        let iface = iface_of(&event.kind);
-        let cell = Rc::new(RefCell::new(Event::new("", EventInit::default())));
-        let o = create_event_object(self.agent, iface, cell.clone(), self.doc);
-        let h = self.agent.host_pin(Value::Object(o));
-        self.wrapper = Some((o, cell.clone(), Some(h)));
-        (o, cell)
-    }
+/// La identidad de un `Event` mientras se despacha.
+fn event_key(event: &Event) -> (usize, u64) {
+    (
+        std::ptr::from_ref(event) as usize,
+        event.time_stamp.to_bits(),
+    )
 }
 
 impl Drop for JsHost<'_> {
@@ -468,15 +468,28 @@ impl Drop for JsHost<'_> {
 }
 
 impl ScriptHost for JsHost<'_> {
+    fn before_invoke(&mut self, doc: &mut Document, target: EventTarget, type_: &DomString) {
+        sync_lent(self.agent, self.ctx.realm, self.doc, doc, target, type_);
+    }
+
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
-        let (wrapper, cell) = self.ensure_wrapper(event);
-        // El evento vigente pasa a la celda del wrapper y el documento vuelve al contexto.
-        std::mem::swap(&mut *cell.borrow_mut(), event);
+        let key = event_key(event);
+        // El documento vuelve al contexto mientras corre el listener.
         let ctx = self.ctx;
         std::mem::swap(ctx.get_mut(self.agent).doc_mut(self.doc), doc);
-        let threw = call_script_listener(self.agent, self.doc, handle, wrapper);
+        let threw = match &self.wrapper {
+            Some((wrapper, cell, _)) if self.main == Some(key) => {
+                let (wrapper, cell) = (*wrapper, cell.clone());
+                // El evento vigente pasa a la celda del wrapper.
+                std::mem::swap(&mut *cell.borrow_mut(), event);
+                let threw = call_script_listener(self.agent, self.doc, handle, wrapper);
+                std::mem::swap(&mut *cell.borrow_mut(), event);
+                *cell.borrow_mut() = event.after_dispatch_copy();
+                threw
+            }
+            _ => invoke_listener_in(self.agent, self.doc, handle, event),
+        };
         std::mem::swap(ctx.get_mut(self.agent).doc_mut(self.doc), doc);
-        std::mem::swap(&mut *cell.borrow_mut(), event);
         threw
     }
 }
@@ -505,6 +518,7 @@ pub fn dispatch_js_event(
         &mut *cell.borrow_mut(),
         Event::new("", EventInit::default()),
     );
+    let main = event_key(&ev);
     let mut document = std::mem::take(ctx.get_mut(agent).doc_mut(doc));
     let r = {
         let mut host = JsHost {
@@ -512,6 +526,7 @@ pub fn dispatch_js_event(
             ctx,
             doc,
             wrapper: Some((event, cell.clone(), None)),
+            main: Some(main),
         };
         if checked {
             document.dispatch_event_checked(target, &mut ev, &mut host)
@@ -541,6 +556,7 @@ pub fn with_script_host<R>(
             ctx,
             doc,
             wrapper: None,
+            main: None,
         };
         f(&mut document, &mut host)
     };
@@ -668,6 +684,7 @@ fn class_for_iface(agent: &Agent, iface: &EventIface) -> HostClassId {
         EventIface::Input => c.input_event,
         EventIface::Error { .. } => c.error_event,
         EventIface::PromiseRejection => c.promise_rejection_event,
+        EventIface::Class(id) => *id,
     }
 }
 
@@ -694,7 +711,7 @@ pub fn create_event_object(
 }
 
 /// Lee un miembro de un diccionario (`undefined` si no hay diccionario).
-fn dict_get(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<Value> {
+pub(crate) fn dict_get(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<Value> {
     match dict {
         Value::Object(o) => agent.get(*o, &PropertyKey::from(name), dict.clone()),
         Value::Undefined | Value::Null => Ok(Value::Undefined),
@@ -702,13 +719,13 @@ fn dict_get(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<Value> {
     }
 }
 
-fn dict_bool(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<bool> {
+pub(crate) fn dict_bool(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<bool> {
     let v = dict_get(agent, dict, name)?;
     Ok(bf_js::host::webidl::to_boolean(agent, &v))
 }
 
 /// `EventInit` (DOM §2.2): `bubbles`, `cancelable`, `composed`.
-fn event_init(agent: &mut Agent, dict: &Value) -> JsResult<EventInit> {
+pub(crate) fn event_init(agent: &mut Agent, dict: &Value) -> JsResult<EventInit> {
     Ok(EventInit {
         bubbles: dict_bool(agent, dict, "bubbles")?,
         cancelable: dict_bool(agent, dict, "cancelable")?,
@@ -717,7 +734,7 @@ fn event_init(agent: &mut Agent, dict: &Value) -> JsResult<EventInit> {
 }
 
 /// El tipo (`DOMString type`, obligatorio) de un constructor de evento.
-fn ctor_type(agent: &mut Agent, a: &CallArgs<'_>, class: &str) -> JsResult<DomString> {
+pub(crate) fn ctor_type(agent: &mut Agent, a: &CallArgs<'_>, class: &str) -> JsResult<DomString> {
     if a.is_empty() {
         return agent.type_error(&format!(
             "Failed to construct '{class}': 1 argument required, but only 0 present."
@@ -734,6 +751,17 @@ fn construct_event(
     event: Event,
     slots: [Value; 2],
 ) -> JsResult<Value> {
+    construct_event_vec(agent, a, iface, event, slots.to_vec())
+}
+
+/// Como [`construct_event`] con todos los slots (`view`/`detail` y los miembros propios).
+pub(crate) fn construct_event_vec(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    iface: EventIface,
+    event: Event,
+    slots: Vec<Value>,
+) -> JsResult<Value> {
     let mut event = event;
     event.time_stamp = high_res_now(agent);
     let class = class_for_iface(agent, &iface);
@@ -749,7 +777,7 @@ fn construct_event(
         }),
     )?;
     if let Some(s) = agent.host_slots_mut(o) {
-        *s = slots.to_vec();
+        *s = slots;
     }
     Ok(Value::Object(o))
 }
@@ -783,7 +811,7 @@ fn custom_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 /// `UIEventInit`: `view` (Window?) y `detail` (long).
-fn ui_init(agent: &mut Agent, dict: &Value) -> JsResult<(Value, i32)> {
+pub(crate) fn ui_init(agent: &mut Agent, dict: &Value) -> JsResult<(Value, i32)> {
     let detail = dict_get(agent, dict, "detail")?;
     let detail = bf_js::host::webidl::to_long(agent, &detail)?;
     let view = dict_get(agent, dict, "view")?;
@@ -810,7 +838,11 @@ fn ui_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 /// Un `EventTarget?` de un diccionario (`relatedTarget`).
-fn dict_target(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<Option<EventTarget>> {
+pub(crate) fn dict_target(
+    agent: &mut Agent,
+    dict: &Value,
+    name: &str,
+) -> JsResult<Option<EventTarget>> {
     let v = dict_get(agent, dict, name)?;
     if v.is_nullish() {
         return Ok(None);
@@ -828,14 +860,15 @@ fn focus_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let type_ = ctor_type(agent, a, "FocusEvent")?;
     let dict = a.arg(1);
     let init = event_init(agent, &dict)?;
-    let (view, _) = ui_init(agent, &dict)?;
+    let (view, detail) = ui_init(agent, &dict)?;
     let related_target = dict_target(agent, &dict, "relatedTarget")?;
     let ev = Event::with_kind(type_, init, EventKind::Focus { related_target });
-    construct_event(agent, a, EventIface::Focus, ev, [view, Value::Undefined])
+    let detail = Value::Number(f64::from(detail));
+    construct_event(agent, a, EventIface::Focus, ev, [view, detail])
 }
 
 /// `EventModifierInit` (UI Events §3.6): las teclas modificadoras.
-fn modifiers(agent: &mut Agent, dict: &Value) -> JsResult<[bool; 4]> {
+pub(crate) fn modifiers(agent: &mut Agent, dict: &Value) -> JsResult<[bool; 4]> {
     Ok([
         dict_bool(agent, dict, "ctrlKey")?,
         dict_bool(agent, dict, "shiftKey")?,
@@ -844,7 +877,7 @@ fn modifiers(agent: &mut Agent, dict: &Value) -> JsResult<[bool; 4]> {
     ])
 }
 
-fn dict_double(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<f64> {
+pub(crate) fn dict_double(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<f64> {
     let v = dict_get(agent, dict, name)?;
     if v.is_undefined() {
         return Ok(0.0);
@@ -854,7 +887,17 @@ fn dict_double(agent: &mut Agent, dict: &Value, name: &str) -> JsResult<f64> {
 
 fn mouse_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let type_ = ctor_type(agent, a, "MouseEvent")?;
-    let dict = a.arg(1);
+    let (init, view, data) = mouse_parts(agent, &a.arg(1))?;
+    let ev = Event::with_kind(type_, init, EventKind::Mouse(data));
+    construct_event(agent, a, EventIface::Mouse, ev, [view, Value::Undefined])
+}
+
+/// `MouseEventInit` (UI Events §5.3.1): `EventInit`, `view` y los datos del ratón.
+pub(crate) fn mouse_parts(
+    agent: &mut Agent,
+    dict: &Value,
+) -> JsResult<(EventInit, Value, MouseEventData)> {
+    let dict = dict.clone();
     let init = event_init(agent, &dict)?;
     let (view, detail) = ui_init(agent, &dict)?;
     let [ctrl_key, shift_key, alt_key, meta_key] = modifiers(agent, &dict)?;
@@ -881,16 +924,18 @@ fn mouse_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         related_target,
         detail,
     };
-    let ev = Event::with_kind(type_, init, EventKind::Mouse(data));
-    construct_event(agent, a, EventIface::Mouse, ev, [view, Value::Undefined])
+    Ok((init, view, data))
 }
 
 fn keyboard_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let type_ = ctor_type(agent, a, "KeyboardEvent")?;
     let dict = a.arg(1);
     let init = event_init(agent, &dict)?;
-    let (view, _) = ui_init(agent, &dict)?;
+    let (view, detail) = ui_init(agent, &dict)?;
     let [ctrl_key, shift_key, alt_key, meta_key] = modifiers(agent, &dict)?;
+    // `KeyboardEventInit` (UI Events §7.2.1, legado): `charCode` y `keyCode`.
+    let char_code = dict_get(agent, &dict, "charCode")?;
+    let char_code = bf_js::host::webidl::to_unsigned_long(agent, &char_code)?;
     let key = dict_get(agent, &dict, "key")?;
     let key = if key.is_undefined() {
         DomString::new()
@@ -918,8 +963,20 @@ fn keyboard_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         repeat,
         is_composing,
     };
+    let key_code = dict_get(agent, &dict, "keyCode")?;
+    let key_code = bf_js::host::webidl::to_unsigned_long(agent, &key_code)?;
+    // `UIEventInit.which` (legado).
+    let which = dict_get(agent, &dict, "which")?;
+    let which = bf_js::host::webidl::to_unsigned_long(agent, &which)?;
     let ev = Event::with_kind(type_, init, EventKind::Keyboard(data));
-    construct_event(agent, a, EventIface::Keyboard, ev, [view, Value::Undefined])
+    let slots = vec![
+        view,
+        Value::Number(f64::from(detail)),
+        Value::Number(f64::from(char_code)),
+        Value::Number(f64::from(key_code)),
+        Value::Number(f64::from(which)),
+    ];
+    construct_event_vec(agent, a, EventIface::Keyboard, ev, slots)
 }
 
 fn input_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1010,14 +1067,18 @@ fn promise_rejection_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult
 
 // --- Atributos de Event ---
 
-fn with_event<R>(agent: &mut Agent, a: &CallArgs<'_>, f: impl FnOnce(&Event) -> R) -> JsResult<R> {
+pub(crate) fn with_event<R>(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    f: impl FnOnce(&Event) -> R,
+) -> JsResult<R> {
     match event_data(agent, &a.this) {
         Some(d) => Ok(f(&d.cell.borrow())),
         None => agent.type_error("Illegal invocation"),
     }
 }
 
-fn with_event_mut<R>(
+pub(crate) fn with_event_mut<R>(
     agent: &mut Agent,
     a: &CallArgs<'_>,
     f: impl FnOnce(&mut Event) -> R,
@@ -1137,7 +1198,7 @@ fn ev_init_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn slot(agent: &mut Agent, a: &CallArgs<'_>, i: usize) -> JsResult<Value> {
+pub(crate) fn slot(agent: &mut Agent, a: &CallArgs<'_>, i: usize) -> JsResult<Value> {
     match &a.this {
         Value::Object(o) => Ok(agent
             .host_slots_mut(*o)
@@ -1211,12 +1272,28 @@ fn ui_detail(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let d = with_event(agent, a, |e| match &e.kind {
         EventKind::Ui { detail } => *detail,
         EventKind::Mouse(m) => m.detail,
-        _ => 0,
+        _ => i32::MIN,
     })?;
+    if d == i32::MIN {
+        // `detail` de las interfaces sin campo propio en `bf-dom`: el slot 1.
+        let v = slot(agent, a, 1)?;
+        return Ok(Value::Number(v.as_number().unwrap_or(0.0)));
+    }
     Ok(Value::Number(f64::from(d)))
 }
 
 fn ui_which(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    // `KeyboardEvent`: el `which` del diccionario o, si no, `keyCode` (UI Events §7.2).
+    if with_event(agent, a, |e| matches!(e.kind, EventKind::Keyboard(_)))? {
+        for i in [4, 3] {
+            if let Some(n) = slot(agent, a, i)?.as_number()
+                && n != 0.0
+            {
+                return Ok(Value::Number(n));
+            }
+        }
+        return kb_key_code(agent, a);
+    }
     let w = with_event(agent, a, |e| match &e.kind {
         EventKind::Mouse(m) => i32::from(m.button) + 1,
         _ => 0,
@@ -1347,6 +1424,11 @@ fn kb_is_composing(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn kb_char_code(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if let Some(n) = slot(agent, a, 2)?.as_number()
+        && n != 0.0
+    {
+        return Ok(Value::Number(n));
+    }
     let c = keyboard(agent, a, |k| {
         let mut chars = k.key.as_lossy_str().chars();
         match (chars.next(), chars.next()) {
@@ -1359,6 +1441,11 @@ fn kb_char_code(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn kb_key_code(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if let Some(n) = slot(agent, a, 3)?.as_number()
+        && n != 0.0
+    {
+        return Ok(Value::Number(n));
+    }
     let c = keyboard(agent, a, |k| {
         let mut chars = k.key.as_lossy_str().chars();
         match (chars.next(), chars.next()) {
@@ -1600,10 +1687,13 @@ fn handler_type(agent: &mut Agent, f: Gc<Object>) -> DomString {
             PropValue::Accessor { .. } => None,
         })
         .unwrap_or_default();
-    name.strip_prefix("get on")
+    let t = name
+        .strip_prefix("get on")
         .or_else(|| name.strip_prefix("set on"))
-        .unwrap_or("")
-        .into()
+        .unwrap_or("");
+    // Los handlers con prefijo `webkit` escuchan los tipos heredados en camelCase (HTML
+    // §8.1.8.2).
+    handler_event_type(t)
 }
 
 /// El target de un handler: los de ventana puestos en `body` van a la ventana.
@@ -1625,15 +1715,70 @@ fn handler_target(
     Ok((doc, t))
 }
 
-/// El elemento que tiene el atributo de contenido de un handler (para la ventana, `body`).
-fn content_element(agent: &Agent, doc: DocIndex, target: EventTarget) -> Option<bf_dom::NodeId> {
-    let ctx = WebContextHandle::current(agent).get(agent);
-    let d = ctx.doc(doc);
+/// El elemento que tiene el atributo de contenido de un handler. Para la ventana, el último
+/// `body`/`frameset` del documento de la ventana cuyo atributo cambió desde script, o el
+/// `body` (HTML §8.1.8.2: los handlers de ventana expuestos en `body` y `frameset`).
+fn content_element(
+    agent: &Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &DomString,
+) -> Option<bf_dom::NodeId> {
+    let h = WebContextHandle::current(agent);
+    let d = h.get(agent).doc(doc);
     match target {
         EventTarget::Node(n) => d.element(n).is_some().then_some(n),
-        EventTarget::Window => d.body(),
+        EventTarget::Window => agent
+            .realm_data::<crate::dom::state::DomState>(h.realm)
+            .and_then(|s| s.window_handler_source.get(type_).copied())
+            .or_else(|| d.body()),
         EventTarget::Object(_) => None,
     }
+}
+
+/// Las "attribute change steps" de los atributos `on…` (HTML §8.1.8.1) para un cambio hecho
+/// desde script: el valor IDL deja de valer (el atributo de contenido manda o, si se quitó,
+/// el handler queda en `null`) y el listener del handler se registra.
+pub fn content_attribute_changed(agent: &mut Agent, n: NodeRef, name: &DomString) {
+    let lower = name.as_lossy_str().to_ascii_lowercase();
+    let Some(raw) = lower.strip_prefix("on") else {
+        return;
+    };
+    let type_ = handler_event_type(raw);
+    let forwarded = n.doc == 0
+        && BODY_WINDOW_HANDLERS.contains(&raw)
+        && crate::with_doc(agent, n.doc, |d| {
+            d.element(n.node)
+                .is_some_and(|e| e.is_html("body") || e.is_html("frameset"))
+        });
+    let (doc, target) = if forwarded {
+        state(agent)
+            .window_handler_source
+            .insert(type_.clone(), n.node);
+        (0, EventTarget::Window)
+    } else {
+        (n.doc, EventTarget::Node(n.node))
+    };
+    if let Some(h) = state(agent).handlers.get_mut(&(doc, target, type_.clone())) {
+        h.idl = None;
+        h.compiled = None;
+    }
+    let present = crate::with_doc(agent, n.doc, |d| d.has_attribute(n.node, name));
+    if present {
+        ensure_handler_listener(agent, doc, target, &type_);
+    }
+}
+
+/// El tipo de evento de un handler `on<raw>` (los `webkit…` en camelCase).
+fn handler_event_type(raw: &str) -> DomString {
+    match raw {
+        "webkitanimationend" => "webkitAnimationEnd",
+        "webkitanimationiteration" => "webkitAnimationIteration",
+        "webkitanimationstart" => "webkitAnimationStart",
+        "webkittransitionend" => "webkitTransitionEnd",
+        other => other,
+    }
+    .into()
 }
 
 /// "Get the current value of the event handler" (HTML §8.1.8.1): compila el atributo de
@@ -1647,7 +1792,7 @@ fn handler_value(
     let key = (doc, target, type_.clone());
     let st = state(agent).handlers.get(&key).cloned().unwrap_or_default();
     let attr_name: DomString = format!("on{type_}").into();
-    let el = content_element(agent, doc, target);
+    let el = content_element(agent, doc, target, type_);
     let attr = el.and_then(|e| crate::with_doc(agent, doc, |d| d.get_attribute(e, &attr_name)));
     // Un atributo de contenido nuevo o cambiado reemplaza al valor IDL.
     let changed = match (&attr, &st.compiled) {
@@ -1814,7 +1959,7 @@ fn handler_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = bf_js::host::webidl::to_event_handler(&a.arg(0));
     let h = v.map(|v| agent.host_pin(v));
     let key = (doc, target, type_.clone());
-    let attr = content_element(agent, doc, target).and_then(|e| {
+    let attr = content_element(agent, doc, target, &type_).and_then(|e| {
         let name: DomString = format!("on{type_}").into();
         crate::with_doc(agent, doc, |d| d.get_attribute(e, &name))
     });
@@ -1910,21 +2055,36 @@ pub fn create_event(agent: &mut Agent, doc: DocIndex, interface: &str) -> JsResu
             EventIface::Keyboard,
             EventKind::Keyboard(KeyboardEventData::default()),
         ),
+        "compositionevent" => (
+            EventIface::Class(classes(agent).composition_event),
+            EventKind::Ui { detail: 0 },
+        ),
+        "hashchangeevent" => (
+            EventIface::Class(classes(agent).hash_change_event),
+            EventKind::Event,
+        ),
+        "messageevent" => (
+            EventIface::Class(classes(agent).message_event),
+            EventKind::Event,
+        ),
+        "storageevent" => (
+            EventIface::Class(classes(agent).storage_event),
+            EventKind::Event,
+        ),
         // Interfaces sin implementar: la más cercana de las que hay (`DragEvent` hereda de
-        // `MouseEvent`; `CompositionEvent`, `TextEvent` y `TouchEvent` de `UIEvent`).
+        // `MouseEvent`; `TextEvent` de `UIEvent`).
         "dragevent" => (
             EventIface::Mouse,
             EventKind::Mouse(MouseEventData::default()),
         ),
-        "compositionevent" | "textevent" | "touchevent" => {
-            (EventIface::Ui, EventKind::Ui { detail: 0 })
+        "touchevent" => (
+            EventIface::Class(classes(agent).touch_event),
+            EventKind::Ui { detail: 0 },
+        ),
+        "textevent" => (EventIface::Ui, EventKind::Ui { detail: 0 }),
+        "beforeunloadevent" | "devicemotionevent" | "deviceorientationevent" => {
+            (EventIface::Event, EventKind::Event)
         }
-        "beforeunloadevent"
-        | "devicemotionevent"
-        | "deviceorientationevent"
-        | "hashchangeevent"
-        | "messageevent"
-        | "storageevent" => (EventIface::Event, EventKind::Event),
         _ => return throw_dom(agent, bf_dom::DomException::NotSupportedError),
     };
     let mut ev = Event::uninitialized(kind);
@@ -1955,10 +2115,12 @@ const NATIVE_WRAPPERS: usize = 8;
 /// ya devuelto al contexto y el realm de la ventana en curso. El wrapper del evento es el mismo para
 /// todos los listeners del dispatch (se reconoce por la dirección y el `timeStamp` del evento).
 pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> bool {
-    let key = (
-        std::ptr::from_mut(event) as usize,
-        event.time_stamp.to_bits(),
-    );
+    invoke_listener_in(agent, 0, handle, event)
+}
+
+/// [`invoke_listener`] con el documento `doc` (el de los targets del dispatch).
+fn invoke_listener_in(agent: &mut Agent, doc: DocIndex, handle: u64, event: &mut Event) -> bool {
+    let key = event_key(event);
     let cached = state(agent)
         .native_events
         .iter()
@@ -1968,7 +2130,7 @@ pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> boo
         Some(Value::Object(o)) => o,
         _ => {
             let cell = Rc::new(RefCell::new(Event::new("", EventInit::default())));
-            let o = create_event_object(agent, iface_of(&event.kind), cell, 0);
+            let o = create_event_object(agent, iface_of(&event.kind), cell, doc);
             let h = agent.host_pin(Value::Object(o));
             let st = state(agent);
             st.native_events.push((key, h));
@@ -1984,8 +2146,10 @@ pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> boo
         .cell
         .clone();
     std::mem::swap(&mut *cell.borrow_mut(), event);
-    let threw = call_script_listener(agent, 0, handle, wrapper);
+    let threw = call_script_listener(agent, doc, handle, wrapper);
     std::mem::swap(&mut *cell.borrow_mut(), event);
+    // El wrapper sigue mostrando el evento después del dispatch (`isTrusted`, `type`…).
+    *cell.borrow_mut() = event.after_dispatch_copy();
     threw
 }
 
@@ -2000,7 +2164,7 @@ pub fn high_res_now(agent: &mut Agent) -> f64 {
 }
 
 /// WebIDL: menos argumentos que los obligatorios es un `TypeError`.
-fn required(agent: &mut Agent, a: &CallArgs<'_>, n: usize, op: &str) -> JsResult<()> {
+pub(crate) fn required(agent: &mut Agent, a: &CallArgs<'_>, n: usize, op: &str) -> JsResult<()> {
     if a.args.len() < n {
         return agent.type_error(&format!(
             "Failed to execute '{op}': {n} argument required, but only {} present.",
@@ -2011,7 +2175,7 @@ fn required(agent: &mut Agent, a: &CallArgs<'_>, n: usize, op: &str) -> JsResult
 }
 
 /// Guarda `view` en el slot 0 de `this`.
-fn set_view_slot(agent: &mut Agent, a: &CallArgs<'_>) {
+pub(crate) fn set_view_slot(agent: &mut Agent, a: &CallArgs<'_>) {
     if let Value::Object(o) = a.this
         && let Some(s) = agent.host_slots_mut(o)
     {
@@ -2086,4 +2250,72 @@ fn init_keyboard_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     })?;
     set_view_slot(agent, a);
     Ok(Value::Undefined)
+}
+
+/// El nombre del atributo de contenido de un tipo de evento (`onclick`; los tipos con
+/// prefijo `webkit` usan el nombre en minúsculas).
+fn handler_attr_name(type_: &DomString) -> DomString {
+    format!("on{}", type_.as_lossy_str().to_ascii_lowercase()).into()
+}
+
+/// ¿El atributo `on<type>` de `target` es un handler que hay que registrar?
+fn target_has_content_handler(d: &Document, target: EventTarget, type_: &DomString) -> bool {
+    let attr = handler_attr_name(type_);
+    let body_handler = BODY_WINDOW_HANDLERS.contains(&type_.as_lossy_str());
+    match target {
+        EventTarget::Node(n) => d.element(n).is_some_and(|e| {
+            // Los handlers de ventana de `body`/`frameset` son de la ventana.
+            !(body_handler && (e.is_html("body") || e.is_html("frameset")))
+                && d.has_attribute(n, &attr)
+        }),
+        EventTarget::Window => body_handler && d.body().is_some_and(|b| d.has_attribute(b, &attr)),
+        EventTarget::Object(_) => false,
+    }
+}
+
+/// Registra el handler del atributo de contenido de `target` para `type_` (si lo tiene).
+pub fn sync_target_handler(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    type_: &DomString,
+) {
+    let has = crate::with_doc(agent, doc, |d| target_has_content_handler(d, target, type_));
+    if has {
+        let tdoc = if target == EventTarget::Window {
+            0
+        } else {
+            doc
+        };
+        ensure_handler_listener(agent, tdoc, target, type_);
+    }
+}
+
+/// [`sync_target_handler`] desde un `ScriptHost` que tiene prestado el documento `index` del
+/// realm `realm`: solo si hace falta, el documento vuelve al contexto mientras se registra.
+pub fn sync_lent(
+    agent: &mut Agent,
+    realm: bf_js::vm::RealmId,
+    index: DocIndex,
+    doc: &mut Document,
+    target: EventTarget,
+    type_: &DomString,
+) {
+    if !target_has_content_handler(doc, target, type_) {
+        return;
+    }
+    let h = WebContextHandle { realm };
+    let real = std::mem::take(doc);
+    let saved = std::mem::replace(
+        &mut h.get_mut(agent).documents[index as usize],
+        crate::DocumentOwner::Document(Box::new(real)),
+    );
+    let saved_realm = agent.current_realm;
+    agent.current_realm = realm;
+    sync_target_handler(agent, index, target, type_);
+    agent.current_realm = saved_realm;
+    let back = std::mem::replace(&mut h.get_mut(agent).documents[index as usize], saved);
+    if let crate::DocumentOwner::Document(d) = back {
+        *doc = *d;
+    }
 }

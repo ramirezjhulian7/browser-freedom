@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blob; // E2: el almacén de URLs blob:
 pub mod cookies;
 pub mod http;
 pub mod sniff;
@@ -280,6 +281,9 @@ impl Fetcher {
         let mut body = opts.body.clone();
         let mut referrer = opts.referrer.clone();
         for redirects in 0..=MAX_REDIRECTS {
+            if url.scheme == "blob" {
+                return blob_response(&url, redirects);
+            }
             if !matches!(url.scheme.as_str(), "http" | "https") {
                 let res = load_local(&url, &[]).ok_or(
                     if matches!(url.scheme.as_str(), "data" | "file") {
@@ -301,7 +305,16 @@ impl Fetcher {
                     redirects,
                 });
             }
-            let mut response = self.http(&url, method, body.as_ref(), referrer.as_ref(), opts)?;
+            let no_headers = Headers::default();
+            let extra = HttpExtra {
+                method: method.as_str(),
+                body: body
+                    .as_ref()
+                    .map(|(b, ct)| (b.as_slice(), Some(ct.as_str()))),
+                headers: &no_headers,
+                credentials: true,
+            };
+            let mut response = self.http(&url, &extra, referrer.as_ref(), &opts.accept)?;
             response.redirects = redirects;
             if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(response);
@@ -332,11 +345,12 @@ impl Fetcher {
     fn http(
         &self,
         url: &Url,
-        method: Method,
-        body: Option<&(Vec<u8>, String)>,
+        extra: &HttpExtra<'_>,
         referrer: Option<&Url>,
-        opts: &FetchOptions,
+        accept: &str,
     ) -> Result<Response, FetchError> {
+        let method = extra.method;
+        let body = extra.body;
         let tls = url.scheme == "https";
         let host = match &url.host {
             Some(Host::Empty) | None => return Err(FetchError::InvalidUrl),
@@ -346,18 +360,28 @@ impl Fetcher {
         let key: PoolKey = (host.clone(), port, tls);
         let mut headers = Headers::default();
         headers.push("Host", &url.host_string());
-        headers.push("User-Agent", USER_AGENT);
+        // E2: las cabeceras del script reemplazan a las por defecto del mismo nombre.
+        let has = |n: &str| extra.headers.get(n).is_some();
+        if !has("user-agent") {
+            headers.push("User-Agent", USER_AGENT);
+        }
         // Client Hints de baja entropía (UA-CH §4.2), solo en peticiones seguras, como Chrome.
         if tls {
             for (name, value) in bf_infra::identity::client_hint_headers() {
                 headers.push(name, &value);
             }
         }
-        headers.push("Accept", &opts.accept);
-        headers.push("Accept-Language", &accept_language());
+        if !has("accept") {
+            headers.push("Accept", accept);
+        }
+        if !has("accept-language") {
+            headers.push("Accept-Language", &accept_language());
+        }
         headers.push("Accept-Encoding", "gzip, deflate, br");
         headers.push("Connection", "keep-alive");
-        if let Some(c) = self.cookies.cookie_header(url) {
+        if extra.credentials
+            && let Some(c) = self.cookies.cookie_header(url)
+        {
             headers.push("Cookie", &c);
         }
         if let Some(r) = referrer {
@@ -375,8 +399,13 @@ impl Fetcher {
                 headers.push("Referer", &r.href());
             }
         }
-        if let Some((_, ct)) = body {
+        if let Some((_, Some(ct))) = body
+            && !has("content-type")
+        {
             headers.push("Content-Type", ct);
+        }
+        for (n, v) in &extra.headers.0 {
+            headers.push(n, v);
         }
         let target = {
             let mut t = url.path_string();
@@ -414,17 +443,17 @@ impl Fetcher {
             let result = (|| -> Result<(http::Head, Vec<u8>, bool), FetchError> {
                 http::write_request(
                     conn.get_mut(),
-                    method.as_str(),
+                    method,
                     &target,
                     &headers,
-                    body.map(|(b, _)| b.as_slice()),
+                    body.map(|(b, _)| b),
                 )?;
                 let mut head = http::read_head(&mut conn)?;
                 // 1xx informativos: se descartan.
                 while (100..200).contains(&head.status) && head.status != 101 {
                     head = http::read_head(&mut conn)?;
                 }
-                let kind = http::body_kind(&head, method == Method::Head);
+                let kind = http::body_kind(&head, method.eq_ignore_ascii_case("HEAD"));
                 let raw = http::read_body(&mut conn, kind, MAX_BODY)?;
                 let close = kind == http::BodyKind::UntilEof
                     || head.headers.list("connection").iter().any(|c| c == "close")
@@ -449,8 +478,10 @@ impl Fetcher {
                     .or_default()
                     .push(conn);
             }
-            for c in head.headers.get_all("set-cookie") {
-                self.cookies.set_cookie(url, c);
+            if extra.credentials {
+                for c in head.headers.get_all("set-cookie") {
+                    self.cookies.set_cookie(url, c);
+                }
             }
             let body = http::decode_content(raw, &head.headers.list("content-encoding"))?;
             return Ok(Response {
@@ -466,6 +497,229 @@ impl Fetcher {
             io::ErrorKind::ConnectionReset,
             "la conexión se cerró",
         )))
+    }
+}
+
+// --- E2: peticiones con método, cabeceras y modo de redirección arbitrarios (para fetch() y
+// XMLHttpRequest) ---
+
+/// Lo que cambia de una petición HTTP respecto a las de documentos y subrecursos.
+struct HttpExtra<'a> {
+    method: &'a str,
+    body: Option<(&'a [u8], Option<&'a str>)>,
+    headers: &'a Headers,
+    credentials: bool,
+}
+
+/// El modo de redirección de una petición (Fetch §2.2.5, "redirect mode").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RedirectMode {
+    #[default]
+    Follow,
+    Error,
+    Manual,
+}
+
+/// Una petición de script (Fetch §2.2.5, simplificada).
+#[derive(Debug, Clone)]
+pub struct RequestOptions {
+    /// El método, ya normalizado (`GET`, `POST`, `PUT`…).
+    pub method: String,
+    /// Las cabeceras del autor (sin las prohibidas).
+    pub headers: Headers,
+    pub body: Option<Vec<u8>>,
+    pub redirect: RedirectMode,
+    /// ¿Se mandan y guardan cookies? (credentials mode `include`/`same-origin`).
+    pub credentials: bool,
+    pub referrer: Option<Url>,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        RequestOptions {
+            method: "GET".into(),
+            headers: Headers::default(),
+            body: None,
+            redirect: RedirectMode::Follow,
+            credentials: true,
+            referrer: None,
+        }
+    }
+}
+
+/// La respuesta de una URL `blob:` (Fetch §4.2, "scheme fetch"): `200 OK`, o `206` con una
+/// cabecera `Range` de un solo rango.
+fn blob_response(url: &Url, redirects: usize) -> Result<Response, FetchError> {
+    blob_response_range(url, redirects, None)
+}
+
+/// "Parse a single range header value" (Fetch §2.2.6, con espacios permitidos).
+fn parse_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let v = v.trim_matches([' ', '\t']);
+    let rest = v.strip_prefix("bytes")?.trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('=')?.trim_matches([' ', '\t']);
+    let (a, b) = rest.split_once('-')?;
+    let (a, b) = (a.trim_matches([' ', '\t']), b.trim_matches([' ', '\t']));
+    let num = |s: &str| -> Option<Option<u64>> {
+        if s.is_empty() {
+            Some(None)
+        } else if s.chars().all(|c| c.is_ascii_digit()) {
+            s.parse().ok().map(Some)
+        } else {
+            None
+        }
+    };
+    let (start, end) = (num(a)?, num(b)?);
+    if start.is_none() && end.is_none() {
+        return None;
+    }
+    if let (Some(s), Some(e)) = (start, end)
+        && s > e
+    {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn blob_response_range(
+    url: &Url,
+    redirects: usize,
+    range: Option<&str>,
+) -> Result<Response, FetchError> {
+    let entry = blob::resolve(url).ok_or(FetchError::NotFound)?;
+    let mut headers = Headers::default();
+    let Some(range) = range else {
+        headers.push("Content-Length", &entry.bytes.len().to_string());
+        headers.push("Content-Type", &entry.mime);
+        return Ok(Response {
+            url: url.clone(),
+            status: 200,
+            status_text: "OK".into(),
+            headers,
+            body: entry.bytes.to_vec(),
+            redirects,
+        });
+    };
+    let len = entry.bytes.len() as u64;
+    let bad = || FetchError::Io(io::Error::other("invalid range"));
+    let (start, end) = parse_range(range).ok_or_else(bad)?;
+    let (start, end) = match (start, end) {
+        (None, Some(suffix)) => (len.saturating_sub(suffix), len.saturating_sub(1)),
+        (Some(s), e) => {
+            if s >= len {
+                return Err(bad());
+            }
+            (s, e.map_or(len - 1, |e| e.min(len - 1)))
+        }
+        (None, None) => return Err(bad()),
+    };
+    if len == 0 || start > end {
+        return Err(bad());
+    }
+    let body = entry.bytes[start as usize..=end as usize].to_vec();
+    headers.push("Content-Length", &body.len().to_string());
+    headers.push("Content-Type", &entry.mime);
+    headers.push("Content-Range", &format!("bytes {start}-{end}/{len}"));
+    Ok(Response {
+        url: url.clone(),
+        status: 206,
+        status_text: "Partial Content".into(),
+        headers,
+        body,
+        redirects,
+    })
+}
+
+impl Fetcher {
+    /// Una petición de script: la respuesta y la lista de URLs visitadas (Fetch §2.2.5, "URL
+    /// list"). Con `RedirectMode::Manual` devuelve la respuesta 3xx; con `Error`, un error.
+    pub fn fetch_request(
+        &self,
+        url: &Url,
+        req: &RequestOptions,
+    ) -> Result<(Response, Vec<Url>), FetchError> {
+        let mut url = url.clone();
+        let mut method = req.method.clone();
+        let mut body = req.body.clone();
+        let mut headers = req.headers.clone();
+        let mut referrer = req.referrer.clone();
+        let mut list = vec![url.clone()];
+        for redirects in 0..=MAX_REDIRECTS {
+            if url.scheme == "blob" {
+                if !method.eq_ignore_ascii_case("GET") {
+                    return Err(FetchError::NotFound);
+                }
+                let range = headers.get("range");
+                return blob_response_range(&url, redirects, range).map(|r| (r, list));
+            }
+            if !matches!(url.scheme.as_str(), "http" | "https") {
+                let res = load_local(&url, &[]).ok_or(FetchError::NotFound)?;
+                let mut h = Headers::default();
+                if let Some(ct) = &res.content_type {
+                    h.push("Content-Type", ct);
+                }
+                let r = Response {
+                    url: res.url,
+                    status: 200,
+                    status_text: "OK".into(),
+                    headers: h,
+                    body: res.bytes,
+                    redirects,
+                };
+                return Ok((r, list));
+            }
+            let extra = HttpExtra {
+                method: &method,
+                body: body.as_deref().map(|b| (b, None)),
+                headers: &headers,
+                credentials: req.credentials,
+            };
+            let mut response = self.http(&url, &extra, referrer.as_ref(), "*/*")?;
+            response.redirects = redirects;
+            if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                return Ok((response, list));
+            }
+            let Some(location) = response.headers.get("location").map(str::to_owned) else {
+                return Ok((response, list));
+            };
+            match req.redirect {
+                RedirectMode::Manual => return Ok((response, list)),
+                RedirectMode::Error => {
+                    return Err(FetchError::Io(io::Error::other("redirect mode is error")));
+                }
+                RedirectMode::Follow => {}
+            }
+            let Ok(mut next) = Url::parse(&location, Some(&url)) else {
+                return Err(FetchError::InvalidUrl);
+            };
+            if next.fragment.is_none() {
+                next.fragment.clone_from(&url.fragment);
+            }
+            // Fetch §4.4 paso 12: 301/302 con POST y 303 (salvo GET/HEAD) pasan a GET sin
+            // cuerpo ni cabeceras de contenido.
+            let post = method.eq_ignore_ascii_case("POST");
+            let get_or_head =
+                method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+            if (matches!(response.status, 301 | 302) && post)
+                || (response.status == 303 && !get_or_head)
+            {
+                method = "GET".into();
+                body = None;
+                headers.0.retain(|(n, _)| {
+                    !matches!(
+                        n.to_ascii_lowercase().as_str(),
+                        "content-encoding"
+                            | "content-language"
+                            | "content-location"
+                            | "content-type"
+                    )
+                });
+            }
+            referrer = Some(url.clone());
+            url = next;
+            list.push(url.clone());
+        }
+        Err(FetchError::TooManyRedirects)
     }
 }
 

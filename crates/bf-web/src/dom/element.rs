@@ -206,7 +206,9 @@ fn set_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let name = to_dom_string(agent, &a.arg(0))?;
     let value = to_dom_string(agent, &a.arg(1))?;
     let r = with_doc_mut(agent, n.doc, |d| d.set_attribute(n.node, &name, value));
-    done(agent, r)
+    let v = done(agent, r)?;
+    crate::dom::events::content_attribute_changed(agent, n, &name);
+    Ok(v)
 }
 
 fn set_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -217,7 +219,9 @@ fn set_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = with_doc_mut(agent, n.doc, |d| {
         d.set_attribute_ns(n.node, ns.as_deref(), &qn, value)
     });
-    done(agent, r)
+    let v = done(agent, r)?;
+    crate::dom::events::content_attribute_changed(agent, n, &qn);
+    Ok(v)
 }
 
 fn remove_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -225,6 +229,7 @@ fn remove_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let name = to_dom_string(agent, &a.arg(0))?;
     with_doc_mut(agent, n.doc, |d| d.remove_attribute(n.node, &name));
     mutated(agent);
+    crate::dom::events::content_attribute_changed(agent, n, &name);
     Ok(Value::Undefined)
 }
 
@@ -251,6 +256,7 @@ fn toggle_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     match r {
         Ok(b) => {
             mutated(agent);
+            crate::dom::events::content_attribute_changed(agent, n, &name);
             Ok(Value::Boolean(b))
         }
         Err(e) => throw_dom(agent, e),

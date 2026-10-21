@@ -463,6 +463,16 @@ impl bf_dom::events::ScriptHost for WebScripts<'_> {
     ) -> bool {
         lend_and_invoke(self.agent, self.realm, doc, handle, event)
     }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: bf_dom::events::EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, 0, doc, target, type_);
+    }
 }
 
 /// El host de un despacho que empieza fuera de un script (un evento del usuario): el
@@ -481,6 +491,16 @@ impl bf_dom::events::ScriptHost for LendHost<'_> {
         event: &mut bf_dom::events::Event,
     ) -> bool {
         lend_and_invoke(self.agent, self.realm, doc, handle, event)
+    }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: bf_dom::events::EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, 0, doc, target, type_);
     }
 }
 
@@ -713,58 +733,6 @@ fn fire_simple(
     dispatch_trusted(agent, realm, target, &mut ev)
 }
 
-/// Un `<script src>` clásico que conectó el DOM (no el parser): como todo script insertado
-/// sin `async=false` es async (HTML §4.12.1.1 paso 33.2): una tarea lo busca con el loader de
-/// la ventana, lo ejecuta y dispara `load` (o `error` si no se pudo cargar).
-pub fn run_inserted_script(agent: &mut Agent, el: NodeId, url: Url) {
-    let realm = WebContextHandle::current(agent).realm;
-    agent.queue_task(
-        TaskSource::Networking,
-        Box::new(move |agent: &mut Agent| {
-            let saved = agent.current_realm;
-            agent.current_realm = realm;
-            let charset = WebContextHandle { realm }
-                .get(agent)
-                .document()
-                .script_info(el)
-                .map_or("UTF-8", |i| i.encoding);
-            let fetched = {
-                let mut host = WebScripts { agent, realm };
-                host.fetch(&url, charset)
-            };
-            let ok = fetched.is_some();
-            if let Some(f) = fetched {
-                let old = WebContextHandle { realm }
-                    .get_mut(agent)
-                    .document_mut()
-                    .scripts_mut()
-                    .current_script
-                    .replace(el);
-                WebScripts { agent, realm }.run_classic(&f.source, &f.url);
-                WebContextHandle { realm }
-                    .get_mut(agent)
-                    .document_mut()
-                    .scripts_mut()
-                    .current_script = old;
-            } else {
-                agent.host.hooks.console(
-                    ConsoleLevel::Error,
-                    &format!("Failed to load resource: {}", url.href()),
-                );
-            }
-            fire_simple(
-                agent,
-                realm,
-                bf_dom::events::EventTarget::Node(el),
-                if ok { "load" } else { "error" },
-                false,
-                false,
-            );
-            agent.current_realm = saved;
-        }),
-    );
-}
-
 /// El navegador terminó de cargar las imágenes y hojas del documento: `load` (13.2.7 pasos 8
 /// y 9) si nada más lo demora.
 pub fn resources_loaded(agent: &mut Agent, realm: RealmId) {
@@ -840,4 +808,27 @@ pub fn storage_event(
         ("storageArea", area),
     ];
     fire_with_props(agent, realm, "storage", false, props);
+}
+
+// E3: los `script` que inserta el DOM (no el parser) usan la misma carga y ejecución.
+/// Busca el script de `url` con el loader de la ventana de `realm` (`None` sin loader o si
+/// falló): el texto decodificado y la URL final.
+pub fn fetch_script(
+    agent: &mut Agent,
+    realm: RealmId,
+    url: &Url,
+    charset: &str,
+) -> Option<(String, String)> {
+    let mut host = WebScripts { agent, realm };
+    host.fetch(url, charset).map(|f| (f.source, f.url))
+}
+
+/// Ejecuta un script clásico (`module = false`) o un módulo como los del parser.
+pub fn run_script(agent: &mut Agent, realm: RealmId, source: &str, url: &str, module: bool) {
+    let mut host = WebScripts { agent, realm };
+    if module {
+        host.run_module(source, url);
+    } else {
+        host.run_classic(source, url);
+    }
 }

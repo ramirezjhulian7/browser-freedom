@@ -92,6 +92,9 @@ impl Document {
         new_units.extend_from_slice(&units[offset + count..]);
         *self.char_data_mut(n) = DomString::from_utf16(&new_units);
         self.bump_version();
+        // E3: pasos 8-11, los rangos vivos.
+        let len = data.code_units().count() as u32;
+        self.ranges_replace_data(n, offset as u32, count as u32, len);
         Ok(())
     }
 
@@ -136,6 +139,9 @@ impl Document {
         if let Some(parent) = self.parent(n) {
             let next = self.get(n).next_sibling();
             self.insert(new_node, parent, next, false);
+            // E3: pasos 7.2-7.5, los rangos vivos.
+            let index = self.index(n) as u32;
+            self.ranges_split(n, new_node, offset as u32, parent, index);
         }
         self.replace_data(n, offset, count, &DomString::new())?;
         Ok(new_node)
