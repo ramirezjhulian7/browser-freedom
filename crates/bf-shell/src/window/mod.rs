@@ -1,4 +1,4 @@
-//! `browser-freedom open [url|archivo]`: la ventana del navegador (winit + softbuffer).
+//! `freedom open [url|archivo]`: la ventana del navegador (winit + softbuffer).
 //!
 //! La interfaz muestra lo que el motor hace con cada página. Todo el cromo se dibuja con el
 //! propio motor y el propio rasterizador, con la paleta de [`Theme`]:
@@ -1238,7 +1238,7 @@ impl App {
     fn update_title(&self) {
         if let Some(g) = &self.graphics {
             g.window
-                .set_title(&format!("«{}» — browser-freedom", self.display_name()));
+                .set_title(&format!("{} — Freedom", self.display_name()));
         }
     }
 
@@ -1514,7 +1514,7 @@ impl App {
                     h
                 }
             })
-            .unwrap_or_else(|| "browser-freedom".to_owned());
+            .unwrap_or_else(|| "Freedom".to_owned());
         let dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -2469,7 +2469,7 @@ impl ApplicationHandler<Wake> for App {
         }
         let attributes = Window::default_attributes()
             .with_window_icon(window_icon())
-            .with_title("«Cargando…» — browser-freedom")
+            .with_title("Freedom")
             .with_inner_size(LogicalSize::new(1180.0, 800.0));
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Rc::new(w),
@@ -2865,7 +2865,7 @@ impl App {
     }
 }
 
-/// `browser-freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
+/// `freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
 /// `link:texto` (clic en el enlace con ese texto), `type:texto`,

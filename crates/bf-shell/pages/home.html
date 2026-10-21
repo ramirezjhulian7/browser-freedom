@@ -57,15 +57,17 @@ body { padding-top: 8px; }
 <main>
   <div class="hero">
     {{mark}}
-    <h1>browser-<span class="accent">freedom</span></h1>
-    <p class="muted">Un navegador con motor propio: HTML, CSS, layout y pintura escritos desde cero.</p>
+    <h1>Freedom</h1>
+    <p class="muted">Navega libre. Un navegador independiente, hecho desde cero.</p>
   </div>
   <a class="search" href="bf:focus-url"><span class="caret"></span><span class="text">Busca en Google o escribe una dirección</span><span class="kbd">Ctrl</span><span class="kbd">L</span></a>
   <div class="tiles">{{tiles}}</div>
   <h2>Recientes</h2>
   <div class="card recent">{{recent}}</div>
-  <h2>Atajos</h2>
+  <h2>Atajos de teclado</h2>
   <div class="card keys">{{shortcuts}}</div>
-  <p class="foot muted"><a href="about:">about:</a> · <a href="about:engine">about:engine</a> · <a href="about:wpt">about:wpt</a></p>
+  <h2>Para desarrolladores</h2>
+  <div class="card keys">{{dev_shortcuts}}</div>
+  <p class="foot muted">Freedom todavía no ejecuta JavaScript: algunos sitios pueden verse incompletos.<br>Páginas internas: <a href="about:">about:</a> · <a href="about:engine">about:engine</a> · <a href="about:wpt">about:wpt</a></p>
 </main>
 </html>

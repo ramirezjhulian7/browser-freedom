@@ -30,7 +30,7 @@ pub enum Icon {
     Close,
 }
 
-/// El contorno del logo (`assets/browser-freedom.png` vectorizado) en la grilla de 16: el
+/// El contorno del logo (`assets/freedom.png` vectorizado) en la grilla de 16: el
 /// marco con la esquina superior derecha abierta y el pájaro, en una sola figura.
 #[rustfmt::skip]
 const BRAND: &[(f32, f32)] = &[

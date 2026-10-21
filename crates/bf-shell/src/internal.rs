@@ -53,25 +53,33 @@ pub const STATUS: &str = include_str!("../pages/status.html");
 /// El estado de compatibilidad al compilar (lo regenera la corrida de reftests).
 const WPT_STATUS: &str = include_str!("../../../docs/wpt-status.md");
 
-/// Los atajos de la ventana (se muestran en `about:home`).
+/// Los atajos de la ventana para el uso diario (se muestran en `about:home`).
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Ir a la barra de dirección"),
-    ("Ctrl+I", "Panel del motor"),
-    ("F12", "Superposición de cajas"),
-    ("Ctrl+R · F5", "Recargar"),
-    ("Esc", "Detener la carga o volver a la página"),
-    ("Alt+← · Alt+→", "Atrás y adelante"),
-    ("Ctrl++ · Ctrl+− · Ctrl+0", "Zoom"),
-    ("Ctrl+S", "Guardar un PNG de la ventana"),
-    ("Ctrl+Shift+D", "Volcar el layout"),
-    ("Ctrl+H", "Inicio"),
     ("Ctrl+T · Ctrl+W", "Pestaña nueva y cerrar pestaña"),
     ("Ctrl+Tab · Ctrl+1…9", "Cambiar de pestaña"),
     (
         "Clic central · Ctrl+clic",
         "Abrir un enlace en otra pestaña",
     ),
+    ("Alt+← · Alt+→", "Atrás y adelante"),
+    ("Ctrl+R · F5", "Recargar"),
+    ("Esc", "Detener la carga"),
+    ("Ctrl+H", "Inicio"),
+    (
+        "Ctrl++ · Ctrl+− · Ctrl+0",
+        "Acercar, alejar y tamaño normal",
+    ),
+    ("Ctrl+A · Ctrl+C", "Seleccionar todo y copiar"),
     ("Espacio · Mayús+Espacio", "Página abajo y arriba"),
+];
+
+/// Las herramientas para quien desarrolla páginas o el navegador (`about:home`, aparte).
+pub const DEV_SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+I", "Panel del motor"),
+    ("F12", "Superposición de cajas"),
+    ("Ctrl+S", "Guardar un PNG de la ventana"),
+    ("Ctrl+Shift+D", "Volcar el layout"),
 ];
 
 /// Accesos de `about:home`.
@@ -193,19 +201,22 @@ fn home(ctx: &LoadContext) -> String {
         recent =
             "<p class=\"empty\">Todavía no visitaste ninguna página en esta sesión.</p>".into();
     }
-    let mut keys = String::new();
-    for (k, d) in SHORTCUTS {
-        // Cada combinación en su tecla: "Ctrl+R · F5" son dos.
-        let chips: String = k
-            .split(" · ")
-            .map(|c| format!("<span class=\"kbd\">{}</span>", escape(c)))
-            .collect();
-        let _ = write!(
-            keys,
-            "<div class=\"key\"><span class=\"k\">{chips}</span><span class=\"d\">{}</span></div>",
-            escape(d)
-        );
-    }
+    let keys = |list: &[(&str, &str)]| {
+        let mut out = String::new();
+        for (k, d) in list {
+            // Cada combinación en su tecla: "Ctrl+R · F5" son dos.
+            let chips: String = k
+                .split(" · ")
+                .map(|c| format!("<span class=\"kbd\">{}</span>", escape(c)))
+                .collect();
+            let _ = write!(
+                out,
+                "<div class=\"key\"><span class=\"k\">{chips}</span><span class=\"d\">{}</span></div>",
+                escape(d)
+            );
+        }
+        out
+    };
     themed(
         HOME,
         &ctx.theme,
@@ -216,7 +227,8 @@ fn home(ctx: &LoadContext) -> String {
             ),
             ("tiles", tiles),
             ("recent", recent),
-            ("shortcuts", keys),
+            ("shortcuts", keys(SHORTCUTS)),
+            ("dev_shortcuts", keys(DEV_SHORTCUTS)),
         ],
     )
 }
@@ -240,58 +252,58 @@ fn sample_error(query: &str) -> LoadError {
 fn describe(kind: ErrorKind) -> (String, String, &'static str) {
     match kind {
         ErrorKind::Dns => (
-            "No se encontró el servidor".into(),
+            "No se encontró el sitio".into(),
             "DNS".into(),
-            "El nombre del host no existe o no se pudo resolver. Revisa la dirección o la conexión.",
+            "No se encontró ese sitio. Revisa que la dirección esté bien escrita y que tengas conexión a internet.",
         ),
         ErrorKind::Tls => (
             "La conexión segura falló".into(),
-            "TLS".into(),
-            "El certificado del servidor no es válido o el handshake TLS no se completó.",
+            "Conexión segura".into(),
+            "No se pudo comprobar que el sitio sea quien dice ser: su certificado no es válido o la conexión segura no se completó.",
         ),
         ErrorKind::Timeout => (
-            "El servidor tardó demasiado".into(),
-            "Timeout".into(),
-            "Se agotó el tiempo de conexión (10 s) o de lectura (30 s).",
+            "El sitio tardó demasiado".into(),
+            "Tiempo agotado".into(),
+            "El sitio no respondió a tiempo. Puede estar caído o tu conexión ser lenta; prueba de nuevo en un momento.",
         ),
         ErrorKind::Connection => (
             "No se pudo conectar".into(),
             "Conexión".into(),
-            "El servidor rechazó la conexión o la cortó antes de responder.",
+            "El sitio rechazó la conexión o la cortó antes de responder.",
         ),
         ErrorKind::Http(code) => (
-            format!("El servidor respondió {code}"),
+            format!("El sitio respondió con un error ({code})"),
             format!("HTTP {code}"),
             if code < 500 {
-                "La página no existe o no hay permiso para verla."
+                "La página no existe o no tienes permiso para verla."
             } else {
-                "El servidor tuvo un error al procesar la petición."
+                "El sitio tuvo un problema al responder. No es un error de Freedom; prueba más tarde."
             },
         ),
         ErrorKind::NotFound => (
             "No se encontró el archivo".into(),
             "Archivo".into(),
-            "La ruta no existe o no se puede leer.",
+            "Ese archivo no existe en tu equipo o no se puede leer.",
         ),
         ErrorKind::InvalidUrl => (
             "La dirección no es válida".into(),
             "URL".into(),
-            "No es una URL que el URL Standard acepte.",
+            "Lo escrito no tiene el formato de una dirección web.",
         ),
         ErrorKind::UnsupportedScheme => (
             "Esquema no soportado".into(),
             "Esquema".into(),
-            "browser-freedom carga http, https, file, data y about.",
+            "Freedom abre direcciones http, https, file, data y about.",
         ),
         ErrorKind::TooManyRedirects => (
             "Demasiadas redirecciones".into(),
             "Redirecciones".into(),
-            "La página redirige más de 20 veces (Fetch §4.4).",
+            "La página redirige a otra una y otra vez (más de 20 veces) y nunca termina de cargar.",
         ),
         ErrorKind::Engine => (
             "El motor falló con esta página".into(),
             "Motor".into(),
-            "Es un error de browser-freedom, no de la página: el detalle sirve para reportarlo.",
+            "Es un error de Freedom, no de la página. El detalle de abajo sirve para reportarlo.",
         ),
         ErrorKind::UnknownInternal => (
             "Página interna desconocida".into(),

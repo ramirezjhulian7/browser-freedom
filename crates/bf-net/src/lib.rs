@@ -24,7 +24,7 @@ pub use cookies::CookieJar;
 pub use http::Headers;
 pub use sniff::{EncodingSource, MimeType, html_encoding, html_encoding_with_source};
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; BrowserFreedom/0.1)";
+pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; Freedom/0.1)";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 20;

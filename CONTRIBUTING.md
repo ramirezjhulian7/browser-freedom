@@ -1,4 +1,4 @@
-# Contribuir a browser-freedom
+# Contribuir a Freedom
 
 ## La regla: spec literal + suite oficial
 
