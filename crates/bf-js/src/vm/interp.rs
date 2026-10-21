@@ -2597,7 +2597,9 @@ fn primitive_truthiness(v: &Value) -> Option<bool> {
 
 /// Las instrucciones más frecuentes que no necesitan el agente (locales, constantes, pila,
 /// saltos y aritmética Number × Number). Deja el frame igual si devuelve [`Fast::Slow`].
-#[inline]
+/// Siempre en línea en el bucle del intérprete: si LLVM decide no hacerlo (pasa al crecer el
+/// código), cada instrucción paga una llamada y todo va ~50 % más lento.
+#[inline(always)]
 fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> Fast {
     let genv = cx.genv;
     use crate::abstract_ops::conversion::{to_int32, to_uint32};
@@ -2836,6 +2838,52 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             }
             _ => return Fast::Slow,
         },
+        // `for…of` sobre un Array con el `next` original (E3): los pasos de
+        // %ArrayIteratorPrototype%.next (§23.1.5.2.1) sin el objeto resultado; un hueco va por
+        // la ruta lenta (su [[Get]] mira la cadena de prototipos).
+        Op::IterStep { slot, done } => {
+            let s = slot as usize;
+            let (Some(Value::Object(it)), Some(Value::Object(next))) = (&f.locals[s], &f.locals[s + 1])
+            else {
+                return Fast::Slow;
+            };
+            let (it, next) = (*it, *next);
+            if !crate::builtins::iterator::is_array_iterator_next(heap, next) {
+                return Fast::Slow;
+            }
+            let ObjectKind::ArrayIterator(d) = &heap[it].kind else {
+                return Fast::Slow;
+            };
+            if !matches!(d.kind, crate::object::IterKind::Values) {
+                return Fast::Slow;
+            }
+            let (object, index) = (d.object, d.next_index);
+            let step = match object {
+                None => None,
+                Some(o) => match &heap[o].kind {
+                    ObjectKind::Array(a) if index >= f64::from(a.length) => None,
+                    ObjectKind::Array(a) => match a.dense.get(index as usize) {
+                        Some(Some(v)) => Some(v.clone()),
+                        _ => return Fast::Slow,
+                    },
+                    _ => return Fast::Slow,
+                },
+            };
+            let ObjectKind::ArrayIterator(d) = &mut heap[it].kind else {
+                return Fast::Slow;
+            };
+            match step {
+                Some(v) => {
+                    d.next_index = index + 1.0;
+                    f.stack.push(v);
+                }
+                None => {
+                    d.object = None;
+                    f.locals[s + 2] = Some(Value::Boolean(true));
+                    return jump!(done);
+                }
+            }
+        }
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
         Op::True => f.stack.push(Value::Boolean(true)),
@@ -3185,24 +3233,21 @@ fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
         }
         Some(i..buf.len())
     };
+    // Un string largo no se copia: el resultado es un rope (o `None` si supera el máximo;
+    // el error lo da la ruta lenta).
+    const SHORT: usize = 64;
     let s = match (l, r) {
-        (Value::String(a), Value::String(b)) => {
-            if a.is_empty() {
-                return Some(r.clone());
-            }
-            if b.is_empty() {
-                return Some(l.clone());
-            }
-            JsString::concat(a.units(), b.units())
-        }
-        (Value::String(a), Value::Number(n)) => match digits(*n) {
+        (Value::String(a), Value::String(b)) => JsString::concat_strings(a, b)?,
+        (Value::String(a), Value::Number(n)) if a.len() < SHORT => match digits(*n) {
             Some(d) => JsString::concat(a.units(), &buf[d]),
             None => JsString::concat(a.units(), number_to_string(*n).units()),
         },
-        (Value::Number(n), Value::String(b)) => match digits(*n) {
+        (Value::Number(n), Value::String(b)) if b.len() < SHORT => match digits(*n) {
             Some(d) => JsString::concat(&buf[d], b.units()),
             None => JsString::concat(number_to_string(*n).units(), b.units()),
         },
+        (Value::String(a), Value::Number(n)) => JsString::concat_strings(a, &number_to_string(*n))?,
+        (Value::Number(n), Value::String(b)) => JsString::concat_strings(&number_to_string(*n), b)?,
         _ => return None,
     };
     Some(Value::String(s))
