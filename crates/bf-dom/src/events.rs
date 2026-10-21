@@ -336,6 +336,11 @@ pub enum Activation {
 pub trait ScriptHost {
     /// Llama al callback `handle` con `event`; devuelve `true` si lanzó una excepción.
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool;
+
+    /// E3: antes de leer los listeners de `target` para `type_` (paso 6 de "invoke"): el host
+    /// registra el event handler del atributo de contenido si todavía no lo hizo (HTML
+    /// §8.1.8.1, los atributos `on…` se compilan perezosamente).
+    fn before_invoke(&mut self, _doc: &mut Document, _target: EventTarget, _type_: &DomString) {}
 }
 
 /// Sin motor de script: los listeners de script no hacen nada.
@@ -602,6 +607,7 @@ impl Document {
         // 5-6.
         let current = event.path[i].invocation_target;
         event.current_target = Some(current);
+        host.before_invoke(self, current, &event.type_); // E3
         let listeners = self
             .listeners
             .map
@@ -847,5 +853,22 @@ impl Document {
         if let Some(list) = self.listeners.map.remove(&from) {
             other.listeners.map.entry(to).or_default().extend(list);
         }
+    }
+}
+
+// E3: el estado de un evento visto después de su dispatch (para los wrappers de bf-web).
+impl Event {
+    /// Una copia con lo que deja el final del dispatch (§2.9 pasos 9 y 12): sin las banderas
+    /// de dispatch y de propagación, fase `NONE`, sin `currentTarget` y sin path.
+    pub fn after_dispatch_copy(&self) -> Event {
+        let mut e = self.clone();
+        e.dispatch = false;
+        e.stop_propagation = false;
+        e.stop_immediate_propagation = false;
+        e.in_passive_listener = false;
+        e.event_phase = EventPhase::None;
+        e.current_target = None;
+        e.path.clear();
+        e
     }
 }

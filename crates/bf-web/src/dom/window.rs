@@ -36,6 +36,7 @@ struct WindowRealms(Vec<RealmId>);
 pub fn window_class(event_target: HostClassId) -> HostClass {
     let c = HostClass::new("Window")
         .parent(event_target)
+        .global()
         .unforgeable("window", Some(window_self), None)
         .unforgeable("document", Some(document), None)
         .attribute("self", Some(window_self), Some(replaceable_self))

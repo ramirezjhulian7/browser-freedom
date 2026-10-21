@@ -9,6 +9,7 @@ pub mod adopt;
 pub mod collections;
 pub mod document;
 pub mod element;
+pub mod event_types;
 pub mod events;
 pub mod exception;
 pub mod implementation;
@@ -16,6 +17,7 @@ pub mod insertion;
 pub mod mixins;
 pub mod node;
 pub mod observer;
+pub mod parser;
 pub mod state;
 pub mod traversal;
 pub mod window;
@@ -38,6 +40,11 @@ pub struct DomClasses {
     pub event_target: HostClassId,
     pub node: HostClassId,
     pub document: HostClassId,
+    /// `HTMLDocument` (los documentos HTML) y `XMLDocument` (los demás, salvo los de
+    /// `new Document()`, que son `Document`).
+    pub html_document: HostClassId,
+    pub xml_document: HostClassId,
+    pub dom_parser: HostClassId,
     pub document_fragment: HostClassId,
     pub document_type: HostClassId,
     pub element: HostClassId,
@@ -58,6 +65,16 @@ pub struct DomClasses {
     pub input_event: HostClassId,
     pub error_event: HostClassId,
     pub promise_rejection_event: HostClassId,
+    pub hash_change_event: HostClassId,
+    pub pop_state_event: HostClassId,
+    pub page_transition_event: HostClassId,
+    pub message_event: HostClassId,
+    pub storage_event: HostClassId,
+    pub composition_event: HostClassId,
+    pub wheel_event: HostClassId,
+    pub animation_event: HostClassId,
+    pub transition_event: HostClassId,
+    pub touch_event: HostClassId,
     pub node_list: HostClassId,
     pub html_collection: HostClassId,
     pub dom_token_list: HostClassId,
@@ -105,6 +122,11 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let dom_exception = agent.register_host_class(exception::dom_exception_class());
         let n = agent.register_host_class(node::node_class(event_target));
         let document = agent.register_host_class(document::document_class(n));
+        let html_document =
+            agent.register_host_class(bf_js::host::HostClass::new("HTMLDocument").parent(document));
+        let xml_document =
+            agent.register_host_class(bf_js::host::HostClass::new("XMLDocument").parent(document));
+        let dom_parser = agent.register_host_class(parser::dom_parser_class());
         let document_fragment = agent.register_host_class(document::document_fragment_class(n));
         let document_type = agent.register_host_class(node::document_type_class(n));
         let element = agent.register_host_class(element::element_class(n));
@@ -134,6 +156,20 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let error_event = agent.register_host_class(events::error_event_class(event));
         let promise_rejection_event =
             agent.register_host_class(events::promise_rejection_event_class(event));
+        let hash_change_event =
+            agent.register_host_class(event_types::hash_change_event_class(event));
+        let pop_state_event = agent.register_host_class(event_types::pop_state_event_class(event));
+        let page_transition_event =
+            agent.register_host_class(event_types::page_transition_event_class(event));
+        let message_event = agent.register_host_class(event_types::message_event_class(event));
+        let storage_event = agent.register_host_class(event_types::storage_event_class(event));
+        let composition_event =
+            agent.register_host_class(event_types::composition_event_class(ui_event));
+        let wheel_event = agent.register_host_class(event_types::wheel_event_class(mouse_event));
+        let animation_event = agent.register_host_class(event_types::animation_event_class(event));
+        let transition_event =
+            agent.register_host_class(event_types::transition_event_class(event));
+        let touch_event = agent.register_host_class(event_types::touch_event_class(ui_event));
         let node_list = agent.register_host_class(collections::node_list_class());
         let html_collection = agent.register_host_class(collections::html_collection_class());
         let dom_token_list = agent.register_host_class(collections::dom_token_list_class());
@@ -151,6 +187,9 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
             event_target,
             node: n,
             document,
+            html_document,
+            xml_document,
+            dom_parser,
             document_fragment,
             document_type,
             element,
@@ -171,6 +210,16 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
             input_event,
             error_event,
             promise_rejection_event,
+            hash_change_event,
+            pop_state_event,
+            page_transition_event,
+            message_event,
+            storage_event,
+            composition_event,
+            wheel_event,
+            animation_event,
+            transition_event,
+            touch_event,
             node_list,
             html_collection,
             dom_token_list,
@@ -200,7 +249,18 @@ fn class_for(agent: &Agent, n: NodeRef) -> HostClassId {
     let c = classes(agent);
     let ctx = WebContextHandle::current(agent).get(agent);
     match &ctx.doc(n.doc).get(n.node).data {
-        NodeData::Document => c.document,
+        NodeData::Document => {
+            let plain = agent
+                .realm_data::<state::DomState>(WebContextHandle::current(agent).realm)
+                .is_some_and(|s| s.plain_documents.contains(&n.doc));
+            if plain {
+                c.document
+            } else if ctx.doc(n.doc).is_html {
+                c.html_document
+            } else {
+                c.xml_document
+            }
+        }
         NodeData::DocumentFragment => c.document_fragment,
         NodeData::Doctype { .. } => c.document_type,
         NodeData::Element(e) => match c.element_classes.get(&(e.ns, e.name.clone())) {

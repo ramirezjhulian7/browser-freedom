@@ -94,6 +94,7 @@ fn document_ctor(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     d.url = bf_infra::Url::parse("about:blank", None).expect("about:blank");
     let ctx = WebContextHandle::current(agent);
     let i = ctx.get_mut(agent).add_document(d);
+    crate::dom::state::state(agent).plain_documents.insert(i);
     let r = root_of(agent, i);
     Ok(wrap_node(agent, r))
 }
