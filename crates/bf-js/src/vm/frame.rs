@@ -30,6 +30,16 @@ pub struct Handler {
     pub env: Gc<Env>,
 }
 
+/// La parte poco usada de un [`Frame`].
+#[derive(Debug, Default)]
+pub struct FrameRare {
+    /// Referencias resueltas dinámicamente: el environment donde está el binding (`None` si
+    /// no se resolvió).
+    pub refs: Vec<Option<Gc<Env>>>,
+    /// Funciones de bloque elevadas por B.3.2.2/B.3.2.3 en este código.
+    pub hoisted: Option<Rc<HashSet<Atom>>>,
+}
+
 #[derive(Debug)]
 pub struct Frame {
     pub code: Rc<FunctionCode>,
@@ -43,20 +53,70 @@ pub struct Frame {
     /// El Function Environment de esta función, si se materializó.
     pub function_env: Option<Gc<Env>>,
     pub handlers: Vec<Handler>,
-    /// Referencias resueltas dinámicamente: el environment donde está el binding (`None` si
-    /// no se resolvió).
-    pub refs: Vec<Option<Gc<Env>>>,
+    /// Lo que solo usan `with`, `eval` y el código global (E3: fuera del frame, que se copia
+    /// en cada llamada).
+    pub rare: Option<Box<FrameRare>>,
     /// `None`: sin inicializar (constructor derivado antes de `super()`).
     pub this: Option<Value>,
     pub callee: Option<Gc<Object>>,
     pub new_target: Option<Gc<Object>>,
     pub args: Vec<Value>,
     pub realm: RealmId,
-    /// Funciones de bloque elevadas por B.3.2.2/B.3.2.3 en este código.
-    pub hoisted: Option<Rc<HashSet<Atom>>>,
+    /// ¿Lo empujó un `Call` del intérprete en el mismo bucle (E3)? Al volver, su resultado
+    /// va a la pila del frame de abajo.
+    pub inline: bool,
+    /// El realm en curso antes de la llamada (para restaurarlo al volver).
+    pub caller_realm: RealmId,
+    /// En un `new` en línea: el objeto `this` creado (si el cuerpo no devuelve un objeto, el
+    /// resultado es él).
+    pub construct: Option<Gc<Object>>,
 }
 
 impl Frame {
+    /// La parte poco usada (se crea la primera vez).
+    pub fn rare_mut(&mut self) -> &mut FrameRare {
+        self.rare.get_or_insert_with(Default::default)
+    }
+
+    /// Cuántas referencias dinámicas hay pendientes.
+    pub fn refs_len(&self) -> usize {
+        self.rare.as_ref().map_or(0, |r| r.refs.len())
+    }
+
+    /// Las funciones elevadas por B.3.2.2/B.3.2.3, si hay.
+    pub fn hoisted(&self) -> Option<&Rc<HashSet<Atom>>> {
+        self.rare.as_ref()?.hoisted.as_ref()
+    }
+
+    /// Un frame con los vectores dados (vacíos; `locals` ya con `num_locals` posiciones).
+    pub fn with_buffers(
+        code: Rc<FunctionCode>,
+        env: Gc<Env>,
+        realm: RealmId,
+        stack: Vec<Value>,
+        locals: Vec<Option<Value>>,
+    ) -> Frame {
+        Frame {
+            code,
+            pc: 0,
+            stack,
+            locals,
+            env,
+            var_env: None,
+            function_env: None,
+            handlers: Vec::new(),
+            rare: None,
+            this: Some(Value::Undefined),
+            callee: None,
+            new_target: None,
+            args: Vec::new(),
+            realm,
+            inline: false,
+            caller_realm: realm,
+            construct: None,
+        }
+    }
+
     pub fn new(code: Rc<FunctionCode>, env: Gc<Env>, realm: RealmId) -> Frame {
         let n = code.num_locals as usize;
         Frame {
@@ -68,13 +128,15 @@ impl Frame {
             var_env: None,
             function_env: None,
             handlers: Vec::new(),
-            refs: Vec::new(),
+            rare: None,
             this: Some(Value::Undefined),
             callee: None,
             new_target: None,
             args: Vec::new(),
             realm,
-            hoisted: None,
+            inline: false,
+            caller_realm: realm,
+            construct: None,
         }
     }
 }
@@ -93,8 +155,10 @@ impl Trace for Frame {
         for h in &self.handlers {
             t.gc(h.env);
         }
-        for r in &self.refs {
-            t.opt(*r);
+        if let Some(rare) = &self.rare {
+            for r in &rare.refs {
+                t.opt(*r);
+            }
         }
         t.opt_value(&self.this);
         t.opt(self.callee);

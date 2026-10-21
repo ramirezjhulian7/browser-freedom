@@ -22,16 +22,11 @@ impl Agent {
             if matches!(lp, Value::String(_)) || matches!(rp, Value::String(_)) {
                 let ls = self.to_string(&lp)?;
                 let rs = self.to_string(&rp)?;
-                if ls.is_empty() {
-                    return Ok(Value::String(rs));
-                }
-                if rs.is_empty() {
-                    return Ok(Value::String(ls));
-                }
-                let mut u = Vec::with_capacity(ls.len() + rs.len());
-                u.extend_from_slice(ls.units());
-                u.extend_from_slice(rs.units());
-                return Ok(Value::String(JsString::from_units(u)));
+                // Un resultado largo es un rope (E3).
+                return match JsString::concat_strings(&ls, &rs) {
+                    Some(s) => Ok(Value::String(s)),
+                    None => self.range_error("Invalid string length"),
+                };
             }
             return self.numeric_op(op, &lp, &rp);
         }

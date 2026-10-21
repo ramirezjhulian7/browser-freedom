@@ -52,6 +52,13 @@ pub fn create_array_iterator(agent: &mut Agent, o: Gc<Object>, kind: IterKind) -
     )))
 }
 
+/// ¿Es `f` la función %ArrayIteratorPrototype%.next original? (E3: la VM hace sus pasos
+/// sin llamarla cuando el registro del iterador la tiene.)
+pub fn is_array_iterator_next(heap: &crate::heap::Heap, f: Gc<Object>) -> bool {
+    matches!(&heap[f].kind, ObjectKind::Builtin(b)
+        if std::ptr::fn_addr_eq(b.func, array_iterator_next as crate::vm::function::NativeFn))
+}
+
 /// %ArrayIteratorPrototype%.next (§23.1.5.2.1).
 fn array_iterator_next(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Value::Object(it) = a.this else {

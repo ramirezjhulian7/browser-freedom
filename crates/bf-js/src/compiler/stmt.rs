@@ -94,13 +94,13 @@ impl<'t> Codegen<'t> {
     pub(crate) fn stmt(&mut self, s: &Stmt) {
         self.pos(s.span().start);
         match s {
-            Stmt::Expression { expression, .. } => {
-                self.expr(expression);
-                match self.sti().completion {
-                    Some(cv) => self.emit(Op::InitLocal(cv)),
-                    None => self.emit(Op::Pop),
+            Stmt::Expression { expression, .. } => match self.sti().completion {
+                Some(cv) => {
+                    self.expr(expression);
+                    self.emit(Op::InitLocal(cv));
                 }
-            }
+                None => self.expr_discard(expression),
+            },
             Stmt::Block(b) => self.block(&b.body, b.span),
             Stmt::Empty(_) => {}
             Stmt::Debugger(_) => self.emit(Op::Debugger),
@@ -499,7 +499,7 @@ impl<'t> Codegen<'t> {
         self.jump(after);
         let mut entries = Vec::new();
         for (k, exit) in exits {
-            entries.push((k, self.pc()));
+            entries.push((k, self.target_pc()));
             self.emit_unwind(exit.target, exit.is_continue);
         }
         self.st().consts[table as usize] = Constant::FinallyTable(std::rc::Rc::new(entries));
@@ -587,8 +587,7 @@ impl<'t> Codegen<'t> {
             self.emit(Op::CopyScope);
         }
         if let Some(u) = update {
-            self.expr(u);
-            self.emit(Op::Pop);
+            self.expr_discard(u);
         }
         self.jump(top);
         self.bind(brk);

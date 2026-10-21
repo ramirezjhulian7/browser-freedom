@@ -69,7 +69,7 @@ impl Agent {
         frame.this = Some(Value::Object(
             self.heap[genv].global().expect("global").this,
         ));
-        frame.hoisted = Some(Rc::new(hoisted));
+        frame.rare_mut().hoisted = Some(Rc::new(hoisted));
         let (exit, _) = self.run_frame(frame)?;
         match exit {
             FrameExit::Return(v) => Ok(v),
@@ -207,7 +207,7 @@ impl Agent {
         let mut frame = Frame::new(code, env, realm);
         frame.var_env = if strict_eval { None } else { Some(var_env) };
         frame.this = None;
-        frame.hoisted = Some(Rc::new(hoisted));
+        frame.rare_mut().hoisted = Some(Rc::new(hoisted));
         let (exit, _) = self.run_frame(frame)?;
         match exit {
             FrameExit::Return(v) => Ok(v),

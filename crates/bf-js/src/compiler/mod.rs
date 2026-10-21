@@ -125,6 +125,9 @@ pub(crate) struct FnState {
     next_completion_kind: u32,
     /// Nombres léxicos del top-level de un script (globales).
     pub global_lex: Vec<Atom>,
+    /// La última posición que es destino de un salto (E3): la mirilla no fusiona a través
+    /// de ella.
+    barrier: u32,
 }
 
 pub struct Codegen<'t> {
@@ -267,6 +270,7 @@ impl FnState {
             switch_marks: Vec::new(),
             next_completion_kind: COMPLETION_RETURN + 1,
             global_lex: Vec::new(),
+            barrier: 0,
         }
     }
 }
@@ -305,7 +309,36 @@ impl<'t> Codegen<'t> {
     }
 
     pub(crate) fn emit(&mut self, op: Op) {
-        self.st().ops.push(op);
+        let st = self.st();
+        // Mirilla (E3): `Set*` seguido de `Pop` es `Init*` (guardar y sacar), si nadie salta
+        // al `Pop`.
+        if op == Op::Pop && st.ops.len() as u32 > st.barrier {
+            match st.ops.last_mut() {
+                Some(last @ Op::SetLocal(_)) => {
+                    let Op::SetLocal(s) = *last else {
+                        unreachable!()
+                    };
+                    *last = Op::InitLocal(s);
+                    return;
+                }
+                Some(last @ Op::SetEnv(..)) => {
+                    let Op::SetEnv(h, s) = *last else {
+                        unreachable!()
+                    };
+                    *last = Op::InitEnv(h, s);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        st.ops.push(op);
+    }
+
+    /// La posición actual como destino de un salto (que no se fusiona con lo anterior).
+    pub(crate) fn target_pc(&mut self) -> u32 {
+        let pc = self.pc();
+        self.st().barrier = pc;
+        pc
     }
 
     pub(crate) fn pc(&self) -> u32 {
@@ -319,7 +352,7 @@ impl<'t> Codegen<'t> {
     }
 
     pub(crate) fn bind(&mut self, l: Label) {
-        let pc = self.pc();
+        let pc = self.target_pc();
         self.st().labels[l.0] = Some(pc);
     }
 
@@ -442,6 +475,8 @@ impl<'t> Codegen<'t> {
             has_prototype,
             decls: None,
             dynamic: info.has_eval || info.has_with,
+
+            ics: Default::default(),
         }
     }
 
