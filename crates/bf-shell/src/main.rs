@@ -1,4 +1,5 @@
-//! Shell del navegador: ventana, entrada de usuario y orquestación de los subsistemas del motor.
+//! Freedom, el navegador: ventana, entrada de usuario y orquestación de los subsistemas del
+//! motor. El ejecutable se llama `freedom`.
 
 #![forbid(unsafe_code)]
 
@@ -14,20 +15,36 @@ use bf_css::selectors::{MatchContext, NamespaceMap, matches, parse_selector_list
 use bf_dom::Document;
 use bf_style::values::color::Rgba;
 
-const USAGE: &str = "uso: browser-freedom [dump-dom <url|archivo>
+const USAGE: &str = "uso: freedom [<url|archivo>
+                       | --version
+                       | dump-dom <url|archivo>
                        | dump-css <archivo.css>
                        | dump-style <url|archivo> [--selector <css>]
                        | dump-layout <url|archivo> [--width <px>] [--height <px>] [--system-fonts]
                        | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>]
                        | open [<url|archivo>]
                        | session <url|archivo> <paso>... -o <prefijo>]
-(<url> puede ser http(s)://, file://, data: o about:; open sin argumento abre about:home)";
+(<url> puede ser http(s)://, file://, data: o about:; sin argumentos, o open sin argumento,
+abre la página de inicio)";
+
+/// Las órdenes de línea de comandos: un único argumento que no es una de ellas se abre.
+const COMMANDS: &[&str] = &[
+    "dump-dom",
+    "dump-css",
+    "dump-style",
+    "dump-layout",
+    "render",
+    "open",
+    "session",
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
-        [] => {
-            println!("browser-freedom {}", env!("CARGO_PKG_VERSION"));
+        // Doble clic en el ejecutable: el navegador.
+        [] => window::open(None),
+        [v] if v == "--version" || v == "-V" => {
+            println!("Freedom {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         [cmd, path] if cmd == "dump-dom" => dump_dom(path),
@@ -38,6 +55,10 @@ fn main() -> ExitCode {
         [cmd] if cmd == "open" => window::open(None),
         [cmd, path] if cmd == "open" => window::open(Some(path)),
         [cmd, path, rest @ ..] if cmd == "session" => session(path, rest),
+        // «Abrir con…» o un archivo arrastrado sobre el ejecutable.
+        [path] if !path.starts_with('-') && !COMMANDS.contains(&path.as_str()) => {
+            window::open(Some(path))
+        }
         _ => Err(USAGE.to_owned()),
     };
     match result {

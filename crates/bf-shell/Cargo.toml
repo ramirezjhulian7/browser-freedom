@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# El navegador se llama Freedom: el ejecutable es `freedom` (`freedom.exe` en Windows).
+[[bin]]
+name = "freedom"
+path = "src/main.rs"
+
 [dependencies]
 bf-font = { path = "../bf-font" }
 bf-infra = { path = "../bf-infra" }
