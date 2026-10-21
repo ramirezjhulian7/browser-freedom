@@ -285,8 +285,43 @@ impl CookieJar {
         Some(cookie)
     }
 
+    /// `document.cookie` (HTML §3.1.3; RFC 6265 §5.8.3 con la API "non-HTTP"): las cookies
+    /// de `url` sin las `HttpOnly`.
+    pub fn script_cookies(&self, url: &Url) -> String {
+        self.cookie_string(url, false).unwrap_or_default()
+    }
+
+    /// `document.cookie = value`: una cookie puesta desde script (RFC 6265 §5.7 con la API
+    /// "non-HTTP"): no puede ser `HttpOnly` ni pisar una cookie `HttpOnly`.
+    pub fn set_cookie_from_script(&self, url: &Url, value: &str) {
+        let Some(cookie) = self.parse(url, value, now()) else {
+            return;
+        };
+        if cookie.http_only {
+            return;
+        }
+        {
+            let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+            let shadows_http_only = jar.iter().any(|c| {
+                c.http_only
+                    && c.name == cookie.name
+                    && c.domain == cookie.domain
+                    && c.path == cookie.path
+            });
+            if shadows_http_only {
+                return;
+            }
+        }
+        self.set_cookie(url, value);
+    }
+
     /// Valor de la cabecera `Cookie` para un request a `url` (§5.8.3).
     pub fn cookie_header(&self, url: &Url) -> Option<String> {
+        self.cookie_string(url, true)
+    }
+
+    /// Las cookies que corresponden a `url`; sin `http`, se omiten las `HttpOnly`.
+    fn cookie_string(&self, url: &Url, http: bool) -> Option<String> {
         let (host, is_ip) = Self::host_of(url)?;
         let path = url.path_string();
         let secure = url.scheme == "https";
@@ -301,7 +336,10 @@ impl CookieJar {
                 } else {
                     domain_match(&host, &c.domain, is_ip)
                 };
-                domain_ok && path_match(&path, &c.path) && (!c.secure || secure)
+                domain_ok
+                    && path_match(&path, &c.path)
+                    && (!c.secure || secure)
+                    && (http || !c.http_only)
             })
             .collect();
         if matching.is_empty() {
