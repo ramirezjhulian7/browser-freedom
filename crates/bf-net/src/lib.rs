@@ -10,6 +10,8 @@ pub mod blob; // E2: el almacén de URLs blob:
 pub mod cookies;
 pub mod http;
 pub mod sniff;
+pub mod streaming; // E2: respuestas por partes (EventSource)
+pub mod websocket; // E2: cliente WebSocket (RFC 6455)
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};

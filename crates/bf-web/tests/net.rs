@@ -700,6 +700,107 @@ net!(
     "abort 2 null"
 );
 
+// --- ReadableStream como cuerpo ---
+
+net!(
+    stream_body_reader,
+    "fetch('/text').then(r => { var rd = r.body.getReader(); return rd.read().then(c => finish(c.value.length + ' ' + (c.value instanceof Uint8Array) + ' ' + r.bodyUsed + ' ' + r.body.locked)); }).catch(fail)",
+    "4 true true true"
+);
+net!(
+    stream_body_used_after_text,
+    "fetch('/text').then(r => r.text().then(() => { try { r.body.getReader(); finish('no'); } catch (e) { finish(e.name + ' ' + r.bodyUsed); } })).catch(fail)",
+    "TypeError true"
+);
+net!(
+    stream_response_from_stream,
+    "var s = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode('a')); c.enqueue(new TextEncoder().encode('bc')); c.close(); }}); new Response(s).text().then(finish, fail)",
+    "abc"
+);
+net!(
+    stream_clone_tee,
+    "var r = new Response('dup'); var c = r.clone(); Promise.all([r.text(), c.text()]).then(v => finish(v.join('+')), fail)",
+    "dup+dup"
+);
+net!(
+    stream_async_iteration,
+    "(async () => { var s = new ReadableStream({start(c) { c.enqueue(1); c.enqueue(2); c.close(); }}); var t = 0; for await (var v of s) t += v; finish(t); })().catch(fail)",
+    "3"
+);
+net!(
+    stream_bad_chunk,
+    "new Response(new ReadableStream({start(c) { c.enqueue('no bytes'); c.close(); }})).text().then(() => finish('no'), e => finish(e.name))",
+    "TypeError"
+);
+net!(
+    stream_upload,
+    "var s = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode('flujo')); c.close(); }}); fetch('/echo', {method: 'POST', body: s, duplex: 'half'}).then(r => r.text()).then(t => finish(t.split('\\n\\n')[1]), fail)",
+    "flujo"
+);
+net!(
+    stream_upload_needs_duplex,
+    "try { new Request('/x', {method: 'POST', body: new ReadableStream()}); finish('no'); } catch (e) { finish(e.name); }",
+    "TypeError"
+);
+
+// --- Streams: WritableStream, TransformStream, pipeTo/pipeThrough ---
+
+net!(
+    writable_stream_sink,
+    "var got = []; var w = new WritableStream({write(c) { got.push(c); }, close() { got.push('fin'); }}); var wr = w.getWriter(); wr.write('a'); wr.write('b'); wr.close().then(() => finish(got.join(',') + ' ' + w.locked), fail)",
+    "a,b,fin true"
+);
+net!(
+    writable_stream_backpressure,
+    "var w = new WritableStream({}, new CountQueuingStrategy({highWaterMark: 2})); var wr = w.getWriter(); var a = wr.desiredSize; wr.write(1); finish(a + ' ' + wr.desiredSize)",
+    "2 1"
+);
+net!(
+    writable_stream_abort,
+    "var w = new WritableStream({abort(r) { log.push('abort:' + r); }}); w.abort('motivo').then(() => finish(log.join() + ' ' + w.locked), fail)",
+    "abort:motivo false"
+);
+net!(
+    transform_stream_upper,
+    "var t = new TransformStream({transform(c, ctl) { ctl.enqueue(c.toUpperCase()); }}); var w = t.writable.getWriter(); w.write('ho'); w.write('la'); w.close(); (async () => { var out = ''; for await (var c of t.readable) out += c; finish(out); })().catch(fail)",
+    "HOLA"
+);
+net!(
+    pipe_through_chain,
+    "var src = new ReadableStream({start(c) { ['x', 'y', 'z'].forEach(v => c.enqueue(v)); c.close(); }}); var up = new TransformStream({transform(c, ctl) { ctl.enqueue(c + c); }}); new Response(src.pipeThrough(up).pipeThrough(new TextEncoderStream())).text().then(finish, fail)",
+    "xxyyzz"
+);
+net!(
+    pipe_to_writable,
+    "var got = []; var src = new ReadableStream({start(c) { c.enqueue(1); c.enqueue(2); c.close(); }}); src.pipeTo(new WritableStream({write(c) { got.push(c); }})).then(() => finish(got.join('+') + ' ' + src.locked), fail)",
+    "1+2 false"
+);
+net!(
+    pipe_to_abort_signal,
+    "var ac = new AbortController(); var src = new ReadableStream({pull(c) { c.enqueue(1); }}); var p = src.pipeTo(new WritableStream(), {signal: ac.signal}); ac.abort(); p.then(() => finish('no'), e => finish(e.name))",
+    "AbortError"
+);
+net!(
+    text_decoder_stream,
+    "fetch('/text').then(r => r.body.pipeThrough(new TextDecoderStream()).getReader().read()).then(c => finish(c.value), fail)",
+    "hola"
+);
+net!(
+    text_encoder_stream_surrogates,
+    "var t = new TextEncoderStream(); var w = t.writable.getWriter(); w.write('\\ud83d'); w.write('\\ude00'); w.close(); new Response(t.readable).arrayBuffer().then(b => finish(new Uint8Array(b).join(',')), fail)",
+    "240,159,152,128"
+);
+net!(
+    queuing_strategies,
+    "var b = new ByteLengthQueuingStrategy({highWaterMark: 16}); var c = new CountQueuingStrategy({highWaterMark: 3}); finish([b.highWaterMark, b.size(new Uint8Array(5)), c.highWaterMark, c.size('x')].join())",
+    "16,5,3,1"
+);
+net!(
+    stream_tee_branches,
+    "var s = new ReadableStream({start(c) { c.enqueue('t'); c.close(); }}); var [a, b] = s.tee(); Promise.all([new Response(a.pipeThrough(new TextEncoderStream())).text(), new Response(b.pipeThrough(new TextEncoderStream())).text()]).then(v => finish(v.join(':')), fail)",
+    "t:t"
+);
+
 // --- sendBeacon y backend sin hilo ---
 
 net!(
