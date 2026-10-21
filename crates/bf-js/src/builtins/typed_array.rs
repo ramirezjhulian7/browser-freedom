@@ -1431,7 +1431,8 @@ fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
         let e = get_element(agent, o, k as f64);
         if !e.is_nullish() {
-            let s = agent.invoke(&e, &key, &[])?;
+            // E2: ECMA-402 §19.5.1 pasa `locales` y `options`.
+            let s = agent.invoke(&e, &key, &[a.arg(0), a.arg(1)])?;
             r.extend_from_slice(agent.to_string(&s)?.units());
         }
     }

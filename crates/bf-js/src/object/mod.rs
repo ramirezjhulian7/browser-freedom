@@ -154,6 +154,8 @@ pub enum ObjectKind {
     RegExp(Box<crate::builtins::regexp::RegExpData>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpStringIteratorData>),
     Date(f64),
+    // E2: las Web APIs (URL, URLSearchParams, TextDecoder, console…) e Intl.
+    Web(Box<crate::builtins::web::WebData>),
     // E3: objetos de plataforma (`crate::host`).
     Host(Box<crate::host::HostObject>),
 }
@@ -267,6 +269,7 @@ impl Trace for Object {
             // E2
             ObjectKind::RegExp(_) | ObjectKind::Date(_) => {}
             ObjectKind::RegExpStringIterator(d) => d.trace(t),
+            ObjectKind::Web(d) => d.trace(t),
             // E3
             ObjectKind::Promise(p) => p.trace(t),
             ObjectKind::AsyncFunction(a) => a.trace(t),

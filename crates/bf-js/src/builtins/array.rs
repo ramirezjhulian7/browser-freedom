@@ -1189,7 +1189,12 @@ fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
         let e = agent.get(o, &key(k), Value::Object(o))?;
         if !e.is_nullish() {
-            let r = agent.invoke(&e, &PropertyKey::from("toLocaleString"), &[])?;
+            // E2: ECMA-402 §19.4.1 pasa `locales` y `options`.
+            let r = agent.invoke(
+                &e,
+                &PropertyKey::from("toLocaleString"),
+                &[a.arg(0), a.arg(1)],
+            )?;
             let s = agent.to_string(&r)?;
             out.extend_from_slice(s.units());
         }

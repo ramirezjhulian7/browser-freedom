@@ -154,7 +154,13 @@ fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// ECMA-402: como `toString()`.
 fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let x = this_bigint(agent, &a.this, "toLocaleString")?;
-    Ok(Value::str(&agent.heap[x].to_string_radix(10)))
+    let d = crate::builtins::intl::decimal::Decimal::from_bigint(&agent.heap[x]);
+    crate::builtins::intl::number_to_locale_string(
+        agent,
+        crate::builtins::intl::number_format_value::Value::BigInt(d),
+        &a.arg(0),
+        &a.arg(1),
+    )
 }
 
 /// BigInt.prototype.valueOf ( ) (§21.2.3.4).
