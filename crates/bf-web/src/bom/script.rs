@@ -40,6 +40,8 @@ fn parse_options() -> ParseOptions {
     ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        // E1: los documentos de navegación permiten declarative shadow roots.
+        allow_declarative_shadow_roots: true,
     }
 }
 

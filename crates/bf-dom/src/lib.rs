@@ -36,12 +36,13 @@ pub mod observer;
 pub mod range; // E3
 pub mod script;
 mod serialize;
+pub mod shadow; // E1
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub use bf_infra::{Atom, DomString, Namespace, Url};
-pub use document::{HtmlElementKind, html_element_kind};
+pub use document::{HtmlElementKind, html_element_kind, is_valid_custom_element_name};
 pub use element::{DomTokenList, NodeOrString, TokenListError};
 pub use exception::DomException;
 pub use node::{NodeType, document_position};
@@ -250,6 +251,7 @@ pub struct Document {
     pub(crate) aborts: abort::AbortState,
     pub(crate) scripts: script::ScriptLists,
     pub(crate) live_ranges: range::LiveRanges, // E3
+    pub(crate) shadow: shadow::ShadowState,    // E1
 }
 
 impl Default for Document {
@@ -277,6 +279,7 @@ impl Document {
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
+            shadow: shadow::ShadowState::default(),    // E1
         };
         doc.push(NodeData::Document);
         doc
@@ -447,9 +450,9 @@ impl Document {
         true
     }
 
-    /// ¿El nodo está conectado (su raíz es el nodo `Document`)?
+    /// ¿El nodo está conectado (su *shadow-including root* es el nodo `Document`)?
     pub fn is_connected(&self, id: NodeId) -> bool {
-        self.tree_root(id) == self.root()
+        self.shadow_including_root(id) == self.root()
     }
 
     /// Descendientes inclusivos de `id` en tree order (sin entrar a template contents).

@@ -593,8 +593,21 @@ fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc
         d.cell.borrow().current_target
     };
     let this = current.map_or(Value::Undefined, |t| wrap_target(agent, doc, t));
-    // `window.event` mientras corre el listener (HTML §8.1.8.4).
-    let pin = agent.host_pin(ev.clone());
+    // `window.event` mientras corre el listener (HTML §8.1.8.4); E1: en un shadow tree se
+    // queda el anterior.
+    let in_shadow =
+        event_data(agent, &ev).is_some_and(|d| d.cell.borrow().invocation_target_in_shadow_tree());
+    let current_value = if in_shadow {
+        state(agent)
+            .current_event
+            .last()
+            .copied()
+            .and_then(|h| agent.host_pinned(h))
+            .unwrap_or(Value::Undefined)
+    } else {
+        ev.clone()
+    };
+    let pin = agent.host_pin(current_value);
     state(agent).current_event.push(pin);
     let r = match rec {
         ListenerRec::Callback(h) => {

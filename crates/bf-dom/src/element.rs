@@ -102,6 +102,8 @@ impl Document {
             if *local == "open" {
                 self.details_open_changed(el, old_value.is_some());
             }
+            // E1: `slot` y el `name` de los `slot` (DOM §4.2.2.3).
+            self.shadow_attribute_changed(el, local, old_value);
         }
     }
 

@@ -91,9 +91,10 @@ pub enum HtmlElementKind {
     Unknown,
 }
 
-/// ¿Es un "valid custom element name" (HTML §4.13.2)? Aproximación: empieza con una letra
-/// ASCII minúscula, contiene `-`, sin mayúsculas ASCII y no es un nombre reservado.
-fn is_valid_custom_element_name(name: &str) -> bool {
+/// ¿Es un "valid custom element name" (HTML §4.13.2)? Empieza con una minúscula ASCII,
+/// contiene `-`, no tiene mayúsculas ASCII, es un *valid element local name* (DOM §1.4: tras
+/// una letra ASCII, nada de NUL, espacios ASCII, `/` ni `>`) y no es un nombre reservado.
+pub fn is_valid_custom_element_name(name: &str) -> bool {
     const RESERVED: [&str; 8] = [
         "annotation-xml",
         "color-profile",
@@ -106,7 +107,10 @@ fn is_valid_custom_element_name(name: &str) -> bool {
     ];
     name.starts_with(|c: char| c.is_ascii_lowercase())
         && name.contains('-')
-        && !name.chars().any(|c| c.is_ascii_uppercase())
+        && !name.chars().any(|c| {
+            c.is_ascii_uppercase()
+                || matches!(c, '\0' | '\t' | '\n' | '\x0C' | '\r' | ' ' | '/' | '>')
+        })
         && !RESERVED.contains(&name)
 }
 

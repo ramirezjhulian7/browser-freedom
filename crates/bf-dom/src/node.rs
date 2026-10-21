@@ -89,7 +89,7 @@ impl Document {
         (!matches!(self.get(n).data, NodeData::Document)).then(|| self.root())
     }
 
-    /// `Node.getRootNode()`.
+    /// `Node.getRootNode()` (sin `composed`; ver [`Document::get_root_node_composed`]).
     pub fn get_root_node(&self, n: NodeId) -> NodeId {
         self.tree_root(n)
     }
@@ -289,7 +289,12 @@ impl Document {
         self.clone_into(id, deep, None)
     }
 
-    fn clone_into(&mut self, node: NodeId, subtree: bool, parent: Option<NodeId>) -> NodeId {
+    pub(crate) fn clone_into(
+        &mut self,
+        node: NodeId,
+        subtree: bool,
+        parent: Option<NodeId>,
+    ) -> NodeId {
         // 2. Clone a single node.
         let mut data = self.get(node).data.clone();
         let template_source = match &mut data {
@@ -327,6 +332,8 @@ impl Document {
                 self.clone_into(child, true, Some(copy));
             }
         }
+        // E1: 6, el shadow root *clonable*.
+        self.clone_shadow_into(node, copy, subtree);
         copy
     }
 
@@ -334,6 +341,15 @@ impl Document {
     /// template contents: es el "clone" con otro node document que usan los algoritmos de
     /// parseo de fragmentos (que parsean en un documento aparte).
     pub fn import_from(&mut self, other: &Document, node: NodeId) -> NodeId {
+        let copy = self.import_from_inner(other, node);
+        // E1: los slots de los shadow roots copiados.
+        if other.has_shadow_roots() {
+            self.assign_slots_in(copy);
+        }
+        copy
+    }
+
+    fn import_from_inner(&mut self, other: &Document, node: NodeId) -> NodeId {
         let mut data = other.get(node).data.clone();
         let template_source = match &mut data {
             NodeData::Element(e) => e.template_contents.take(),
@@ -349,13 +365,35 @@ impl Document {
             self.element(copy).and_then(|e| e.template_contents),
         ) {
             for child in other.children(source) {
-                let c = self.import_from(other, child);
+                let c = self.import_from_inner(other, child);
                 self.link(target, c, None);
             }
         }
         for child in other.children(node) {
-            let c = self.import_from(other, child);
+            let c = self.import_from_inner(other, child);
             self.link(copy, c, None);
+        }
+        // E1: el shadow root (los declarativos del parseo de fragmentos).
+        if let Some(sr) = other.shadow_root(node)
+            && let Some(data) = other.shadow_root_data(sr).cloned()
+        {
+            let init = crate::shadow::ShadowRootInit {
+                mode: data.mode,
+                delegates_focus: data.delegates_focus,
+                slot_assignment: data.slot_assignment,
+                clonable: data.clonable,
+                serializable: data.serializable,
+            };
+            if let Ok(root) = self.attach_shadow(copy, init) {
+                if let Some(d) = self.shadow_root_data_mut(root) {
+                    d.declarative = data.declarative;
+                    d.available_to_element_internals = data.available_to_element_internals;
+                }
+                for child in other.children(sr) {
+                    let c = self.import_from_inner(other, child);
+                    self.link(root, c, None);
+                }
+            }
         }
         copy
     }

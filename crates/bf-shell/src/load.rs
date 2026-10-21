@@ -337,7 +337,14 @@ pub fn fetch_document_with(
             Some((engine, env)) => {
                 parse_with_scripts(&text, &response.url, engine, loader.clone(), env)
             }
-            None => bf_html::parse_document(&text, &bf_html::ParseOptions::default()).0,
+            // E1: un documento de navegación permite declarative shadow roots.
+            None => {
+                let opts = bf_html::ParseOptions {
+                    allow_declarative_shadow_roots: true,
+                    ..bf_html::ParseOptions::default()
+                };
+                bf_html::parse_document(&text, &opts).0
+            }
         };
         (doc, enc, source)
     };

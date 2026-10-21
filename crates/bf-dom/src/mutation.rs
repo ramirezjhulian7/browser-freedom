@@ -57,7 +57,8 @@ impl Document {
                 return true;
             }
             let root = self.tree_root(current);
-            match self.template_host(root) {
+            // E1: el host de un shadow root también cuenta.
+            match self.shadow_host(root).or_else(|| self.template_host(root)) {
                 Some(host) => current = host,
                 None => return false,
             }
@@ -241,6 +242,8 @@ impl Document {
             self.adopt_node_into(n);
             self.link(parent, n, child);
             self.bump_version();
+            // E1: 7.4-7.6, slots.
+            self.shadow_insert_steps(n, parent);
         }
         // 8.
         if !suppress_observers {
@@ -347,6 +350,8 @@ impl Document {
         let old_next = self.get(node).next_sibling();
         self.unlink(node);
         self.bump_version();
+        // E1: 12-14, slots.
+        self.shadow_remove_steps(node, parent);
         // 15. Removing steps.
         self.run_removing_steps(node);
         // 17. Registros transitorios.

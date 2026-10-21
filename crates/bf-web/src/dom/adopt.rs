@@ -35,7 +35,9 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
             d.remove(n.node);
         }
     });
-    let old: Vec<NodeId> = with_doc(agent, from, |d| d.inclusive_descendants(n.node));
+    let old: Vec<NodeId> = with_doc(agent, from, |d| {
+        d.shadow_including_inclusive_descendants(n.node)
+    }); // E1
     let ctx = WebContextHandle::current(agent);
     let copy = {
         let wc = ctx.get_mut(agent);
@@ -44,7 +46,9 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         *wc.doc_mut(to) = target;
         copy
     };
-    let new: Vec<NodeId> = with_doc(agent, to, |d| d.inclusive_descendants(copy));
+    let new: Vec<NodeId> = with_doc(agent, to, |d| {
+        d.shadow_including_inclusive_descendants(copy)
+    }); // E1
     crate::dom::insertion::copy_script_state(agent, (from, &old), (to, &new));
     let realm = ctx.realm;
     for (&o, &nw) in old.iter().zip(new.iter()) {

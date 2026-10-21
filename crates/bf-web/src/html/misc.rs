@@ -58,6 +58,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             }
         }
         "HTMLCanvasElement" => super::canvas::extend_canvas(class),
+        "HTMLSlotElement" => crate::dom::shadow::extend_slot(class),
         "HTMLBaseElement" => class.attribute("href", Some(base_href), Some(set_base_href)),
         // WindowEventHandlers (HTML §8.1.8.2): los handlers de `body`/`frameset` son los de la
         // ventana (los handlers de E3 los reenvían a `window`).

@@ -364,6 +364,7 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     let mut parser = Parser::new(&ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        allow_declarative_shadow_roots: true,
     });
     parser.document_mut().url = url.clone();
     crate::install(

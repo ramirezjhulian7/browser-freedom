@@ -19,6 +19,7 @@ pub mod node;
 pub mod observer;
 pub mod parser;
 pub mod range;
+pub mod shadow; // E1
 pub mod state;
 pub mod traversal;
 pub mod window;
@@ -273,6 +274,10 @@ fn class_for(agent: &Agent, n: NodeRef) -> HostClassId {
             } else {
                 c.xml_document
             }
+        }
+        // E1: los shadow roots.
+        NodeData::DocumentFragment if ctx.doc(n.doc).is_shadow_root(n.node) => {
+            shadow::shadow_root_class_id(agent).unwrap_or(c.document_fragment)
         }
         NodeData::DocumentFragment => c.document_fragment,
         NodeData::Doctype { .. } => c.document_type,
