@@ -9,6 +9,7 @@ pub(crate) mod named_entities;
 mod states;
 mod token;
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 
 pub use error::ParseError;
@@ -63,6 +64,42 @@ pub struct Tokenizer {
     queue: VecDeque<Token>,
     eof_emitted: bool,
     errors: Vec<ParseError>,
+    /// La entrada está completa: al final de `input` viene el EOF (el *explicit "EOF"
+    /// character* de un parser creado por script, o el fin de los datos de red).
+    closed: bool,
+    /// Límite de consumo: el *insertion point* cuando el parser procesa lo que escribió
+    /// `document.write()` (13.2.3.5, §8.4.3). Más allá no hay que leer, ni es EOF.
+    limit: Option<usize>,
+    /// Un CR al final del último trozo agregado: si el siguiente empieza con LF, se descarta.
+    pending_cr: bool,
+    /// El paso actual se topó con el final de la entrada disponible sin que sea EOF: su
+    /// resultado no vale y se deshace (ver [`Tokenizer::next_token`]).
+    starved: Cell<bool>,
+}
+
+/// Estado de la máquina al empezar a buscar un token, para deshacer los pasos que se toparon
+/// con el final de la entrada disponible.
+struct Snapshot {
+    pos: usize,
+    current: Option<char>,
+    current_raw: Option<u32>,
+    reconsume: bool,
+    checked: usize,
+    state: State,
+    return_state: State,
+    temp: String,
+    char_ref_code: u32,
+    tag_kind: TagKind,
+    tag: Tag,
+    attr_active: bool,
+    attr_duplicate: bool,
+    attr_name: String,
+    attr_value: String,
+    comment: String,
+    doctype: Doctype,
+    pi: ProcessingInstruction,
+    last_start_tag: Option<String>,
+    errors: usize,
 }
 
 impl Tokenizer {
@@ -97,7 +134,156 @@ impl Tokenizer {
             queue: VecDeque::new(),
             eof_emitted: false,
             errors: Vec::new(),
+            closed: true,
+            limit: None,
+            pending_cr: false,
+            starved: Cell::new(false),
         }
+    }
+
+    /// Tokenizador sobre una entrada que llega por partes ([`Tokenizer::append`]) y termina con
+    /// [`Tokenizer::close`].
+    pub fn streaming() -> Self {
+        let mut t = Self::from_code_points([]);
+        t.closed = false;
+        t
+    }
+
+    /// Agrega code points al final de la entrada (datos de red).
+    pub fn append(&mut self, input: impl IntoIterator<Item = u32>) {
+        let mut chunk = input.into_iter().peekable();
+        if std::mem::take(&mut self.pending_cr) && chunk.peek() == Some(&0x0A) {
+            chunk.next();
+        }
+        let chunk: Vec<u32> = chunk.collect();
+        self.pending_cr = chunk.last() == Some(&0x0D);
+        self.input.extend(preprocess(chunk));
+    }
+
+    /// Inserta code points en la posición `at` de la entrada ("insert input into the input
+    /// stream just before the insertion point"); devuelve cuántos quedaron tras normalizar.
+    pub fn insert(&mut self, at: usize, input: impl IntoIterator<Item = u32>) -> usize {
+        debug_assert!(at >= self.pos && at <= self.input.len());
+        let chunk = preprocess(input);
+        let len = chunk.len();
+        self.input.splice(at..at, chunk);
+        self.checked = self.checked.min(at);
+        len
+    }
+
+    /// Fin de la entrada: lo que sigue a lo ya agregado es EOF.
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.pending_cr = false;
+    }
+
+    /// ¿Ya llegó el fin de la entrada ([`Tokenizer::close`])?
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Fija (o quita) el punto hasta el que se puede consumir.
+    pub fn set_limit(&mut self, limit: Option<usize>) {
+        self.limit = limit;
+    }
+
+    /// Longitud actual de la entrada (en code points ya preprocesados).
+    pub fn len(&self) -> usize {
+        self.input.len()
+    }
+
+    /// ¿La entrada está vacía?
+    pub fn is_empty(&self) -> bool {
+        self.input.is_empty()
+    }
+
+    /// ¿Ya emitió el token de EOF?
+    pub fn eof_emitted(&self) -> bool {
+        self.eof_emitted
+    }
+
+    /// Fin de lo que se puede leer ahora.
+    fn end(&self) -> usize {
+        self.limit
+            .map_or(self.input.len(), |l| l.min(self.input.len()))
+    }
+
+    /// ¿El final de lo legible es el EOF de verdad?
+    fn at_real_end(&self) -> bool {
+        self.closed && self.limit.is_none()
+    }
+
+    /// Lee el code point `i` de la entrada legible; más allá del final devuelve `None` y, si no
+    /// es EOF, marca el paso como incompleto.
+    pub(crate) fn peek_at(&self, i: usize) -> Option<u32> {
+        if i < self.end() {
+            Some(self.input[i])
+        } else {
+            if !self.at_real_end() {
+                self.starved.set(true);
+            }
+            None
+        }
+    }
+
+    /// La entrada legible desde `start`, y si después de ella viene el EOF de verdad.
+    pub(crate) fn readable_from(&self, start: usize) -> (&[u32], bool) {
+        (&self.input[start..self.end()], self.at_real_end())
+    }
+
+    /// Marca el paso actual como incompleto (necesita entrada que todavía no llegó).
+    pub(crate) fn mark_starved(&self) {
+        self.starved.set(true);
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            pos: self.pos,
+            current: self.current,
+            current_raw: self.current_raw,
+            reconsume: self.reconsume,
+            checked: self.checked,
+            state: self.state,
+            return_state: self.return_state,
+            temp: self.temp.clone(),
+            char_ref_code: self.char_ref_code,
+            tag_kind: self.tag_kind,
+            tag: self.tag.clone(),
+            attr_active: self.attr_active,
+            attr_duplicate: self.attr_duplicate,
+            attr_name: self.attr_name.clone(),
+            attr_value: self.attr_value.clone(),
+            comment: self.comment.clone(),
+            doctype: self.doctype.clone(),
+            pi: self.pi.clone(),
+            last_start_tag: self.last_start_tag.clone(),
+            errors: self.errors.len(),
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.pos = s.pos;
+        self.current = s.current;
+        self.current_raw = s.current_raw;
+        self.reconsume = s.reconsume;
+        self.checked = s.checked;
+        self.state = s.state;
+        self.return_state = s.return_state;
+        self.temp = s.temp;
+        self.char_ref_code = s.char_ref_code;
+        self.tag_kind = s.tag_kind;
+        self.tag = s.tag;
+        self.attr_active = s.attr_active;
+        self.attr_duplicate = s.attr_duplicate;
+        self.attr_name = s.attr_name;
+        self.attr_value = s.attr_value;
+        self.comment = s.comment;
+        self.doctype = s.doctype;
+        self.pi = s.pi;
+        self.last_start_tag = s.last_start_tag;
+        self.errors.truncate(s.errors);
+        self.queue.clear();
+        self.eof_emitted = false;
     }
 
     /// Cambia el estado del tokenizador (lo usa el tree builder, p. ej. al ver `<script>`).
@@ -116,17 +302,31 @@ impl Tokenizer {
         self.cdata_allowed = allowed;
     }
 
-    /// Devuelve el siguiente token, o `None` después de haber devuelto `Token::Eof`.
+    /// Devuelve el siguiente token, o `None` después de haber devuelto `Token::Eof` o cuando
+    /// la entrada disponible (hasta el límite) no alcanza para completar uno: en ese caso el
+    /// estado queda como antes de empezarlo, y se retoma al llegar más entrada.
     pub fn next_token(&mut self) -> Option<Token> {
-        loop {
-            if let Some(token) = self.queue.pop_front() {
-                return Some(token);
+        if let Some(token) = self.queue.pop_front() {
+            return Some(token);
+        }
+        if self.eof_emitted {
+            return None;
+        }
+        if self.at_real_end() {
+            while self.queue.is_empty() {
+                self.step();
             }
-            if self.eof_emitted {
+            return self.queue.pop_front();
+        }
+        let snapshot = self.snapshot();
+        while self.queue.is_empty() {
+            self.step();
+            if self.starved.replace(false) {
+                self.restore(snapshot);
                 return None;
             }
-            self.step();
         }
+        self.queue.pop_front()
     }
 
     pub fn errors(&self) -> &[ParseError] {
@@ -146,7 +346,7 @@ impl Tokenizer {
             self.reconsume = false;
             return self.current;
         }
-        let raw = self.input.get(self.pos).copied();
+        let raw = self.peek_at(self.pos);
         if let Some(cp) = raw {
             if self.pos >= self.checked {
                 self.checked = self.pos + 1;
@@ -175,8 +375,8 @@ impl Tokenizer {
     fn chars_match_at(&self, start: usize, s: &str, ignore_ascii_case: bool) -> bool {
         (start..)
             .zip(s.chars())
-            .all(|(i, expected)| match self.input.get(i) {
-                Some(&cp) => {
+            .all(|(i, expected)| match self.peek_at(i) {
+                Some(cp) => {
                     cp == u32::from(expected)
                         || (ignore_ascii_case
                             && char::from_u32(cp)
@@ -400,17 +600,20 @@ fn preprocess(input: impl IntoIterator<Item = u32>) -> Vec<u32> {
 }
 
 /// Busca el identificador más largo de la tabla de named character references que sea prefijo
-/// de `input`. Devuelve su longitud (en caracteres) y el texto al que se expande.
+/// de `input`. Devuelve su longitud (en caracteres) y el texto al que se expande, y si se acabó
+/// `input` con identificadores aún posibles (con más entrada, el resultado podría cambiar).
 ///
 /// La tabla está ordenada, así que se mantiene el rango `[lo, hi)` de entradas que comparten el
 /// prefijo leído hasta ahora y se estrecha carácter a carácter: O(len · log n).
-fn match_named_entity(input: &[u32]) -> Option<(usize, &'static str)> {
+fn match_named_entity(input: &[u32]) -> (Option<(usize, &'static str)>, bool) {
     let table = named_entities::NAMED_ENTITIES;
     let (mut lo, mut hi) = (0, table.len());
     let mut best = None;
     for (k, &c) in input.iter().enumerate() {
         // Todos los identificadores son ASCII.
-        let Ok(byte) = u8::try_from(c) else { break };
+        let Ok(byte) = u8::try_from(c) else {
+            return (best, false);
+        };
         let range = &table[lo..hi];
         // Dentro del rango todas las entradas empiezan con el prefijo de longitud `k`; la
         // única entrada de longitud `k` (si existe) va primero.
@@ -419,14 +622,14 @@ fn match_named_entity(input: &[u32]) -> Option<(usize, &'static str)> {
         let end = range.partition_point(|(name, _)| byte_at(name).is_none_or(|b| b <= byte));
         (lo, hi) = (lo + start, lo + end);
         if lo == hi {
-            break;
+            return (best, false);
         }
         let (name, value) = table[lo];
         if name.len() == k + 1 {
             best = Some((k + 1, value));
         }
     }
-    best
+    (best, true)
 }
 
 /// <https://infra.spec.whatwg.org/#noncharacter>

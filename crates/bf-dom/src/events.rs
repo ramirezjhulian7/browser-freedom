@@ -351,6 +351,14 @@ impl ScriptHost for NoScript {
 const PASSIVE_TYPES: [&str; 4] = ["touchstart", "touchmove", "wheel", "mousewheel"];
 
 impl Document {
+    /// "Erase all event listeners and handlers" de cada nodo del documento y del `Window`
+    /// (`document.open()`, HTML §8.4.1 pasos 9-10).
+    pub fn erase_all_event_listeners(&mut self) {
+        self.listeners
+            .map
+            .retain(|target, _| matches!(target, EventTarget::Object(_)));
+    }
+
     /// Un nuevo `EventTarget` no-nodo (`new EventTarget()`, `AbortSignal`, ...).
     pub fn create_event_target(&mut self) -> EventTarget {
         self.listeners.next_object += 1;
@@ -477,6 +485,26 @@ impl Document {
         event: &mut Event,
         host: &mut dyn ScriptHost,
     ) -> bool {
+        self.dispatch_with_override(target, event, host, None)
+    }
+
+    /// Dispara `load` en el `Window` con el *legacy target override flag* (HTML §13.2.7): el
+    /// `target` que ven los listeners es el documento.
+    pub fn fire_window_load(&mut self, host: &mut dyn ScriptHost) -> bool {
+        let mut event = Event::new("load", EventInit::default());
+        event.is_trusted = true;
+        let root = EventTarget::Node(self.root());
+        self.dispatch_with_override(EventTarget::Window, &mut event, host, Some(root))
+    }
+
+    /// "Dispatch" con un *target override* opcional (§2.9, pasos 1 a 5.2).
+    fn dispatch_with_override(
+        &mut self,
+        target: EventTarget,
+        event: &mut Event,
+        host: &mut dyn ScriptHost,
+        target_override: Option<EventTarget>,
+    ) -> bool {
         // 1.
         event.dispatch = true;
         // 3.
@@ -484,7 +512,7 @@ impl Document {
         // 5.2.
         event.path.push(PathEntry {
             invocation_target: target,
-            shadow_adjusted_target: Some(target),
+            shadow_adjusted_target: Some(target_override.unwrap_or(target)),
         });
         // 5.3-5.4.
         let is_activation_event = event.is_mouse_event() && event.type_ == "click";
