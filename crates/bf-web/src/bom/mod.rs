@@ -292,7 +292,6 @@ fn install_window(agent: &mut Agent, realm: RealmId) {
     accessor(agent, g, "length", get_zero, None);
     accessor(agent, g, "origin", get_origin, None);
     accessor(agent, g, "isSecureContext", get_secure_context, None);
-    accessor(agent, g, "devicePixelRatio", get_device_pixel_ratio, None);
     // `location` es `[LegacyUnforgeable]` y `[PutForwards=href]`.
     let lg = agent.create_builtin_function(get_location, 0, "get location", false);
     let ls = agent.create_builtin_function(set_location, 1, "set location", false);
@@ -481,12 +480,6 @@ fn get_secure_context(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
         || host == "127.0.0.1"
         || host == "[::1]";
     Ok(Value::Boolean(secure))
-}
-
-fn get_device_pixel_ratio(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Number(
-        state(agent).hooks.screen().device_pixel_ratio,
-    ))
 }
 
 /// El mensaje de un diálogo: `undefined` es el string vacío.

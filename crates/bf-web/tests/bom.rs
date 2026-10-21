@@ -502,9 +502,9 @@ fn screen_from_hooks() {
     assert_eq!(
         p.show(
             "[screen.width, screen.height, screen.availWidth, screen.availHeight, \
-             screen.colorDepth, screen.pixelDepth, devicePixelRatio].join()"
+             screen.colorDepth, screen.pixelDepth].join()"
         ),
-        "2560,1440,2560,1392,24,24,1.5"
+        "2560,1440,2560,1392,24,24"
     );
     assert!(p.truthy("screen === window.screen && screen instanceof Screen"));
 }
