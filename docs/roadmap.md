@@ -280,3 +280,16 @@ Pendientes que no tienen `TODO(` en el código pero están medidos en
 - las dos referencias contradictorias y `letter-spacing-080` (sección "Tests con expectativa
   dudosa");
 - el ajuste vertical de contornos, que es una aproximación al hinting.
+
+## Pendiente E3
+
+Workers (HTML §10) y varios agentes (ECMA-262 §9.7). Estado al cierre: `21f17bc` (agentes) y
+`08f9cc5` (workers), sin merge de `master` posterior a `bad1ac6`.
+
+- **Hecho, agentes** (`bf-js/src/host/agents.rs`, `builtins/atomics.rs`, `builtins/web/serialize.rs`): `SharedArrayBuffer` con memoria compartida real (`AtomicU64` en bloques perezosos, sin `unsafe`), `Atomics.wait/notify/waitAsync` entre hilos, `$262.agent` completo (test262 `built-ins/Atomics` 380/380), structured serialize a datos `Send`.
+- **Hecho, workers** (`bf-web/src/workers/{mod,dedicated,scope,ports,shared}.rs`): `Worker` (hilo propio, cola previa a la carga, `terminate`, `close`, `error`/`messageerror`, módulos, anidados, `data:`/`blob:`), `DedicatedWorkerGlobalScope`, `WorkerLocation`, `WorkerNavigator`, `importScripts` con MIME estricto, `FileReaderSync`, `SharedWorker` básico, `MessagePort` transferible entre agentes, Blob/File clonables.
+- **Hecho, plataforma**: `window.postMessage` y `structuredClone` con el serializador web; `onerror` del global para excepciones de tareas; `onmessage` hace `start()`. Tests: `bf-web/tests/workers.rs` (57). WPT `workers/` 79.3 %, `safe-passing-of-structured-data` 86.8 %.
+- **Integración**: el shell no necesita ganchos (el waker de red despierta a los workers y `net::pump` reparte su bandeja). El runner de WPT corre `.any.worker.html`, `.any.sharedworker.html` y `.worker.js`; hace falta `git -C tests/wpt sparse-checkout add workers html/infrastructure/safe-passing-of-structured-data common html/webappapis/structured-clone`.
+- **Falta**: `workers/modules` (36.7 %) y `workers/baseurl` (0 %), que dependen de sustituciones `{{domains}}`, CSP, referrer y handlers `.py` del runner; `ImageData`/`ImageBitmap`/`FileList` clonables (las clases de canvas de E1 no están en el worker).
+- **Falta**: `Atomics.wait` sin límite en un worker terminado deja el hilo esperando hasta el límite de tiempo del agente (habría que pasarle la interrupción a `agents::wait`); `BroadcastChannel` entre agentes; `crossOriginIsolated` real desde COOP/COEP (hoy el embebedor pone `workers::Isolation`).
+- **Próximos pasos**: `git merge master`; conectar `BroadcastChannel` al registro global de `workers::ports`; `ServiceWorker`/`Worklet` siguen en el roadmap.
