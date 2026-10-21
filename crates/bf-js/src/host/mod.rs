@@ -16,6 +16,7 @@
 //!   microtasks y animation frames; [`webidl`]: conversiones; [`runtime`]: la fachada.
 
 pub mod event_loop;
+pub mod exotic;
 pub mod hooks;
 pub mod runtime;
 pub mod webidl;
@@ -31,6 +32,7 @@ use crate::vm::function::{CallArgs, NativeFn};
 use crate::vm::{Agent, JsResult, RealmId};
 
 pub use event_loop::{TimerHandler, TimerId};
+pub use exotic::HostExotic;
 pub use hooks::{ConsoleLevel, DefaultHooks, HostHooks, RejectionOperation, TaskSource};
 pub use runtime::{FromJs, IntoJs, JsError, Runtime};
 
@@ -96,6 +98,8 @@ pub struct HostClass {
     pub static_attributes: Vec<HostAttribute>,
     /// `[Symbol.hasInstance]` propio del objeto interfaz.
     pub has_instance: Option<NativeFn>,
+    /// Propiedades indexadas y con nombre (objeto de plataforma *legacy*, WebIDL §3.9).
+    pub exotic: Option<HostExotic>,
     /// ¿Se expone como propiedad del objeto global? (`[Exposed]`.)
     pub exposed: bool,
 }
@@ -113,6 +117,7 @@ impl HostClass {
             static_methods: Vec::new(),
             static_attributes: Vec::new(),
             has_instance: None,
+            exotic: None,
             exposed: true,
         }
     }
@@ -177,6 +182,12 @@ impl HostClass {
         self
     }
 
+    /// Getters indexado y con nombre (WebIDL §3.9).
+    pub fn exotic(mut self, exotic: HostExotic) -> HostClass {
+        self.exotic = Some(exotic);
+        self
+    }
+
     pub fn exposed(mut self, exposed: bool) -> HostClass {
         self.exposed = exposed;
         self
@@ -189,6 +200,9 @@ pub struct ClassObjects {
     pub prototype: Gc<Object>,
     pub interface: Gc<Object>,
 }
+
+/// Ver [`HostState::rejection_notifier`].
+pub type RejectionNotifier = fn(&mut Agent, Vec<Gc<Object>>);
 
 /// El estado del host en el agente.
 pub struct HostState {
@@ -210,7 +224,16 @@ pub struct HostState {
     embedder: HashMap<std::any::TypeId, Box<dyn Any>>,
     /// Datos del embebedor por realm y tipo (p. ej. el `WebContext` de cada ventana).
     realm_data: HashMap<(RealmId, std::any::TypeId), Box<dyn Any>>,
+    /// HTML "notify about rejected promises" (§8.1.7.3): recibe las promesas que siguen
+    /// rechazadas sin handler al vaciar la cola de microtasks.
+    pub rejection_notifier: Option<RejectionNotifier>,
+    /// Los getters/setters de los atributos `[LegacyUnforgeable]` por realm, clase y nombre:
+    /// todas las instancias comparten las mismas funciones (WebIDL §3.7.6).
+    unforgeable_fns: UnforgeableFns,
 }
+
+type UnforgeableFns =
+    HashMap<(RealmId, u32, &'static str), (Option<Gc<Object>>, Option<Gc<Object>>)>;
 
 impl Default for HostState {
     fn default() -> HostState {
@@ -226,6 +249,8 @@ impl Default for HostState {
             event_loop: event_loop::EventLoop::default(),
             embedder: HashMap::new(),
             realm_data: HashMap::new(),
+            rejection_notifier: None,
+            unforgeable_fns: HashMap::new(),
         }
     }
 }
@@ -238,6 +263,11 @@ impl Trace for HostState {
         }
         for v in self.pins.values().chain(self.running.iter()) {
             t.value(v);
+        }
+        for (g, s) in self.unforgeable_fns.values() {
+            for f in g.iter().chain(s.iter()) {
+                t.gc(*f);
+            }
         }
         self.event_loop.trace(t);
     }
@@ -619,9 +649,40 @@ impl Agent {
         }
         for id in chain.into_iter().rev() {
             let attrs = self.host.classes[id.0 as usize].unforgeable.clone();
+            let realm = self.current_realm;
             for attr in &attrs {
-                define_attribute(self, o, attr, id, CALL_METHOD, false);
+                let (name, get, set) = *attr;
+                let key = (realm, id.0, name);
+                let (g, st) = match self.host.unforgeable_fns.get(&key) {
+                    Some(fns) => *fns,
+                    None => {
+                        let g = get.map(|f| {
+                            host_function(self, f, 0, &format!("get {name}"), id, CALL_METHOD)
+                        });
+                        let st = set.map(|f| {
+                            host_function(self, f, 1, &format!("set {name}"), id, CALL_METHOD)
+                        });
+                        self.host.unforgeable_fns.insert(key, (g, st));
+                        (g, st)
+                    }
+                };
+                self.heap[o].props.insert(
+                    PropertyKey::from(name),
+                    Prop {
+                        value: PropValue::Accessor { get: g, set: st },
+                        enumerable: true,
+                        configurable: false,
+                    },
+                );
             }
+        }
+    }
+
+    /// ¿La promesa `p` tiene handler (`[[PromiseIsHandled]]`)? y su `[[PromiseResult]]`.
+    pub fn promise_handled_and_result(&self, p: Gc<Object>) -> Option<(bool, Value)> {
+        match &self.heap[p].kind {
+            ObjectKind::Promise(d) => Some((d.is_handled, d.result.clone())),
+            _ => None,
         }
     }
 
@@ -632,6 +693,18 @@ impl Agent {
             .get(&(realm, key))
             .copied()
             .filter(|o| self.heap.is_alive(*o))
+    }
+
+    /// Cambia la clave de identidad del wrapper de `old` en `realm` a `new` (p. ej. un nodo
+    /// que el embebedor movió a otra arena); devuelve el wrapper si existía.
+    pub fn host_rekey(&mut self, realm: RealmId, old: HostKey, new: HostKey) -> Option<Gc<Object>> {
+        let o = self.host_lookup(realm, old)?;
+        self.host.wrappers.remove(&(realm, old));
+        if let ObjectKind::Host(h) = &mut self.heap[o].kind {
+            h.key = Some(new);
+        }
+        self.host.wrappers.insert((realm, new), o);
+        Some(o)
     }
 
     /// El wrapper de `key` en `realm`: el existente (y `payload` se descarta) o uno nuevo de

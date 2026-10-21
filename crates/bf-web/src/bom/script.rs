@@ -30,7 +30,6 @@ use bf_js::vm::module::ModuleLoader;
 use bf_js::vm::{Agent, JsResult, RealmId, Throw};
 
 use super::document::this_document;
-use crate::html::scripting::ListenerInvoker;
 use crate::{DocumentOwner, WebContextHandle};
 
 /// Cuánto puede correr un script antes de que el motor lo corte.
@@ -378,8 +377,8 @@ fn json_parse(agent: &mut Agent, text: &str) -> JsResult<Value> {
     agent.call(&parse, Value::Object(json), &[Value::str(text)])
 }
 
-/// Presta `doc` al contexto (como `window.document`) mientras corre el listener `handle` con
-/// el [`ListenerInvoker`] que registra el DOM (dueño de `addEventListener`).
+/// Presta `doc` al contexto (como `window.document`) mientras corre el listener `handle`, que
+/// llama el DOM de E3 (dueño de `addEventListener`).
 fn lend_and_invoke(
     agent: &mut Agent,
     realm: RealmId,
@@ -387,9 +386,6 @@ fn lend_and_invoke(
     handle: u64,
     event: &mut bf_dom::events::Event,
 ) -> bool {
-    let Some(ListenerInvoker(invoke)) = agent.embedder_data::<ListenerInvoker>().copied() else {
-        return false;
-    };
     let real = std::mem::take(doc);
     let saved = std::mem::replace(
         &mut WebContextHandle { realm }.get_mut(agent).documents[0],
@@ -397,7 +393,7 @@ fn lend_and_invoke(
     );
     let saved_realm = agent.current_realm;
     agent.current_realm = realm;
-    let threw = invoke(agent, handle, event);
+    let threw = crate::dom::events::invoke_listener(agent, handle, event);
     agent.current_realm = saved_realm;
     let back = std::mem::replace(
         &mut WebContextHandle { realm }.get_mut(agent).documents[0],
@@ -410,6 +406,8 @@ fn lend_and_invoke(
 }
 
 impl bf_dom::events::ScriptHost for WebScripts<'_> {
+    /// Los listeners de JavaScript (del DOM de E3): el documento vuelve al contexto mientras
+    /// corre el listener (el parser lo tiene prestado durante `feed`).
     fn call_listener(
         &mut self,
         doc: &mut Document,

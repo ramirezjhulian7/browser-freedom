@@ -153,8 +153,9 @@ pub struct WebContext {
 }
 
 impl WebContext {
-    /// Un contexto con `document` como documento de la ventana.
-    pub fn new(document: DocumentOwner, url: Url) -> WebContext {
+    /// Un contexto con `document` como documento de la ventana (su URL pasa a ser `url`).
+    pub fn new(mut document: DocumentOwner, url: Url) -> WebContext {
+        document.doc_mut().url = url.clone();
         WebContext {
             documents: vec![document],
             base: url.clone(),
