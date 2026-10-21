@@ -369,7 +369,10 @@ impl Agent {
         realm: crate::vm::RealmId,
     ) -> Frame {
         let n = code.num_locals as usize;
-        let stack = self.value_pool.pop().unwrap_or_else(|| Vec::with_capacity(16));
+        let stack = self
+            .value_pool
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(16));
         let mut locals = self.locals_pool.pop().unwrap_or_default();
         locals.resize(n, None);
         Frame::with_buffers(code, env, realm, stack, locals)
@@ -462,10 +465,11 @@ impl Agent {
         // propiedad propia de datos con un objeto es lo que devuelve [[Get]] (sin getter).
         let own = match self.heap[f].props.get(&self.keys.prototype) {
             Some(crate::object::Prop {
-                value: PropValue::Data {
-                    value: Value::Object(p),
-                    ..
-                },
+                value:
+                    PropValue::Data {
+                        value: Value::Object(p),
+                        ..
+                    },
                 ..
             }) => Some(*p),
             _ => None,

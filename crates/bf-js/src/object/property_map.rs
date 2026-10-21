@@ -32,11 +32,10 @@ impl KeyHasher {
 impl Hasher for KeyHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            self.add(u64::from_le_bytes(c.try_into().expect("8 bytes")));
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.add(u64::from_le_bytes(*c));
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let mut b = [0u8; 8];
             b[..rest.len()].copy_from_slice(rest);
@@ -587,7 +586,7 @@ impl PropertyMap {
     }
 
     /// Pasa a modo diccionario.
-    fn to_dictionary(&mut self) -> &mut Dictionary {
+    fn make_dictionary(&mut self) -> &mut Dictionary {
         if let Named::Shaped { shape, values } = &mut self.named {
             let entries: Vec<Option<(PropertyKey, Prop)>> = shape
                 .keys
@@ -632,7 +631,7 @@ impl PropertyMap {
         }
         let to_dict = matches!(&self.named, Named::Shaped { shape, .. } if shape.keys.len() >= DICTIONARY_LIMIT);
         if to_dict {
-            self.to_dictionary();
+            self.make_dictionary();
         }
         match &mut self.named {
             Named::Shaped { shape, values } => {
@@ -653,7 +652,7 @@ impl PropertyMap {
         }
         self.find_slot(key)?;
         // Borrar pasa el objeto a modo diccionario.
-        let d = self.to_dictionary();
+        let d = self.make_dictionary();
         let i = d.lookup.remove(key)?;
         let (_, prop) = d.entries[i].take()?;
         d.id = next_shape_id();
@@ -677,7 +676,10 @@ impl PropertyMap {
 
     /// Los strings y después los símbolos (sin los índices).
     pub fn push_named_keys(&self, out: &mut Vec<PropertyKey>) {
-        fn push<'a>(out: &mut Vec<PropertyKey>, keys: impl Iterator<Item = &'a PropertyKey> + Clone) {
+        fn push<'a>(
+            out: &mut Vec<PropertyKey>,
+            keys: impl Iterator<Item = &'a PropertyKey> + Clone,
+        ) {
             out.extend(keys.clone().filter(|k| !k.is_symbol()).cloned());
             out.extend(keys.filter(|k| k.is_symbol()).cloned());
         }

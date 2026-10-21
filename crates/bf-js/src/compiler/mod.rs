@@ -315,12 +315,16 @@ impl<'t> Codegen<'t> {
         if op == Op::Pop && st.ops.len() as u32 > st.barrier {
             match st.ops.last_mut() {
                 Some(last @ Op::SetLocal(_)) => {
-                    let Op::SetLocal(s) = *last else { unreachable!() };
+                    let Op::SetLocal(s) = *last else {
+                        unreachable!()
+                    };
                     *last = Op::InitLocal(s);
                     return;
                 }
                 Some(last @ Op::SetEnv(..)) => {
-                    let Op::SetEnv(h, s) = *last else { unreachable!() };
+                    let Op::SetEnv(h, s) = *last else {
+                        unreachable!()
+                    };
                     *last = Op::InitEnv(h, s);
                     return;
                 }

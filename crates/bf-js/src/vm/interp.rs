@@ -918,12 +918,30 @@ impl Agent {
                         Op::Div => a / b,
                         Op::Mod => crate::abstract_ops::number::remainder(a, b),
                         Op::Exp => crate::abstract_ops::number::exponentiate(a, b),
-                        Op::Shl => f64::from(crate::abstract_ops::conversion::to_int32(a).wrapping_shl(crate::abstract_ops::conversion::to_uint32(b) & 31)),
-                        Op::Shr => f64::from(crate::abstract_ops::conversion::to_int32(a) >> (crate::abstract_ops::conversion::to_uint32(b) & 31)),
-                        Op::UShr => f64::from(crate::abstract_ops::conversion::to_uint32(a) >> (crate::abstract_ops::conversion::to_uint32(b) & 31)),
-                        Op::BitAnd => f64::from(crate::abstract_ops::conversion::to_int32(a) & crate::abstract_ops::conversion::to_int32(b)),
-                        Op::BitOr => f64::from(crate::abstract_ops::conversion::to_int32(a) | crate::abstract_ops::conversion::to_int32(b)),
-                        _ => f64::from(crate::abstract_ops::conversion::to_int32(a) ^ crate::abstract_ops::conversion::to_int32(b)),
+                        Op::Shl => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                .wrapping_shl(crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::Shr => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                >> (crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::UShr => f64::from(
+                            crate::abstract_ops::conversion::to_uint32(a)
+                                >> (crate::abstract_ops::conversion::to_uint32(b) & 31),
+                        ),
+                        Op::BitAnd => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                & crate::abstract_ops::conversion::to_int32(b),
+                        ),
+                        Op::BitOr => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                | crate::abstract_ops::conversion::to_int32(b),
+                        ),
+                        _ => f64::from(
+                            crate::abstract_ops::conversion::to_int32(a)
+                                ^ crate::abstract_ops::conversion::to_int32(b),
+                        ),
                     };
                     self.replace_top2(Value::Number(v));
                     return Ok(Flow::Next);
@@ -2884,7 +2902,10 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
         | Op::StrictEq
         | Op::StrictNe => {
             let n = f.stack.len();
-            let (a, b) = match (f.stack.get(n.wrapping_sub(2)), f.stack.get(n.wrapping_sub(1))) {
+            let (a, b) = match (
+                f.stack.get(n.wrapping_sub(2)),
+                f.stack.get(n.wrapping_sub(1)),
+            ) {
                 (Some(Value::Number(a)), Some(Value::Number(b))) => (*a, *b),
                 // Concatenación de primitivos sin conversiones con efectos (§13.15.3).
                 (Some(l), Some(r)) if op == Op::Add => {
@@ -2966,7 +2987,10 @@ fn dense_index(heap: &crate::heap::Heap, o: Gc<Object>, i: f64) -> Option<Value>
 #[inline]
 fn fast_named(heap: &crate::heap::Heap, o: Gc<Object>, key: &PropertyKey) -> bool {
     match &heap[o].kind {
-        ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Builtin(_) | ObjectKind::Error => true,
+        ObjectKind::Ordinary
+        | ObjectKind::Function(_)
+        | ObjectKind::Builtin(_)
+        | ObjectKind::Error => true,
         ObjectKind::Array(_) => !is_length(key),
         // Un String exótico: sus propiedades propias extra son los índices y `length`.
         ObjectKind::String(_) => !is_length(key) && !matches!(key, PropertyKey::Index(_)),
@@ -2982,7 +3006,12 @@ fn is_length(key: &PropertyKey) -> bool {
 
 /// Un acierto de la inline cache de `GetProp` con una propiedad de datos (sin el agente).
 #[inline]
-fn fast_ic_get(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>) -> Option<Value> {
+fn fast_ic_get(
+    heap: &crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+) -> Option<Value> {
     use crate::vm::ic::Ic;
     let key = name_key(code, c);
     if !fast_named(heap, o, key) {
@@ -2992,13 +3021,15 @@ fn fast_ic_get(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Obje
     code.ics
         .with(c, |site| {
             site.ways.iter().find_map(|w| match w {
-                Ic::Own { shape: s, slot } if *s == shape => match heap[o].props.slot(*slot as usize) {
-                    Some(crate::object::Prop {
-                        value: crate::object::PropValue::Data { value, .. },
-                        ..
-                    }) => Some(value.clone()),
-                    _ => None,
-                },
+                Ic::Own { shape: s, slot } if *s == shape => {
+                    match heap[o].props.slot(*slot as usize) {
+                        Some(crate::object::Prop {
+                            value: crate::object::PropValue::Data { value, .. },
+                            ..
+                        }) => Some(value.clone()),
+                        _ => None,
+                    }
+                }
                 Ic::Missing {
                     shape: s,
                     proto,
@@ -3038,7 +3069,13 @@ fn fast_ic_get(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Obje
 /// Un acierto de la inline cache de `SetProp` (propiedad de datos escribible, o la
 /// transición que la agrega) sin el agente.
 #[inline]
-fn fast_ic_set(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>, v: &Value) -> bool {
+fn fast_ic_set(
+    heap: &mut crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+    v: &Value,
+) -> bool {
     use crate::vm::ic::Ic;
     let key = name_key(code, c);
     if !fast_named(heap, o, key) {
@@ -3052,14 +3089,23 @@ fn fast_ic_set(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<
     let hit = code.ics.with(c, |site| {
         site.ways.iter().find_map(|w| match w {
             Ic::Own { shape: s, slot } if *s == shape => Some(Hit::Own(*slot)),
-            Ic::Add { from, proto, epoch, to } if *from == shape => Some(Hit::Add(*proto, *epoch, to.clone())),
+            Ic::Add {
+                from,
+                proto,
+                epoch,
+                to,
+            } if *from == shape => Some(Hit::Add(*proto, *epoch, to.clone())),
             _ => None,
         })
     });
     match hit.flatten() {
         Some(Hit::Own(slot)) => match heap[o].props.slot_mut(slot as usize) {
             Some(crate::object::Prop {
-                value: crate::object::PropValue::Data { value, writable: true },
+                value:
+                    crate::object::PropValue::Data {
+                        value,
+                        writable: true,
+                    },
                 ..
             }) => {
                 *value = v.clone();
@@ -3082,7 +3128,12 @@ fn fast_ic_set(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<
 
 /// Un acierto de la inline cache de `GetGlobal` con una propiedad de datos del objeto global.
 #[inline]
-fn fast_ic_global(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, genv: Gc<Env>) -> Option<Value> {
+fn fast_ic_global(
+    heap: &crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    genv: Gc<Env>,
+) -> Option<Value> {
     use crate::vm::ic::Ic;
     let g = heap[genv].global()?;
     let (object, decl_len) = (g.object, g.decl.len() as u32);
@@ -3167,7 +3218,13 @@ struct FastCx {
 
 /// Un acierto de la inline cache de `InitProp` (la transición del literal).
 #[inline]
-fn fast_ic_init(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>, v: &Value) -> bool {
+fn fast_ic_init(
+    heap: &mut crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    o: Gc<Object>,
+    v: &Value,
+) -> bool {
     use crate::vm::ic::Ic;
     let obj = &heap[o];
     if !matches!(obj.kind, ObjectKind::Ordinary) || !obj.extensible {
@@ -3231,7 +3288,11 @@ fn fast_set_named(heap: &mut crate::heap::Heap, o: Gc<Object>, k: &JsString, v: 
     };
     match props.slot_mut(slot) {
         Some(crate::object::Prop {
-            value: crate::object::PropValue::Data { value, writable: true },
+            value:
+                crate::object::PropValue::Data {
+                    value,
+                    writable: true,
+                },
             ..
         }) => {
             *value = v.clone();

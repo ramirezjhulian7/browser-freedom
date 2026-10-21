@@ -24,7 +24,8 @@ fn bench_dir() -> PathBuf {
 fn run_once(src: &str, name: &str) -> Result<f64, String> {
     let mut rt = Runtime::new(Box::new(DefaultHooks));
     let realm = rt.main_realm();
-    rt.eval_script(realm, CHECK, "check.js").map_err(|e| e.message)?;
+    rt.eval_script(realm, CHECK, "check.js")
+        .map_err(|e| e.message)?;
     let t = Instant::now();
     rt.eval_script(realm, src, name).map_err(|e| e.message)?;
     Ok(t.elapsed().as_secs_f64() * 1000.0)
@@ -67,9 +68,10 @@ fn real_main() -> ExitCode {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "js"))
         .filter(|p| {
-            filter
-                .as_deref()
-                .is_none_or(|f| p.file_name().is_some_and(|n| n.to_string_lossy().contains(f)))
+            filter.as_deref().is_none_or(|f| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(f))
+            })
         })
         .collect();
     files.sort();
@@ -80,7 +82,10 @@ fn real_main() -> ExitCode {
     println!("| benchmark | ms | base ms | speedup |");
     println!("|---|---:|---:|---:|");
     for f in &files {
-        let name = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = f
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let src = std::fs::read_to_string(f).unwrap_or_default();
         let mut best = f64::INFINITY;
         let mut err = None;
@@ -122,11 +127,18 @@ fn real_main() -> ExitCode {
                 *e = e.min(v);
             }
         }
-        let text: String = results.iter().map(|(k, v)| format!("{k}\t{v:.3}\n")).collect();
+        let text: String = results
+            .iter()
+            .map(|(k, v)| format!("{k}\t{v:.3}\n"))
+            .collect();
         if let Err(e) = std::fs::write(&path, text) {
             eprintln!("no se pudo escribir {path}: {e}");
             return ExitCode::FAILURE;
         }
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

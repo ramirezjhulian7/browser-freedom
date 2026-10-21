@@ -58,7 +58,11 @@ pub enum Ic {
     Init { from: u64, to: Rc<Shape> },
     /// Una propiedad propia del objeto global (el registro léxico global tenía `decl_len`
     /// bindings y no tenía el nombre).
-    Global { shape: u64, slot: u32, decl_len: u32 },
+    Global {
+        shape: u64,
+        slot: u32,
+        decl_len: u32,
+    },
 }
 
 /// Las disposiciones de un sitio.
@@ -444,7 +448,13 @@ impl Agent {
 
 impl Agent {
     /// `InitProp` (CreateDataPropertyOrThrow en un literal de objeto) por la cache.
-    pub(crate) fn ic_init(&mut self, code: &Rc<FunctionCode>, n: u32, o: Gc<Object>, v: &Value) -> bool {
+    pub(crate) fn ic_init(
+        &mut self,
+        code: &Rc<FunctionCode>,
+        n: u32,
+        o: Gc<Object>,
+        v: &Value,
+    ) -> bool {
         let shape = self.heap[o].props.shape_id();
         let to = code.ics.with(n, |site| {
             site.ways.iter().find_map(|w| match w {

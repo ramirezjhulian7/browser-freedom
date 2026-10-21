@@ -621,10 +621,10 @@ fn index_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let target = a.arg(0);
     while k < len {
         let p = key(k);
-        if let Some(v) = present(agent, o, &p)? {
-            if agent.is_strictly_equal(&v, &target) {
-                return Ok(Value::Number(k));
-            }
+        if let Some(v) = present(agent, o, &p)?
+            && agent.is_strictly_equal(&v, &target)
+        {
+            return Ok(Value::Number(k));
         }
         k += 1.0;
     }
@@ -1060,10 +1060,10 @@ fn last_index_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let target = a.arg(0);
     while k >= 0.0 {
         let p = key(k);
-        if let Some(v) = present(agent, o, &p)? {
-            if agent.is_strictly_equal(&v, &target) {
-                return Ok(Value::Number(k));
-            }
+        if let Some(v) = present(agent, o, &p)?
+            && agent.is_strictly_equal(&v, &target)
+        {
+            return Ok(Value::Number(k));
         }
         k -= 1.0;
     }
