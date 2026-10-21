@@ -34,6 +34,9 @@ pub struct HandlerState {
     pub compiled: Option<(DomString, Option<HostHandle>)>,
 }
 
+/// Los hijos de un nodo con la versión del documento en que se calcularon.
+pub type ChildList = (u64, std::rc::Rc<Vec<bf_dom::NodeId>>);
+
 #[derive(Default)]
 pub struct DomState {
     pub listeners: HashMap<u64, ListenerRec>,
@@ -62,7 +65,7 @@ pub struct DomState {
     /// La selección de cada documento.
     pub selections: HashMap<DocIndex, crate::dom::range::SelectionState>,
     /// `childNodes`: los hijos de (documento, padre) con la versión del documento.
-    pub child_cache: HashMap<(DocIndex, bf_dom::NodeId), (u64, std::rc::Rc<Vec<bf_dom::NodeId>>)>,
+    pub child_cache: HashMap<(DocIndex, bf_dom::NodeId), ChildList>,
     /// Los documentos de `new Document()` (su interfaz es `Document`, no `XMLDocument`).
     pub plain_documents: HashSet<DocIndex>,
     /// Los wrappers de los eventos nativos en dispatch, por (dirección, `timeStamp`).
