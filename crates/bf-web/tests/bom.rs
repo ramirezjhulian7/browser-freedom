@@ -798,3 +798,97 @@ fn performance_timing_after_load() {
          performance.timing.domContentLoadedEventStart > 0"
     ));
 }
+
+/// Los eventos que dispara el parser llegan al `ListenerInvoker` del DOM, con el documento
+/// prestado al contexto.
+#[test]
+fn parser_events_reach_the_listener_invoker() {
+    use bf_web::html::scripting::ListenerInvoker;
+    fn invoke(
+        agent: &mut bf_js::vm::Agent,
+        handle: u64,
+        event: &mut bf_dom::events::Event,
+    ) -> bool {
+        let realm = agent.current_realm;
+        let ctx = WebContextHandle { realm }.get(agent);
+        let has_body = ctx.document().body().is_some();
+        let msg = format!("{handle}:{}:{has_body}", event.type_.as_lossy_str());
+        agent.host.hooks.console(ConsoleLevel::Log, &msg);
+        false
+    }
+    let mut p = Page::new("");
+    p.rt.agent.set_embedder_data(ListenerInvoker(invoke));
+    let realm = p.ctx.realm;
+    let url = Url::parse("https://example.test/", None).unwrap();
+    bom::script::install_scripting(
+        &mut p.rt.agent,
+        realm,
+        &url,
+        Arc::new(MemLoader(HashMap::new())),
+    );
+    bom::script::begin_parse(&mut p.rt.agent, realm, &url);
+    {
+        let ctx = p.ctx.get_mut(&mut p.rt.agent);
+        let root = bf_dom::events::EventTarget::Node(ctx.document().root());
+        ctx.document_mut().add_event_listener(
+            root,
+            "DOMContentLoaded",
+            bf_dom::events::Listener::Script(7),
+            Default::default(),
+        );
+    }
+    bom::script::feed(&mut p.rt.agent, realm, "<body><p>x");
+    bom::script::finish(&mut p.rt.agent, realm);
+    assert_eq!(p.console(), ["7:DOMContentLoaded:true"]);
+}
+
+/// Un evento del usuario (de confianza) despachado desde fuera de un script.
+#[test]
+fn trusted_dispatch_lends_the_document() {
+    use bf_web::html::scripting::ListenerInvoker;
+    fn invoke(
+        agent: &mut bf_js::vm::Agent,
+        handle: u64,
+        event: &mut bf_dom::events::Event,
+    ) -> bool {
+        let msg = format!(
+            "{handle}:{}:{}",
+            event.type_.as_lossy_str(),
+            event.is_trusted
+        );
+        agent.host.hooks.console(ConsoleLevel::Log, &msg);
+        false
+    }
+    let mut p = Page::new("<body><button id=b>x</button>");
+    p.rt.agent.set_embedder_data(ListenerInvoker(invoke));
+    let realm = p.ctx.realm;
+    let b = {
+        let ctx = p.ctx.get_mut(&mut p.rt.agent);
+        let b = ctx.document().get_element_by_id(&"b".into()).unwrap();
+        ctx.document_mut().add_event_listener(
+            bf_dom::events::EventTarget::Node(b),
+            "click",
+            bf_dom::events::Listener::Script(3),
+            Default::default(),
+        );
+        b
+    };
+    let mut ev = bf_dom::events::Event::new(
+        "click",
+        bf_dom::events::EventInit {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+        },
+    );
+    let ok = bom::script::dispatch_trusted(
+        &mut p.rt.agent,
+        realm,
+        bf_dom::events::EventTarget::Node(b),
+        &mut ev,
+    );
+    assert!(ok);
+    assert_eq!(p.console(), ["3:click:true"]);
+    // El documento volvió al contexto.
+    assert!(p.truthy("document.getElementById('b') !== null"));
+}

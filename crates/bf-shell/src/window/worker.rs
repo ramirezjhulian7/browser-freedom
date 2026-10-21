@@ -66,6 +66,28 @@ pub struct Done {
     pub viewport: Size,
 }
 
+/// Cómo ve la ventana la página de una pestaña: viewport, desplazamiento y px de dispositivo
+/// por px CSS (para el `LayoutSnapshot` del CSSOM View).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub viewport: Size,
+    pub scroll: (f32, f32),
+    pub device_pixel_ratio: f32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View {
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            scroll: (0.0, 0.0),
+            device_pixel_ratio: 1.0,
+        }
+    }
+}
+
 /// Lo que manda un hilo de documento a la ventana.
 pub enum FromDoc {
     Done(Box<Done>),
@@ -115,11 +137,27 @@ impl Documents {
     }
 
     pub fn set_viewport(&mut self, tab: u64, size: Size) {
-        *self
-            .thread(tab)
-            .viewport
+        self.thread(tab)
+            .view
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = size;
+            .unwrap_or_else(|e| e.into_inner())
+            .viewport = size;
+    }
+
+    /// El desplazamiento y la escala de la página cambiaron: el hilo actualiza el snapshot
+    /// del layout (y dispara `scroll`).
+    pub fn set_scroll(&mut self, tab: u64, scroll: (f32, f32), device_pixel_ratio: f32) {
+        let t = self.thread(tab);
+        let changed = {
+            let mut v = t.view.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = v.scroll != scroll || v.device_pixel_ratio != device_pixel_ratio;
+            v.scroll = scroll;
+            v.device_pixel_ratio = device_pixel_ratio;
+            changed
+        };
+        if changed {
+            let _ = t.jobs.send(Msg::ViewChanged);
+        }
     }
 
     /// Termina el hilo de la pestaña `tab` (se cerró).
@@ -132,14 +170,16 @@ impl Documents {
 
 enum Msg {
     Job(Job),
+    /// Cambió el desplazamiento o la escala (ver [`Documents::set_scroll`]).
+    ViewChanged,
     Stop,
 }
 
 /// El hilo de una pestaña.
 struct DocumentThread {
     jobs: Sender<Msg>,
-    /// Viewport actual de la página (px CSS), que el hilo lee justo antes del layout.
-    viewport: Arc<Mutex<Size>>,
+    /// Cómo ve la ventana la página; el hilo lee el viewport justo antes del layout.
+    view: Arc<Mutex<View>>,
 }
 
 fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
@@ -170,7 +210,7 @@ struct State {
     fonts: Arc<FontDb>,
     tx: Sender<FromDoc>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    viewport: Arc<Mutex<Size>>,
+    view: Arc<Mutex<View>>,
     current: Option<Current>,
     last_frame: Instant,
 }
@@ -183,11 +223,8 @@ impl DocumentThread {
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> DocumentThread {
         let (jobs, rx) = channel::<Msg>();
-        let viewport = Arc::new(Mutex::new(Size {
-            width: 800.0,
-            height: 600.0,
-        }));
-        let shared = viewport.clone();
+        let view = Arc::new(Mutex::new(View::default()));
+        let shared = view.clone();
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
@@ -198,14 +235,14 @@ impl DocumentThread {
                     fonts,
                     tx,
                     wake,
-                    viewport: shared,
+                    view: shared,
                     current: None,
                     last_frame: Instant::now(),
                 };
                 state.run(rx);
             })
             .expect("no se pudo crear el hilo de la pestaña");
-        DocumentThread { jobs, viewport }
+        DocumentThread { jobs, view }
     }
 }
 
@@ -242,8 +279,20 @@ fn coalesce(queue: &mut VecDeque<Job>) {
 }
 
 impl State {
+    fn view(&self) -> View {
+        *self.view.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn viewport(&self) -> Size {
-        *self.viewport.lock().unwrap_or_else(|e| e.into_inner())
+        self.view().viewport
+    }
+
+    /// El desplazamiento o la escala cambiaron: el snapshot del layout se pone al día.
+    fn view_changed(&mut self) {
+        let view = self.view();
+        if let Some(engine) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            engine.update_view(view.scroll, view.device_pixel_ratio);
+        }
     }
 
     /// El bucle del hilo: trabajos de la interfaz y, entre ellos, las tareas del documento.
@@ -270,6 +319,10 @@ impl State {
                 };
                 match msg {
                     Some(Msg::Stop) => break,
+                    Some(Msg::ViewChanged) => {
+                        self.view_changed();
+                        continue;
+                    }
                     Some(Msg::Job(j)) => queue.push_back(j),
                     None => {
                         self.run_tasks();
@@ -281,6 +334,7 @@ impl State {
             while let Ok(next) = rx.try_recv() {
                 match next {
                     Msg::Job(j) => queue.push_back(j),
+                    Msg::ViewChanged => self.view_changed(),
                     Msg::Stop => stop = true,
                 }
             }
@@ -344,6 +398,7 @@ impl State {
             screen,
         } = job;
         let env = PageEnv {
+            fonts: Some(self.fonts.clone()),
             net: net.clone(),
             requests: Some(self.request_sink()),
             session_history,
@@ -424,8 +479,17 @@ impl State {
                 (shown, p)
             }
         };
+        let view = self.view();
         if let Some(c) = &mut self.current {
             c.version = loaded.doc.version();
+            if let Some(engine) = &mut c.engine {
+                engine.set_layout(
+                    &page,
+                    loaded.doc.version(),
+                    view.scroll,
+                    view.device_pixel_ratio,
+                );
+            }
         }
         self.last_frame = Instant::now();
         let done = Done {
@@ -449,7 +513,15 @@ impl State {
         let Some(engine) = &mut current.engine else {
             return;
         };
-        if engine.run_due_tasks() == 0 {
+        let ran = engine.run_due_tasks();
+        if let Some((x, y)) = engine.take_scroll_request() {
+            let _ = self.tx.send(FromDoc::Request {
+                tab: self.tab,
+                request: PageRequest::ScrollTo(x, y),
+            });
+            (self.wake)();
+        }
+        if ran == 0 {
             return;
         }
         if engine.take_dirty()

@@ -72,6 +72,8 @@ pub enum PageRequest {
     Open(String),
     /// `window.close()`.
     Close,
+    /// `window.scrollTo` y compañía: desplazar la página a (x, y) px CSS.
+    ScrollTo(f32, f32),
     /// Un diálogo: la interfaz responde por `reply` (`None`: cancelado; para `alert` y
     /// `confirm`, `Some("")` es aceptar).
     Dialog {
@@ -93,6 +95,9 @@ pub struct PageEnv {
     pub session_history: (u32, u32),
     pub referrer: String,
     pub screen: ScreenInfo,
+    /// Las fuentes del sistema, para maquetar cuando JavaScript pide geometría con el layout
+    /// desactualizado (sin ellas, el CSSOM usa métricas de prueba).
+    pub fonts: Option<Arc<bf_font::FontDb>>,
 }
 
 impl PageEnv {
@@ -103,7 +108,32 @@ impl PageEnv {
             session_history: (1, 0),
             referrer: String::new(),
             screen: ScreenInfo::default(),
+            fonts: None,
         }
+    }
+}
+
+/// El [`bf_web::cssom::LayoutProvider`] del navegador: maqueta con las fuentes reales y los
+/// tamaños de las imágenes del último layout.
+struct ShellLayout {
+    fonts: bf_font::Fonts,
+    images: Rc<RefCell<bf_layout::ImageSizes>>,
+}
+
+impl bf_web::cssom::LayoutProvider for ShellLayout {
+    fn layout(
+        &mut self,
+        doc: &Document,
+        styles: &bf_style::StyleMap,
+        viewport: bf_layout::Size,
+    ) -> bf_layout::FragmentTree {
+        bf_layout::layout_document_with_images(
+            doc,
+            styles,
+            viewport,
+            &self.fonts,
+            &self.images.borrow(),
+        )
     }
 }
 
@@ -387,6 +417,8 @@ pub struct Engine {
     rejections: Rc<RefCell<usize>>,
     /// Rechazos sin manejar ya reportados a la consola.
     reported_rejections: usize,
+    /// Los tamaños de las imágenes del último layout (para el [`ShellLayout`]).
+    images: Rc<RefCell<bf_layout::ImageSizes>>,
 }
 
 impl Engine {
@@ -412,6 +444,7 @@ impl Engine {
             console,
             rejections,
             reported_rejections: 0,
+            images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
         }
     }
 
@@ -475,6 +508,63 @@ impl Engine {
             Box::new(ShellBom { env: env.clone() }),
         );
         bf_web::bom::script::install_scripting(&mut self.rt.agent, realm, url, loader);
+        if let Some(db) = &env.fonts {
+            let provider = ShellLayout {
+                fonts: bf_font::Fonts::new(db.clone()),
+                images: self.images.clone(),
+            };
+            bf_web::cssom::set_layout_provider(&mut self.rt.agent, realm, Box::new(provider));
+        }
+    }
+
+    /// El layout que acaba de hacer el navegador (para el CSSOM View: `getBoundingClientRect`,
+    /// `innerWidth`, `getComputedStyle`…).
+    pub fn set_layout(
+        &mut self,
+        page: &bf_paint::Page,
+        version: u64,
+        scroll: (f32, f32),
+        device_pixel_ratio: f32,
+    ) {
+        let realm = self.realm;
+        let generation = bf_web::cssom::sheets_generation(&self.rt.agent, realm);
+        let mut snapshot =
+            bf_web::LayoutSnapshot::new(page.styles.clone(), Arc::new(page.tree.clone()), version);
+        snapshot.sheets_generation = generation;
+        snapshot.scroll = scroll;
+        snapshot.device_pixel_ratio = device_pixel_ratio;
+        *self.images.borrow_mut() = page.images.sizes.clone();
+        if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
+            ctx.layout = Some(snapshot);
+        }
+        self.update_view(scroll, device_pixel_ratio);
+    }
+
+    /// El desplazamiento o la escala de la página cambiaron (sin volver a maquetar).
+    pub fn update_view(&mut self, scroll: (f32, f32), device_pixel_ratio: f32) {
+        let realm = self.realm;
+        if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm)
+            && let Some(l) = &mut ctx.layout
+        {
+            l.scroll = scroll;
+            l.device_pixel_ratio = device_pixel_ratio;
+        }
+        if let Some(s) = self
+            .rt
+            .agent
+            .realm_data_mut::<bf_web::cssom::CssomState>(realm)
+        {
+            s.scroll = scroll;
+            s.device_pixel_ratio = device_pixel_ratio;
+        }
+    }
+
+    /// Un desplazamiento pedido desde JavaScript (`scrollTo`…) que la ventana debe aplicar.
+    pub fn take_scroll_request(&mut self) -> Option<(f32, f32)> {
+        self.rt
+            .agent
+            .realm_data_mut::<bf_web::cssom::CssomState>(self.realm)
+            .and_then(|s| s.scroll_request.take())
     }
 
     /// Parsea `text` (el HTML ya decodificado de `url`) ejecutando sus scripts; devuelve una
@@ -670,6 +760,45 @@ mod tests {
              navigator.userAgentData.brands[0].brand, navigator.cookieEnabled)</script>",
         );
         assert_eq!(texts(&log), ["true false \"\" Freedom true"]);
+    }
+
+    #[test]
+    fn layout_snapshot_feeds_cssom_view() {
+        let (mut engine, log, doc) = parse(
+            "<body style='margin:0'><div id=caja style='width:120px;height:30px;margin-top:50px'></div>",
+        );
+        let fonts = bf_font::FontDb::system();
+        let base = Url::parse("https://example.test/", None).unwrap();
+        let env = env();
+        let ctx = bf_paint::PageContext {
+            base: &base,
+            encoding: bf_infra::encoding::Encoding::Utf8,
+            loader: loader(&env),
+            fonts,
+            extra: &[],
+        };
+        let viewport = bf_layout::Size {
+            width: 640.0,
+            height: 480.0,
+        };
+        let page = bf_paint::prepare_page(&doc, &ctx, viewport);
+        engine.set_layout(&page, doc.version(), (0.0, 20.0), 1.25);
+        let realm = engine.realm;
+        engine
+            .rt
+            .eval_script(
+                realm,
+                "var r = document.getElementById('caja').getBoundingClientRect();                  console.log(innerWidth, innerHeight, scrollY, devicePixelRatio, r.width, r.top)",
+                "t.js",
+            )
+            .unwrap();
+        assert_eq!(texts(&log).last().unwrap(), "640 480 20 1.25 120 30");
+        engine.update_view((0.0, 0.0), 1.0);
+        engine
+            .rt
+            .eval_script(realm, "console.log(scrollY, devicePixelRatio)", "t.js")
+            .unwrap();
+        assert_eq!(texts(&log).last().unwrap(), "0 1");
     }
 
     #[test]
