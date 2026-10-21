@@ -1,9 +1,11 @@
 **Navega libre.** Freedom es un navegador web independiente: no está construido sobre Chrome,
 Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 
-> **Vista previa.** Freedom todavía no ejecuta JavaScript. Los sitios para leer (Wikipedia,
-> blogs, noticias, documentación) se ven bien; los que dependen de JavaScript (redes
-> sociales, correo web, mapas, tiendas) todavía no funcionan o se ven incompletos.
+> **Vista previa.** Freedom ya abre y muestra páginas web, y su JavaScript está en
+> construcción: ejecuta los scripts de las páginas, pero todavía faltan muchas de las funciones
+> que usan los sitios. Los sitios para leer (Wikipedia, blogs, noticias, documentación) se ven
+> bien; los muy interactivos (redes sociales, correo web, mapas, tiendas) todavía no funcionan
+> o se ven incompletos.
 
 ## Descarga
 
