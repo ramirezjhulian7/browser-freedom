@@ -25,7 +25,7 @@ historial, scroll y zoom. El plan de las fases siguientes está en
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **76.4%** (con los módulos; 97.5% sin lo que espera a Promise); total **56.8%** (29 234 / 51 442) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.4%**; total **83.0%** (42 534 / 51 220) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
