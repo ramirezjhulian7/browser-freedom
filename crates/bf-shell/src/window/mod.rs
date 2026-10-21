@@ -899,6 +899,9 @@ impl App {
         let Some(mut incoming) = self.tabs[i].take() else {
             return;
         };
+        // `visibilitychange`: la que se oculta y la que se muestra.
+        self.worker.send(self.tab_key, Job::Visibility(false));
+        self.worker.send(incoming.tab_key, Job::Visibility(true));
         self.swap_state(&mut incoming);
         self.tabs[self.active] = Some(incoming);
         self.active = i;
@@ -1721,6 +1724,14 @@ impl App {
         }
     }
 
+    /// La clave del hilo de documento de la pestaña `i`.
+    fn key_of_tab(&self, i: usize) -> Option<u64> {
+        if i == self.active {
+            return Some(self.tab_key);
+        }
+        self.tabs.get(i)?.as_ref().map(|t| t.tab_key)
+    }
+
     /// La pestaña cuyo hilo de documento tiene la clave `key`.
     fn tab_with_key(&self, key: u64) -> Option<usize> {
         if self.tab_key == key {
@@ -1901,6 +1912,17 @@ impl App {
                 }
             }
             PageRequest::Close => self.close_tab(i),
+            PageRequest::StorageChanged(notice) => {
+                // Las otras pestañas (de cualquier origen: cada una filtra el suyo).
+                let keys: Vec<u64> = (0..self.tabs.len())
+                    .filter(|&j| j != i)
+                    .filter_map(|j| self.key_of_tab(j))
+                    .collect();
+                for key in keys {
+                    self.worker
+                        .send(key, Job::Storage(Box::new(notice.clone())));
+                }
+            }
             PageRequest::ScrollTo(x, y) => self.with_tab(i, |app| {
                 app.scroll = (x, y);
                 app.clamp_scroll();

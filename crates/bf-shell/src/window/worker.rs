@@ -54,6 +54,10 @@ pub enum Job {
     },
     /// Una entrada del usuario para el documento.
     Input(Box<super::events::UserInput>),
+    /// La pestaña se mostró (`true`) u ocultó.
+    Visibility(bool),
+    /// Otra pestaña cambió el `localStorage` de un origen.
+    Storage(Box<crate::script::StorageNotice>),
 }
 
 /// Un documento maquetado.
@@ -402,7 +406,10 @@ impl State {
                     },
                 };
                 match msg {
-                    Some(Msg::Stop) => break,
+                    Some(Msg::Stop) => {
+                        self.unload_current();
+                        break;
+                    }
                     Some(Msg::ViewChanged) => {
                         self.view_changed();
                         continue;
@@ -423,6 +430,7 @@ impl State {
                 }
             }
             if stop {
+                self.unload_current();
                 break;
             }
             coalesce(&mut queue);
@@ -432,6 +440,18 @@ impl State {
             match job {
                 Job::Load(job) => self.load(*job),
                 Job::Input(input) => self.input(*input),
+                Job::Visibility(visible) => {
+                    if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+                        e.set_visibility(visible);
+                    }
+                    self.refresh();
+                }
+                Job::Storage(notice) => {
+                    if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+                        e.storage_event(&notice);
+                    }
+                    self.refresh();
+                }
                 Job::Relayout { id, loaded } => {
                     if let (Some(l), Some(c)) = (loaded, self.current.as_mut()) {
                         if let Some(engine) = &mut c.engine {
@@ -489,6 +509,7 @@ impl State {
             screen,
         } = job;
         let env = PageEnv {
+            defer_load: true,
             fonts: Some(self.fonts.clone()),
             net: net.clone(),
             requests: Some(self.request_sink()),
@@ -504,7 +525,8 @@ impl State {
             theme,
             post,
         };
-        // El documento anterior (y su motor) se descartan.
+        // El documento anterior recibe `unload` y se descarta (con su motor).
+        self.unload_current();
         self.current = None;
         self.input.reset();
         self.last_viewport = None;
@@ -523,6 +545,18 @@ impl State {
             version,
         });
         self.layout(id, Some(ctx));
+        // El primer layout cargó imágenes y hojas: ya puede salir `load` (13.2.7 paso 8).
+        if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            e.resources_loaded();
+        }
+        self.refresh();
+    }
+
+    /// `beforeunload`, `pagehide` y `unload` en el documento actual.
+    fn unload_current(&mut self) {
+        if let Some(e) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            e.unload();
+        }
     }
 
     /// Estilo, layout y lista de visualización del documento actual; `Done` a la ventana.
@@ -673,7 +707,7 @@ mod tests {
             .map(|j| match j {
                 Job::Load(l) => l.id,
                 Job::Relayout { id, .. } => *id,
-                Job::Input(_) => 0,
+                Job::Input(_) | Job::Visibility(_) | Job::Storage(_) => 0,
             })
             .collect();
         assert_eq!(ids, [3, 5]);

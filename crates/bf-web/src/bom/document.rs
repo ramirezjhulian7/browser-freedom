@@ -120,12 +120,14 @@ fn current_script(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(wrap_opt(agent, n.doc, s))
 }
 
-fn visibility_state(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::str("visible"))
+/// `visibilityState` (HTML §6.2.1): la de la pestaña.
+fn visibility_state(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    let visible = state(agent).visible;
+    Ok(Value::str(if visible { "visible" } else { "hidden" }))
 }
 
-fn hidden(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Boolean(false))
+fn hidden(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Boolean(!state(agent).visible))
 }
 
 fn has_focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

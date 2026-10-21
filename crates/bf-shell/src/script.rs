@@ -78,6 +78,9 @@ pub enum PageRequest {
     Close,
     /// `window.scrollTo` y compañía: desplazar la página a (x, y) px CSS.
     ScrollTo(f32, f32),
+    /// El documento cambió el `localStorage` de su origen: las otras pestañas reciben
+    /// `storage`.
+    StorageChanged(StorageNotice),
     /// Un diálogo: la interfaz responde por `reply` (`None`: cancelado; para `alert` y
     /// `confirm`, `Some("")` es aceptar).
     Dialog {
@@ -85,6 +88,17 @@ pub enum PageRequest {
         message: String,
         reply: Sender<Option<String>>,
     },
+}
+
+/// Un cambio de `localStorage` (HTML §12.2.1) para las otras pestañas del origen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageNotice {
+    pub origin: String,
+    /// `None`: `clear()`.
+    pub key: Option<String>,
+    pub old: Option<String>,
+    pub new: Option<String>,
+    pub url: String,
 }
 
 /// A dónde van las peticiones de un documento (en la línea de comandos, a ningún lado).
@@ -102,6 +116,9 @@ pub struct PageEnv {
     /// Las fuentes del sistema, para maquetar cuando JavaScript pide geometría con el layout
     /// desactualizado (sin ellas, el CSSOM usa métricas de prueba).
     pub fonts: Option<Arc<bf_font::FontDb>>,
+    /// El navegador avisa cuándo terminaron de cargar imágenes y hojas
+    /// ([`Engine::resources_loaded`]); si no (línea de comandos), `load` sale al parsear.
+    pub defer_load: bool,
 }
 
 impl PageEnv {
@@ -113,6 +130,7 @@ impl PageEnv {
             referrer: String::new(),
             screen: ScreenInfo::default(),
             fonts: None,
+            defer_load: false,
         }
     }
 }
@@ -284,6 +302,23 @@ impl BomHooks for ShellBom {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|s| parse_storage(&s))
             .unwrap_or_default()
+    }
+
+    fn storage_changed(
+        &mut self,
+        origin: &str,
+        key: Option<&str>,
+        old: Option<&str>,
+        new: Option<&str>,
+        url: &str,
+    ) {
+        self.request(PageRequest::StorageChanged(StorageNotice {
+            origin: origin.to_owned(),
+            key: key.map(str::to_owned),
+            old: old.map(str::to_owned),
+            new: new.map(str::to_owned),
+            url: url.to_owned(),
+        }));
     }
 
     fn save_storage(&mut self, origin: &str, items: &[(String, String)]) {
@@ -589,9 +624,51 @@ impl Engine {
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
+        if !env.defer_load {
+            bf_web::bom::script::resources_loaded(agent, realm);
+        }
         self.flush_rejections();
         self.take_dirty();
         self.document().cloned().unwrap_or_default()
+    }
+
+    /// El navegador cargó las imágenes y hojas del documento: `load`.
+    pub fn resources_loaded(&mut self) {
+        if self.has_window() {
+            bf_web::bom::script::resources_loaded(&mut self.rt.agent, self.realm);
+            self.flush_rejections();
+        }
+    }
+
+    /// El documento se va (otra navegación, se cierra la pestaña): `beforeunload`,
+    /// `pagehide` y `unload`.
+    pub fn unload(&mut self) {
+        if self.has_window() {
+            bf_web::bom::script::unload_document(&mut self.rt.agent, self.realm);
+        }
+    }
+
+    /// La pestaña se mostró u ocultó (`visibilitychange`).
+    pub fn set_visibility(&mut self, visible: bool) {
+        if self.has_window() {
+            bf_web::bom::script::set_visibility(&mut self.rt.agent, self.realm, visible);
+        }
+    }
+
+    /// Otra pestaña cambió el `localStorage` de un origen (`storage` si es el de esta).
+    pub fn storage_event(&mut self, n: &StorageNotice) {
+        if self.has_window() {
+            bf_web::bom::script::storage_event(
+                &mut self.rt.agent,
+                self.realm,
+                &n.origin,
+                n.key.as_deref(),
+                n.old.as_deref(),
+                n.new.as_deref(),
+                &n.url,
+            );
+            self.flush_rejections();
+        }
     }
 
     /// El documento de la ventana.

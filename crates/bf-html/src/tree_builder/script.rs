@@ -104,6 +104,9 @@ pub struct Parser {
     aborted: bool,
     /// Cambia con cada `document.open()`: los pasos en curso del parser anterior se cortan.
     generation: u64,
+    /// Lo que el navegador todavía carga y demora el evento `load` (imágenes, hojas: 13.2.7
+    /// paso 8, "nothing that delays the load event").
+    load_blockers: u32,
 }
 
 impl Parser {
@@ -133,6 +136,7 @@ impl Parser {
             script_created: false,
             aborted: false,
             generation: 0,
+            load_blockers: 0,
         }
     }
 
@@ -147,6 +151,7 @@ impl Parser {
             script_created: false,
             aborted: false,
             generation: 0,
+            load_blockers: 0,
         }
     }
 
@@ -235,6 +240,18 @@ impl Parser {
         scripts.in_order.clear();
         scripts.pending_parsing_blocking = None;
         self.b.truncate_open(0);
+    }
+
+    /// El navegador carga algo que demora el evento `load` (las imágenes y hojas del
+    /// documento): `load` espera hasta el [`Parser::release_load_event`] correspondiente.
+    pub fn delay_load_event(&mut self) {
+        self.load_blockers += 1;
+    }
+
+    /// Terminó de cargar algo que demoraba `load`; si era lo último, "the end" sigue.
+    pub fn release_load_event(&mut self, host: &mut dyn ScriptHost) {
+        self.load_blockers = self.load_blockers.saturating_sub(1);
+        self.run_tasks(host);
     }
 
     /// La búsqueda de un script externo (o del grafo de un módulo) terminó: `ok` es `false`
@@ -579,8 +596,8 @@ impl Parser {
                     self.end = End::Load;
                 }
                 End::Load => {
-                    // 8. Lo único que demora el `load` aquí son los scripts.
-                    let delayed = {
+                    // 8. Los scripts y lo que retiene el navegador ([`Parser::delay_load_event`]).
+                    let delayed = self.load_blockers > 0 || {
                         let doc = &self.b.doc;
                         doc.inclusive_descendants(doc.root())
                             .into_iter()

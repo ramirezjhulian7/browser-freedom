@@ -61,6 +61,17 @@ pub trait BomHooks {
     }
     /// Guarda el `localStorage` de `origin`.
     fn save_storage(&mut self, _origin: &str, _items: &[(String, String)]) {}
+    /// Cambió el `localStorage` de `origin` (`key` `None`: `clear()`): el navegador avisa a
+    /// las otras ventanas de ese origen ([`script::storage_event`]).
+    fn storage_changed(
+        &mut self,
+        _origin: &str,
+        _key: Option<&str>,
+        _old: Option<&str>,
+        _new: Option<&str>,
+        _url: &str,
+    ) {
+    }
     /// La pantalla (`window.screen`).
     fn screen(&self) -> ScreenInfo {
         ScreenInfo::default()
@@ -172,6 +183,8 @@ pub struct BomState {
     pub name: String,
     /// `window.closed`.
     pub closed: bool,
+    /// ¿La pestaña está a la vista? (`document.visibilityState`.)
+    pub visible: bool,
 }
 
 impl BomState {
@@ -188,6 +201,7 @@ impl BomState {
             timing: performance::Timing::starting_at(time_origin),
             name: String::new(),
             closed: false,
+            visible: true,
         }
     }
 }

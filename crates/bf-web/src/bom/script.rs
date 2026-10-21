@@ -198,9 +198,10 @@ pub fn with_parser<R>(
 }
 
 /// Empieza a parsear el documento de la ventana de `realm` (en `url`): el contexto pasa a
-/// tener un parser de red vacío.
+/// tener un parser de red vacío. El evento `load` espera a [`resources_loaded`].
 pub fn begin_parse(agent: &mut Agent, realm: RealmId, url: &Url) {
     let mut parser = Parser::new(&parse_options());
+    parser.delay_load_event();
     parser.document_mut().url = url.clone();
     let ctx = WebContextHandle { realm }.get_mut(agent);
     ctx.url = url.clone();
@@ -583,7 +584,7 @@ pub fn queue_window_event(agent: &mut Agent, type_: &'static str) {
     let realm = WebContextHandle::current(agent).realm;
     agent.queue_task(
         TaskSource::DomManipulation,
-        Box::new(move |agent: &mut Agent| fire_window_handler(agent, realm, type_, None)),
+        Box::new(move |agent: &mut Agent| fire_with_props(agent, realm, type_, false, Vec::new())),
     );
 }
 
@@ -595,44 +596,150 @@ pub fn queue_popstate(agent: &mut Agent, state: Value) {
         TaskSource::DomManipulation,
         Box::new(move |agent: &mut Agent| {
             let state = agent.host_unpin(pin).unwrap_or(Value::Null);
-            fire_window_handler(agent, realm, "popstate", Some(state));
+            fire_with_props(agent, realm, "popstate", false, vec![("state", state)]);
         }),
     );
 }
 
-/// Llama al *event handler* `on<type>` de la ventana con un evento simple. (El dispatch
-/// completo, con `addEventListener`, es del DOM de E3.)
-fn fire_window_handler(agent: &mut Agent, realm: RealmId, type_: &str, state: Option<Value>) {
+/// Dispara en la ventana un evento con datos propios (`state` de `popstate`, `key`/`newValue`
+/// de `storage`): un `Event` con esas propiedades, despachado con `dispatchEvent` (los
+/// `PopStateEvent`, `HashChangeEvent` y `StorageEvent` de la plataforma todavía no existen).
+fn fire_with_props(
+    agent: &mut Agent,
+    realm: RealmId,
+    type_: &str,
+    bubbles: bool,
+    props: Vec<(&str, Value)>,
+) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let g = agent.realms[realm].global_object;
-    let handler = agent.get_str(g, &format!("on{type_}")).unwrap_or_default();
-    if agent.is_callable(&handler) {
-        let event = agent.new_plain_object();
+    let r = (|| -> JsResult<()> {
+        let ctor = agent.get_str(g, "Event")?;
+        let Value::Object(ctor_obj) = ctor else {
+            return Ok(());
+        };
+        let init = agent.new_plain_object();
         agent.put_data(
-            event,
-            PropertyKey::from("type"),
-            Value::str(type_),
+            init,
+            PropertyKey::from("bubbles"),
+            Value::Boolean(bubbles),
             true,
             true,
             true,
         );
-        agent.put_data(
-            event,
-            PropertyKey::from("target"),
-            Value::Object(g),
-            true,
-            true,
-            true,
-        );
-        if let Some(s) = state {
-            agent.put_data(event, PropertyKey::from("state"), s, true, true, true);
+        let ev = agent.construct(ctor_obj, &[Value::str(type_), Value::Object(init)], None)?;
+        if let Value::Object(e) = &ev {
+            for (k, v) in props {
+                agent.put_data(*e, PropertyKey::from(k), v, false, true, true);
+            }
         }
-        if let Err(Throw::Value(e)) =
-            agent.call(&handler, Value::Object(g), &[Value::Object(event)])
-        {
-            agent.report_exception(&e);
-        }
+        let dispatch = agent.get_str(g, "dispatchEvent")?;
+        agent.call(&dispatch, Value::Object(g), &[ev])?;
+        Ok(())
+    })();
+    if let Err(Throw::Value(e)) = r {
+        agent.report_exception(&e);
+    }
+    if agent.frames.is_empty() {
+        let _ = agent.perform_microtask_checkpoint();
     }
     agent.current_realm = saved;
+}
+
+/// Un evento simple de confianza en `target` del documento de la ventana.
+fn fire_simple(
+    agent: &mut Agent,
+    realm: RealmId,
+    target: bf_dom::events::EventTarget,
+    type_: &str,
+    bubbles: bool,
+    cancelable: bool,
+) -> bool {
+    let mut ev = bf_dom::events::Event::new(
+        type_,
+        bf_dom::events::EventInit {
+            bubbles,
+            cancelable,
+            composed: false,
+        },
+    );
+    dispatch_trusted(agent, realm, target, &mut ev)
+}
+
+/// El navegador terminó de cargar las imágenes y hojas del documento: `load` (13.2.7 pasos 8
+/// y 9) si nada más lo demora.
+pub fn resources_loaded(agent: &mut Agent, realm: RealmId) {
+    // `loadEventStart` se marca antes de disparar `load` (Navigation Timing §4.1).
+    super::performance::load_finished(agent, realm);
+    with_parser(agent, realm, |p, host| p.release_load_event(host));
+}
+
+/// "Unload a document" (HTML §7.4.2.4): `beforeunload` (su cancelación no detiene la
+/// navegación: no hay diálogo de confirmación), `pagehide` y `unload` en la ventana.
+pub fn unload_document(agent: &mut Agent, realm: RealmId) {
+    use bf_dom::events::EventTarget;
+    fire_simple(
+        agent,
+        realm,
+        EventTarget::Window,
+        "beforeunload",
+        false,
+        true,
+    );
+    fire_simple(agent, realm, EventTarget::Window, "pagehide", false, false);
+    fire_simple(agent, realm, EventTarget::Window, "unload", false, false);
+}
+
+/// La pestaña se mostró u ocultó: `visibilityState` y `visibilitychange` (HTML §6.2.1).
+pub fn set_visibility(agent: &mut Agent, realm: RealmId, visible: bool) {
+    let changed = agent
+        .realm_data_mut::<super::BomState>(realm)
+        .is_some_and(|s| std::mem::replace(&mut s.visible, visible) != visible);
+    if !changed {
+        return;
+    }
+    let root = WebContextHandle { realm }.get(agent).document().root();
+    fire_simple(
+        agent,
+        realm,
+        bf_dom::events::EventTarget::Node(root),
+        "visibilitychange",
+        true,
+        false,
+    );
+}
+
+/// Otra ventana cambió el `localStorage` de `origin`: si es el de esta, el área se vuelve a
+/// leer y la ventana recibe `storage` (HTML §12.2.1).
+pub fn storage_event(
+    agent: &mut Agent,
+    realm: RealmId,
+    origin: &str,
+    key: Option<&str>,
+    old: Option<&str>,
+    new: Option<&str>,
+    url: &str,
+) {
+    let window = WebContextHandle { realm }.get(agent).url.clone();
+    if super::origin_of(&window) != origin {
+        return;
+    }
+    if let Some(s) = agent.realm_data_mut::<super::BomState>(realm) {
+        s.local_storage = None;
+    }
+    let opt = |v: Option<&str>| v.map_or(Value::Null, Value::str);
+    let area = agent
+        .realm_data::<super::BomState>(realm)
+        .and_then(|s| s.objects.local_storage)
+        .and_then(|h| agent.host_pinned(h))
+        .unwrap_or(Value::Null);
+    let props = vec![
+        ("key", opt(key)),
+        ("oldValue", opt(old)),
+        ("newValue", opt(new)),
+        ("url", Value::str(url)),
+        ("storageArea", area),
+    ];
+    fire_with_props(agent, realm, "storage", false, props);
 }

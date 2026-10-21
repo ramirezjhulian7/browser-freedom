@@ -65,6 +65,21 @@ impl BomHooks for TestBom {
             .saved
             .insert(origin.to_owned(), items.to_vec());
     }
+    fn storage_changed(
+        &mut self,
+        origin: &str,
+        key: Option<&str>,
+        old: Option<&str>,
+        new: Option<&str>,
+        _url: &str,
+    ) {
+        if let Some(k) = key {
+            self.0
+                .borrow_mut()
+                .calls
+                .push(format!("storage {origin} {k} {old:?} {new:?}"));
+        }
+    }
     fn screen(&self) -> ScreenInfo {
         ScreenInfo {
             width: 2560.0,
@@ -191,6 +206,8 @@ impl Page {
         bom::script::begin_parse(&mut p.rt.agent, realm, &url);
         bom::script::feed(&mut p.rt.agent, realm, html);
         bom::script::finish(&mut p.rt.agent, realm);
+        // Como el navegador tras cargar imágenes y hojas.
+        bom::script::resources_loaded(&mut p.rt.agent, realm);
         p
     }
 
@@ -841,4 +858,138 @@ fn trusted_dispatch_lends_the_document() {
     assert!(!ok, "el listener canceló el evento");
     assert_eq!(p.show("got.join()"), "click,true,b,true");
     assert!(p.truthy("document.getElementById('b') !== null"));
+}
+
+// --- Ciclo de vida del documento ---
+
+#[test]
+fn load_waits_for_resources() {
+    let mut p = Page::new("");
+    let realm = p.ctx.realm;
+    let url = Url::parse("https://example.test/", None).unwrap();
+    bom::script::install_scripting(
+        &mut p.rt.agent,
+        realm,
+        &url,
+        Arc::new(MemLoader(HashMap::new())),
+    );
+    bom::script::begin_parse(&mut p.rt.agent, realm, &url);
+    bom::script::feed(
+        &mut p.rt.agent,
+        realm,
+        "<script>var log = []; addEventListener('load', function () { log.push('load'); }); \
+         document.addEventListener('DOMContentLoaded', function () { log.push('dcl'); });</script><img src=x.png>",
+    );
+    bom::script::finish(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show("log.join() + ' ' + document.readyState"),
+        "dcl interactive"
+    );
+    bom::script::resources_loaded(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show("log.join() + ' ' + document.readyState"),
+        "dcl,load complete"
+    );
+    assert!(p.truthy(
+        "performance.timing.loadEventStart >= performance.timing.domContentLoadedEventStart"
+    ));
+}
+
+#[test]
+fn unload_events() {
+    let mut p = Page::scripted(
+        "<script>var log = []; ['beforeunload', 'pagehide', 'unload'].forEach(function (t) { \
+         addEventListener(t, function (e) { log.push(t + ':' + e.cancelable); }); });</script>",
+        &[],
+    );
+    let realm = p.ctx.realm;
+    bom::script::unload_document(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show("log.join()"),
+        "beforeunload:true,pagehide:false,unload:false"
+    );
+}
+
+#[test]
+fn visibility_change() {
+    let mut p = Page::scripted(
+        "<script>var log = []; document.addEventListener('visibilitychange', function () { \
+         log.push(document.visibilityState + ':' + document.hidden); });</script>",
+        &[],
+    );
+    let realm = p.ctx.realm;
+    assert_eq!(p.show("document.visibilityState"), "visible");
+    bom::script::set_visibility(&mut p.rt.agent, realm, false);
+    bom::script::set_visibility(&mut p.rt.agent, realm, false);
+    bom::script::set_visibility(&mut p.rt.agent, realm, true);
+    assert_eq!(p.show("log.join()"), "hidden:true,visible:false");
+}
+
+#[test]
+fn storage_event_from_another_window() {
+    let mut p = Page::new(SIMPLE);
+    p.eval(
+        "var got = []; addEventListener('storage', function (e) { \
+         got.push(e.type, e.key, e.oldValue, e.newValue, e.url, e.storageArea === localStorage); });",
+    );
+    let realm = p.ctx.realm;
+    // Otra pestaña del mismo origen guardó `color` (el archivo ya tiene el valor nuevo).
+    p.log.borrow_mut().stored = vec![("color".into(), "rojo".into())];
+    bom::script::storage_event(
+        &mut p.rt.agent,
+        realm,
+        "https://example.test",
+        Some("color"),
+        None,
+        Some("rojo"),
+        "https://example.test/otra",
+    );
+    assert_eq!(
+        p.show("got.join('|')"),
+        "storage|color||rojo|https://example.test/otra|true"
+    );
+    assert_eq!(p.show("localStorage.getItem('color')"), "rojo");
+    // Otro origen: nada.
+    bom::script::storage_event(
+        &mut p.rt.agent,
+        realm,
+        "https://otro.test",
+        None,
+        None,
+        None,
+        "x",
+    );
+    assert_eq!(p.show("got.length"), "6");
+}
+
+#[test]
+fn local_storage_changes_are_broadcast() {
+    let mut p = Page::new(SIMPLE);
+    p.eval("localStorage.setItem('a', '1'); localStorage.setItem('a', '2'); localStorage.removeItem('a'); localStorage.clear();");
+    let calls: Vec<String> = p
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("storage"))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "storage https://example.test a None Some(\"1\")",
+            "storage https://example.test a Some(\"1\") Some(\"2\")",
+            "storage https://example.test a Some(\"2\") None",
+        ]
+    );
+}
+
+#[test]
+fn popstate_and_hashchange_reach_listeners() {
+    let mut p = Page::new(SIMPLE);
+    p.eval(
+        "var log = []; addEventListener('popstate', function (e) { log.push('pop:' + e.state); }); \
+         addEventListener('hashchange', function (e) { log.push('hash'); }); \
+         history.pushState('uno', '', '?1'); history.pushState('dos', '', '?2'); history.back(); \
+         location.hash = 'abajo';",
+    );
+    p.idle();
+    assert_eq!(p.show("log.join()"), "pop:uno,hash");
 }
