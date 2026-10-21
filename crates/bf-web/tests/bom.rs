@@ -117,7 +117,7 @@ impl WebHooks for TestWeb {
 
 struct TestHooks(Shared);
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Freedom/0.1";
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Freedom/0.1";
 
 impl HostHooks for TestHooks {
     fn console(&mut self, _level: ConsoleLevel, message: &str) {
@@ -316,7 +316,7 @@ fn user_agent_data_brands() {
     let mut p = Page::new(SIMPLE);
     assert_eq!(
         p.show("navigator.userAgentData.brands.map(b => b.brand + '/' + b.version).join()"),
-        "Chromium/153,Freedom/0.1"
+        "Chromium/155,Freedom/0.1"
     );
     assert!(p.truthy(
         "navigator.userAgentData.mobile === false && \
@@ -339,7 +339,7 @@ fn high_entropy_values() {
             "[he.architecture, he.bitness, he.uaFullVersion, he.platform, \
              he.fullVersionList[0].version].join('|')"
         ),
-        "x86|64|153.0.0.0|Windows|153.0.0.0"
+        "x86|64|155.0.0.0|Windows|155.0.0.0"
     );
 }
 

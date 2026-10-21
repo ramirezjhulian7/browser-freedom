@@ -423,6 +423,7 @@ dependencies = [
  "bf-paint",
  "bf-style",
  "bf-url",
+ "bf-web",
  "rfd",
  "softbuffer",
  "winit",

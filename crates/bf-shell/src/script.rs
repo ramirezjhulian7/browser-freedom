@@ -1,32 +1,32 @@
-//! Ejecución de los scripts de un documento (HTML §4.12.1 y §8.1): el motor de JavaScript de
-//! cada documento ([`Engine`]: un `bf_js::Runtime` con su realm y los hooks del navegador) y la
-//! implementación de [`bf_html::ScriptHost`] que usa el parser ([`Scripts`]): scripts clásicos
-//! inline y externos, módulos (con su grafo cargado por la red e *import maps* básicos) y el
-//! reporte de errores a la consola.
+//! El motor de JavaScript de cada documento ([`Engine`]): un `bf_js::Runtime` con la ventana de
+//! `bf-web` (DOM, HTML, BOM, CSSOM) y los hooks del navegador. El documento se parsea con
+//! ejecución de scripts (`bf_web::bom::script`) y vive en el `WebContext` del realm; el hilo
+//! del documento toma de ahí una copia para maquetar cada vez que los scripts lo cambian.
 //!
-//! Los scripts externos se buscan en el momento con el [`CachedLoader`] del documento (el hilo
-//! del documento puede bloquearse), así que el parser nunca queda esperando: los bloqueantes
-//! corren en orden, los `defer` al terminar el parseo y los `async` como tareas.
+//! Los hooks ([`ShellHooks`], [`ShellBom`], [`ShellWeb`]) dan la consola, la jarra de cookies
+//! de `bf-net`, el `localStorage` persistido en `%APPDATA%\freedom\storage` y, en la ventana,
+//! las peticiones a la interfaz ([`PageRequest`]: navegar, diálogos, pestañas nuevas).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
 
-use bf_dom::script::ScriptType;
-use bf_dom::{Document, NodeId};
-use bf_html::{ParseOptions, Parser, ScriptDisposition};
-use bf_infra::encoding::{self, Encoding};
-use bf_infra::{ResourceLoader, Url};
+use bf_dom::Document;
+use bf_infra::Url;
 use bf_js::host::{ConsoleLevel, HostHooks, RejectionOperation};
-use bf_js::vm::module::ModuleLoader;
 use bf_js::vm::{AgentOptions, RealmId};
 use bf_js::{JsError, Runtime};
+use bf_net::NetLoader;
+use bf_web::bom::{BomHooks, ScreenInfo};
+use bf_web::{DocumentOwner, WebContext, WebHooks};
 
 use crate::load::CachedLoader;
 
-/// Cuánto puede correr un script (o una tarea) antes de que el motor lo corte.
-const SCRIPT_DEADLINE: Duration = Duration::from_secs(10);
+/// Cuánto puede correr una tarea antes de que el motor la corte.
+const TASK_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Pila de JavaScript de cada documento (el hilo del documento tiene más).
 pub const JS_STACK: usize = 64 << 20;
@@ -44,10 +44,72 @@ pub struct ConsoleEntry {
 /// A dónde van los mensajes de la consola y los errores de un documento.
 pub type ConsoleSink = Box<dyn FnMut(ConsoleEntry)>;
 
-/// Los hooks del navegador para el motor de un documento.
+/// Un diálogo modal (HTML §8.8.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogKind {
+    Alert,
+    Confirm,
+    /// Con el valor por defecto.
+    Prompt(String),
+}
+
+/// Lo que un documento le pide a la interfaz.
+pub enum PageRequest {
+    /// Navegar la pestaña (`replace`: sin entrada nueva en el historial).
+    Navigate {
+        url: Url,
+        replace: bool,
+    },
+    /// La URL cambió sin cargar otro documento (`pushState`, fragmento).
+    SameDocument {
+        url: Url,
+        replace: bool,
+    },
+    Reload,
+    /// `history.go(delta)` fuera del documento.
+    Traverse(i32),
+    /// `window.open`: una pestaña nueva.
+    Open(String),
+    /// `window.close()`.
+    Close,
+    /// Un diálogo: la interfaz responde por `reply` (`None`: cancelado; para `alert` y
+    /// `confirm`, `Some("")` es aceptar).
+    Dialog {
+        kind: DialogKind,
+        message: String,
+        reply: Sender<Option<String>>,
+    },
+}
+
+/// A dónde van las peticiones de un documento (en la línea de comandos, a ningún lado).
+pub type RequestSink = Rc<dyn Fn(PageRequest)>;
+
+/// Lo que el navegador sabe del documento al cargarlo.
+#[derive(Clone)]
+pub struct PageEnv {
+    pub net: Arc<NetLoader>,
+    pub requests: Option<RequestSink>,
+    /// Entradas del historial hasta la actual inclusive y después (`history.length`).
+    pub session_history: (u32, u32),
+    pub referrer: String,
+    pub screen: ScreenInfo,
+}
+
+impl PageEnv {
+    pub fn cli(net: Arc<NetLoader>) -> PageEnv {
+        PageEnv {
+            net,
+            requests: None,
+            session_history: (1, 0),
+            referrer: String::new(),
+            screen: ScreenInfo::default(),
+        }
+    }
+}
+
+/// Los hooks del motor: consola, rechazos sin manejar y `User-Agent`.
 struct ShellHooks {
     console: Rc<RefCell<ConsoleSink>>,
-    /// Rechazos de promesas sin manejar (`promise_rejection`).
     rejections: Rc<RefCell<usize>>,
 }
 
@@ -88,65 +150,233 @@ impl HostHooks for ShellHooks {
     }
 }
 
-/// Un *import map* (HTML §8.1.5.3): especificador (o prefijo terminado en `/`) → URL.
-#[derive(Debug, Clone, Default)]
-pub struct ImportMap {
-    pub imports: Vec<(String, Url)>,
+/// Los hooks de la ventana de `bf-web`: diálogos y `window.open`.
+struct ShellWeb {
+    requests: Option<RequestSink>,
 }
 
-impl ImportMap {
-    /// "Resolve an imports match" (HTML §8.1.5.3.6): la entrada exacta o el prefijo más largo.
-    fn resolve(&self, specifier: &str) -> Option<Url> {
-        if let Some((_, url)) = self.imports.iter().find(|(k, _)| k == specifier) {
-            return Some(url.clone());
-        }
-        let (key, url) = self
-            .imports
-            .iter()
-            .filter(|(k, _)| k.ends_with('/') && specifier.starts_with(k.as_str()))
-            .max_by_key(|(k, _)| k.len())?;
-        Url::parse(&specifier[key.len()..], Some(url)).ok()
+impl ShellWeb {
+    fn dialog(&self, kind: DialogKind, message: &str) -> Option<String> {
+        let requests = self.requests.as_ref()?;
+        let (reply, answer) = channel();
+        requests(PageRequest::Dialog {
+            kind,
+            message: message.to_owned(),
+            reply,
+        });
+        answer.recv().ok().flatten()
     }
 }
 
-/// El cargador de módulos del documento: resuelve con el import map y la URL del que importa
-/// (HTML §8.1.5.5 "resolve a module specifier") y lee por la red.
-struct NetModuleLoader {
-    loader: Rc<RefCell<Option<std::sync::Arc<CachedLoader>>>>,
-    base: Rc<RefCell<Url>>,
-    import_map: Rc<RefCell<ImportMap>>,
+impl WebHooks for ShellWeb {
+    fn alert(&mut self, message: &str) {
+        self.dialog(DialogKind::Alert, message);
+    }
+
+    fn confirm(&mut self, message: &str) -> bool {
+        self.dialog(DialogKind::Confirm, message).is_some()
+    }
+
+    fn prompt(&mut self, message: &str, default: &str) -> Option<String> {
+        self.dialog(DialogKind::Prompt(default.to_owned()), message)
+    }
+
+    fn open(&mut self, url: &str, _target: &str, _features: &str) -> bool {
+        match &self.requests {
+            Some(r) => {
+                r(PageRequest::Open(url.to_owned()));
+                true
+            }
+            None => false,
+        }
+    }
 }
 
-impl ModuleLoader for NetModuleLoader {
-    fn resolve(&self, specifier: &str, referrer: Option<&str>) -> Result<String, String> {
-        let base = referrer
-            .and_then(|r| Url::parse(r, None).ok())
-            .unwrap_or_else(|| self.base.borrow().clone());
-        if let Some(url) = self.import_map.borrow().resolve(specifier) {
-            return Ok(url.href());
+/// Los hooks del BOM: cookies de `bf-net`, `localStorage` en disco y la interfaz.
+struct ShellBom {
+    env: PageEnv,
+}
+
+impl ShellBom {
+    fn request(&self, r: PageRequest) {
+        if let Some(sink) = &self.env.requests {
+            sink(r);
         }
-        // "Resolve a URL-like module specifier".
-        let url_like = specifier.starts_with('/')
-            || specifier.starts_with("./")
-            || specifier.starts_with("../");
-        let url = if url_like {
-            Url::parse(specifier, Some(&base)).ok()
-        } else {
-            Url::parse(specifier, None).ok()
+    }
+}
+
+impl BomHooks for ShellBom {
+    fn navigate(&mut self, url: &Url, replace: bool) {
+        self.request(PageRequest::Navigate {
+            url: url.clone(),
+            replace,
+        });
+    }
+
+    fn same_document_navigation(&mut self, url: &Url, replace: bool) {
+        self.request(PageRequest::SameDocument {
+            url: url.clone(),
+            replace,
+        });
+    }
+
+    fn reload(&mut self) {
+        self.request(PageRequest::Reload);
+    }
+
+    fn traverse(&mut self, delta: i32) {
+        self.request(PageRequest::Traverse(delta));
+    }
+
+    fn session_history(&self) -> (u32, u32) {
+        self.env.session_history
+    }
+
+    fn cookies(&mut self, url: &Url) -> String {
+        self.env.net.fetcher.cookies.script_cookies(url)
+    }
+
+    fn set_cookie(&mut self, url: &Url, value: &str) {
+        self.env
+            .net
+            .fetcher
+            .cookies
+            .set_cookie_from_script(url, value);
+    }
+
+    fn load_storage(&mut self, origin: &str) -> Vec<(String, String)> {
+        storage_path(origin)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| parse_storage(&s))
+            .unwrap_or_default()
+    }
+
+    fn save_storage(&mut self, origin: &str, items: &[(String, String)]) {
+        let Some(path) = storage_path(origin) else {
+            return;
         };
-        url.map(|u| u.href()).ok_or_else(|| {
-            format!("Failed to resolve module specifier \"{specifier}\": relative references must start with \"/\", \"./\" or \"../\"")
-        })
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&path, serialize_storage(items)) {
+            eprintln!("aviso: no se pudo guardar {}: {e}", path.display());
+        }
     }
 
-    fn load(&self, url: &str) -> Result<String, String> {
-        let parsed = Url::parse(url, None).map_err(|_| format!("URL inválida: {url}"))?;
-        let loader = self.loader.borrow().clone().ok_or("sin red")?;
-        let res = loader
-            .load(&parsed)
-            .ok_or_else(|| format!("no se pudo cargar {url}"))?;
-        Ok(encoding::decode(&res.bytes, Encoding::Utf8).0)
+    fn screen(&self) -> ScreenInfo {
+        self.env.screen
     }
+
+    fn languages(&self) -> Vec<String> {
+        bf_net::languages()
+    }
+
+    fn hardware_concurrency(&self) -> u32 {
+        std::thread::available_parallelism().map_or(4, |n| n.get() as u32)
+    }
+
+    fn close(&mut self) {
+        self.request(PageRequest::Close);
+    }
+
+    fn referrer(&self) -> String {
+        self.env.referrer.clone()
+    }
+}
+
+/// El archivo del `localStorage` de `origin`: `%APPDATA%\freedom\storage\<origen>.json`
+/// (`$HOME/.freedom/storage` fuera de Windows). Los orígenes opacos no se guardan.
+fn storage_path(origin: &str) -> Option<PathBuf> {
+    if origin == "null" {
+        return None;
+    }
+    let base = std::env::var_os("APPDATA")
+        .map(|d| PathBuf::from(d).join("freedom"))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".freedom")))?;
+    let name: String = origin
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(base.join("storage").join(format!("{name}.json")))
+}
+
+/// Un string JSON.
+fn json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// `[["clave","valor"],…]` (conserva el orden de inserción).
+pub fn serialize_storage(items: &[(String, String)]) -> String {
+    let mut out = String::from("[");
+    for (i, (k, v)) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        json_string(k, &mut out);
+        out.push(',');
+        json_string(v, &mut out);
+        out.push(']');
+    }
+    out.push(']');
+    out
+}
+
+/// Lee lo que escribió [`serialize_storage`] (lo que no se entiende se descarta).
+pub fn parse_storage(s: &str) -> Vec<(String, String)> {
+    let mut strings = Vec::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut cur = String::new();
+        loop {
+            match chars.next() {
+                None => return Vec::new(),
+                Some('"') => break,
+                Some('\\') => match chars.next() {
+                    Some('n') => cur.push('\n'),
+                    Some('r') => cur.push('\r'),
+                    Some('t') => cur.push('\t'),
+                    Some('u') => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                        {
+                            cur.push(c);
+                        }
+                    }
+                    Some(c) => cur.push(c),
+                    None => return Vec::new(),
+                },
+                Some(c) => cur.push(c),
+            }
+        }
+        strings.push(cur);
+    }
+    strings
+        .chunks(2)
+        .filter(|p| p.len() == 2)
+        .map(|p| (p[0].clone(), p[1].clone()))
+        .collect()
 }
 
 /// El motor de JavaScript de un documento.
@@ -155,14 +385,6 @@ pub struct Engine {
     pub realm: RealmId,
     console: Rc<RefCell<ConsoleSink>>,
     rejections: Rc<RefCell<usize>>,
-    loader: Rc<RefCell<Option<std::sync::Arc<CachedLoader>>>>,
-    base: Rc<RefCell<Url>>,
-    import_map: Rc<RefCell<ImportMap>>,
-    /// Cuántos scripts se ejecutaron y cuántos terminaron con una excepción.
-    pub executed: usize,
-    pub failed: usize,
-    /// Módulos inline numerados (cada uno es un módulo distinto en el module map).
-    inline_modules: usize,
     /// Rechazos sin manejar ya reportados a la consola.
     reported_rejections: usize,
 }
@@ -176,35 +398,19 @@ impl Engine {
             console: console.clone(),
             rejections: rejections.clone(),
         };
-        let mut rt = Runtime::with_options(
+        let rt = Runtime::with_options(
             Box::new(hooks),
             AgentOptions {
                 max_stack: JS_STACK,
                 ..AgentOptions::default()
             },
         );
-        let loader = Rc::new(RefCell::new(None));
-        let base = Rc::new(RefCell::new(
-            Url::parse("about:blank", None).expect("about:blank"),
-        ));
-        let import_map = Rc::new(RefCell::new(ImportMap::default()));
-        rt.agent.set_module_loader(Rc::new(NetModuleLoader {
-            loader: loader.clone(),
-            base: base.clone(),
-            import_map: import_map.clone(),
-        }));
         let realm = rt.main_realm();
         Engine {
             rt,
             realm,
             console,
             rejections,
-            loader,
-            base,
-            import_map,
-            executed: 0,
-            failed: 0,
-            inline_modules: 0,
             reported_rejections: 0,
         }
     }
@@ -217,25 +423,20 @@ impl Engine {
                 ConsoleLevel::Warn => "aviso",
                 _ => "consola",
             };
-            eprintln!("[{tag}] {}", e.text);
+            let first = e.text.lines().next().unwrap_or_default();
+            let short: String = first.chars().take(300).collect();
+            eprintln!("[{tag}] {short}");
         }))
     }
 
-    /// Para el documento en `base`, que carga sus recursos con `loader`.
-    pub fn set_document(&mut self, base: &Url, loader: std::sync::Arc<CachedLoader>) {
-        *self.base.borrow_mut() = base.clone();
-        *self.loader.borrow_mut() = Some(loader);
+    fn report(&mut self, level: ConsoleLevel, text: String) {
+        (self.console.borrow_mut())(ConsoleEntry { level, text });
     }
 
-    /// Rechazos de promesas sin manejar.
-    pub fn unhandled_rejections(&self) -> usize {
-        *self.rejections.borrow()
-    }
-
-    /// Tras correr script: los rechazos nuevos que siguen sin manejar, a la consola (como
+    /// Tras correr script: los rechazos nuevos que siguen sin manejar, a la consola (como el
     /// "Uncaught (in promise)" de los navegadores).
     fn flush_rejections(&mut self) {
-        let n = self.unhandled_rejections();
+        let n = *self.rejections.borrow();
         if n > self.reported_rejections {
             let new = n - self.reported_rejections;
             self.report(
@@ -246,12 +447,7 @@ impl Engine {
         self.reported_rejections = n;
     }
 
-    fn report(&mut self, level: ConsoleLevel, text: String) {
-        (self.console.borrow_mut())(ConsoleEntry { level, text });
-    }
-
     fn report_error(&mut self, e: &JsError) {
-        self.failed += 1;
         let text = if e.stack.is_empty() {
             format!("Uncaught {}", e.message)
         } else {
@@ -260,103 +456,104 @@ impl Engine {
         self.report(ConsoleLevel::Error, text);
     }
 
-    /// Corre `f` con el límite de tiempo de un script.
-    fn with_deadline<T>(&mut self, f: impl FnOnce(&mut Engine) -> T) -> T {
-        let saved = self.rt.agent.options.deadline;
-        self.rt.agent.options.deadline = Some(Instant::now() + SCRIPT_DEADLINE);
-        let r = f(self);
-        self.rt.agent.options.deadline = saved;
-        r
+    /// ¿Ya tiene una ventana (`WebContext`)?
+    fn has_window(&self) -> bool {
+        self.rt.agent.realm_data::<WebContext>(self.realm).is_some()
     }
 
-    /// Ejecuta un script clásico; un error va a la consola.
-    pub fn run_classic(&mut self, source: &str, url: &str) {
-        self.executed += 1;
+    /// Instala la ventana para el documento en `url`, con los hooks de `env`.
+    fn install_window(&mut self, url: &Url, loader: Arc<CachedLoader>, env: &PageEnv) {
         let realm = self.realm;
-        let r = self.with_deadline(|e| e.rt.eval_script(realm, source, url));
-        if let Err(e) = r {
-            self.report_error(&e);
-        }
-        self.flush_rejections();
-    }
-
-    /// Ejecuta un módulo (su grafo se carga por la red); un error va a la consola.
-    pub fn run_module(&mut self, source: &str, url: &str) {
-        self.executed += 1;
-        let r = self.with_deadline(|e| {
-            let agent = &mut e.rt.agent;
-            let saved = agent.current_realm;
-            agent.current_realm = e.realm;
-            let r = agent
-                .parse_module_record(url, source)
-                .and_then(|m| {
-                    agent.load_requested_modules(m)?;
-                    agent.link_module(m)?;
-                    agent.evaluate_module(m)
-                })
-                .and_then(|p| {
-                    agent.run_jobs()?;
-                    match agent.promise_outcome(p) {
-                        Some(Err(v)) => Err(bf_js::vm::Throw::Value(v)),
-                        _ => Ok(()),
-                    }
-                });
-            agent.current_realm = saved;
-            r.map_err(|t| JsError::from_throw(agent, t))
+        let mut ctx = WebContext::new(DocumentOwner::Document(Box::default()), url.clone());
+        ctx.hooks = Box::new(ShellWeb {
+            requests: env.requests.clone(),
         });
-        if let Err(e) = r {
-            self.report_error(&e);
-        }
-        self.flush_rejections();
-    }
-
-    /// Un *import map* inline (HTML §8.1.5.3.2 "parse an import map string"): solo `imports`.
-    pub fn register_import_map(&mut self, text: &str, base: &Url) {
-        let quoted = json_string(text);
-        let probe = format!(
-            "(function(){{var m=JSON.parse({quoted});var i=(m&&m.imports)||{{}};\
-             return Object.keys(i).map(function(k){{return k+'\\u0000'+i[k];}}).join('\\u0001');}})()"
+        bf_web::install(&mut self.rt.agent, realm, ctx);
+        bf_web::bom::set_hooks(
+            &mut self.rt.agent,
+            realm,
+            Box::new(ShellBom { env: env.clone() }),
         );
+        bf_web::bom::script::install_scripting(&mut self.rt.agent, realm, url, loader);
+    }
+
+    /// Parsea `text` (el HTML ya decodificado de `url`) ejecutando sus scripts; devuelve una
+    /// copia del documento resultante.
+    pub fn parse(
+        &mut self,
+        text: &str,
+        url: &Url,
+        loader: Arc<CachedLoader>,
+        env: &PageEnv,
+    ) -> Document {
+        if !self.has_window() {
+            self.install_window(url, loader, env);
+        }
         let realm = self.realm;
-        match self.rt.eval_script(realm, &probe, "importmap") {
-            Ok(v) => {
-                let s = self.rt.to_display(&v);
-                let mut map = self.import_map.borrow_mut();
-                for entry in s.split('\u{1}').filter(|e| !e.is_empty()) {
-                    if let Some((k, v)) = entry.split_once('\u{0}')
-                        && let Ok(url) = Url::parse(v, Some(base))
-                    {
-                        map.imports.push((k.to_owned(), url));
-                    }
-                }
-            }
-            Err(e) => self.report_error(&e),
+        let agent = &mut self.rt.agent;
+        bf_web::bom::script::begin_parse(agent, realm, url);
+        bf_web::bom::script::feed(agent, realm, text);
+        bf_web::bom::script::finish(agent, realm);
+        self.flush_rejections();
+        self.take_dirty();
+        self.document().cloned().unwrap_or_default()
+    }
+
+    /// El documento de la ventana.
+    pub fn document(&self) -> Option<&Document> {
+        self.rt
+            .agent
+            .realm_data::<WebContext>(self.realm)
+            .map(WebContext::document)
+    }
+
+    /// Reemplaza el documento de la ventana (la interfaz editó un campo).
+    pub fn set_document(&mut self, doc: Document) {
+        if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(self.realm) {
+            *ctx.document_mut() = doc;
         }
     }
 
-    /// Corre las tareas que vencieron (temporizadores, async, ...). Devuelve cuántas corrió.
+    /// ¿Los scripts cambiaron el DOM desde la última vez? (Y se limpia la marca.)
+    pub fn take_dirty(&mut self) -> bool {
+        self.rt
+            .agent
+            .realm_data_mut::<WebContext>(self.realm)
+            .is_some_and(|ctx| std::mem::take(&mut ctx.pending_dirty))
+    }
+
+    /// Scripts ejecutados y con error.
+    pub fn counts(&self) -> (usize, usize) {
+        bf_web::bom::script::script_env(&self.rt.agent, self.realm)
+            .map_or((0, 0), |e| (e.executed, e.failed))
+    }
+
+    /// Corre las tareas que vencieron (temporizadores, async, …). Devuelve cuántas corrió.
     pub fn run_due_tasks(&mut self) -> usize {
         let mut n = 0;
         loop {
-            let r = self.with_deadline(|e| e.rt.run_one_task());
+            self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);
+            let r = self.rt.run_one_task();
+            self.rt.agent.options.deadline = None;
             match r {
                 Ok(true) => n += 1,
-                Ok(false) => {
-                    self.flush_rejections();
-                    return n;
-                }
+                Ok(false) => break,
                 Err(e) => {
                     n += 1;
                     self.report_error(&e);
                 }
             }
             if n > 10_000 {
-                return n;
+                break;
             }
         }
+        if n > 0 {
+            self.flush_rejections();
+        }
+        n
     }
 
-    /// Cuándo hay que despertar para el próximo temporizador: `None` si no hay ninguno.
+    /// Cuánto falta para el próximo temporizador: `None` si no hay ninguno.
     pub fn next_wake(&mut self) -> Option<Duration> {
         let at = self.rt.next_wake()?;
         let now = self.rt.agent.host.hooks.now();
@@ -364,149 +561,15 @@ impl Engine {
     }
 }
 
-/// Un string de JavaScript con comillas dobles.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Un script externo ya buscado.
-struct Fetched {
-    source: String,
-    url: String,
-}
-
-/// El [`bf_html::ScriptHost`] del navegador: busca y ejecuta los scripts del documento con su
-/// [`Engine`].
-pub struct Scripts<'a> {
-    pub engine: &'a mut Engine,
-    loader: std::sync::Arc<CachedLoader>,
-    fetched: HashMap<NodeId, Fetched>,
-    /// ¿Hay módulos? (`nomodule` se ignora entonces: HTML §4.12.1.1 paso 18.)
-    modules: bool,
-}
-
-impl<'a> Scripts<'a> {
-    pub fn new(engine: &'a mut Engine, loader: std::sync::Arc<CachedLoader>) -> Scripts<'a> {
-        Scripts {
-            engine,
-            loader,
-            fetched: HashMap::new(),
-            modules: true,
-        }
-    }
-
-    fn fetch(&mut self, url: &Url, charset: &str) -> Option<Fetched> {
-        let res = self.loader.load(url)?;
-        let fallback = Encoding::for_label(charset).unwrap_or(Encoding::Utf8);
-        let (source, _) = encoding::decode(&res.bytes, fallback);
-        Some(Fetched {
-            source,
-            url: res.url.href(),
-        })
-    }
-}
-
-impl bf_dom::events::ScriptHost for Scripts<'_> {
-    fn call_listener(
-        &mut self,
-        _doc: &mut Document,
-        _handle: u64,
-        _event: &mut bf_dom::events::Event,
-    ) -> bool {
-        false
-    }
-}
-
-impl bf_html::ScriptHost for Scripts<'_> {
-    fn prepare(&mut self, doc: &mut Parser, script: NodeId) -> ScriptDisposition {
-        let Some(info) = doc.document().script_info(script).cloned() else {
-            return ScriptDisposition::Failed;
-        };
-        let Some(url) = info.url.clone() else {
-            // Inline: el resultado ya está.
-            return ScriptDisposition::Ready;
-        };
-        match self.fetch(&url, info.encoding) {
-            Some(f) => {
-                self.fetched.insert(script, f);
-                ScriptDisposition::Ready
-            }
-            None => {
-                self.engine.report(
-                    ConsoleLevel::Error,
-                    format!("Failed to load resource: {}", url.href()),
-                );
-                ScriptDisposition::Failed
-            }
-        }
-    }
-
-    fn execute(&mut self, doc: &mut Parser, script: NodeId) {
-        let Some(info) = doc.document().script_info(script).cloned() else {
-            return;
-        };
-        let _ = self.modules;
-        let page = doc.document().url.href();
-        match info.type_ {
-            ScriptType::Classic => match self.fetched.remove(&script) {
-                Some(f) => self.engine.run_classic(&f.source, &f.url),
-                None => self
-                    .engine
-                    .run_classic(&info.source_text.as_lossy_str(), &page),
-            },
-            ScriptType::Module => match self.fetched.remove(&script) {
-                Some(f) => self.engine.run_module(&f.source, &f.url),
-                None => {
-                    self.engine.inline_modules += 1;
-                    let url = format!("{page}#module-{}", self.engine.inline_modules);
-                    self.engine
-                        .run_module(&info.source_text.as_lossy_str(), &url);
-                }
-            },
-            ScriptType::ImportMap => {
-                let base = info.base_url.clone();
-                self.engine
-                    .register_import_map(&info.source_text.as_lossy_str(), &base);
-            }
-        }
-    }
-}
-
-/// Parsea `text` (el HTML ya decodificado de `url`) ejecutando sus scripts con `engine`.
+/// Parsea `text` con scripts, con un motor nuevo y los hooks de la línea de comandos.
 pub fn parse_with_scripts(
     text: &str,
     url: &Url,
     engine: &mut Engine,
-    loader: std::sync::Arc<CachedLoader>,
+    loader: Arc<CachedLoader>,
+    env: &PageEnv,
 ) -> Document {
-    let opts = ParseOptions {
-        scripting: true,
-        iframe_srcdoc: false,
-    };
-    let mut parser = Parser::new(&opts);
-    parser.document_mut().url = url.clone();
-    engine.set_document(url, loader.clone());
-    let mut host = Scripts::new(engine, loader);
-    parser.feed(text, &mut host);
-    parser.finish(&mut host);
-    // Lo que quede pendiente (scripts async ya listos, "the end").
-    parser.run_tasks(&mut host);
-    parser.into_document().0
+    engine.parse(text, url, loader, env)
 }
 
 #[cfg(test)]
@@ -520,104 +583,117 @@ mod tests {
         (engine, log)
     }
 
-    fn loader() -> std::sync::Arc<CachedLoader> {
-        std::sync::Arc::new(CachedLoader::new(std::sync::Arc::new(
-            bf_net::NetLoader::new(),
-        )))
+    fn env() -> PageEnv {
+        PageEnv::cli(Arc::new(NetLoader::new()))
+    }
+
+    fn loader(env: &PageEnv) -> Arc<CachedLoader> {
+        Arc::new(CachedLoader::new(env.net.clone()))
     }
 
     fn texts(log: &Rc<RefCell<Vec<ConsoleEntry>>>) -> Vec<String> {
         log.borrow().iter().map(|e| e.text.clone()).collect()
     }
 
-    #[test]
-    fn inline_scripts_run_in_order() {
+    fn parse(html: &str) -> (Engine, Rc<RefCell<Vec<ConsoleEntry>>>, Document) {
         let (mut engine, log) = engine_with_log();
         let url = Url::parse("https://example.test/", None).unwrap();
-        parse_with_scripts(
-            "<script>console.log('uno')</script><p>x<script>console.log('dos', 1 + 1)</script>",
-            &url,
-            &mut engine,
-            loader(),
+        let env = env();
+        let doc = engine.parse(html, &url, loader(&env), &env);
+        (engine, log, doc)
+    }
+
+    #[test]
+    fn inline_scripts_see_the_document() {
+        let (engine, log, _) = parse(
+            "<p id=a>x</p><script>console.log('uno', document.getElementById('a').textContent)</script>\
+             <script>console.log('dos', 1 + 1)</script>",
         );
-        assert_eq!(texts(&log), ["uno", "dos 2"]);
-        assert_eq!(engine.executed, 2);
+        assert_eq!(texts(&log), ["uno x", "dos 2"]);
+        assert_eq!(engine.counts(), (2, 0));
     }
 
     #[test]
     fn errors_go_to_console() {
-        let (mut engine, log) = engine_with_log();
-        let url = Url::parse("https://example.test/", None).unwrap();
-        parse_with_scripts(
-            "<script>noExiste()</script><script>console.log('sigue')</script>",
-            &url,
-            &mut engine,
-            loader(),
-        );
+        let (engine, log, _) =
+            parse("<script>noExiste()</script><script>console.log('sigue')</script>");
         let t = texts(&log);
         assert!(t[0].starts_with("Uncaught ReferenceError"), "{t:?}");
         assert_eq!(t[1], "sigue");
-        assert_eq!(engine.failed, 1);
+        assert_eq!(engine.counts(), (2, 1));
+    }
+
+    #[test]
+    fn document_write_shapes_the_document() {
+        let (_, _, doc) = parse("<body><script>document.write('<p id=w>escrito</p>')</script>");
+        assert!(doc.get_element_by_id(&"w".into()).is_some());
     }
 
     #[test]
     fn inline_module_and_data_url_external_script() {
-        let (mut engine, log) = engine_with_log();
-        let url = Url::parse("https://example.test/", None).unwrap();
-        parse_with_scripts(
+        let (_, log, _) = parse(
             "<script type=module>console.log('m', import.meta.url.startsWith('https://example.test/'))</script>\
              <script src=\"data:text/javascript,console.log('externo')\"></script>\
              <script type=text/plain>console.log('no')</script>",
-            &url,
-            &mut engine,
-            loader(),
         );
         assert_eq!(texts(&log), ["externo", "m true"]);
     }
 
     #[test]
     fn module_imports_through_import_map() {
-        let (mut engine, log) = engine_with_log();
-        let url = Url::parse("https://example.test/", None).unwrap();
-        parse_with_scripts(
+        let (_, log, _) = parse(
             "<script type=importmap>{\"imports\": {\"lib\": \"data:text/javascript,export const x = 42;\"}}</script>\
              <script type=module>import { x } from 'lib'; console.log('x', x)</script>",
-            &url,
-            &mut engine,
-            loader(),
         );
         assert_eq!(texts(&log), ["x 42"]);
     }
 
     #[test]
-    fn timers_run_as_tasks() {
-        let (mut engine, log) = engine_with_log();
-        let url = Url::parse("https://example.test/", None).unwrap();
-        parse_with_scripts(
-            "<script>setTimeout(function(){ console.log('timer') }, 0); console.log('sync')</script>",
-            &url,
-            &mut engine,
-            loader(),
+    fn timers_run_as_tasks_and_mark_dirty() {
+        let (mut engine, log, _) = parse(
+            "<body><script>setTimeout(function(){ console.log('timer'); \
+             document.body.appendChild(document.createElement('p')); }, 0); console.log('sync')</script>",
         );
         assert_eq!(texts(&log), ["sync"]);
         assert!(engine.next_wake().is_some());
+        assert!(!engine.take_dirty());
         engine.run_due_tasks();
         assert_eq!(texts(&log), ["sync", "timer"]);
+        assert!(engine.take_dirty());
     }
 
     #[test]
-    fn import_map_prefix() {
-        let base = Url::parse("https://a.test/", None).unwrap();
-        let map = ImportMap {
-            imports: vec![(
-                "lib/".to_owned(),
-                Url::parse("https://cdn.test/lib/", Some(&base)).unwrap(),
-            )],
-        };
-        assert_eq!(
-            map.resolve("lib/x.js").map(|u| u.href()).as_deref(),
-            Some("https://cdn.test/lib/x.js")
+    fn navigator_is_chrome() {
+        let (_, log, _) = parse(
+            "<script>console.log(navigator.userAgent.includes('Chrome/'), navigator.vendor, \
+             navigator.cookieEnabled)</script>",
         );
-        assert!(map.resolve("otro").is_none());
+        assert_eq!(texts(&log), ["true Google Inc. true"]);
+    }
+
+    #[test]
+    fn storage_file_round_trip() {
+        let items = vec![
+            ("a".to_owned(), "1".to_owned()),
+            ("clave \"rara\"\n".to_owned(), "ñ\\u{1}".to_owned()),
+        ];
+        assert_eq!(parse_storage(&serialize_storage(&items)), items);
+        assert_eq!(parse_storage("basura"), Vec::<(String, String)>::new());
+        let p = storage_path("https://a.test:8080").unwrap();
+        assert!(
+            p.ends_with("storage/https___a.test_8080.json")
+                || p.ends_with("storage\\https___a.test_8080.json")
+        );
+        assert!(storage_path("null").is_none());
+    }
+
+    #[test]
+    fn user_agent_is_chrome_with_freedom() {
+        assert!(bf_net::USER_AGENT.starts_with("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
+        assert!(bf_net::USER_AGENT.contains(&format!(
+            "Chrome/{}.0.0.0 Safari/537.36",
+            bf_net::CHROME_MAJOR
+        )));
+        assert!(bf_net::USER_AGENT.ends_with(" Freedom/0.1"));
     }
 }

@@ -16,7 +16,7 @@ use bf_net::{
 };
 
 use crate::internal;
-use crate::script::{Engine, parse_with_scripts};
+use crate::script::{Engine, PageEnv, parse_with_scripts};
 use crate::theme::Theme;
 
 /// Los subrecursos de un documento (hojas, imágenes, fuentes) en memoria, para que volver a
@@ -227,20 +227,20 @@ pub fn load(arg: &str) -> Result<Loaded, String> {
         return Ok(internal::page(&url, &LoadContext::cli()));
     }
     let mut engine = Engine::stderr();
-    let loaded = fetch_document_with(&url, Arc::new(NetLoader::new()), None, Some(&mut engine))
+    let net = Arc::new(NetLoader::new());
+    let env = PageEnv::cli(net.clone());
+    let loaded = fetch_document_with(&url, net, None, Some((&mut engine, &env)))
         .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
-    if engine.executed > 0 {
-        eprintln!(
-            "scripts: {} ejecutados, {} con error",
-            engine.executed, engine.failed
-        );
+    let (executed, failed) = engine.counts();
+    if executed > 0 {
+        eprintln!("scripts: {executed} ejecutados, {failed} con error");
     }
     Ok(loaded)
 }
 
 /// Carga para la ventana: nunca falla; los errores se muestran como `about:error`. Con
 /// `engine`, los scripts del documento se ejecutan con él.
-pub fn load_with(url: &Url, ctx: &LoadContext, engine: Option<&mut Engine>) -> Loaded {
+pub fn load_with(url: &Url, ctx: &LoadContext, engine: Option<(&mut Engine, &PageEnv)>) -> Loaded {
     if url.scheme == "about" {
         return internal::page(url, ctx);
     }
@@ -283,7 +283,7 @@ pub fn fetch_document_with(
     url: &Url,
     net: Arc<NetLoader>,
     post: Option<(Vec<u8>, String)>,
-    engine: Option<&mut Engine>,
+    engine: Option<(&mut Engine, &PageEnv)>,
 ) -> Result<Loaded, LoadError> {
     let start = Instant::now();
     let mut options = FetchOptions::document();
@@ -334,7 +334,9 @@ pub fn fetch_document_with(
         }
         let (text, enc) = encoding::decode(&response.body, enc);
         let doc = match engine {
-            Some(engine) => parse_with_scripts(&text, &response.url, engine, loader.clone()),
+            Some((engine, env)) => {
+                parse_with_scripts(&text, &response.url, engine, loader.clone(), env)
+            }
             None => bf_html::parse_document(&text, &bf_html::ParseOptions::default()).0,
         };
         (doc, enc, source)

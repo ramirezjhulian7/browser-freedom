@@ -23,6 +23,7 @@ winit = "0.30"
 bf-dom = { path = "../bf-dom" }
 bf-html = { path = "../bf-html" }
 bf-js = { path = "../bf-js" }
+bf-web = { path = "../bf-web" }
 bf-image = { path = "../bf-image" }
 arboard = "3"
 rfd = "0.15"

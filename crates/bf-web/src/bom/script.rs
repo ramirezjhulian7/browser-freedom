@@ -425,7 +425,7 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         match info.type_ {
             ScriptType::Classic => match fetched {
                 Some(f) => self.run_classic(&f.source, &f.url),
-                None => self.run_classic(&info.source_text.as_lossy_str(), &page),
+                None => self.run_classic(info.source_text.as_lossy_str(), &page),
             },
             ScriptType::Module => match fetched {
                 Some(f) => self.run_module(&f.source, &f.url),
@@ -435,11 +435,11 @@ impl bf_html::ScriptHost for WebScripts<'_> {
                         e.inline_modules
                     });
                     let url = format!("{page}#module-{n}");
-                    self.run_module(&info.source_text.as_lossy_str(), &url);
+                    self.run_module(info.source_text.as_lossy_str(), &url);
                 }
             },
             ScriptType::ImportMap => {
-                self.register_import_map(&info.source_text.as_lossy_str(), &info.base_url);
+                self.register_import_map(info.source_text.as_lossy_str(), &info.base_url);
             }
         }
         *doc = take_parser(self.agent, self.realm);

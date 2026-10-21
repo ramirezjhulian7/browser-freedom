@@ -21,7 +21,7 @@ use bf_paint::{Page, PageContext, prepare_page};
 
 use crate::internal;
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
-use crate::script::{ConsoleEntry, ConsoleSink, Engine, THREAD_STACK};
+use crate::script::{ConsoleEntry, ConsoleSink, Engine, PageEnv, PageRequest, THREAD_STACK};
 use crate::theme::Theme;
 
 /// Intervalo mínimo entre dos cuadros producidos por scripts.
@@ -36,6 +36,12 @@ pub struct LoadJob {
     pub theme: Theme,
     /// Cuerpo `POST` (formularios).
     pub post: Option<(Vec<u8>, String)>,
+    /// Entradas del historial de la pestaña hasta la nueva inclusive y después.
+    pub session_history: (u32, u32),
+    /// La URL de la página desde la que se navegó (`document.referrer`).
+    pub referrer: String,
+    /// La pantalla (`window.screen`).
+    pub screen: bf_web::bom::ScreenInfo,
 }
 
 pub enum Job {
@@ -62,11 +68,16 @@ pub struct Done {
 
 /// Lo que manda un hilo de documento a la ventana.
 pub enum FromDoc {
-    Done(Done),
+    Done(Box<Done>),
     /// Un mensaje de la consola del documento de la pestaña `tab`.
     Console {
         tab: u64,
         entry: ConsoleEntry,
+    },
+    /// Algo que el documento de la pestaña `tab` le pide a la interfaz.
+    Request {
+        tab: u64,
+        request: PageRequest,
     },
 }
 
@@ -284,6 +295,9 @@ impl State {
                 Job::Load(job) => self.load(*job),
                 Job::Relayout { id, loaded } => {
                     if let (Some(l), Some(c)) = (loaded, self.current.as_mut()) {
+                        if let Some(engine) = &mut c.engine {
+                            engine.set_document(l.doc.clone());
+                        }
                         c.loaded = l;
                     }
                     self.layout(id, None);
@@ -307,6 +321,16 @@ impl State {
         })
     }
 
+    /// Las peticiones del documento a la interfaz.
+    fn request_sink(&self) -> crate::script::RequestSink {
+        let (tx, wake, tab) = (self.tx.clone(), self.wake.clone(), self.tab);
+        std::rc::Rc::new(move |request: PageRequest| {
+            if tx.send(FromDoc::Request { tab, request }).is_ok() {
+                wake();
+            }
+        })
+    }
+
     fn load(&mut self, job: LoadJob) {
         let LoadJob {
             id,
@@ -315,7 +339,17 @@ impl State {
             recent,
             theme,
             post,
+            session_history,
+            referrer,
+            screen,
         } = job;
+        let env = PageEnv {
+            net: net.clone(),
+            requests: Some(self.request_sink()),
+            session_history,
+            referrer,
+            screen,
+        };
         let ctx = LoadContext {
             net,
             fonts: self.fonts.clone(),
@@ -328,7 +362,7 @@ impl State {
         self.current = None;
         let mut engine = Engine::new(self.console_sink());
         let loaded = catch_unwind(AssertUnwindSafe(|| {
-            load_with(&url, &ctx, Some(&mut engine))
+            load_with(&url, &ctx, Some((&mut engine, &env)))
         }))
         .unwrap_or_else(|e| {
             let err = engine_error(panic_message(&*e));
@@ -401,7 +435,7 @@ impl State {
             page,
             viewport,
         };
-        if self.tx.send(FromDoc::Done(done)).is_ok() {
+        if self.tx.send(FromDoc::Done(Box::new(done))).is_ok() {
             (self.wake)();
         }
     }
@@ -417,6 +451,14 @@ impl State {
         };
         if engine.run_due_tasks() == 0 {
             return;
+        }
+        if engine.take_dirty()
+            && let Some(doc) = engine.document()
+        {
+            // Una copia del documento que cambiaron los scripts, para maquetar y mostrar.
+            let mut loaded = (*current.loaded).clone();
+            loaded.doc = doc.clone();
+            current.loaded = Arc::new(loaded);
         }
         if current.loaded.doc.version() != current.version {
             let wait = FRAME.saturating_sub(self.last_frame.elapsed());
@@ -443,6 +485,9 @@ mod tests {
                 recent: Vec::new(),
                 theme: Theme::for_system(None),
                 post: None,
+                session_history: (1, 0),
+                referrer: String::new(),
+                screen: bf_web::bom::ScreenInfo::default(),
             }))
         };
         let mut q: VecDeque<Job> = VecDeque::from([
