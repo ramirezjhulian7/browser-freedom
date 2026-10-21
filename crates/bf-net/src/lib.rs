@@ -24,17 +24,9 @@ pub use cookies::CookieJar;
 pub use http::Headers;
 pub use sniff::{EncodingSource, MimeType, html_encoding, html_encoding_with_source};
 
-/// La versión mayor de Chrome estable que anuncia Freedom (se actualiza con cada versión
-/// estable de Chrome: los sitios detectan el navegador por ella).
-pub const CHROME_MAJOR: &str = "155";
-
-/// El `User-Agent` de Freedom: el de Chrome estable en Windows (con la versión reducida,
-/// `Chrome/<mayor>.0.0.0`) y `Freedom/0.1` al final, para que los sitios lo traten como Chrome.
-pub const USER_AGENT: &str = concat!(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/",
-    "155",
-    ".0.0.0 Safari/537.36 Freedom/0.1"
-);
+/// El `User-Agent` de Freedom (ver [`bf_infra::identity`]): los datos de Chrome, con Freedom
+/// como producto y como motor.
+pub use bf_infra::identity::USER_AGENT;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 20;
@@ -355,6 +347,12 @@ impl Fetcher {
         let mut headers = Headers::default();
         headers.push("Host", &url.host_string());
         headers.push("User-Agent", USER_AGENT);
+        // Client Hints de baja entropía (UA-CH §4.2), solo en peticiones seguras, como Chrome.
+        if tls {
+            for (name, value) in bf_infra::identity::client_hint_headers() {
+                headers.push(name, &value);
+            }
+        }
         headers.push("Accept", &opts.accept);
         headers.push("Accept-Language", &accept_language());
         headers.push("Accept-Encoding", "gzip, deflate, br");

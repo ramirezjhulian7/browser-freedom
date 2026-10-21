@@ -56,6 +56,7 @@ impl Namespace {
 
 pub mod encoding;
 mod encoding_tables;
+pub mod identity;
 pub mod resource;
 
 pub use bf_url::Url;
