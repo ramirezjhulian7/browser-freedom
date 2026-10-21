@@ -81,6 +81,19 @@ fn slice_of(agent: &Agent, buffer: Gc<Object>, offset: usize, len: usize) -> Vec
     }
 }
 
+/// Un ArrayBuffer nuevo (del realm actual) con `bytes`.
+pub fn new_array_buffer(agent: &mut Agent, bytes: Vec<u8>) -> Gc<Object> {
+    let bp = agent.intrinsics().array_buffer_prototype;
+    agent.alloc(Object::new(
+        Some(bp),
+        ObjectKind::ArrayBuffer(Box::new(ArrayBufferData {
+            data: Some(bytes),
+            max_byte_length: None,
+            shared: false,
+        })),
+    ))
+}
+
 /// Un Uint8Array nuevo (del realm actual) con `bytes`.
 pub fn new_uint8_array(agent: &mut Agent, bytes: Vec<u8>) -> Gc<Object> {
     let len = bytes.len();
