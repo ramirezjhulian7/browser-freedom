@@ -388,8 +388,9 @@ impl Agent {
             // Una función ECMAScript recibe los argumentos sin copiarlos (E3): salen de
             // la pila y pasan a su frame (no hay recolección hasta que el frame entra en
             // la pila de frames).
+            let mut args = self.value_pool.pop().unwrap_or_default();
             let s = &mut frame!(self).stack;
-            let args = s.split_off(base + 2);
+            args.extend(s.drain(base + 2..));
             let this = s.pop().expect("this");
             s.pop();
             // Una función simple corre en este mismo bucle (sin recursión de Rust).
@@ -436,9 +437,11 @@ impl Agent {
         if let Value::Object(fo) = frame!(self).stack[base]
             && let Some(mut frame) = self.inline_construct_frame(fo)?
         {
+            let mut args = self.value_pool.pop().unwrap_or_default();
             let s = &mut frame!(self).stack;
-            frame.args = s.split_off(base + 1);
+            args.extend(s.drain(base + 1..));
             s.pop();
+            frame.args = args;
             self.current_realm = frame.realm;
             self.frames.push(frame);
             return Ok(Flow::Next);

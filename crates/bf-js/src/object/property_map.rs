@@ -385,9 +385,87 @@ impl Dictionary {
     }
 }
 
+/// Cuántas propiedades con nombre van dentro del objeto, sin otra reserva de memoria (E3).
+const INLINE: usize = 3;
+
+/// El relleno de las posiciones inline sin usar.
+const FILLER: Prop = Prop {
+    value: PropValue::Data {
+        value: Value::Undefined,
+        writable: false,
+    },
+    enumerable: false,
+    configurable: false,
+};
+
+/// Los valores de un objeto con shape: los primeros [`INLINE`] dentro del objeto (la
+/// mayoría de los objetos tiene pocas propiedades y vive poco).
+#[derive(Debug, Clone)]
+enum PropVec {
+    Inline { len: u8, items: [Prop; INLINE] },
+    Heap(Vec<Prop>),
+}
+
+impl Default for PropVec {
+    fn default() -> PropVec {
+        PropVec::Inline {
+            len: 0,
+            items: [FILLER; INLINE],
+        }
+    }
+}
+
+impl std::ops::Deref for PropVec {
+    type Target = [Prop];
+
+    #[inline]
+    fn deref(&self) -> &[Prop] {
+        match self {
+            PropVec::Inline { len, items } => &items[..*len as usize],
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for PropVec {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Prop] {
+        match self {
+            PropVec::Inline { len, items } => &mut items[..*len as usize],
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
+impl PropVec {
+    #[inline]
+    fn push(&mut self, prop: Prop) {
+        match self {
+            PropVec::Inline { len, items } if (*len as usize) < INLINE => {
+                items[*len as usize] = prop;
+                *len += 1;
+            }
+            PropVec::Inline { .. } => {
+                let mut v = std::mem::take(self).into_vec();
+                v.reserve(INLINE + 1);
+                v.push(prop);
+                *self = PropVec::Heap(v);
+            }
+            PropVec::Heap(v) => v.push(prop),
+        }
+    }
+
+    fn into_vec(self) -> Vec<Prop> {
+        match self {
+            PropVec::Inline { len, items } => items.into_iter().take(len as usize).collect(),
+            PropVec::Heap(v) => v,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Named {
-    Shaped { shape: Rc<Shape>, values: Vec<Prop> },
+    Shaped { shape: Rc<Shape>, values: PropVec },
     Dict(Box<Dictionary>),
 }
 
@@ -403,7 +481,7 @@ impl Default for PropertyMap {
             indexed: BTreeMap::new(),
             named: Named::Shaped {
                 shape: ROOT_SHAPE.with(Rc::clone),
-                values: Vec::new(),
+                values: PropVec::default(),
             },
         }
     }
@@ -515,7 +593,7 @@ impl PropertyMap {
                 .keys
                 .iter()
                 .cloned()
-                .zip(std::mem::take(values))
+                .zip(std::mem::take(values).into_vec())
                 .map(Some)
                 .collect();
             let lookup = shape
@@ -666,7 +744,7 @@ impl Trace for PropertyMap {
         };
         match &self.named {
             Named::Shaped { shape, values } => {
-                for p in values {
+                for p in values.iter() {
                     p.trace(t);
                 }
                 for k in &shape.keys {
