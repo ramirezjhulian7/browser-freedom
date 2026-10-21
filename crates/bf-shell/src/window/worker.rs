@@ -370,6 +370,8 @@ impl State {
             && engine.take_dirty()
             && let Some(doc) = engine.render_copy()
         {
+            // Los `<iframe>` nuevos o con otro `src`.
+            engine.sync_frames();
             let mut loaded = (*current.loaded).clone();
             loaded.doc = doc;
             current.loaded = Arc::new(loaded);

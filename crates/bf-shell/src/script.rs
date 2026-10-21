@@ -352,6 +352,18 @@ impl BomHooks for ShellBom {
     fn referrer(&self) -> String {
         self.env.referrer.clone()
     }
+
+    /// Los marcos usan la misma red, almacenamiento, pantalla y diálogos que la pestaña.
+    fn child_hooks(&self) -> Option<(Box<dyn BomHooks>, Box<dyn WebHooks>)> {
+        Some((
+            Box::new(ShellBom {
+                env: self.env.clone(),
+            }),
+            Box::new(ShellWeb {
+                requests: self.env.requests.clone(),
+            }),
+        ))
+    }
 }
 
 /// El archivo del `localStorage` de `origin`: `%APPDATA%\freedom\storage\<origen>.json`
@@ -624,6 +636,7 @@ impl Engine {
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
+        bf_web::bom::frames::sync_frames(agent, realm);
         if !env.defer_load {
             bf_web::bom::script::resources_loaded(agent, realm);
         }
@@ -766,6 +779,14 @@ impl Engine {
     pub fn set_document(&mut self, doc: Document) {
         if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(self.realm) {
             *ctx.document_mut() = doc;
+        }
+    }
+
+    /// Pone al día los marcos (`<iframe>`) del documento.
+    pub fn sync_frames(&mut self) {
+        if self.has_window() {
+            bf_web::bom::frames::sync_frames(&mut self.rt.agent, self.realm);
+            self.flush_rejections();
         }
     }
 

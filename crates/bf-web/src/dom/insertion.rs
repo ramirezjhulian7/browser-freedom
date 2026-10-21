@@ -110,12 +110,8 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
     }
     if info.src.is_some() {
         match &info.url {
-            Some(url) => {
-                let ctx = WebContextHandle::current(agent);
-                ctx.get_mut(agent)
-                    .hooks
-                    .resource_needed(&url.serialize(false), ResourceKind::Script);
-            }
+            // La búsqueda y la ejecución de los scripts externos son de E4 (`bom::script`).
+            Some(url) => crate::bom::script::run_inserted_script(agent, el, url.clone()),
             // Paso 31.5: `src` vacío o inválido → `error` en el elemento.
             None => {
                 fire_event(

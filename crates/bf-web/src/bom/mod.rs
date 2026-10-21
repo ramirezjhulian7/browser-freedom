@@ -9,6 +9,7 @@
 //! (`host_pin`): son siempre el mismo objeto.
 
 pub mod document;
+pub mod frames;
 pub mod history;
 pub mod location;
 pub mod navigator;
@@ -91,6 +92,11 @@ pub trait BomHooks {
     /// La URL del documento que llevó a este (`document.referrer`).
     fn referrer(&self) -> String {
         String::new()
+    }
+    /// Los hooks para un marco (`<iframe>`) de esta ventana: los del BOM (cookies,
+    /// almacenamiento, pantalla) y los de la ventana (diálogos). `None`: sin navegador.
+    fn child_hooks(&self) -> Option<(Box<dyn BomHooks>, Box<dyn crate::WebHooks>)> {
+        None
     }
 }
 
@@ -266,6 +272,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     agent.current_realm = realm;
     install_window(agent, realm);
     document::install(agent, realm);
+    frames::install(agent, realm);
     agent.current_realm = saved;
 }
 
@@ -303,7 +310,8 @@ fn install_window(agent: &mut Agent, realm: RealmId) {
     accessor(agent, g, "closed", get_closed, None);
     accessor(agent, g, "opener", get_null, Some(ignore_set));
     accessor(agent, g, "status", get_empty, Some(ignore_set));
-    accessor(agent, g, "length", get_zero, None);
+    accessor(agent, g, "length", frames::window_length, None);
+    accessor(agent, g, "frameElement", frames::frame_element, None);
     accessor(agent, g, "origin", get_origin, None);
     accessor(agent, g, "isSecureContext", get_secure_context, None);
     // `location` es `[LegacyUnforgeable]` y `[PutForwards=href]`.
@@ -466,10 +474,6 @@ fn get_null(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
 
 fn get_empty(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::str(""))
-}
-
-fn get_zero(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Number(0.0))
 }
 
 fn ignore_set(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {

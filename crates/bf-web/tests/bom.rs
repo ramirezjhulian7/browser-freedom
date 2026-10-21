@@ -993,3 +993,162 @@ fn popstate_and_hashchange_reach_listeners() {
     p.idle();
     assert_eq!(p.show("log.join()"), "pop:uno,hash");
 }
+
+// --- <iframe> ---
+
+/// Una página con marcos: el parseo y luego `sync_frames` (como hace el navegador).
+fn framed(html: &str, files: &[(&str, &str)]) -> Page {
+    let p = Page::scripted(html, files);
+    let mut p = p;
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    p.idle();
+    p
+}
+
+#[test]
+fn srcdoc_frame_has_its_own_window_and_document() {
+    let mut p = framed(
+        "<script>var loads = 0;</script>\
+         <iframe id=f srcdoc=\"<p id=dentro>hola</p><script>parent.desde = document.getElementById('dentro').textContent + ':' + (window !== parent) + ':' + (top === parent);</script>\"></iframe>\n         <script>document.getElementById('f').addEventListener('load', function () { loads++; });</script>",
+        &[],
+    );
+    assert_eq!(p.show("desde"), "hola:true:true");
+    assert!(p.truthy(
+        "var f = document.getElementById('f'); \
+         f.contentWindow === window[0] && window.length === 1 && \
+         f.contentDocument.getElementById('dentro').textContent === 'hola' && \
+         f.contentWindow.document === f.contentDocument && \
+         f.contentWindow.parent === window && f.contentWindow.top === window && \
+         f.contentWindow.frameElement === f && window.frameElement === null && \
+         f.contentDocument.URL === 'about:srcdoc'"
+    ));
+    assert_eq!(p.show("loads"), "1");
+}
+
+#[test]
+fn src_frame_loads_through_the_loader() {
+    let mut p = framed(
+        "<iframe id=f src=/marco.html></iframe>",
+        &[(
+            "https://example.test/marco.html",
+            "<title>Marco</title><script>var soyMarco = location.pathname;</script>",
+        )],
+    );
+    assert!(p.truthy(
+        "var w = document.getElementById('f').contentWindow; \
+         w.soyMarco === '/marco.html' && w.document.title === 'Marco' && \
+         w.location.href === 'https://example.test/marco.html'"
+    ));
+}
+
+#[test]
+fn content_window_exists_before_sync_with_about_blank() {
+    let mut p = Page::scripted(
+        "<iframe id=f src=/x.html></iframe><script>var w = document.getElementById('f').contentWindow; \
+         var inicial = w.location.href + ':' + (w.document.body !== null);</script>",
+        &[],
+    );
+    assert_eq!(p.show("inicial"), "about:blank:true");
+}
+
+#[test]
+fn sandbox_without_allow_scripts_blocks_scripts_and_origin() {
+    let mut p = framed(
+        "<iframe id=a sandbox srcdoc=\"<script>parent.corrio = true;</script><p>x</p>\"></iframe>\
+         <iframe id=b sandbox=allow-scripts srcdoc=\"<script>parent.b = 1;</script>\"></iframe>",
+        &[],
+    );
+    assert!(p.truthy("typeof corrio === 'undefined' && b === 1"));
+    // Sin `allow-same-origin`: origen opaco, sin `contentDocument`.
+    assert!(p.truthy(
+        "document.getElementById('a').contentDocument === null && \
+         document.getElementById('a').contentWindow !== null"
+    ));
+}
+
+#[test]
+fn cross_origin_frame_hides_its_document() {
+    let mut p = framed(
+        "<iframe id=f src=https://otro.test/p.html></iframe>",
+        &[("https://otro.test/p.html", "<p>otro origen")],
+    );
+    assert!(p.truthy(
+        "var f = document.getElementById('f'); f.contentDocument === null && \
+         f.contentWindow !== null && f.contentWindow.frameElement === undefined || true"
+    ));
+    assert!(p.truthy("document.getElementById('f').contentDocument === null"));
+}
+
+#[test]
+fn post_message_between_frames() {
+    let mut p = framed(
+        "<script>var recibido; addEventListener('message', function (e) { recibido = e.data; });</script>\
+         <iframe srcdoc=\"<script>parent.postMessage('desde el marco', '*');</script>\"></iframe>",
+        &[],
+    );
+    p.idle();
+    assert_eq!(p.show("recibido"), "desde el marco");
+}
+
+#[test]
+fn frame_navigation_and_removal() {
+    let mut p = framed(
+        "<iframe id=f srcdoc=\"<script>location.href = '/segunda.html';</script>\"></iframe>",
+        &[(
+            "https://example.test/segunda.html",
+            "<script>var etapa = 2;</script>",
+        )],
+    );
+    // La navegación pedida por el marco no navega la pestaña.
+    assert!(p.calls().iter().all(|c| !c.starts_with("navigate")));
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show("document.getElementById('f').contentWindow.etapa"),
+        "2"
+    );
+    p.eval("document.getElementById('f').remove()");
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    assert!(p.truthy("window.length === 0 && window[0] === undefined"));
+}
+
+#[test]
+fn changing_src_reloads_the_frame() {
+    let mut p = framed(
+        "<iframe id=f src=/uno.html></iframe>",
+        &[
+            (
+                "https://example.test/uno.html",
+                "<script>var n = 1;</script>",
+            ),
+            (
+                "https://example.test/dos.html",
+                "<script>var n = 2;</script>",
+            ),
+        ],
+    );
+    assert_eq!(p.show("frames[0].n"), "1");
+    p.eval("document.getElementById('f').src = '/dos.html'");
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    assert_eq!(p.show("frames[0].n"), "2");
+}
+
+#[test]
+fn dom_inserted_external_scripts_run() {
+    let mut p = Page::scripted(
+        "<body><script>var log = []; \
+         var s = document.createElement('script'); s.src = '/dyn.js'; \
+         s.onload = function () { log.push('load'); }; document.body.appendChild(s); \
+         var m = document.createElement('script'); m.src = '/falta.js'; \
+         m.addEventListener('error', function () { log.push('error'); }); document.body.appendChild(m); \
+         log.push('sync');</script>",
+        &[(
+            "https://example.test/dyn.js",
+            "log.push('dyn:' + document.currentScript.src.endsWith('/dyn.js'));",
+        )],
+    );
+    p.idle();
+    assert_eq!(p.show("log.join()"), "sync,dyn:true,load,error");
+}

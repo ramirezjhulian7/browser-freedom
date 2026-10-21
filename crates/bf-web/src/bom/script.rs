@@ -124,6 +124,35 @@ pub struct ScriptEnv {
     pub failed: usize,
 }
 
+impl ScriptEnv {
+    /// El loader de los recursos de la ventana.
+    pub fn loader(&self) -> Arc<dyn ResourceLoader> {
+        self.loader.clone()
+    }
+}
+
+/// Los scripts de un marco: como [`install_scripting`], pero el cargador de módulos del
+/// agente (uno solo) sigue siendo el de la pestaña.
+pub fn install_frame_scripting(
+    agent: &mut Agent,
+    realm: RealmId,
+    url: &Url,
+    loader: Arc<dyn ResourceLoader>,
+) {
+    agent.set_realm_data(
+        realm,
+        ScriptEnv {
+            loader,
+            base: Rc::new(RefCell::new(url.clone())),
+            import_map: Rc::new(RefCell::new(ImportMap::default())),
+            fetched: HashMap::new(),
+            inline_modules: 0,
+            executed: 0,
+            failed: 0,
+        },
+    );
+}
+
 /// Prepara `realm` (ya con su [`crate::WebContext`]) para ejecutar los scripts del documento
 /// en `url`, que carga sus recursos con `loader`.
 pub fn install_scripting(
@@ -200,7 +229,16 @@ pub fn with_parser<R>(
 /// Empieza a parsear el documento de la ventana de `realm` (en `url`): el contexto pasa a
 /// tener un parser de red vacío. El evento `load` espera a [`resources_loaded`].
 pub fn begin_parse(agent: &mut Agent, realm: RealmId, url: &Url) {
-    let mut parser = Parser::new(&parse_options());
+    begin_parse_with(agent, realm, url, true);
+}
+
+/// Como [`begin_parse`]; sin `scripting` (un marco con `sandbox` sin `allow-scripts`) los
+/// scripts no se ejecutan.
+pub fn begin_parse_with(agent: &mut Agent, realm: RealmId, url: &Url, scripting: bool) {
+    let mut parser = Parser::new(&ParseOptions {
+        scripting,
+        iframe_srcdoc: url.href() == "about:srcdoc",
+    });
     parser.delay_load_event();
     parser.document_mut().url = url.clone();
     let ctx = WebContextHandle { realm }.get_mut(agent);
@@ -209,6 +247,14 @@ pub fn begin_parse(agent: &mut Agent, realm: RealmId, url: &Url) {
     ctx.documents[0] = DocumentOwner::Parser(Box::new(parser));
     if let Some(env) = env_mut(agent, realm) {
         *env.base.borrow_mut() = url.clone();
+    }
+}
+
+/// Cambia la URL base de la ventana `realm` (y la de sus módulos).
+pub fn set_base(agent: &mut Agent, realm: RealmId, base: &Url) {
+    WebContextHandle { realm }.get_mut(agent).base = base.clone();
+    if let Some(env) = env_mut(agent, realm) {
+        *env.base.borrow_mut() = base.clone();
     }
 }
 
@@ -665,6 +711,58 @@ fn fire_simple(
         },
     );
     dispatch_trusted(agent, realm, target, &mut ev)
+}
+
+/// Un `<script src>` clásico que conectó el DOM (no el parser): como todo script insertado
+/// sin `async=false` es async (HTML §4.12.1.1 paso 33.2): una tarea lo busca con el loader de
+/// la ventana, lo ejecuta y dispara `load` (o `error` si no se pudo cargar).
+pub fn run_inserted_script(agent: &mut Agent, el: NodeId, url: Url) {
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        TaskSource::Networking,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            let charset = WebContextHandle { realm }
+                .get(agent)
+                .document()
+                .script_info(el)
+                .map_or("UTF-8", |i| i.encoding);
+            let fetched = {
+                let mut host = WebScripts { agent, realm };
+                host.fetch(&url, charset)
+            };
+            let ok = fetched.is_some();
+            if let Some(f) = fetched {
+                let old = WebContextHandle { realm }
+                    .get_mut(agent)
+                    .document_mut()
+                    .scripts_mut()
+                    .current_script
+                    .replace(el);
+                WebScripts { agent, realm }.run_classic(&f.source, &f.url);
+                WebContextHandle { realm }
+                    .get_mut(agent)
+                    .document_mut()
+                    .scripts_mut()
+                    .current_script = old;
+            } else {
+                agent.host.hooks.console(
+                    ConsoleLevel::Error,
+                    &format!("Failed to load resource: {}", url.href()),
+                );
+            }
+            fire_simple(
+                agent,
+                realm,
+                bf_dom::events::EventTarget::Node(el),
+                if ok { "load" } else { "error" },
+                false,
+                false,
+            );
+            agent.current_realm = saved;
+        }),
+    );
 }
 
 /// El navegador terminó de cargar las imágenes y hojas del documento: `load` (13.2.7 pasos 8
