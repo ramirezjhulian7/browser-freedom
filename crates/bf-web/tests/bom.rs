@@ -117,7 +117,7 @@ impl WebHooks for TestWeb {
 
 struct TestHooks(Shared);
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Freedom/0.1";
+const UA: &str = bf_infra::identity::USER_AGENT;
 
 impl HostHooks for TestHooks {
     fn console(&mut self, _level: ConsoleLevel, message: &str) {
@@ -250,15 +250,19 @@ fn user_agent_and_app_version() {
 }
 
 #[test]
-fn navigator_identifies_as_chrome() {
+fn navigator_identifies_as_freedom() {
     let mut p = Page::new(SIMPLE);
     assert_eq!(
         p.show(
             "[navigator.appName, navigator.appCodeName, navigator.product, navigator.productSub, \
              navigator.vendor, navigator.vendorSub, navigator.platform].join('|')"
         ),
-        "Netscape|Mozilla|Gecko|20030107|Google Inc.||Win32"
+        format!(
+            "Netscape|Mozilla|Gecko|20030107|||{}",
+            bf_infra::identity::NAVIGATOR_PLATFORM
+        )
     );
+    assert!(!p.show("navigator.userAgent").contains("Chrome"));
 }
 
 #[test]
@@ -277,21 +281,19 @@ fn navigator_capabilities() {
     assert!(p.truthy(
         "navigator.cookieEnabled === true && navigator.onLine === true && \
          navigator.hardwareConcurrency === 12 && navigator.maxTouchPoints === 0 && \
-         navigator.webdriver === false && navigator.pdfViewerEnabled === true && \
+         navigator.webdriver === false && navigator.pdfViewerEnabled === false && \
          navigator.doNotTrack === null && navigator.deviceMemory === 8 && \
          navigator.javaEnabled() === false"
     ));
 }
 
 #[test]
-fn plugins_and_mime_types() {
+fn plugins_and_mime_types_are_empty_without_pdf_viewer() {
     let mut p = Page::new(SIMPLE);
     assert!(p.truthy(
-        "navigator.plugins.length === 5 && navigator.plugins[0].name === 'PDF Viewer' && \
-         navigator.plugins.item(1).name === 'Chrome PDF Viewer' && \
-         navigator.plugins.namedItem('Chromium PDF Viewer').filename === 'internal-pdf-viewer' && \
-         navigator.plugins.item(9) === null && navigator.plugins === navigator.plugins && \
-         navigator.mimeTypes.length === 2 && navigator.mimeTypes[0].type === 'application/pdf' && \
+        "navigator.plugins.length === 0 && navigator.plugins.item(0) === null && \
+         navigator.plugins.namedItem('PDF Viewer') === null && \
+         navigator.plugins === navigator.plugins && navigator.mimeTypes.length === 0 && \
          navigator.plugins instanceof PluginArray"
     ));
 }
@@ -316,14 +318,15 @@ fn user_agent_data_brands() {
     let mut p = Page::new(SIMPLE);
     assert_eq!(
         p.show("navigator.userAgentData.brands.map(b => b.brand + '/' + b.version).join()"),
-        "Chromium/155,Freedom/0.1"
+        format!("Freedom/{},Not.A/Brand/99", bf_infra::identity::MAJOR)
     );
-    assert!(p.truthy(
+    assert!(p.truthy(&format!(
         "navigator.userAgentData.mobile === false && \
-         navigator.userAgentData.platform === 'Windows' && \
+         navigator.userAgentData.platform === '{}' && \
          navigator.userAgentData === navigator.userAgentData && \
-         JSON.stringify(navigator.userAgentData).includes('Chromium')"
-    ));
+         !JSON.stringify(navigator.userAgentData).includes('Chromium')",
+        bf_infra::identity::UA_PLATFORM
+    )));
 }
 
 #[test]
@@ -339,7 +342,13 @@ fn high_entropy_values() {
             "[he.architecture, he.bitness, he.uaFullVersion, he.platform, \
              he.fullVersionList[0].version].join('|')"
         ),
-        "x86|64|155.0.0.0|Windows|155.0.0.0"
+        format!(
+            "{}|{}|{v}|{}|{v}",
+            bf_infra::identity::ARCHITECTURE,
+            bf_infra::identity::BITNESS,
+            bf_infra::identity::UA_PLATFORM,
+            v = bf_infra::identity::VERSION
+        )
     );
 }
 

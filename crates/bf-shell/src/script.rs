@@ -663,12 +663,13 @@ mod tests {
     }
 
     #[test]
-    fn navigator_is_chrome() {
+    fn navigator_is_freedom() {
         let (_, log, _) = parse(
-            "<script>console.log(navigator.userAgent.includes('Chrome/'), navigator.vendor, \
-             navigator.cookieEnabled)</script>",
+            "<script>console.log(navigator.userAgent.includes('Freedom/'), \
+             navigator.userAgent.includes('Chrome'), JSON.stringify(navigator.vendor), \
+             navigator.userAgentData.brands[0].brand, navigator.cookieEnabled)</script>",
         );
-        assert_eq!(texts(&log), ["true Google Inc. true"]);
+        assert_eq!(texts(&log), ["true false \"\" Freedom true"]);
     }
 
     #[test]
@@ -688,12 +689,11 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_is_chrome_with_freedom() {
-        assert!(bf_net::USER_AGENT.starts_with("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
-        assert!(bf_net::USER_AGENT.contains(&format!(
-            "Chrome/{}.0.0.0 Safari/537.36",
-            bf_net::CHROME_MAJOR
-        )));
-        assert!(bf_net::USER_AGENT.ends_with(" Freedom/0.1"));
+    fn user_agent_is_freedom() {
+        assert!(bf_net::USER_AGENT.starts_with("Mozilla/5.0 ("));
+        assert!(
+            bf_net::USER_AGENT.ends_with(&format!(") Freedom/{}", bf_infra::identity::VERSION))
+        );
+        assert!(!bf_net::USER_AGENT.contains("Chrome"));
     }
 }
