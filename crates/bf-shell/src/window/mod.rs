@@ -303,9 +303,38 @@ impl RasterKey {
 }
 
 /// El icono de la ventana: el logo a 64 px.
+/// Lado en px del icono de la ventana.
+const ICON_SIZE: u32 = 64;
+
+/// La marca vectorizada en ámbar sobre transparente, rasterizada por el propio motor a
+/// `size` px, como RGBA sin premultiplicar.
+fn brand_rgba(size: u32) -> Vec<u8> {
+    let s = size as f32;
+    // Un margen de 1/32 para que el pájaro no toque el borde.
+    let m = s / 32.0;
+    let mut list = DisplayList::default();
+    list.items.extend(icons::icon(
+        icons::Icon::Brand,
+        Rect::new(m, m, s - 2.0 * m, s - 2.0 * m),
+        Theme::DARK.accent,
+    ));
+    let size = Size {
+        width: s,
+        height: s,
+    };
+    render(&list, size, 1.0, Rgba::TRANSPARENT)
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
+/// El icono de la ventana (barra de tareas, `Alt+Tab`): la marca sin fondo.
 fn window_icon() -> Option<winit::window::Icon> {
-    let img = bf_image::decode(internal::LOGO_64, Some("image/png")).ok()?;
-    winit::window::Icon::from_rgba(img.rgba, img.width, img.height).ok()
+    winit::window::Icon::from_rgba(brand_rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok()
 }
 
 /// Dos viewports se consideran iguales si difieren menos de medio px CSS: evita que un
@@ -2908,6 +2937,17 @@ mod tests {
         let c = Url::parse("https://a.test/p?r#x", None).unwrap();
         assert!(same_document(&a, &b));
         assert!(!same_document(&a, &c));
+    }
+
+    #[test]
+    fn window_icon_is_transparent_mark() {
+        let px = brand_rgba(ICON_SIZE);
+        let n = ICON_SIZE as usize;
+        assert_eq!(px.len(), n * n * 4);
+        // Las esquinas, transparentes; algo de la marca, ámbar opaco.
+        assert_eq!(px[3], 0);
+        assert_eq!(px[(n * n - 1) * 4 + 3], 0);
+        assert!(px.chunks(4).any(|c| c == [0xF5, 0xA5, 0x24, 0xFF]));
     }
 
     #[test]

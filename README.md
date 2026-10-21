@@ -238,9 +238,10 @@ bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"
 - **Menú contextual** (clic derecho): abrir enlaces o imágenes en otra pestaña, copiar sus
   direcciones, guardar una imagen o la página con un diálogo del sistema, cortar/copiar/pegar
   en un campo, ver el código fuente (`about:source?<url>`) e inspeccionar las cajas.
-- **Logo**: `assets/browser-freedom.png`. `crates/bf-shell/assets/logo-64.png` es el icono de la
-  ventana y `mark-256.png` la marca sobre transparente de `about:home`; en la barra y las
-  pestañas la marca es el logo vectorizado (`Icon::Brand`), nítido a cualquier escala.
+- **Logo**: `assets/browser-freedom.png`. La marca vectorizada (`Icon::Brand`), sin fondo, es
+  el icono de la ventana (barra de tareas, `Alt+Tab`) y la de la barra y las pestañas;
+  `crates/bf-shell/assets/mark-256.png` es la misma marca sobre transparente para
+  `about:home`.
 
 ## La interfaz (detalle)
 
