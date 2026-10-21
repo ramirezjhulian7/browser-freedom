@@ -172,6 +172,23 @@ impl UrlField {
         self.cursor = self.len();
     }
 
+    /// El texto seleccionado, si hay selección.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection()?;
+        Some(self.text.chars().skip(start).take(end - start).collect())
+    }
+
+    /// Pega `text` en el cursor (reemplazando la selección) en una sola línea: los saltos
+    /// de línea y demás caracteres de control pasan a espacios.
+    pub fn paste(&mut self, text: &str) {
+        let line: String = text
+            .trim()
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        self.insert(&line);
+    }
+
     fn delete_selection(&mut self) -> bool {
         let Some((start, end)) = self.selection() else {
             return false;
@@ -690,5 +707,23 @@ impl Chrome {
             width: self.width,
             height: STATUS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_field_selection_and_paste() {
+        let mut f = UrlField::default();
+        f.set_text("https://example.com/".into());
+        assert_eq!(f.selected_text(), None);
+        f.select_all();
+        assert_eq!(f.selected_text().as_deref(), Some("https://example.com/"));
+        // Pegar reemplaza la selección y aplana los saltos de línea.
+        f.paste("  motor\nde navegador\r\n");
+        assert_eq!(f.text, "motor de navegador");
+        assert_eq!(f.cursor, f.text.chars().count());
     }
 }

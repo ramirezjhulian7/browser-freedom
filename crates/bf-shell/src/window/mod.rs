@@ -2126,6 +2126,22 @@ impl App {
             Key::Named(NamedKey::Home) => field.home(shift),
             Key::Named(NamedKey::End) => field.end(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => field.select_all(),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => {
+                if let Some(t) = field.selected_text() {
+                    set_clipboard(&t);
+                }
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x") => {
+                if let Some(t) = field.selected_text() {
+                    set_clipboard(&t);
+                    field.insert("");
+                }
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
+                if let Some(t) = clipboard_text() {
+                    field.paste(&t);
+                }
+            }
             Key::Named(NamedKey::Space) => field.insert(" "),
             _ if ctrl || self.modifiers.alt_key() => return false,
             _ => match text {
