@@ -35,7 +35,11 @@ pub enum WsEvent {
     /// Se escribieron `n` bytes de datos de aplicación (para `bufferedAmount`).
     Sent(usize),
     /// La conexión se cerró (§7.1.4); `clean` si hubo cierre de ambos lados.
-    Closed { code: u16, reason: String, clean: bool },
+    Closed {
+        code: u16,
+        reason: String,
+        clean: bool,
+    },
     /// "Fail the WebSocket connection" (§7.1.7), antes del `Closed`.
     Error(String),
 }
@@ -75,7 +79,13 @@ pub struct WsOptions {
 
 /// SHA-1 de `data`.
 pub fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
     let mut msg = data.to_vec();
     let bit_len = (data.len() as u64).wrapping_mul(8);
     msg.push(0x80);
@@ -264,7 +274,11 @@ fn tcp_of(s: &Stream) -> &std::net::TcpStream {
 
 /// Abre una conexión a `url` (`ws:` o `wss:`) en un hilo propio; `on_event` recibe los
 /// eventos desde ese hilo. `cookies` manda y guarda las cookies de la jarra.
-pub fn open(url: &Url, options: WsOptions, mut on_event: Box<dyn FnMut(WsEvent) + Send>) -> WsClient {
+pub fn open(
+    url: &Url,
+    options: WsOptions,
+    mut on_event: Box<dyn FnMut(WsEvent) + Send>,
+) -> WsClient {
     let (tx, rx) = mpsc::channel();
     let url = url.clone();
     std::thread::spawn(move || {
@@ -321,7 +335,8 @@ fn run(
         target.push('?');
         target.push_str(q);
     }
-    http::write_request(conn.get_mut(), "GET", &target, &headers, None).map_err(|e| e.to_string())?;
+    http::write_request(conn.get_mut(), "GET", &target, &headers, None)
+        .map_err(|e| e.to_string())?;
     let head = http::read_head(&mut conn).map_err(|e| e.to_string())?;
     if head.status != 101 {
         return Err(format!("unexpected response code {}", head.status));
@@ -415,9 +430,11 @@ fn frames(
                 // El script ya no existe: cierre normal.
                 Err(TryRecvError::Disconnected) => {
                     if !close_sent {
-                        let _ = conn
-                            .get_mut()
-                            .write_all(&encode_frame(8, &1001u16.to_be_bytes(), true));
+                        let _ = conn.get_mut().write_all(&encode_frame(
+                            8,
+                            &1001u16.to_be_bytes(),
+                            true,
+                        ));
                     }
                     return Ok(());
                 }
@@ -442,7 +459,11 @@ fn frames(
                 return Ok(());
             }
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             Err(e) => return Err(e.to_string()),
         }
         loop {

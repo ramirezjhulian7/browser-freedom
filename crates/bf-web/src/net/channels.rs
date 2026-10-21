@@ -17,7 +17,9 @@ use bf_js::vm::{Agent, JsResult};
 
 use super::xhr::new_target;
 use super::{classes, state};
-use crate::dom::events::{EventData, EventIface, TargetRef, dispatch_js_event, with_event_handlers};
+use crate::dom::events::{
+    EventData, EventIface, TargetRef, dispatch_js_event, with_event_handlers,
+};
 
 type Obj = bf_js::heap::Gc<bf_js::object::Object>;
 
@@ -89,7 +91,13 @@ pub fn fire_message(
         type_,
         EventInit::default(),
         true,
-        [data, Value::str(origin), Value::str(last_event_id), Value::Null, ports],
+        [
+            data,
+            Value::str(origin),
+            Value::str(last_event_id),
+            Value::Null,
+            ports,
+        ],
     ) {
         dispatch(agent, t, ev);
     }
@@ -108,7 +116,9 @@ fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     if a.args.is_empty() {
-        return agent.type_error("Failed to construct 'MessageEvent': 1 argument required, but only 0 present.");
+        return agent.type_error(
+            "Failed to construct 'MessageEvent': 1 argument required, but only 0 present.",
+        );
     }
     let type_ = crate::dom::to_dom_string(agent, &a.arg(0))?;
     let d = a.arg(1);
@@ -120,7 +130,11 @@ fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let cancelable = flag(agent, "cancelable")?;
     let composed = flag(agent, "composed")?;
     let data = dict_member(agent, &d, "data")?;
-    let data = if data.is_undefined() { Value::Null } else { data };
+    let data = if data.is_undefined() {
+        Value::Null
+    } else {
+        data
+    };
     let str_member = |agent: &mut Agent, n: &str| -> JsResult<Value> {
         let v = dict_member(agent, &d, n)?;
         if v.is_undefined() {
@@ -143,7 +157,9 @@ fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             _ => Value::Undefined,
         };
         if !agent.is_callable(&m) {
-            return agent.type_error("Failed to construct 'MessageEvent': The 'ports' member is not iterable.");
+            return agent.type_error(
+                "Failed to construct 'MessageEvent': The 'ports' member is not iterable.",
+            );
         }
         let items = super::headers::collect_iterable(agent, &ports_v, &m)?;
         let port_class = classes(agent).message_port;
@@ -155,7 +171,11 @@ fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         items
     };
     let source = dict_member(agent, &d, "source")?;
-    let source = if source.is_undefined() { Value::Null } else { source };
+    let source = if source.is_undefined() {
+        Value::Null
+    } else {
+        source
+    };
     let ports_arr = agent.create_array_from_list(&ports)?;
     agent.set_integrity_level(ports_arr, true)?;
     let class = classes(agent).message_event;
@@ -177,7 +197,13 @@ fn message_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }),
     )?;
     if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![data, origin, last_event_id, source, Value::Object(ports_arr)];
+        *s = vec![
+            data,
+            origin,
+            last_event_id,
+            source,
+            Value::Object(ports_arr),
+        ];
     }
     Ok(Value::Object(o))
 }
@@ -400,7 +426,11 @@ fn this_port(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(TargetRef, u64)> 
 
 /// StructuredSerializeWithTransfer + deserialize (en el mismo agente): `structuredClone`
 /// sin los `MessagePort` de `transfer`, que se pasan aparte.
-fn clone_message(agent: &mut Agent, message: &Value, transfer: &Value) -> JsResult<(Value, Vec<Value>)> {
+fn clone_message(
+    agent: &mut Agent,
+    message: &Value,
+    transfer: &Value,
+) -> JsResult<(Value, Vec<Value>)> {
     let port_class = classes(agent).message_port;
     let mut ports = Vec::new();
     let mut others = Vec::new();
@@ -438,7 +468,11 @@ fn clone_message(agent: &mut Agent, message: &Value, transfer: &Value) -> JsResu
     let opts = agent.new_plain_object();
     let arr = agent.create_array_from_list(&others)?;
     agent.create_data_property_or_throw(opts, PropertyKey::from("transfer"), Value::Object(arr))?;
-    let data = agent.call(&sc, Value::Undefined, &[message.clone(), Value::Object(opts)])?;
+    let data = agent.call(
+        &sc,
+        Value::Undefined,
+        &[message.clone(), Value::Object(opts)],
+    )?;
     Ok((data, ports))
 }
 
@@ -497,10 +531,18 @@ fn port_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (data, ports) = clone_message(agent, &a.arg(0), &a.arg(1))?;
     for p in &ports {
         if agent.host_unwrap::<TargetRef>(p).map(|t| target_id(*t)) == Some(id) {
-            return crate::net::dom_error(agent, "DataCloneError", "A MessagePort cannot transfer itself.");
+            return crate::net::dom_error(
+                agent,
+                "DataCloneError",
+                "A MessagePort cannot transfer itself.",
+            );
         }
     }
-    let to = state(agent).ports.ports.get(&id).and_then(|p| if p.closed { None } else { p.entangled });
+    let to = state(agent)
+        .ports
+        .ports
+        .get(&id)
+        .and_then(|p| if p.closed { None } else { p.entangled });
     if let Some(to) = to {
         enqueue_port_message(agent, to, data, ports);
     }
@@ -563,7 +605,9 @@ fn bc_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     if a.args.is_empty() {
-        return agent.type_error("Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present.");
+        return agent.type_error(
+            "Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present.",
+        );
     }
     let name = agent.to_string(&a.arg(0))?.to_string();
     let class = classes(agent).broadcast_channel;
@@ -590,7 +634,9 @@ fn bc_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn this_bc(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(u64, Obj)> {
     let class = classes(agent).broadcast_channel;
     match (agent.host_unwrap::<TargetRef>(&a.this).copied(), &a.this) {
-        (Some(t), Value::Object(o)) if agent.host_is_instance(&a.this, class) => Ok((target_id(t), *o)),
+        (Some(t), Value::Object(o)) if agent.host_is_instance(&a.this, class) => {
+            Ok((target_id(t), *o))
+        }
         _ => agent.type_error("Illegal invocation"),
     }
 }
@@ -609,7 +655,11 @@ fn bc_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (id, _) = this_bc(agent, a)?;
     let closed = state(agent).ports.ports.get(&id).is_none_or(|p| p.closed);
     if closed {
-        return crate::net::dom_error(agent, "InvalidStateError", "The BroadcastChannel is closed.");
+        return crate::net::dom_error(
+            agent,
+            "InvalidStateError",
+            "The BroadcastChannel is closed.",
+        );
     }
     let (origin, name) = match state(agent).ports.broadcast.iter().find(|b| b.0 == id) {
         Some(b) => (b.1.clone(), b.2.clone()),
@@ -632,7 +682,15 @@ fn bc_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 let data = agent.host_unpin(data).unwrap_or(Value::Undefined);
                 let closed = state(agent).ports.ports.get(&to).is_none_or(|p| p.closed);
                 if !closed {
-                    fire_message(agent, target_of(to), "message", data, &origin, "", Vec::new());
+                    fire_message(
+                        agent,
+                        target_of(to),
+                        "message",
+                        data,
+                        &origin,
+                        "",
+                        Vec::new(),
+                    );
                 }
             }),
         );

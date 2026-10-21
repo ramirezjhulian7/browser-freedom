@@ -2,7 +2,7 @@
 //! `fetch()` que llegan de a poco): la cabecera se entrega en cuanto llega y luego cada
 //! trozo del cuerpo, en una conexión propia (sin pool, sin compresión). (E2)
 
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader};
 
 use bf_url::{Host, Url};
 
@@ -158,7 +158,13 @@ fn read_parts(
             if r.read_line(&mut line)? == 0 {
                 break;
             }
-            let size_hex = line.trim().split(';').next().unwrap_or("").trim().to_owned();
+            let size_hex = line
+                .trim()
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned();
             if size_hex.is_empty() {
                 continue;
             }

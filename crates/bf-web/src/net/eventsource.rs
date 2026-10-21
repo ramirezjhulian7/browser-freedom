@@ -77,7 +77,9 @@ fn es_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     if a.args.is_empty() {
-        return agent.type_error("Failed to construct 'EventSource': 1 argument required, but only 0 present.");
+        return agent.type_error(
+            "Failed to construct 'EventSource': 1 argument required, but only 0 present.",
+        );
     }
     let s = usv_utf8(agent, &a.arg(0))?;
     let init = a.arg(1);
@@ -91,13 +93,22 @@ fn es_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let base = super::base_url(agent);
     let Ok(url) = Url::parse(&s, Some(&base)) else {
-        return dom_error(agent, "SyntaxError", &format!("Failed to construct 'EventSource': Cannot open an EventSource to '{s}'. The URL is invalid."));
+        return dom_error(
+            agent,
+            "SyntaxError",
+            &format!(
+                "Failed to construct 'EventSource': Cannot open an EventSource to '{s}'. The URL is invalid."
+            ),
+        );
     };
     let class = classes(agent).event_source;
     let (t, o) = new_target(agent, class, Some(nt))?;
     let id = target_id(t);
     let pin = agent.host_pin(Value::Object(o));
-    let sink = super::listen(agent, Box::new(move |agent: &mut Agent, e: NetEvent| on_event(agent, t, e)));
+    let sink = super::listen(
+        agent,
+        Box::new(move |agent: &mut Agent, e: NetEvent| on_event(agent, t, e)),
+    );
     state(agent).sources.insert(
         id,
         SourceState {
@@ -153,7 +164,11 @@ fn connect(agent: &mut Agent, id: u64, sink: EventSink) {
         headers.push("Origin", &super::document_origin(agent));
     }
     let backend = super::current_backend(agent);
-    let cookie = if credentials { backend.cookie_header(&url) } else { None };
+    let cookie = if credentials {
+        backend.cookie_header(&url)
+    } else {
+        None
+    };
     let req = NetRequest {
         url: url.clone(),
         options: bf_net::RequestOptions {
@@ -213,7 +228,8 @@ fn connect(agent: &mut Agent, id: u64, sink: EventSink) {
             out: sink.clone(),
             cancel: cancel.clone(),
         };
-        let r = bf_net::streaming::fetch_streaming(&req.url, &req.options, cookie.as_deref(), &mut s);
+        let r =
+            bf_net::streaming::fetch_streaming(&req.url, &req.options, cookie.as_deref(), &mut s);
         let _ = backend2;
         if !cancel.load(Ordering::Relaxed) {
             sink.push(NetEvent::End(r.map_err(|e| e.to_string())));
@@ -228,7 +244,11 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: NetEvent) {
         return;
     }
     match e {
-        NetEvent::Head { url, status, headers } => {
+        NetEvent::Head {
+            url,
+            status,
+            headers,
+        } => {
             let set_cookies: Vec<String> = headers
                 .0
                 .iter()
@@ -242,7 +262,10 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: NetEvent) {
                 .get("content-type")
                 .and_then(|c| super::body::mime_essence(&c))
                 .is_some_and(|e| e == "text/event-stream");
-            let with_credentials = state(agent).sources.get(&id).is_some_and(|s| s.with_credentials);
+            let with_credentials = state(agent)
+                .sources
+                .get(&id)
+                .is_some_and(|s| s.with_credentials);
             let cors_ok = super::same_origin(agent, &url) || {
                 let origin = super::document_origin(agent);
                 super::cors_check(&origin, &headers, with_credentials)
@@ -299,7 +322,13 @@ fn reestablish(agent: &mut Agent, t: TargetRef) {
     }
     let realm = WebContextHandle::current(agent).realm;
     let f = agent.create_builtin_with_slots(retry_tick, 0, "", vec![Value::Number(id as f64)]);
-    let timer = agent.set_timer(realm, TimerHandler::Callback(Value::Object(f)), retry, Vec::new(), false);
+    let timer = agent.set_timer(
+        realm,
+        TimerHandler::Callback(Value::Object(f)),
+        retry,
+        Vec::new(),
+        false,
+    );
     if let Some(s) = state(agent).sources.get_mut(&id) {
         s.timer = Some(timer);
     }
@@ -324,7 +353,10 @@ fn retry_tick(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => return Ok(Value::Undefined),
     };
     super::unlisten(agent, listener);
-    let sink = super::listen(agent, Box::new(move |agent: &mut Agent, e: NetEvent| on_event(agent, t, e)));
+    let sink = super::listen(
+        agent,
+        Box::new(move |agent: &mut Agent, e: NetEvent| on_event(agent, t, e)),
+    );
     if let Some(s) = state(agent).sources.get_mut(&id) {
         s.listener = sink.id();
     }
@@ -436,13 +468,25 @@ fn dispatch(agent: &mut Agent, t: TargetRef) {
             data.pop();
         }
         let ty = std::mem::take(&mut s.event_type);
-        let ty = if ty.is_empty() { "message".to_owned() } else { ty };
+        let ty = if ty.is_empty() {
+            "message".to_owned()
+        } else {
+            ty
+        };
         (data, ty, s.last_event_id.clone(), s.origin.clone())
     };
     if state(agent).sources.get(&id).is_some_and(|s| s.ready == 2) {
         return;
     }
-    fire_message(agent, t, &event_type, Value::str(&data), &origin, &last_id, Vec::new());
+    fire_message(
+        agent,
+        t,
+        &event_type,
+        Value::str(&data),
+        &origin,
+        &last_id,
+        Vec::new(),
+    );
 }
 
 fn this_es(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<u64> {
@@ -455,18 +499,29 @@ fn this_es(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<u64> {
 
 fn es_url(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_es(agent, a)?;
-    let u = state(agent).sources.get(&id).map(|s| s.url.href()).unwrap_or_default();
+    let u = state(agent)
+        .sources
+        .get(&id)
+        .map(|s| s.url.href())
+        .unwrap_or_default();
     Ok(Value::str(&u))
 }
 
 fn es_with_credentials(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_es(agent, a)?;
-    Ok(Value::Boolean(state(agent).sources.get(&id).is_some_and(|s| s.with_credentials)))
+    Ok(Value::Boolean(
+        state(agent)
+            .sources
+            .get(&id)
+            .is_some_and(|s| s.with_credentials),
+    ))
 }
 
 fn es_ready_state(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_es(agent, a)?;
-    Ok(Value::Number(f64::from(state(agent).sources.get(&id).map_or(2, |s| s.ready))))
+    Ok(Value::Number(f64::from(
+        state(agent).sources.get(&id).map_or(2, |s| s.ready),
+    )))
 }
 
 /// `close()` (§9.2.2).

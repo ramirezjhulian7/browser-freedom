@@ -79,7 +79,11 @@ fn target_id(t: TargetRef) -> u64 {
 /// El URL de la conexión con el esquema HTTP equivalente (para cookies y bad ports).
 fn http_url(url: &Url) -> Url {
     let mut u = url.clone();
-    u.scheme = if url.scheme == "wss" { "https".into() } else { "http".into() };
+    u.scheme = if url.scheme == "wss" {
+        "https".into()
+    } else {
+        "http".into()
+    };
     u
 }
 
@@ -89,12 +93,18 @@ fn ws_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     if a.args.is_empty() {
-        return agent.type_error("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
+        return agent.type_error(
+            "Failed to construct 'WebSocket': 1 argument required, but only 0 present.",
+        );
     }
     let s = usv_utf8(agent, &a.arg(0))?;
     let base = super::base_url(agent);
     let Ok(mut url) = Url::parse(&s, Some(&base)) else {
-        return dom_error(agent, "SyntaxError", &format!("Failed to construct 'WebSocket': The URL '{s}' is invalid."));
+        return dom_error(
+            agent,
+            "SyntaxError",
+            &format!("Failed to construct 'WebSocket': The URL '{s}' is invalid."),
+        );
     };
     match url.scheme.as_str() {
         "http" => url.scheme = "ws".into(),
@@ -104,12 +114,18 @@ fn ws_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             return dom_error(
                 agent,
                 "SyntaxError",
-                &format!("Failed to construct 'WebSocket': The URL's scheme must be either 'http', 'https', 'ws', or 'wss'. '{other}' is not allowed."),
+                &format!(
+                    "Failed to construct 'WebSocket': The URL's scheme must be either 'http', 'https', 'ws', or 'wss'. '{other}' is not allowed."
+                ),
             );
         }
     }
     if url.fragment.is_some() {
-        return dom_error(agent, "SyntaxError", "Failed to construct 'WebSocket': The URL contains a fragment identifier.");
+        return dom_error(
+            agent,
+            "SyntaxError",
+            "Failed to construct 'WebSocket': The URL contains a fragment identifier.",
+        );
     }
     // Los subprotocolos: un string o una secuencia, sin repetidos y con la sintaxis de token.
     let mut protocols = Vec::new();
@@ -239,7 +255,10 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: WsEvent) {
             if !open {
                 return;
             }
-            let blob = state(agent).sockets.get(&id).is_some_and(|s| s.binary_type_blob);
+            let blob = state(agent)
+                .sockets
+                .get(&id)
+                .is_some_and(|s| s.binary_type_blob);
             let data = if blob {
                 super::blob::create(
                     agent,
@@ -268,7 +287,11 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: WsEvent) {
                 fire_simple(agent, t, "error");
             }
         }
-        WsEvent::Closed { code, reason, clean } => {
+        WsEvent::Closed {
+            code,
+            reason,
+            clean,
+        } => {
             let Some(s) = state(agent).sockets.get_mut(&id) else {
                 return;
             };
@@ -282,7 +305,8 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: WsEvent) {
             s.client = None;
             let listener = s.listener;
             let pin = s.pin.take();
-            if error_first && !already_errored {
+            // Un cierre anormal (1006) avisa con `error` antes del `close`, como los navegadores.
+            if (error_first || (!clean && code == 1006)) && !already_errored {
                 fire_simple(agent, t, "error");
             }
             fire_close(agent, t, clean, code, &reason);
@@ -297,7 +321,13 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: WsEvent) {
 /// ¿Está abierto? y el origen serializado del URL (el `origin` de los `MessageEvent`).
 fn socket_origin(agent: &mut Agent, id: u64) -> (bool, String) {
     match state(agent).sockets.get(&id) {
-        Some(s) => (s.ready == 1, http_url(&s.url).origin().to_string().replacen("http", "ws", 1)),
+        Some(s) => (
+            s.ready == 1,
+            http_url(&s.url)
+                .origin()
+                .to_string()
+                .replacen("http", "ws", 1),
+        ),
         None => (false, String::new()),
     }
 }
@@ -316,7 +346,11 @@ fn fire_close(agent: &mut Agent, t: TargetRef, clean: bool, code: u16, reason: &
         }),
     );
     if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![Value::Boolean(clean), Value::Number(f64::from(code)), Value::str(reason)];
+        *s = vec![
+            Value::Boolean(clean),
+            Value::Number(f64::from(code)),
+            Value::str(reason),
+        ];
     }
     dispatch(agent, t, o);
 }
@@ -329,7 +363,11 @@ fn this_ws(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(TargetRef, u64)> {
     }
 }
 
-fn with_ws<R>(agent: &mut Agent, a: &CallArgs<'_>, f: impl FnOnce(&SocketState) -> R) -> JsResult<R> {
+fn with_ws<R>(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    f: impl FnOnce(&SocketState) -> R,
+) -> JsResult<R> {
     let (_, id) = this_ws(agent, a)?;
     match state(agent).sockets.get(&id) {
         Some(s) => Ok(f(s)),
@@ -387,13 +425,19 @@ fn ws_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     } else {
         let n = agent.to_number(&a.arg(0))?;
         // `[Clamp] unsigned short`.
-        let c = if n.is_nan() { 0.0 } else { n.clamp(0.0, 65535.0).round_ties_even() };
+        let c = if n.is_nan() {
+            0.0
+        } else {
+            n.clamp(0.0, 65535.0).round_ties_even()
+        };
         let c = c as u16;
         if c != 1000 && !(3000..=4999).contains(&c) {
             return dom_error(
                 agent,
                 "InvalidAccessError",
-                &format!("Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999. {c} is neither."),
+                &format!(
+                    "Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999. {c} is neither."
+                ),
             );
         }
         Some(c)
@@ -404,7 +448,11 @@ fn ws_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         usv_utf8(agent, &a.arg(1))?
     };
     if reason.len() > 123 {
-        return dom_error(agent, "SyntaxError", "Failed to execute 'close' on 'WebSocket': The close reason must not be greater than 123 UTF-8 bytes.");
+        return dom_error(
+            agent,
+            "SyntaxError",
+            "Failed to execute 'close' on 'WebSocket': The close reason must not be greater than 123 UTF-8 bytes.",
+        );
     }
     let Some(s) = state(agent).sockets.get_mut(&id) else {
         return Ok(Value::Undefined);
@@ -435,7 +483,11 @@ fn ws_send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (_, id) = this_ws(agent, a)?;
     let ready = state(agent).sockets.get(&id).map_or(3, |s| s.ready);
     if ready == 0 {
-        return dom_error(agent, "InvalidStateError", "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.");
+        return dom_error(
+            agent,
+            "InvalidStateError",
+            "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.",
+        );
     }
     let data = a.arg(0);
     let cmd = if let Some(b) = super::blob::data(agent, &data) {
@@ -468,7 +520,9 @@ fn close_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("Illegal constructor");
     };
     if a.args.is_empty() {
-        return agent.type_error("Failed to construct 'CloseEvent': 1 argument required, but only 0 present.");
+        return agent.type_error(
+            "Failed to construct 'CloseEvent': 1 argument required, but only 0 present.",
+        );
     }
     let type_ = crate::dom::to_dom_string(agent, &a.arg(0))?;
     let d = a.arg(1);
@@ -490,10 +544,18 @@ fn close_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         0.0
     } else {
         let n = agent.to_number(&code)?;
-        if n.is_finite() { n.trunc().rem_euclid(65536.0) } else { 0.0 }
+        if n.is_finite() {
+            n.trunc().rem_euclid(65536.0)
+        } else {
+            0.0
+        }
     };
     let reason = get(agent, "reason")?;
-    let reason = if reason.is_undefined() { String::new() } else { usv_utf8(agent, &reason)? };
+    let reason = if reason.is_undefined() {
+        String::new()
+    } else {
+        usv_utf8(agent, &reason)?
+    };
     let was_clean = get(agent, "wasClean")?;
     let was_clean = bf_js::host::webidl::to_boolean(agent, &was_clean);
     let class = classes(agent).close_event;
@@ -515,7 +577,11 @@ fn close_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }),
     )?;
     if let Some(s) = agent.host_slots_mut(o) {
-        *s = vec![Value::Boolean(was_clean), Value::Number(code), Value::str(&reason)];
+        *s = vec![
+            Value::Boolean(was_clean),
+            Value::Number(code),
+            Value::str(&reason),
+        ];
     }
     Ok(Value::Object(o))
 }
