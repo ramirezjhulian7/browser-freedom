@@ -12,6 +12,8 @@ bf-infra = { path = "../bf-infra" }
 bf-js = { path = "../bf-js" }
 # E2: el CSSOM necesita la cascada y la maqueta
 bf-layout = { path = "../bf-layout" }
+bf-net = { path = "../bf-net" } # E2: fetch y XMLHttpRequest
+bf-url = { path = "../bf-url" }
 bf-style = { path = "../bf-style" }
 # E1: el bitmap del canvas y el texto con las fuentes del navegador
 bf-font = { path = "../bf-font" }

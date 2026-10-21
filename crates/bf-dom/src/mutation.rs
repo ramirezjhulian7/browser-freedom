@@ -224,6 +224,13 @@ impl Document {
             }
             self.queue_tree_mutation_record(node, &[], &nodes, None, None);
         }
+        // E3: paso 5, los rangos vivos.
+        if let Some(c) = child
+            && self.has_live_ranges()
+        {
+            let index = self.index(c) as u32;
+            self.ranges_insert(parent, index, nodes.len() as u32);
+        }
         // 6.
         let previous = match child {
             Some(c) => self.get(c).prev_sibling(),
@@ -330,6 +337,11 @@ impl Document {
         let Some(parent) = self.parent(node) else {
             return;
         };
+        // E3: pasos 4-7, los rangos vivos.
+        if self.has_live_ranges() {
+            let index = self.index(node) as u32;
+            self.ranges_remove(node, parent, index);
+        }
         // 9-11.
         let old_previous = self.get(node).prev_sibling();
         let old_next = self.get(node).next_sibling();

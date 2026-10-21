@@ -155,6 +155,16 @@ impl bf_dom::events::ScriptHost for PageHost<'_> {
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
         lend_and_invoke(self.agent, self.realm, 0, doc, handle, event)
     }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, 0, doc, target, type_);
+    }
 }
 
 /// El host de un despacho que empieza en una función nativa: el documento `doc` del
@@ -168,6 +178,16 @@ struct LendHost<'a> {
 impl bf_dom::events::ScriptHost for LendHost<'_> {
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
         lend_and_invoke(self.agent, self.realm, self.doc, doc, handle, event)
+    }
+
+    // E3: los handlers de atributo de contenido (`onclick="…"`) se registran al despachar.
+    fn before_invoke(
+        &mut self,
+        doc: &mut Document,
+        target: EventTarget,
+        type_: &bf_dom::DomString,
+    ) {
+        crate::dom::events::sync_lent(self.agent, self.realm, self.doc, doc, target, type_);
     }
 }
 

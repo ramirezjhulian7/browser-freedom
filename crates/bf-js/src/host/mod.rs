@@ -102,6 +102,9 @@ pub struct HostClass {
     pub exotic: Option<HostExotic>,
     /// ¿Se expone como propiedad del objeto global? (`[Exposed]`.)
     pub exposed: bool,
+    /// `[Global]` (WebIDL §3.7.3): los atributos y operaciones regulares van en el objeto
+    /// global, no en el prototipo.
+    pub global: bool,
 }
 
 impl HostClass {
@@ -118,6 +121,7 @@ impl HostClass {
             static_attributes: Vec::new(),
             has_instance: None,
             exotic: None,
+            global: false,
             exposed: true,
         }
     }
@@ -179,6 +183,13 @@ impl HostClass {
 
     pub fn has_instance(mut self, f: NativeFn) -> HostClass {
         self.has_instance = Some(f);
+        self
+    }
+
+    /// `[Global]`: los miembros regulares los define [`Agent::host_make_global`] en el
+    /// objeto global.
+    pub fn global(mut self) -> HostClass {
+        self.global = true;
         self
     }
 
@@ -386,6 +397,31 @@ fn define_attribute(
     );
 }
 
+/// Las operaciones y los atributos regulares de `class` en `target` (el prototipo, o el objeto
+/// global de una interfaz `[Global]`).
+fn define_members(
+    agent: &mut Agent,
+    target: Gc<Object>,
+    methods: &[HostOperation],
+    attributes: &[HostAttribute],
+    class: HostClassId,
+) {
+    for &(name, length, f) in methods {
+        let m = host_function(agent, f, length, name, class, CALL_METHOD);
+        agent.put_data(
+            target,
+            PropertyKey::from(name),
+            Value::Object(m),
+            true,
+            true,
+            true,
+        );
+    }
+    for attr in attributes {
+        define_attribute(agent, target, attr, class, CALL_METHOD, true);
+    }
+}
+
 /// Crea (si falta) la interfaz y el prototipo de `class` en `realm`.
 fn instantiate(agent: &mut Agent, realm: RealmId, class: HostClassId) -> ClassObjects {
     while agent.host.realm_classes.len() <= realm {
@@ -423,19 +459,8 @@ fn instantiate(agent: &mut Agent, realm: RealmId, class: HostClassId) -> ClassOb
     agent.put_data(proto, kc, Value::Object(iface), true, false, true);
     let tag = PropertyKey::Symbol(agent.well_known.to_string_tag);
     agent.put_data(proto, tag, Value::str(def.name), false, false, true);
-    for &(name, length, f) in &def.methods {
-        let m = host_function(agent, f, length, name, class, CALL_METHOD);
-        agent.put_data(
-            proto,
-            PropertyKey::from(name),
-            Value::Object(m),
-            true,
-            true,
-            true,
-        );
-    }
-    for attr in &def.attributes {
-        define_attribute(agent, proto, attr, class, CALL_METHOD, true);
+    if !def.global {
+        define_members(agent, proto, &def.methods, &def.attributes, class);
     }
     for &(name, v) in &def.constants {
         agent.put_data(
@@ -533,19 +558,17 @@ impl Agent {
             };
             let saved = self.current_realm;
             self.current_realm = realm;
-            for &(name, length, f) in &ext.methods {
-                let m = host_function(self, f, length, name, class, CALL_METHOD);
-                self.put_data(
-                    objs.prototype,
-                    PropertyKey::from(name),
-                    Value::Object(m),
-                    true,
-                    true,
-                    true,
-                );
-            }
-            for attr in &ext.attributes {
-                define_attribute(self, objs.prototype, attr, class, CALL_METHOD, true);
+            let target = if self.host.classes[ci].global {
+                let g = self.realms[realm].global_object;
+                let is_global =
+                    matches!(&self.heap[g].kind, ObjectKind::Host(h) if h.class == class);
+                // Sin global de esta clase en el realm todavía: `host_make_global` los pondrá.
+                is_global.then_some(g)
+            } else {
+                Some(objs.prototype)
+            };
+            if let Some(target) = target {
+                define_members(self, target, &ext.methods, &ext.attributes, class);
             }
             for &(name, length, f) in &ext.static_methods {
                 let m = host_function(self, f, length, name, class, CALL_STATIC);
@@ -884,6 +907,11 @@ impl Agent {
         let saved = self.current_realm;
         self.current_realm = realm;
         self.define_unforgeables(g, class);
+        let def = &self.host.classes[class.0 as usize];
+        if def.global {
+            let (methods, attributes) = (def.methods.clone(), def.attributes.clone());
+            define_members(self, g, &methods, &attributes, class);
+        }
         self.current_realm = saved;
         g
     }

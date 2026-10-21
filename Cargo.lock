@@ -461,7 +461,9 @@ dependencies = [
  "bf-infra",
  "bf-js",
  "bf-layout",
+ "bf-net",
  "bf-style",
+ "bf-url",
  "tiny-skia",
 ]
 
