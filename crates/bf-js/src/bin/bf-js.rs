@@ -42,6 +42,7 @@ fn run() -> ExitCode {
     };
     match cmd.as_str() {
         "dump-ast" => dump_ast(path, flags),
+        "dump-bytecode" => dump_bytecode(path),
         "run" => {
             let module = flags.iter().any(|f| f == "--module") || path.ends_with(".mjs");
             run_script(path, module)
@@ -167,4 +168,38 @@ fn run_event_loop(agent: &mut Agent) -> Result<(), Throw> {
             std::thread::sleep(std::time::Duration::from_secs_f64((wake - now) / 1000.0));
         }
     }
+}
+
+/// `dump-bytecode`: las instrucciones de cada función del script (para estudiar el
+/// rendimiento de la VM).
+fn dump_bytecode(path: &str) -> ExitCode {
+    let Some(src) = read(path) else {
+        return ExitCode::FAILURE;
+    };
+    let mut agent = Agent::new(AgentOptions::default());
+    let code = match agent.compile_script_text(&src, path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("error de sintaxis");
+            return ExitCode::FAILURE;
+        }
+    };
+    fn dump(code: &bf_js::compiler::bytecode::FunctionCode, depth: usize) {
+        let pad = "  ".repeat(depth);
+        println!(
+            "{pad}== {} (locals {})",
+            code.name.to_string_lossy(),
+            code.num_locals
+        );
+        for (i, op) in code.ops.iter().enumerate() {
+            println!("{pad}{i:5} {op:?}");
+        }
+        for c in &code.consts {
+            if let bf_js::compiler::bytecode::Constant::Function(f) = c {
+                dump(f, depth + 1);
+            }
+        }
+    }
+    dump(&code, 0);
+    ExitCode::SUCCESS
 }

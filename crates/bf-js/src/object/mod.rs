@@ -17,7 +17,9 @@ use crate::vm::env::Env;
 use crate::vm::function::{BoundFunction, BuiltinFunction, Closure};
 use crate::vm::generator::GeneratorData;
 
-pub use property_map::{Prop, PropValue, PropertyDescriptor, PropertyMap};
+pub use property_map::{
+    Prop, PropValue, PropertyDescriptor, PropertyMap, Shape, bump_setter_epoch, setter_epoch,
+};
 
 /// PrivateElement (§6.2.10).
 #[derive(Debug, Clone)]

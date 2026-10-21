@@ -58,6 +58,8 @@ impl Agent {
             p = self.heap[pp].proto;
         }
         self.heap[o].proto = v;
+        // Las caches que agregan propiedades suponen la cadena de prototipos.
+        crate::object::bump_setter_epoch();
         Ok(true)
     }
 

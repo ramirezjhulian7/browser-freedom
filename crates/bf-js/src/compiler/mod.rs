@@ -442,6 +442,8 @@ impl<'t> Codegen<'t> {
             has_prototype,
             decls: None,
             dynamic: info.has_eval || info.has_with,
+
+            ics: Default::default(),
         }
     }
 

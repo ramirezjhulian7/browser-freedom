@@ -619,6 +619,8 @@ pub struct FunctionCode {
     pub decls: Option<Box<Declarations>>,
     /// ¿La función tiene `eval` directo o `with`? (Solo informativo.)
     pub dynamic: bool,
+    /// Las inline caches de los accesos por nombre (E3).
+    pub ics: crate::vm::ic::IcTable,
 }
 
 impl FunctionCode {

@@ -16,6 +16,7 @@ pub mod eval;
 pub mod frame;
 pub mod function;
 pub mod generator;
+pub mod ic; // E3
 pub mod interp;
 pub mod module; // E1
 pub mod realm;
