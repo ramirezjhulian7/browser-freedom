@@ -154,6 +154,8 @@ pub enum ObjectKind {
     RegExp(Box<crate::builtins::regexp::RegExpData>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpStringIteratorData>),
     Date(f64),
+    // E3: objetos de plataforma (`crate::host`).
+    Host(Box<crate::host::HostObject>),
 }
 
 #[derive(Debug)]
@@ -278,6 +280,7 @@ impl Trace for Object {
             ObjectKind::ArrayBuffer(_) => {}
             ObjectKind::TypedArray(ta) => t.gc(ta.buffer),
             ObjectKind::DataView(dv) => t.gc(dv.buffer),
+            ObjectKind::Host(h) => h.trace(t),
         }
     }
 }
