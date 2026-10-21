@@ -97,7 +97,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
 // --- Algoritmos de tiempo (§21.4.1) ---
 
 /// Day ( t ).
-fn day(t: f64) -> f64 {
+pub(crate) fn day(t: f64) -> f64 {
     (t / MS_PER_DAY).floor()
 }
 
@@ -131,7 +131,7 @@ fn time_from_year(y: f64) -> f64 {
 }
 
 /// YearFromTime ( t ): el mayor `y` con TimeFromYear(y) ≤ t.
-fn year_from_time(t: f64) -> f64 {
+pub(crate) fn year_from_time(t: f64) -> f64 {
     let mut y = (t / (MS_PER_DAY * 365.2425)).floor() + 1970.0;
     while time_from_year(y) > t {
         y -= 1.0;
@@ -162,7 +162,7 @@ fn month_start(m: usize, leap: bool) -> f64 {
 }
 
 /// MonthFromTime ( t ): 0 a 11.
-fn month_from_time(t: f64) -> f64 {
+pub(crate) fn month_from_time(t: f64) -> f64 {
     let d = day_within_year(t);
     let leap = in_leap_year(t);
     for m in 0..12 {
@@ -174,29 +174,29 @@ fn month_from_time(t: f64) -> f64 {
 }
 
 /// DateFromTime ( t ): 1 a 31.
-fn date_from_time(t: f64) -> f64 {
+pub(crate) fn date_from_time(t: f64) -> f64 {
     let m = month_from_time(t) as usize;
     day_within_year(t) - month_start(m, in_leap_year(t)) + 1.0
 }
 
 /// WeekDay ( t ): 0 (domingo) a 6.
-fn week_day(t: f64) -> f64 {
+pub(crate) fn week_day(t: f64) -> f64 {
     (day(t) + 4.0).rem_euclid(7.0)
 }
 
-fn hour_from_time(t: f64) -> f64 {
+pub(crate) fn hour_from_time(t: f64) -> f64 {
     (t / MS_PER_HOUR).floor().rem_euclid(24.0)
 }
 
-fn min_from_time(t: f64) -> f64 {
+pub(crate) fn min_from_time(t: f64) -> f64 {
     (t / MS_PER_MINUTE).floor().rem_euclid(60.0)
 }
 
-fn sec_from_time(t: f64) -> f64 {
+pub(crate) fn sec_from_time(t: f64) -> f64 {
     (t / MS_PER_SECOND).floor().rem_euclid(60.0)
 }
 
-fn ms_from_time(t: f64) -> f64 {
+pub(crate) fn ms_from_time(t: f64) -> f64 {
     t.rem_euclid(MS_PER_SECOND)
 }
 
@@ -206,7 +206,7 @@ fn to_integer(n: f64) -> f64 {
 }
 
 /// MakeTime ( hour, min, sec, ms ) (§21.4.1.27).
-fn make_time(hour: f64, min: f64, sec: f64, ms: f64) -> f64 {
+pub(crate) fn make_time(hour: f64, min: f64, sec: f64, ms: f64) -> f64 {
     if !hour.is_finite() || !min.is_finite() || !sec.is_finite() || !ms.is_finite() {
         return f64::NAN;
     }
@@ -220,7 +220,7 @@ fn make_time(hour: f64, min: f64, sec: f64, ms: f64) -> f64 {
 }
 
 /// MakeDay ( year, month, date ) (§21.4.1.28).
-fn make_day(year: f64, month: f64, date: f64) -> f64 {
+pub(crate) fn make_day(year: f64, month: f64, date: f64) -> f64 {
     if !year.is_finite() || !month.is_finite() || !date.is_finite() {
         return f64::NAN;
     }
@@ -236,7 +236,7 @@ fn make_day(year: f64, month: f64, date: f64) -> f64 {
 }
 
 /// MakeDate ( day, time ) (§21.4.1.29).
-fn make_date(day: f64, time: f64) -> f64 {
+pub(crate) fn make_date(day: f64, time: f64) -> f64 {
     if !day.is_finite() || !time.is_finite() {
         return f64::NAN;
     }
@@ -261,7 +261,7 @@ fn make_full_year(year: f64) -> f64 {
 }
 
 /// TimeClip ( time ) (§21.4.1.31).
-fn time_clip(time: f64) -> f64 {
+pub(crate) fn time_clip(time: f64) -> f64 {
     if !time.is_finite() || time.abs() > 8.64e15 {
         return f64::NAN;
     }
@@ -282,7 +282,7 @@ fn utc_of(t: f64) -> f64 {
     t - TimeZone::system().offset_for_local_ms(t)
 }
 
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis() as f64,
         Err(e) => -(e.duration().as_millis() as f64),
@@ -321,6 +321,8 @@ enum RuleDate {
 #[derive(Debug, Clone)]
 pub struct TimeZone {
     name: String,
+    /// El identificador IANA, si se conoce.
+    iana: Option<String>,
     /// (instante UTC en segundos, índice del tipo).
     transitions: Vec<(i64, usize)>,
     /// (offset en segundos, abreviatura).
@@ -332,6 +334,7 @@ impl TimeZone {
     fn utc() -> TimeZone {
         TimeZone {
             name: "Coordinated Universal Time".into(),
+            iana: Some("UTC".into()),
             transitions: Vec::new(),
             types: vec![(0, "UTC".into())],
             rule: None,
@@ -366,7 +369,92 @@ impl TimeZone {
                 .unwrap_or_default();
             return TimeZone::from_tzif(&data, name);
         }
+        if cfg!(windows) {
+            return TimeZone::from_windows_registry();
+        }
         None
+    }
+
+    /// La zona de Windows sin FFI: `reg query` de `TimeZoneInformation` (Bias, StandardBias,
+    /// DaylightBias, las fechas SYSTEMTIME de los cambios y TimeZoneKeyName, que la tabla
+    /// windowsZones de CLDR pasa a IANA) convertida en una regla POSIX.
+    fn from_windows_registry() -> Option<TimeZone> {
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+            ])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut values: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && parts[1].starts_with("REG_") {
+                values.push((parts[0].to_owned(), parts[2..].join(" ")));
+            }
+        }
+        let get = |k: &str| values.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let dword = |k: &str| -> Option<i64> {
+            let v = get(k)?;
+            let n = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()?;
+            Some(i64::from(n as i32))
+        };
+        let bias = dword("Bias")?;
+        let std_bias = dword("StandardBias").unwrap_or(0);
+        let dst_bias = dword("DaylightBias").unwrap_or(0);
+        let systemtime = |k: &str| -> Option<[u16; 8]> {
+            let hex = get(k)?;
+            if hex.len() < 32 {
+                return None;
+            }
+            let mut w = [0u16; 8];
+            for (i, slot) in w.iter_mut().enumerate() {
+                let lo = u8::from_str_radix(&hex[4 * i..4 * i + 2], 16).ok()?;
+                let hi = u8::from_str_radix(&hex[4 * i + 2..4 * i + 4], 16).ok()?;
+                *slot = u16::from(lo) | u16::from(hi) << 8;
+            }
+            Some(w)
+        };
+        let std_offset = -(bias + std_bias) * 60;
+        let key = get("TimeZoneKeyName").unwrap_or_default();
+        let iana = crate::builtins::intl::cldr::WINDOWS_ZONES
+            .iter()
+            .find(|(w, _)| *w == key)
+            .and_then(|(_, z)| crate::builtins::intl::time_zone_identifier(z))
+            .map(|(_, primary)| primary.to_owned());
+        let dst_start = systemtime("DaylightStart");
+        let dst_end = systemtime("StandardStart");
+        let disabled = dword("DynamicDaylightTimeDisabled") == Some(1);
+        let dst = match (dst_start, dst_end) {
+            (Some(s), Some(e)) if s[1] != 0 && e[1] != 0 && !disabled => {
+                let rule = |w: [u16; 8]| {
+                    (
+                        RuleDate::Month(u32::from(w[1]), u32::from(w[3]), u32::from(w[2])),
+                        i64::from(w[4]) * 3600 + i64::from(w[5]) * 60 + i64::from(w[6]),
+                    )
+                };
+                Some(PosixDst {
+                    abbr: "DST".into(),
+                    offset: -(bias + dst_bias) * 60,
+                    start: rule(s),
+                    end: rule(e),
+                })
+            }
+            _ => None,
+        };
+        let name = iana.clone().unwrap_or_else(|| key.clone());
+        Some(TimeZone {
+            name: name.clone(),
+            iana,
+            transitions: Vec::new(),
+            types: vec![(std_offset, name.clone())],
+            rule: Some(PosixTz {
+                std_abbr: name,
+                std_offset,
+                dst,
+            }),
+        })
     }
 
     fn from_zoneinfo_name(name: &str) -> Option<TimeZone> {
@@ -397,6 +485,7 @@ impl TimeZone {
         let rule = parse_posix_tz(s)?;
         Some(TimeZone {
             name: rule.std_abbr.clone(),
+            iana: None,
             transitions: Vec::new(),
             types: vec![(rule.std_offset, rule.std_abbr.clone())],
             rule: Some(rule),
@@ -493,8 +582,10 @@ impl TimeZone {
         } else {
             None
         };
+        let iana = crate::builtins::intl::time_zone_identifier(&name).map(|(n, _)| n.to_owned());
         Some(TimeZone {
             name,
+            iana,
             transitions,
             types,
             rule,
@@ -746,6 +837,89 @@ fn parse_posix_tz(s: &str) -> Option<PosixTz> {
             start,
             end,
         }),
+    })
+}
+
+/// SystemTimeZoneIdentifier (ECMA-262 §21.4.1.24): el IANA de la zona del sistema o, si no se
+/// conoce, su offset actual (`+05:00`).
+pub fn system_time_zone_identifier() -> String {
+    let tz = TimeZone::system();
+    if let Some(i) = &tz.iana {
+        return i.clone();
+    }
+    format_offset_identifier((tz.offset_ms(now_ms()) / MS_PER_MINUTE) as i64)
+}
+
+/// FormatOffsetTimeZoneIdentifier: `±HH:MM`.
+pub fn format_offset_identifier(minutes: i64) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let m = minutes.abs();
+    format!("{sign}{:02}:{:02}", m / 60, m % 60)
+}
+
+/// Un identificador de offset (`±HH`, `±HHMM`, `±HH:MM`): los minutos. Con segundos o
+/// fracciones, `Some(Err(()))` (sintaxis de offset no admitida por Intl).
+pub fn parse_offset_identifier(s: &str) -> Option<Result<i64, ()>> {
+    let sign = match s.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &s[1..];
+    if !rest
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == ':' || c == '.' || c == ',')
+        || rest.len() < 2
+        || !rest[..2].bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let (h, m) = match rest.len() {
+        2 => (&rest[..2], "00"),
+        4 if rest.bytes().all(|c| c.is_ascii_digit()) => (&rest[..2], &rest[2..]),
+        5 if &rest[2..3] == ":" && rest[3..].bytes().all(|c| c.is_ascii_digit()) => {
+            (&rest[..2], &rest[3..])
+        }
+        _ => return Some(Err(())),
+    };
+    let h: i64 = h.parse().ok()?;
+    let m: i64 = m.parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(Ok(sign * (h * 60 + m)))
+}
+
+thread_local! {
+    static ZONES: std::cell::RefCell<std::collections::HashMap<String, Option<TimeZone>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// El offset (ms) de la zona `id` (identificador IANA u offset) en el instante UTC `t`. Sin
+/// los datos de la zona (en Windows solo hay los de la zona del sistema), 0 salvo `Etc/GMT±N`.
+pub fn zone_offset_ms(id: &str, t: f64) -> f64 {
+    if let Some(Ok(m)) = parse_offset_identifier(id) {
+        return m as f64 * MS_PER_MINUTE;
+    }
+    let primary = crate::builtins::intl::time_zone_identifier(id).map_or(id, |(_, p)| p);
+    if primary == "UTC" {
+        return 0.0;
+    }
+    if let Some(n) = primary.strip_prefix("Etc/GMT")
+        && let Ok(h) = n.parse::<i64>()
+    {
+        return -(h as f64) * MS_PER_HOUR;
+    }
+    let sys = TimeZone::system();
+    if sys.iana.as_deref() == Some(primary) || sys.iana.as_deref() == Some(id) {
+        return sys.offset_ms(t);
+    }
+    ZONES.with(|z| {
+        let mut z = z.borrow_mut();
+        let entry = z
+            .entry(primary.to_owned())
+            .or_insert_with(|| TimeZone::from_zoneinfo_name(primary));
+        entry.as_ref().map_or(0.0, |tz| tz.offset_ms(t))
     })
 }
 
@@ -1601,31 +1775,46 @@ fn to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     agent.invoke(&Value::Object(o), &PropertyKey::from("toISOString"), &[])
 }
 
-/// toLocaleString y compañía sin ECMA-402: los mismos formatos que toString.
+/// Date.prototype.toLocaleString ( [ locales [ , options ] ] ) (ECMA-402 §20.4.1).
 fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    use crate::builtins::intl::date_time_format::{Defaults, Required, to_locale_string as f};
     let tv = this_time_value(agent, &a.this, "toLocaleString")?;
-    Ok(Value::str(&to_date_string_of(tv)))
+    f(
+        agent,
+        tv,
+        &a.arg(0),
+        &a.arg(1),
+        Required::Any,
+        Defaults::All,
+    )
 }
 
+/// Date.prototype.toLocaleDateString ( [ locales [ , options ] ] ) (ECMA-402 §20.4.2).
 fn to_locale_date_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    use crate::builtins::intl::date_time_format::{Defaults, Required, to_locale_string as f};
     let tv = this_time_value(agent, &a.this, "toLocaleDateString")?;
-    if tv.is_nan() {
-        return Ok(Value::str("Invalid Date"));
-    }
-    Ok(Value::str(&date_string(local_time(tv))))
+    f(
+        agent,
+        tv,
+        &a.arg(0),
+        &a.arg(1),
+        Required::Date,
+        Defaults::Date,
+    )
 }
 
+/// Date.prototype.toLocaleTimeString ( [ locales [ , options ] ] ) (ECMA-402 §20.4.3).
 fn to_locale_time_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    use crate::builtins::intl::date_time_format::{Defaults, Required, to_locale_string as f};
     let tv = this_time_value(agent, &a.this, "toLocaleTimeString")?;
-    if tv.is_nan() {
-        return Ok(Value::str("Invalid Date"));
-    }
-    let t = local_time(tv);
-    Ok(Value::str(&format!(
-        "{}{}",
-        time_string(t),
-        time_zone_string(tv)
-    )))
+    f(
+        agent,
+        tv,
+        &a.arg(0),
+        &a.arg(1),
+        Required::Time,
+        Defaults::Time,
+    )
 }
 
 /// Date.prototype [ @@toPrimitive ] ( hint ) (§21.4.4.45).

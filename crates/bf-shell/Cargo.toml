@@ -9,6 +9,11 @@ license.workspace = true
 name = "freedom"
 path = "src/main.rs"
 
+[features]
+# Compilación para los instaladores: en Windows, una aplicación de ventana sin consola (las
+# órdenes de línea de comandos dejan de imprimir en la terminal).
+gui = []
+
 [dependencies]
 bf-font = { path = "../bf-font" }
 bf-infra = { path = "../bf-infra" }
@@ -22,6 +27,8 @@ softbuffer = "0.4"
 winit = "0.30"
 bf-dom = { path = "../bf-dom" }
 bf-html = { path = "../bf-html" }
+bf-js = { path = "../bf-js" }
+bf-web = { path = "../bf-web" }
 bf-image = { path = "../bf-image" }
 arboard = "3"
 rfd = "0.15"

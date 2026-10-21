@@ -131,10 +131,15 @@ fn to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::str(&number_to_string_radix(x, radix as u32)))
 }
 
-/// Number.prototype.toLocaleString (§21.1.3.4) sin Intl: Number::toString.
+/// Number.prototype.toLocaleString (ECMA-402 §19.2.1). // E2: sobre Intl.NumberFormat.
 fn to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let x = this_number(agent, &a.this)?;
-    Ok(Value::String(number_to_string(x)))
+    crate::builtins::intl::number_to_locale_string(
+        agent,
+        crate::builtins::intl::number_format_value::Value::Number(x),
+        &a.arg(0),
+        &a.arg(1),
+    )
 }
 
 fn value_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

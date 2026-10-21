@@ -12,7 +12,11 @@ Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 
 ## Instalar Freedom
 
-Por ahora Freedom se instala desde el código fuente. Son cuatro pasos:
+Descarga el instalador para tu sistema (Windows, macOS o Linux) desde
+[Releases](https://github.com/ramirezjhulian7/browser-freedom/releases); cada release explica
+cómo instalarlo.
+
+También puedes compilarlo desde el código fuente, en cuatro pasos:
 
 1. Instala Rust con el instalador oficial de [rustup.rs](https://rustup.rs) (en Windows,
    acepta las opciones por defecto).
@@ -274,6 +278,8 @@ El flujo de una página:
 
 Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) para el flujo de trabajo.
 
+Los instaladores y el proceso de release están en [`packaging/`](packaging/README.md).
+
 ## Compilar
 
 Requiere Rust estable (edición 2024) y Python 3 solo para regenerar tablas.
@@ -373,7 +379,8 @@ Sus partes:
     at-rules sin efecto, `display` degradados, formatos de imagen sin decodificador y
     controles sin interactividad;
   - las fuentes resueltas;
-  - botones para guardar PNG, volcar el layout y volcar el DOM (junto al ejecutable).
+  - botones para guardar PNG, volcar el layout y volcar el DOM (en la carpeta de
+    descargas).
 - **Línea de estado** (24 px): el destino del enlace bajo el puntero; zoom, viewport en px CSS
   y tiempo total de carga.
 - **Menú contextual**: tarjeta con sombra, resaltado ámbar tenue y el atajo de cada acción a la
@@ -440,6 +447,8 @@ cargo test -p bf-js --test test262_parse -- --nocapture        # parsing de test
 cargo test -p bf-js --release --test fuzz -- --ignored --nocapture   # 1000 mutaciones sin pánico
 cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md   # ejecución de test262
 cargo test -p bf-js --release --test test262_run -- --ignored --nocapture   # regresión de language/
+cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md   # WPT testharness.js (dom, html/dom, url, encoding…)
+cargo test -p bf-web --release --test wpt_testharness -- --ignored --nocapture   # WPT testharness.js sin pánicos
 cargo test -p bf-layout --test layout       # 102 casos propios (BF_LAYOUT_PRINT=1 imprime)
 cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPECTED=1 regenera)
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture  # reftests (~1,5 min)

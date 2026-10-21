@@ -55,3 +55,35 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.
+
+## testharness
+
+Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md`.
+
+- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `dom`, `html/dom`, `html/semantics/scripting-1`, `html/webappapis`, `url`, `encoding`, `console`; 1935 documentos en 15 s.
+- Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por archivo.
+- `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). Detalle por subtest: `target/wpt-testharness/results.tsv`.
+
+| Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| console | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom | 11 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/abort | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/collections | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/events | 177 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/lists | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/nodes | 359 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/observable | 29 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/ranges | 68 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| dom/traversal | 18 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding | 45 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding/legacy-mb-japanese | 51 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding/legacy-mb-korean | 26 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding/legacy-mb-schinese | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding/legacy-mb-tchinese | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| encoding/streams | 13 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| html/dom | 223 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| html/semantics | 491 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| html/webappapis | 321 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| url | 41 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |
+| **Total** | 1935 | 0 | 0 | 0 | 0 | 0 | 0 | 0.0% |

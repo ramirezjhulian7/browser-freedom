@@ -26,6 +26,7 @@ mod select;
 mod worker;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ use chrome::{BAR, Chrome, PANEL, Region, STATUS, TabInfo};
 use edit::{Editable, Focus};
 use menu::{Menu, MenuAction, MenuItem};
 use select::{Selection, TextIndex};
-use worker::{Done, Job, LoadJob, Worker};
+use worker::{Documents, Done, FromDoc, Job, LoadJob};
 
 /// Px CSS por "línea" de rueda y por pulsación de flecha.
 const LINE: f32 = 40.0;
@@ -70,6 +71,9 @@ const ZOOM_LEVELS: [f32; 15] = [
 const PROGRESS_CYCLE: f32 = 1.4;
 /// Periodo de la animación de la línea de progreso (~30 fps).
 const PROGRESS_FRAME: Duration = Duration::from_millis(33);
+
+/// Entradas de la consola que se guardan por pestaña y nivel.
+const CONSOLE_PER_LEVEL: usize = 200;
 
 /// Cuánto se muestra un aviso en la línea de estado.
 const NOTICE: Duration = Duration::from_secs(4);
@@ -107,6 +111,8 @@ enum Navigation {
     /// Atrás/adelante a la entrada `i`.
     Traverse(usize),
     Reload,
+    /// `location.replace`: el documento nuevo reemplaza la entrada actual.
+    Replace,
 }
 
 /// Una carga en curso.
@@ -130,6 +136,8 @@ enum Area {
 /// demás se guardan aquí y se intercambian al cambiar de pestaña (`swap_state`).
 #[derive(Default)]
 struct TabState {
+    /// La clave del hilo de documento de la pestaña ([`Documents`]).
+    tab_key: u64,
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
     scroll: (f32, f32),
@@ -168,7 +176,18 @@ struct App {
     /// Menú contextual abierto.
     menu: Option<Menu>,
     fonts: Arc<FontDb>,
-    worker: Worker,
+    /// Los hilos de documento (uno por pestaña).
+    worker: Documents,
+    /// La clave del hilo de documento de la pestaña activa.
+    tab_key: u64,
+    /// Última clave de pestaña asignada.
+    next_tab_key: u64,
+    /// La consola de cada pestaña (por clave): las últimas [`CONSOLE_PER_LEVEL`] entradas de
+    /// cada nivel.
+    consoles: HashMap<u64, Vec<crate::script::ConsoleEntry>>,
+    /// La interfaz cambió el documento actual (un campo editado): el próximo re-layout se lo
+    /// manda al hilo del documento.
+    edited: bool,
     current: Option<Arc<Loaded>>,
     page: Option<Page>,
     scroll: (f32, f32),
@@ -497,6 +516,38 @@ fn set_clipboard(text: &str) -> bool {
         .is_ok()
 }
 
+/// Dónde se guardan las capturas y los volcados: la carpeta de descargas del usuario (instalado,
+/// el ejecutable no puede escribir junto a sí mismo), o su carpeta personal, o la del
+/// ejecutable si no hay ninguna.
+fn output_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_dir());
+    // En Linux el nombre de la carpeta depende del idioma: `user-dirs.dirs` (XDG).
+    let xdg = home.as_ref().and_then(|h| {
+        let dirs = std::fs::read_to_string(h.join(".config/user-dirs.dirs")).ok()?;
+        let line = dirs
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?;
+        let path = line
+            .trim_matches('"')
+            .replace("$HOME", &h.to_string_lossy());
+        Some(PathBuf::from(path))
+    });
+    xdg.into_iter()
+        .chain(home.as_ref().map(|h| h.join("Downloads")))
+        .find(|d| d.is_dir())
+        .or(home)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        })
+        .unwrap_or_default()
+}
+
 /// El nombre de una página sin título: el archivo, la página interna o el host.
 fn short_name(url: &Url) -> String {
     match &url.path {
@@ -520,7 +571,7 @@ fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
 }
 
 impl App {
-    fn new(worker: Worker, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
+    fn new(worker: Documents, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
         App {
             net: Arc::new(NetLoader::new()),
             tabs: vec![None],
@@ -533,6 +584,10 @@ impl App {
             menu: None,
             fonts: fonts.clone(),
             worker,
+            tab_key: 1,
+            next_tab_key: 1,
+            consoles: HashMap::new(),
+            edited: false,
             current: None,
             page: None,
             scroll: (0.0, 0.0),
@@ -649,6 +704,7 @@ impl App {
     /// Intercambia el estado de la pestaña activa con `t`.
     fn swap_state(&mut self, t: &mut TabState) {
         use std::mem::swap;
+        swap(&mut self.tab_key, &mut t.tab_key);
         swap(&mut self.current, &mut t.current);
         swap(&mut self.page, &mut t.page);
         swap(&mut self.scroll, &mut t.scroll);
@@ -754,7 +810,12 @@ impl App {
     /// URL enfocado y vacío; `background` la carga sin mostrarla.
     fn new_tab(&mut self, url: Option<Url>, background: bool) {
         let i = (self.active + 1).min(self.tabs.len());
-        self.tabs.insert(i, Some(TabState::default()));
+        self.next_tab_key += 1;
+        let state = TabState {
+            tab_key: self.next_tab_key,
+            ..TabState::default()
+        };
+        self.tabs.insert(i, Some(state));
         let home = url.is_none();
         let url = url.or_else(|| Url::parse("about:home", None).ok());
         if background {
@@ -810,6 +871,10 @@ impl App {
                 i - 1
             };
             self.activate_tab(next);
+        }
+        if let Some(Some(t)) = self.tabs.get(i) {
+            self.worker.close(t.tab_key);
+            self.consoles.remove(&t.tab_key);
         }
         self.tabs.remove(i);
         if self.active > i {
@@ -978,6 +1043,7 @@ impl App {
         let mut l: Loaded = (**cur).clone();
         edit::set_value(&mut l.doc, node, kind, &text);
         self.current = Some(Arc::new(l));
+        self.edited = true;
         self.request_relayout();
     }
 
@@ -1313,10 +1379,11 @@ impl App {
             return;
         }
         let height = self.page_area().height;
-        let body = match (&self.current, &self.page) {
+        let mut body = match (&self.current, &self.page) {
             (Some(l), Some(p)) => internal::engine_body(l, p, self.raster.get(), true),
             _ => "<p class=\"muted\">Sin página.</p>".to_owned(),
         };
+        body.push_str(&internal::console_section(self.console()));
         self.panel_raster = self.raster.get();
         self.chrome.layout_panel(&body, height);
         self.panel_generation += 1;
@@ -1349,15 +1416,36 @@ impl App {
                 recent.push((e.title.clone(), href));
             }
         }
-        self.worker.set_viewport(self.viewport());
-        self.worker.send(Job::Load(Box::new(LoadJob {
-            id,
-            url: url.clone(),
-            net: self.net.clone(),
-            recent,
-            theme: self.chrome.theme,
-            post,
-        })));
+        let viewport = self.viewport();
+        self.worker.set_viewport(self.tab_key, viewport);
+        let len = self.history.len() as u32;
+        let index = self.index as u32;
+        let session_history = match nav {
+            Navigation::Push if len == 0 => (1, 0),
+            Navigation::Push => (index + 2, 0),
+            Navigation::Traverse(i) => (i as u32 + 1, len.saturating_sub(i as u32 + 1)),
+            Navigation::Reload | Navigation::Replace => (index + 1, len.saturating_sub(index + 1)),
+        };
+        let referrer = self
+            .current
+            .as_ref()
+            .filter(|c| matches!(c.url.scheme.as_str(), "http" | "https"))
+            .map(|c| c.url.serialize(true))
+            .unwrap_or_default();
+        self.worker.send(
+            self.tab_key,
+            Job::Load(Box::new(LoadJob {
+                id,
+                url: url.clone(),
+                net: self.net.clone(),
+                recent,
+                theme: self.chrome.theme,
+                post,
+                session_history,
+                referrer,
+                screen: self.screen_info(),
+            })),
+        );
         self.loading = Some(Loading {
             id,
             nav,
@@ -1501,7 +1589,7 @@ impl App {
         }
     }
 
-    /// Ruta junto al ejecutable con el host de la página y la fecha.
+    /// Ruta en la carpeta de descargas con el host de la página y la fecha.
     fn output_path(&self, extension: &str) -> std::path::PathBuf {
         let host = self
             .current
@@ -1515,11 +1603,7 @@ impl App {
                 }
             })
             .unwrap_or_else(|| "Freedom".to_owned());
-        let dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-            .unwrap_or_default();
-        dir.join(format!("{host}-{}.{extension}", timestamp()))
+        output_dir().join(format!("{host}-{}.{extension}", timestamp()))
     }
 
     /// `Ctrl+S`: un PNG del cuadro completo (cromo incluido).
@@ -1557,6 +1641,17 @@ impl App {
     /// Entrega un resultado del hilo de carga a la pestaña que lo pidió. Devuelve el viewport
     /// usado si era para la pestaña activa.
     fn deliver(&mut self, done: Done) -> Option<Size> {
+        if done.id == 0 {
+            // Un cuadro producido por los scripts del documento de la pestaña `done.tab`.
+            let i = self.tab_with_key(done.tab)?;
+            if i == self.active {
+                let viewport = done.viewport;
+                self.apply_script_frame(done);
+                return Some(viewport);
+            }
+            self.with_tab(i, |app| app.apply_script_frame(done));
+            return None;
+        }
         match self.tab_owning(done.id) {
             Some(i) if i != self.active => {
                 self.with_tab(i, |app| app.apply(done));
@@ -1572,9 +1667,15 @@ impl App {
 
     fn receive(&mut self) {
         let mut laid_out = None;
-        while let Ok(done) = self.worker.done.try_recv() {
-            if let Some(v) = self.deliver(done) {
-                laid_out = Some(v);
+        while let Ok(msg) = self.worker.rx.try_recv() {
+            match msg {
+                FromDoc::Done(done) => {
+                    if let Some(v) = self.deliver(*done) {
+                        laid_out = Some(v);
+                    }
+                }
+                FromDoc::Console { tab, entry } => self.console_entry(tab, entry),
+                FromDoc::Request { tab, request } => self.page_request(tab, request),
             }
         }
         // Si la ventana cambió mientras se maquetaba, se rehace con el viewport actual.
@@ -1588,6 +1689,196 @@ impl App {
         {
             self.request_relayout();
         }
+    }
+
+    /// La pestaña cuyo hilo de documento tiene la clave `key`.
+    fn tab_with_key(&self, key: u64) -> Option<usize> {
+        if self.tab_key == key {
+            return Some(self.active);
+        }
+        self.tabs
+            .iter()
+            .position(|t| t.as_ref().is_some_and(|t| t.tab_key == key))
+    }
+
+    /// Un cuadro nuevo porque los scripts cambiaron el documento (se descarta si hay una
+    /// carga en curso: es del documento anterior).
+    fn apply_script_frame(&mut self, done: Done) {
+        if self.loading.is_some() || self.current.is_none() {
+            return;
+        }
+        self.current = Some(done.loaded);
+        self.page = Some(done.page);
+        self.page_generation += 1;
+        self.selection = None;
+        self.raster.set(None);
+        self.clamp_scroll();
+        self.update_title();
+        self.refresh_chrome();
+        self.refresh_panel();
+        self.redraw_later();
+    }
+
+    /// Un mensaje de la consola del documento de la pestaña `tab`.
+    fn console_entry(&mut self, tab: u64, entry: crate::script::ConsoleEntry) {
+        let log = self.consoles.entry(tab).or_default();
+        let level = entry.level;
+        log.push(entry);
+        let same = log.iter().filter(|e| e.level == level).count();
+        if same > CONSOLE_PER_LEVEL
+            && let Some(first) = log.iter().position(|e| e.level == level)
+        {
+            log.remove(first);
+        }
+        if tab == self.tab_key {
+            self.refresh_panel();
+        }
+    }
+
+    /// La pantalla en la que está la ventana (`window.screen`), en px CSS.
+    fn screen_info(&self) -> bf_web::bom::ScreenInfo {
+        let mut info = bf_web::bom::ScreenInfo::default();
+        if let Some(g) = &self.graphics
+            && let Some(m) = g.window.current_monitor()
+        {
+            let scale = m.scale_factor();
+            let size = m.size().to_logical::<f64>(scale);
+            info.width = size.width.round();
+            info.height = size.height.round();
+            info.avail_width = info.width;
+            // La barra de tareas de Windows (48 px lógicos).
+            info.avail_height = (info.height - 48.0).max(0.0);
+            info.device_pixel_ratio = scale * f64::from(self.zoom);
+        }
+        info
+    }
+
+    /// Lo que pide el documento de la pestaña `tab` (`location`, `history`, `window.open`,
+    /// diálogos).
+    fn page_request(&mut self, tab: u64, request: crate::script::PageRequest) {
+        use crate::script::PageRequest;
+        let Some(i) = self.tab_with_key(tab) else {
+            if let PageRequest::Dialog { reply, .. } = request {
+                let _ = reply.send(None);
+            }
+            return;
+        };
+        match request {
+            PageRequest::Navigate { url, replace } => {
+                let nav = if replace {
+                    Navigation::Replace
+                } else {
+                    Navigation::Push
+                };
+                self.with_tab(i, |app| app.start_load(url, nav));
+            }
+            PageRequest::SameDocument { url, replace } => {
+                self.with_tab(i, |app| app.same_document_url(url, replace));
+            }
+            PageRequest::Reload => self.with_tab(i, App::reload),
+            PageRequest::Traverse(delta) => self.with_tab(i, |app| {
+                let target = app.index as i64 + i64::from(delta);
+                if target >= 0 && (target as usize) < app.history.len() {
+                    app.traverse(target as usize);
+                }
+            }),
+            PageRequest::Open(url) => {
+                if let Ok(u) = Url::parse(&url, None) {
+                    self.new_tab(Some(u), false);
+                }
+            }
+            PageRequest::Close => self.close_tab(i),
+            PageRequest::Dialog {
+                kind,
+                message,
+                reply,
+            } => {
+                self.activate_tab(i);
+                let answer = self.show_dialog(&kind, &message);
+                let _ = reply.send(answer);
+            }
+        }
+    }
+
+    /// La URL del documento cambió sin cargar otro (`pushState`, `location.hash`).
+    fn same_document_url(&mut self, url: Url, replace: bool) {
+        let title = self.display_name();
+        if replace || self.history.is_empty() {
+            match self.history.get_mut(self.index) {
+                Some(e) => e.url = url.clone(),
+                None => self.history.push(Entry {
+                    url: url.clone(),
+                    title,
+                    scroll: self.scroll,
+                }),
+            }
+        } else {
+            if let Some(e) = self.history.get_mut(self.index) {
+                e.scroll = self.scroll;
+            }
+            self.history.truncate(self.index + 1);
+            self.history.push(Entry {
+                url: url.clone(),
+                title,
+                scroll: self.scroll,
+            });
+            self.index = self.history.len() - 1;
+        }
+        if let Some(cur) = &self.current {
+            let mut l = (**cur).clone();
+            l.url = url;
+            self.current = Some(Arc::new(l));
+        }
+        self.refresh_chrome();
+    }
+
+    /// Un diálogo modal de la página (`alert`, `confirm`, `prompt`); `None` es cancelar.
+    fn show_dialog(&mut self, kind: &crate::script::DialogKind, message: &str) -> Option<String> {
+        use crate::script::DialogKind;
+        use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+        let host = self
+            .current
+            .as_ref()
+            .map(|c| c.url.host_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "Esta página".to_owned());
+        let title = format!("{host} dice");
+        match kind {
+            DialogKind::Alert => {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title(&title)
+                    .set_description(message)
+                    .set_buttons(MessageButtons::Ok)
+                    .show();
+                Some(String::new())
+            }
+            DialogKind::Confirm => {
+                let r = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title(&title)
+                    .set_description(message)
+                    .set_buttons(MessageButtons::OkCancel)
+                    .show();
+                matches!(r, MessageDialogResult::Ok | MessageDialogResult::Yes).then(String::new)
+            }
+            // Sin campo de texto en el diálogo nativo: aceptar devuelve el valor por defecto.
+            DialogKind::Prompt(default) => {
+                let r = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title(&title)
+                    .set_description(format!("{message}\n\n[{default}]"))
+                    .set_buttons(MessageButtons::OkCancel)
+                    .show();
+                matches!(r, MessageDialogResult::Ok | MessageDialogResult::Yes)
+                    .then(|| default.clone())
+            }
+        }
+    }
+
+    /// La consola de la pestaña activa.
+    fn console(&self) -> &[crate::script::ConsoleEntry] {
+        self.consoles.get(&self.tab_key).map_or(&[], Vec::as_slice)
     }
 
     fn apply(&mut self, done: Done) {
@@ -1657,6 +1948,23 @@ impl App {
                 self.history[i].title = title;
             }
             Navigation::Reload => {}
+            Navigation::Replace => {
+                if self.history.is_empty() {
+                    self.index = 0;
+                    self.history.push(Entry {
+                        url: url.clone(),
+                        title,
+                        scroll: (0.0, 0.0),
+                    });
+                } else {
+                    self.history[self.index] = Entry {
+                        url: url.clone(),
+                        title,
+                        scroll: (0.0, 0.0),
+                    };
+                }
+                self.scroll = (0.0, 0.0);
+            }
         }
         self.clamp_scroll();
         if std::mem::take(&mut self.focus_bar_on_load) {
@@ -1678,9 +1986,11 @@ impl App {
         let id = self.next_id;
         let viewport = self.viewport();
         trace(&format!("request_relayout id={id} viewport={viewport:?}"));
-        self.worker.set_viewport(viewport);
+        self.worker.set_viewport(self.tab_key, viewport);
         self.last_layout_request = Some(viewport);
-        self.worker.send(Job::Relayout { id, loaded });
+        // Si la interfaz cambió el documento (un campo editado), el hilo adopta esa versión.
+        let loaded = std::mem::take(&mut self.edited).then_some(loaded);
+        self.worker.send(self.tab_key, Job::Relayout { id, loaded });
         self.relayout = Some(id);
     }
 
@@ -1694,7 +2004,8 @@ impl App {
         if self.loading.is_some() {
             // La carga en curso lee el viewport nuevo antes del layout (o se rehace al
             // terminar).
-            self.worker.set_viewport(self.viewport());
+            let viewport = self.viewport();
+            self.worker.set_viewport(self.tab_key, viewport);
         } else {
             self.request_relayout();
         }
@@ -2609,8 +2920,12 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("no se pudo iniciar la ventana: {e}"))?;
     let proxy: EventLoopProxy<Wake> = event_loop.create_proxy();
     let fonts = FontDb::system();
-    let worker = Worker::spawn(fonts.clone(), move || {
-        let _ = proxy.send_event(Wake);
+    let proxy = std::sync::Mutex::new(proxy);
+    let worker = Documents::new(fonts.clone(), move || {
+        let _ = proxy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_event(Wake);
     });
     let mut app = App::new(worker, fonts, url, Theme::for_system(None));
     event_loop
@@ -2622,12 +2937,23 @@ impl App {
     /// Espera a que el hilo de trabajo termine lo pendiente (sesiones sin ventana).
     fn settle(&mut self) {
         while self.any_loading() || self.relayout.is_some() {
-            let Ok(done) = self
+            let Ok(msg) = self
                 .worker
-                .done
+                .rx
                 .recv_timeout(std::time::Duration::from_secs(120))
             else {
                 break;
+            };
+            let done = match msg {
+                FromDoc::Done(done) => *done,
+                FromDoc::Console { tab, entry } => {
+                    self.console_entry(tab, entry);
+                    continue;
+                }
+                FromDoc::Request { tab, request } => {
+                    self.page_request(tab, request);
+                    continue;
+                }
             };
             if let Some(viewport) = self.deliver(done)
                 && viewport != self.viewport()
@@ -2728,7 +3054,12 @@ impl App {
         };
         let (verb, arg) = step.split_once(':').unwrap_or((step, ""));
         match verb {
-            "wait" => {}
+            // Deja correr los temporizadores de la página y aplica los cuadros que produjeron.
+            "wait" => {
+                std::thread::sleep(Duration::from_millis(300));
+                self.receive();
+                self.settle();
+            }
             "newtab" => self.new_tab(None, false),
             "field" => {
                 let Some(cur) = self.current.clone() else {
@@ -2873,7 +3204,7 @@ impl App {
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     let fonts = FontDb::system();
-    let worker = Worker::spawn(fonts.clone(), || {});
+    let worker = Documents::new(fonts.clone(), || {});
     let mut app = App::new(worker, fonts, None, Theme::for_system(None));
     app.headless = Size {
         width: 1180.0,

@@ -1,0 +1,120 @@
+# Instaladores de Freedom para Windows, Linux y macOS.
+#
+# - A mano (Actions → Instaladores → Run workflow): arma los paquetes y los deja como
+#   artefactos del run, para probarlos.
+# - Al subir una etiqueta `v*` (p. ej. `git tag v0.1.0 && git push origin v0.1.0`): además
+#   crea un release en BORRADOR con los paquetes, SHA256SUMS y las notas de
+#   packaging/NOTAS-DEL-RELEASE.md, y una atestación de procedencia de GitHub por paquete
+#   (prueba que salió de este repositorio y de este workflow). Se revisa y se publica desde
+#   GitHub.
+name: Instaladores
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust estable
+        run: rustup update stable && rustup default stable
+      - name: Inno Setup
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Paquetes
+        run: powershell -File packaging\windows\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freedom-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    # 22.04: la glibc más antigua disponible, para que el ejecutable corra en más distros.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust estable
+        run: rustup update stable && rustup default stable
+      - name: Paquetes
+        run: sh packaging/linux/build.sh
+      - name: Prueba de humo (sin ventana)
+        run: |
+          ./target/release/freedom --version
+          ./target/release/freedom render about:home -o dist/prueba.png
+          rm dist/prueba.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freedom-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust estable
+        run: rustup update stable && rustup default stable
+      - name: Paquetes
+        run: sh packaging/macos/build.sh
+      - name: Prueba de humo (sin ventana)
+        run: dist/Freedom.app/Contents/MacOS/freedom --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freedom-macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Atestaciones de procedencia (Sigstore, a través de GitHub).
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sumas SHA-256
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Atestación de procedencia
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.deb
+            dist/*.tar.gz
+      - name: Release en borrador
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --draft \
+            --title "Freedom ${TAG#v}" \
+            --notes-file packaging/NOTAS-DEL-RELEASE.md

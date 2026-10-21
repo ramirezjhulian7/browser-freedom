@@ -190,6 +190,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     }
     exception::finish_realm(agent, realm);
     collections::finish_realm(agent, realm);
+    mixins::finish_realm(agent, realm);
     window::install(agent, realm, ctx);
 }
 

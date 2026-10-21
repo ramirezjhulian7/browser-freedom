@@ -256,3 +256,33 @@ pub fn closest(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Err(e) => throw_dom(agent, e),
     }
 }
+
+/// `@@unscopables` de los prototipos con miembros `[Unscopable]` (WebIDL §3.7.3): ParentNode
+/// y ChildNode (y `slot` en `Element`).
+pub fn finish_realm(agent: &mut Agent, realm: bf_js::vm::RealmId) {
+    let c = crate::dom::classes(agent).clone();
+    let parent = ["prepend", "append", "replaceChildren"];
+    let child = ["before", "after", "replaceWith", "remove"];
+    let mut element: Vec<&str> = parent.to_vec();
+    element.extend(child);
+    element.push("slot");
+    let lists: [(bf_js::host::HostClassId, Vec<&str>); 5] = [
+        (c.element, element),
+        (c.document, parent.to_vec()),
+        (c.document_fragment, parent.to_vec()),
+        (c.character_data, child.to_vec()),
+        (c.document_type, child.to_vec()),
+    ];
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    for (class, names) in lists {
+        let proto = agent.host_class_objects(realm, class).prototype;
+        let u = agent.new_object(None);
+        for n in names {
+            agent.put_data(u, n.into(), Value::Boolean(true), true, true, true);
+        }
+        let key = bf_js::value::PropertyKey::Symbol(agent.well_known.unscopables);
+        agent.put_data(proto, key, Value::Object(u), false, false, true);
+    }
+    agent.current_realm = saved;
+}

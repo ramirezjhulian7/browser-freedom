@@ -54,8 +54,17 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
         ("split", 2, split),
         ("startsWith", 1, starts_with),
         ("substring", 2, substring),
-        ("toLocaleLowerCase", 0, to_lower_case),
-        ("toLocaleUpperCase", 0, to_upper_case),
+        // E2: TransformCase de ECMA-402 (§19.1.2).
+        (
+            "toLocaleLowerCase",
+            0,
+            crate::builtins::intl::to_locale_lower_case,
+        ),
+        (
+            "toLocaleUpperCase",
+            0,
+            crate::builtins::intl::to_locale_upper_case,
+        ),
         ("toLowerCase", 0, to_lower_case),
         ("toString", 0, to_string),
         ("toUpperCase", 0, to_upper_case),
@@ -404,24 +413,17 @@ fn normalize_units(s: &[u16], form: &str) -> Vec<u16> {
     out
 }
 
-/// String.prototype.localeCompare (§22.1.3.12) sin Intl: compara las formas NFC code
-/// point a code point (las cadenas canónicamente equivalentes dan 0).
+/// String.prototype.localeCompare (ECMA-402 §19.1.1). // E2: sobre Intl.Collator.
 fn locale_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = this_str(agent, a)?;
     let that = agent.to_string(&a.arg(0))?;
-    let x = normalize_units(s.units(), "NFC");
-    let y = normalize_units(that.units(), "NFC");
-    let cps = |u: &[u16]| -> Vec<u32> {
-        char::decode_utf16(u.iter().copied())
-            .map(|r| r.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
-            .collect()
-    };
-    let r = match cps(&x).cmp(&cps(&y)) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    };
-    Ok(Value::Number(r))
+    crate::builtins::intl::locale_compare(
+        agent,
+        &s.to_string_lossy(),
+        &that.to_string_lossy(),
+        &a.arg(1),
+        &a.arg(2),
+    )
 }
 
 /// La función `RegExp` del realm (la registra el built-in RegExp como global).
