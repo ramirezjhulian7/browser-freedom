@@ -700,6 +700,49 @@ net!(
     "abort 2 null"
 );
 
+// --- ReadableStream como cuerpo ---
+
+net!(
+    stream_body_reader,
+    "fetch('/text').then(r => { var rd = r.body.getReader(); return rd.read().then(c => finish(c.value.length + ' ' + (c.value instanceof Uint8Array) + ' ' + r.bodyUsed + ' ' + r.body.locked)); }).catch(fail)",
+    "4 true true true"
+);
+net!(
+    stream_body_used_after_text,
+    "fetch('/text').then(r => r.text().then(() => { try { r.body.getReader(); finish('no'); } catch (e) { finish(e.name + ' ' + r.bodyUsed); } })).catch(fail)",
+    "TypeError true"
+);
+net!(
+    stream_response_from_stream,
+    "var s = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode('a')); c.enqueue(new TextEncoder().encode('bc')); c.close(); }}); new Response(s).text().then(finish, fail)",
+    "abc"
+);
+net!(
+    stream_clone_tee,
+    "var r = new Response('dup'); var c = r.clone(); Promise.all([r.text(), c.text()]).then(v => finish(v.join('+')), fail)",
+    "dup+dup"
+);
+net!(
+    stream_async_iteration,
+    "(async () => { var s = new ReadableStream({start(c) { c.enqueue(1); c.enqueue(2); c.close(); }}); var t = 0; for await (var v of s) t += v; finish(t); })().catch(fail)",
+    "3"
+);
+net!(
+    stream_bad_chunk,
+    "new Response(new ReadableStream({start(c) { c.enqueue('no bytes'); c.close(); }})).text().then(() => finish('no'), e => finish(e.name))",
+    "TypeError"
+);
+net!(
+    stream_upload,
+    "var s = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode('flujo')); c.close(); }}); fetch('/echo', {method: 'POST', body: s, duplex: 'half'}).then(r => r.text()).then(t => finish(t.split('\\n\\n')[1]), fail)",
+    "flujo"
+);
+net!(
+    stream_upload_needs_duplex,
+    "try { new Request('/x', {method: 'POST', body: new ReadableStream()}); finish('no'); } catch (e) { finish(e.name); }",
+    "TypeError"
+);
+
 // --- sendBeacon y backend sin hilo ---
 
 net!(

@@ -14,9 +14,11 @@ use super::formdata::{self, Entry};
 /// Un cuerpo: los bytes (ya completos) y si ya se leyó.
 #[derive(Debug, Clone, Default)]
 pub struct Body {
-    /// `None` = cuerpo nulo.
+    /// Los bytes del cuerpo, si se conocen (`None` y no `stream_only` = cuerpo nulo).
     pub source: Option<Arc<Vec<u8>>>,
     pub used: bool,
+    /// El cuerpo es un `ReadableStream` del autor (los bytes llegan al leerlo).
+    pub stream_only: bool,
 }
 
 impl Body {
@@ -24,6 +26,7 @@ impl Body {
         Body {
             source: bytes.map(Arc::new),
             used: false,
+            stream_only: false,
         }
     }
 }

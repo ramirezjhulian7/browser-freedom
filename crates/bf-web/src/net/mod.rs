@@ -23,6 +23,7 @@ pub mod body;
 pub mod fetch;
 pub mod formdata;
 pub mod headers;
+pub mod streams;
 pub mod wptserve;
 pub mod xhr;
 
@@ -490,6 +491,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
         set_iterator(agent, realm, name, f);
     }
     blob::install_object_urls(agent, realm);
+    streams::install(agent, realm);
     fetch::install_send_beacon(agent, realm);
     agent.current_realm = saved;
 }
