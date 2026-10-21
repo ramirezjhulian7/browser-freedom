@@ -16,6 +16,7 @@ pub mod console;
 pub mod crypto;
 pub mod encoding;
 pub mod performance;
+pub mod serialize; // E3: entre agentes
 pub mod url;
 
 use std::collections::HashMap;

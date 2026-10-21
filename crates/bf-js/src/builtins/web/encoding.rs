@@ -54,7 +54,12 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
 pub fn buffer_source_bytes(agent: &Agent, v: &Value) -> Option<Vec<u8>> {
     let Value::Object(o) = v else { return None };
     match &agent.heap[*o].kind {
-        ObjectKind::ArrayBuffer(b) => Some(b.data.clone().unwrap_or_default()),
+        ObjectKind::ArrayBuffer(_) => Some(crate::builtins::array_buffer::read_bytes(
+            agent,
+            *o,
+            0,
+            crate::builtins::array_buffer::byte_length(agent, *o),
+        )),
         ObjectKind::TypedArray(t) => {
             let len = crate::builtins::typed_array::ta_length(agent, *o).unwrap_or(0);
             let bytes = len * t.kind.size();
@@ -70,15 +75,12 @@ pub fn buffer_source_bytes(agent: &Agent, v: &Value) -> Option<Vec<u8>> {
 }
 
 fn slice_of(agent: &Agent, buffer: Gc<Object>, offset: usize, len: usize) -> Vec<u8> {
-    match &agent.heap[buffer].kind {
-        ObjectKind::ArrayBuffer(b) => b
-            .data
-            .as_ref()
-            .and_then(|d| d.get(offset..offset + len))
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default(),
-        _ => Vec::new(),
+    // E3: también sobre la memoria de un SharedArrayBuffer.
+    let total = crate::builtins::array_buffer::byte_length(agent, buffer);
+    if offset + len > total {
+        return Vec::new();
     }
+    crate::builtins::array_buffer::read_bytes(agent, buffer, offset, len)
 }
 
 /// Un ArrayBuffer nuevo (del realm actual) con `bytes`.
@@ -90,6 +92,7 @@ pub fn new_array_buffer(agent: &mut Agent, bytes: Vec<u8>) -> Gc<Object> {
             data: Some(bytes),
             max_byte_length: None,
             shared: false,
+            block: None,
         })),
     ))
 }
@@ -104,6 +107,7 @@ pub fn new_uint8_array(agent: &mut Agent, bytes: Vec<u8>) -> Gc<Object> {
             data: Some(bytes),
             max_byte_length: None,
             shared: false,
+            block: None,
         })),
     ));
     let proto = agent.intrinsics().uint8_array_prototype;
@@ -185,11 +189,8 @@ fn encode_into(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         read += c.len_utf16();
     }
-    if let ObjectKind::ArrayBuffer(b) = &mut agent.heap[buffer].kind
-        && let Some(d) = &mut b.data
-        && let Some(slot) = d.get_mut(offset..offset + out.len())
-    {
-        slot.copy_from_slice(&out);
+    if offset + out.len() <= crate::builtins::array_buffer::byte_length(agent, buffer) {
+        crate::builtins::array_buffer::write_bytes(agent, buffer, offset, &out);
     }
     let r = agent.new_plain_object();
     agent.create_data_property_or_throw(

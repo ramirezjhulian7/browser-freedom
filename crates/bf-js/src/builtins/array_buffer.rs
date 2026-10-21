@@ -3,12 +3,14 @@
 //! valores y bytes (GetValueFromBuffer, SetValueInBuffer, NumericToRawBytes y
 //! RawBytesToNumeric, §25.1.3), incluida la de binary16 (Float16Array, ES2025).
 //!
-//! Sin hilos, un Shared Data Block es un bloque más del agente: las operaciones con orden
-//! `seq-cst` y `unordered` son la misma lectura o escritura.
+//! Un Shared Data Block es un [`SharedBlock`] (`crate::host::agents`): memoria compartida
+//! de verdad entre los agentes de distintos hilos, sin `unsafe` (palabras atómicas). Un
+//! ArrayBuffer común tiene su `Vec<u8>`; un SharedArrayBuffer, su bloque.
 
 use crate::bigint::BigInt;
 use crate::builtins::{FnEntry, accessor, constructor, methods, to_string_tag};
 use crate::heap::Gc;
+use crate::host::agents::SharedBlock;
 use crate::object::{Object, ObjectKind};
 use crate::value::{PropertyKey, Value};
 use crate::vm::function::CallArgs;
@@ -21,12 +23,54 @@ pub const MAX_BYTE_LENGTH: u64 = 1 << 30;
 /// Los internal slots de un ArrayBuffer o SharedArrayBuffer.
 #[derive(Debug, Default)]
 pub struct ArrayBufferData {
-    /// `[[ArrayBufferData]]`; `None` si está detached.
+    /// `[[ArrayBufferData]]` de un ArrayBuffer; `None` si está detached (o es compartido).
     pub data: Option<Vec<u8>>,
     /// `[[ArrayBufferMaxByteLength]]` (redimensionable o creciente).
     pub max_byte_length: Option<usize>,
     /// ¿Es un SharedArrayBuffer?
     pub shared: bool,
+    /// `[[ArrayBufferData]]` de un SharedArrayBuffer: el Shared Data Block (E3).
+    pub block: Option<SharedBlock>,
+}
+
+/// Los bytes `[start, start + len)` de un buffer (vacío si está detached; recortado al
+/// largo del buffer).
+pub fn read_bytes(agent: &Agent, b: Gc<Object>, start: usize, len: usize) -> Vec<u8> {
+    match buffer_data(agent, b) {
+        Some(ArrayBufferData {
+            block: Some(block), ..
+        }) => {
+            let end = (start + len).min(block.len());
+            block.to_vec(start, end.saturating_sub(start))
+        }
+        Some(ArrayBufferData { data: Some(d), .. }) => d
+            .get(start..(start + len).min(d.len()))
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Escribe `bytes` desde `start` (lo que cae fuera del buffer se descarta).
+pub fn write_bytes(agent: &mut Agent, b: Gc<Object>, start: usize, bytes: &[u8]) {
+    match buffer_data_mut(agent, b) {
+        Some(ArrayBufferData {
+            block: Some(block), ..
+        }) => {
+            let n = bytes.len().min(block.len().saturating_sub(start));
+            block.write(start, &bytes[..n]);
+        }
+        Some(ArrayBufferData { data: Some(d), .. }) => {
+            let n = bytes.len().min(d.len().saturating_sub(start));
+            d[start..start + n].copy_from_slice(&bytes[..n]);
+        }
+        _ => {}
+    }
+}
+
+/// El Shared Data Block de un SharedArrayBuffer.
+pub fn shared_block(agent: &Agent, b: Gc<Object>) -> Option<&SharedBlock> {
+    buffer_data(agent, b).and_then(|d| d.block.as_ref())
 }
 
 /// Los tipos de elemento (Table 71, §23.2).
@@ -80,7 +124,7 @@ fn buffer_data_mut(agent: &mut Agent, b: Gc<Object>) -> Option<&mut ArrayBufferD
 
 /// IsDetachedBuffer (§25.1.3.2).
 pub fn is_detached(agent: &Agent, b: Gc<Object>) -> bool {
-    buffer_data(agent, b).is_none_or(|d| d.data.is_none())
+    buffer_data(agent, b).is_none_or(|d| d.data.is_none() && d.block.is_none())
 }
 
 /// IsSharedArrayBuffer (§25.2.2.2).
@@ -95,9 +139,13 @@ pub fn is_fixed_length(agent: &Agent, b: Gc<Object>) -> bool {
 
 /// ArrayBufferByteLength (§25.1.3.8): 0 si está detached.
 pub fn byte_length(agent: &Agent, b: Gc<Object>) -> usize {
-    buffer_data(agent, b)
-        .and_then(|d| d.data.as_ref())
-        .map_or(0, Vec::len)
+    match buffer_data(agent, b) {
+        Some(ArrayBufferData {
+            block: Some(block), ..
+        }) => block.len(),
+        Some(d) => d.data.as_ref().map_or(0, Vec::len),
+        None => 0,
+    }
 }
 
 /// CreateByteDataBlock (§6.2.9.1).
@@ -139,6 +187,7 @@ pub fn allocate_array_buffer(
             data: Some(block),
             max_byte_length: max.map(|m| m as usize),
             shared: false,
+            block: None,
         })),
     )))
 }
@@ -157,13 +206,8 @@ pub fn clone_array_buffer(
     len: usize,
 ) -> JsResult<Gc<Object>> {
     let target = allocate_default(agent, len as u64)?;
-    let bytes: Vec<u8> = buffer_data(agent, src)
-        .and_then(|d| d.data.as_ref())
-        .map(|d| d[offset..offset + len].to_vec())
-        .unwrap_or_default();
-    if let Some(d) = buffer_data_mut(agent, target).and_then(|d| d.data.as_mut()) {
-        d[..bytes.len()].copy_from_slice(&bytes);
-    }
+    let bytes = read_bytes(agent, src, offset, len);
+    write_bytes(agent, target, 0, &bytes);
     Ok(target)
 }
 
@@ -190,13 +234,8 @@ pub fn copy_bytes(
     from_index: usize,
     len: usize,
 ) {
-    let bytes: Vec<u8> = match buffer_data(agent, from).and_then(|d| d.data.as_ref()) {
-        Some(d) => d[from_index..from_index + len].to_vec(),
-        None => return,
-    };
-    if let Some(d) = buffer_data_mut(agent, to).and_then(|d| d.data.as_mut()) {
-        d[to_index..to_index + len].copy_from_slice(&bytes);
-    }
+    let bytes = read_bytes(agent, from, from_index, len);
+    write_bytes(agent, to, to_index, &bytes);
 }
 
 // --- Conversiones (§25.1.3.15–17) ---
@@ -363,6 +402,10 @@ pub fn raw_to_numeric(agent: &mut Agent, ty: ElementType, raw: u64) -> Value {
 
 /// Lee `size` bytes en `index` como entero little-endian (o big-endian si `!little`).
 pub fn read_raw(agent: &Agent, b: Gc<Object>, index: usize, size: usize, little: bool) -> u64 {
+    if let Some(block) = shared_block(agent, b) {
+        let raw = block.load(index, size);
+        return if little { raw } else { swap_bytes(raw, size) };
+    }
     let Some(d) = buffer_data(agent, b).and_then(|d| d.data.as_ref()) else {
         return 0;
     };
@@ -387,6 +430,14 @@ pub fn write_raw(
     raw: u64,
     little: bool,
 ) {
+    if let Some(block) = shared_block(agent, b) {
+        block.store(
+            index,
+            size,
+            if little { raw } else { swap_bytes(raw, size) },
+        );
+        return;
+    }
     let Some(d) = buffer_data_mut(agent, b).and_then(|d| d.data.as_mut()) else {
         return;
     };
@@ -396,6 +447,14 @@ pub fn write_raw(
             *slot = (raw >> shift) as u8;
         }
     }
+}
+
+/// Invierte el orden de los `size` bytes bajos de `raw`.
+fn swap_bytes(raw: u64, size: usize) -> u64 {
+    if size == 0 {
+        return 0;
+    }
+    raw.swap_bytes() >> (8 * (8 - size))
 }
 
 /// GetValueFromBuffer (§25.1.3.15).
@@ -709,18 +768,18 @@ fn sab_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.range_error("byteLength exceeds maxByteLength");
     }
     let proto = agent.get_prototype_from_constructor(nt, |i| i.shared_array_buffer_prototype)?;
-    let block = create_byte_data_block(agent, len)?;
-    if let Some(m) = max
-        && m > MAX_BYTE_LENGTH
-    {
+    // CreateSharedByteDataBlock (§6.2.9.2): la memoria compartida de verdad (E3).
+    if len > MAX_BYTE_LENGTH || max.is_some_and(|m| m > MAX_BYTE_LENGTH) {
         return agent.range_error("SharedArrayBuffer allocation failed");
     }
+    let block = SharedBlock::new(len as usize, max.unwrap_or(len) as usize);
     Ok(Value::Object(agent.alloc(Object::new(
         Some(proto),
         ObjectKind::ArrayBuffer(Box::new(ArrayBufferData {
-            data: Some(block),
+            data: None,
             max_byte_length: max.map(|m| m as usize),
             shared: true,
+            block: Some(block),
         })),
     ))))
 }
@@ -754,8 +813,10 @@ fn sab_grow(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if new_len < current || new_len > max as u64 {
         return agent.range_error("SharedArrayBuffer.prototype.grow: invalid length");
     }
-    if let Some(d) = buffer_data_mut(agent, b).and_then(|d| d.data.as_mut()) {
-        d.resize(new_len as usize, 0);
+    // HostGrowSharedArrayBuffer: el largo solo sube, aunque otro agente crezca a la vez.
+    let grown = shared_block(agent, b).is_some_and(|block| block.grow(new_len as usize));
+    if !grown {
+        return agent.range_error("SharedArrayBuffer.prototype.grow: invalid length");
     }
     Ok(Value::Undefined)
 }

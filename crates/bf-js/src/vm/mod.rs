@@ -223,6 +223,10 @@ pub struct Agent {
     /// Los waiters de `Atomics.waitAsync` y los timers del host, que RunJobs dispara cuando
     /// la cola queda vacía.
     pub(crate) timers: Vec<crate::builtins::atomics::Timer>,
+    /// E3: por dónde otros agentes despiertan a este (los waiters de `waitAsync`).
+    pub signal: std::sync::Arc<crate::host::agents::AgentSignal>,
+    /// E3: los agentes de `$262.agent.start`.
+    pub(crate) agent_group: Option<crate::host::agents::AgentGroup>,
     /// Los objetos host, los hooks del embebedor y el bucle de eventos (`crate::host`).
     pub host: crate::host::HostState,
 }
@@ -278,6 +282,8 @@ impl Agent {
             job_errors: Vec::new(),
             can_block: false,
             timers: Vec::new(),
+            signal: std::sync::Arc::default(),
+            agent_group: None,
             host: crate::host::HostState::default(),
         };
         let realm = agent.create_realm();

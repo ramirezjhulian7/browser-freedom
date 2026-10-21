@@ -160,19 +160,39 @@ impl Agent {
         if self.has_pending_tasks() {
             return Some(now);
         }
-        self.host
+        // E3: los waiters de `Atomics.waitAsync` (su vencimiento es de reloj real).
+        let atomics = crate::builtins::atomics::next_timer_deadline(self).map(|d| {
+            now + d
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs_f64()
+                * 1000.0
+        });
+        let timers = self
+            .host
             .event_loop
             .timers
             .values()
             .filter(|t| !t.queued)
             .map(|t| t.when)
-            .reduce(f64::min)
+            .reduce(f64::min);
+        match (timers, atomics) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Una iteración del bucle de eventos (§8.1.7.3 pasos 1–2 y 5): los temporizadores
     /// vencidos pasan a la cola de *timers*, se ejecuta la tarea más antigua de todas las
     /// colas y después el punto de control de microtasks. `false` si no había ninguna.
     pub fn run_one_task(&mut self) -> JsResult<bool> {
+        // E3: los waiters de `Atomics.waitAsync` notificados por otro agente o vencidos se
+        // resuelven como una tarea (con su punto de control de microtasks).
+        let pending_atomics = self.timers.len();
+        crate::builtins::atomics::poll_timers(self)?;
+        if self.timers.len() != pending_atomics {
+            self.perform_microtask_checkpoint()?;
+            return Ok(true);
+        }
         let now = self.host.hooks.now();
         let el = &mut self.host.event_loop;
         let mut due: Vec<(f64, u64, TimerId)> = el
