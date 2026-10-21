@@ -145,13 +145,20 @@ pub fn parse_float(input: &str) -> Option<f64> {
         }
     }
     text.push_str(&int_digits);
-    // Fracción.
-    if i < b.len() && b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
-        text.push('.');
-        i += 1;
-        while i < b.len() && b[i].is_ascii_digit() {
-            text.push(b[i] as char);
-            i += 1;
+    // Fracción (paso 9): después del punto, dígitos o directamente el exponente (`1.e2`);
+    // cualquier otra cosa termina el número.
+    if i < b.len() && b[i] == b'.' {
+        match b.get(i + 1) {
+            Some(c) if c.is_ascii_digit() => {
+                text.push('.');
+                i += 1;
+                while i < b.len() && b[i].is_ascii_digit() {
+                    text.push(b[i] as char);
+                    i += 1;
+                }
+            }
+            Some(b'e' | b'E') => i += 1,
+            _ => {}
         }
     }
     // Exponente: solo si después de `e` (y el signo) hay dígitos.

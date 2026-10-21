@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use bf_web::html::testharness::{DocResult, Harness, SubStatus, is_test_file, run_doc, test_docs};
+use bf_web::html::testharness::{
+    DocResult, Harness, SubStatus, doc_limit, is_test_file, run_doc, test_docs,
+};
 
 /// Los directorios por defecto.
 const DEFAULT_DIRS: &[&str] = &[
@@ -139,6 +141,9 @@ fn main() {
     }
     files.sort();
     files.dedup();
+    // Un trabajo por documento (las variantes de un `.any.js` también corren en paralelo):
+    // cada uno tiene su agente y no comparte estado.
+    let docs: Vec<_> = files.iter().flat_map(|rel| test_docs(&root, rel)).collect();
     let start = Instant::now();
     let limit = Duration::from_secs(timeout);
     let next = Mutex::new(0usize);
@@ -155,11 +160,9 @@ fn main() {
                             *n += 1;
                             i
                         };
-                        let Some(rel) = files.get(i) else { break };
-                        for doc in test_docs(&root, rel) {
-                            let r = run_doc(&root, &doc, limit);
-                            results.lock().unwrap().push(r);
-                        }
+                        let Some(doc) = docs.get(i) else { break };
+                        let r = run_doc(&root, doc, doc_limit(doc, limit));
+                        results.lock().unwrap().push(r);
                     }
                 })
                 .expect("hilo del runner");
@@ -290,7 +293,8 @@ fn write_status(
          - Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un \
          agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en \
          `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un \
-         `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por archivo.\n\
+         `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por documento \
+         (60 s con `<meta name=timeout content=long>` o `META: timeout=long`), un hilo por documento.\n\
          - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). \
          Detalle por subtest: `target/wpt-testharness/results.tsv`.\n\n\
          {table}{causes}",

@@ -1735,6 +1735,13 @@ impl App {
         }
     }
 
+    /// Le cuenta al hilo del documento el desplazamiento y la escala actuales (el
+    /// `LayoutSnapshot` del CSSOM View); solo manda algo si cambiaron.
+    fn sync_view(&mut self) {
+        let dpr = self.dpi() * self.zoom;
+        self.worker.set_scroll(self.tab_key, self.scroll, dpr);
+    }
+
     /// La pantalla en la que está la ventana (`window.screen`), en px CSS.
     fn screen_info(&self) -> bf_web::bom::ScreenInfo {
         let mut info = bf_web::bom::ScreenInfo::default();
@@ -1788,6 +1795,11 @@ impl App {
                 }
             }
             PageRequest::Close => self.close_tab(i),
+            PageRequest::ScrollTo(x, y) => self.with_tab(i, |app| {
+                app.scroll = (x, y);
+                app.clamp_scroll();
+                app.redraw_later();
+            }),
             PageRequest::Dialog {
                 kind,
                 message,
@@ -2221,6 +2233,7 @@ impl App {
 
     fn redraw(&mut self) {
         trace("redraw");
+        self.sync_view();
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -2936,6 +2949,7 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
 impl App {
     /// Espera a que el hilo de trabajo termine lo pendiente (sesiones sin ventana).
     fn settle(&mut self) {
+        self.sync_view();
         while self.any_loading() || self.relayout.is_some() {
             let Ok(msg) = self
                 .worker

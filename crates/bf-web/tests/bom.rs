@@ -798,3 +798,47 @@ fn performance_timing_after_load() {
          performance.timing.domContentLoadedEventStart > 0"
     ));
 }
+
+/// Los eventos que dispara el parser llegan a los listeners de JavaScript.
+#[test]
+fn parser_events_reach_js_listeners() {
+    let mut p = Page::scripted(
+        "<script>var log = []; document.addEventListener('DOMContentLoaded', function (e) {          log.push(e.type + ':' + document.readyState + ':' + !!document.body); });          window.addEventListener('load', function (e) { log.push('load:' + document.readyState); });         </script><body><p>x",
+        &[],
+    );
+    assert_eq!(
+        p.show("log.join()"),
+        "DOMContentLoaded:interactive:true,load:complete"
+    );
+}
+
+/// Un evento del usuario (de confianza) despachado desde fuera de un script.
+#[test]
+fn trusted_dispatch_lends_the_document() {
+    let mut p = Page::new("<body><button id=b>x</button>");
+    p.eval(
+        "var got = []; document.getElementById('b').addEventListener('click', function (e) {          got.push(e.type, e.isTrusted, e.target.id, document.body !== null); e.preventDefault(); });",
+    );
+    let realm = p.ctx.realm;
+    let b = {
+        let ctx = p.ctx.get(&p.rt.agent);
+        ctx.document().get_element_by_id(&"b".into()).unwrap()
+    };
+    let mut ev = bf_dom::events::Event::new(
+        "click",
+        bf_dom::events::EventInit {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+        },
+    );
+    let ok = bom::script::dispatch_trusted(
+        &mut p.rt.agent,
+        realm,
+        bf_dom::events::EventTarget::Node(b),
+        &mut ev,
+    );
+    assert!(!ok, "el listener canceló el evento");
+    assert_eq!(p.show("got.join()"), "click,true,b,true");
+    assert!(p.truthy("document.getElementById('b') !== null"));
+}

@@ -32,6 +32,8 @@ pub use tiny_skia::{Pixmap, PixmapPaint, Transform};
 /// Un documento estilado, maquetado y listo para pintar.
 pub struct Page {
     pub fonts: Fonts,
+    /// Los estilos computados con que se maquetó (el CSSOM de la página los reutiliza).
+    pub styles: std::sync::Arc<bf_style::StyleMap>,
     pub tree: FragmentTree,
     pub display_list: DisplayList,
     pub images: PageImages,
@@ -147,6 +149,7 @@ pub fn prepare_page(doc: &Document, ctx: &PageContext<'_>, viewport: Size) -> Pa
     };
     Page {
         fonts,
+        styles: std::sync::Arc::new(styles),
         tree,
         display_list,
         images,

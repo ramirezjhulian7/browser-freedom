@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bf_web::html::testharness::{
-    Harness, SubStatus, TestDoc, is_test_file, meta_lines, run_doc, test_docs,
+    Harness, SubStatus, TestDoc, doc_limit, is_test_file, meta_lines, run_doc, test_docs,
 };
 
 /// Un `testharness.js` mínimo: `test()` corre en el acto, `done()` llama a los callbacks.
@@ -44,7 +44,7 @@ fn fake_root(name: &str) -> PathBuf {
 fn run(root: &Path, rel: &str) -> Vec<bf_web::html::testharness::DocResult> {
     test_docs(root, rel)
         .iter()
-        .map(|d| run_doc(root, d, Duration::from_secs(10)))
+        .map(|d| run_doc(root, d, doc_limit(d, Duration::from_secs(10))))
         .collect()
 }
 
@@ -128,6 +128,36 @@ fn variants_and_no_result() {
 }
 
 #[test]
+fn long_timeout() {
+    let root = fake_root("long");
+    std::fs::write(
+        root.join("t/l.html"),
+        "<meta name=\"timeout\" content='long'><script src=/resources/testharness.js></script>",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("t/s.html"),
+        "<meta name=viewport content=long><script src=/resources/testharness.js></script>",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("t/l.any.js"),
+        "// META: timeout=long
+done();
+",
+    )
+    .unwrap();
+    assert!(test_docs(&root, "t/l.html")[0].long);
+    assert!(!test_docs(&root, "t/s.html")[0].long);
+    let d = &test_docs(&root, "t/l.any.js")[0];
+    assert!(d.long);
+    assert_eq!(
+        doc_limit(d, Duration::from_secs(10)),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
 fn file_selection() {
     assert!(is_test_file("dom/nodes/Node-cloneNode.html"));
     assert!(is_test_file("url/url-constructor.any.js"));
@@ -176,7 +206,7 @@ fn wpt_testharness_no_crashes() {
     let (mut docs, mut pass, mut total) = (0, 0, 0);
     for rel in &files {
         for doc in test_docs(&root, rel) {
-            let r = run_doc(&root, &doc, Duration::from_secs(10));
+            let r = run_doc(&root, &doc, doc_limit(&doc, Duration::from_secs(10)));
             docs += 1;
             total += r.subtests.len();
             pass += r

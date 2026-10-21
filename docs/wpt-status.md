@@ -61,7 +61,7 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md`.
 
 - Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `url`, `encoding`, `console`, `html/webappapis`, `html/dom`; 759 documentos en 4 s.
-- Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por archivo.
+- Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por documento (60 s con `<meta name=timeout content=long>` o `META: timeout=long`), un hilo por documento.
 - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). Detalle por subtest: `target/wpt-testharness/results.tsv`.
 
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
@@ -84,28 +84,28 @@ Las causas más frecuentes de los archivos sin estado OK:
 
 ## Proyección de testharness con el core DOM de E3
 
-Medido el 2026-10-20 con un merge temporal (sin commit) de `duo/e3` (`8961aeb`, WIP: eventos,
-colecciones, `Node`/`Element`/`Document` completos) sobre `master`, y los listeners que dispara
-el parser (`DOMContentLoaded`, `load`) llamados con el `JsHost` de E3. Es lo que mostrará la
-sección anterior cuando el core de E3 esté en `master`. Directorios: `url`, `encoding`,
-`console`, `html/webappapis`, `html/dom`, `dom/nodes`.
+Medido el 2026-10-20 con un merge temporal (sin commit) de `duo/e3` (`f6b1aef`, WIP: eventos,
+colecciones, `Node`/`Element`/`Document` completos, `ListenerInvoker`) sobre `duo/e1` con las
+interfaces `HTML*Element`. Es lo que mostrará la sección anterior cuando el core de E3 esté en
+`master`. Directorios: `url`, `encoding`, `console`, `html/webappapis`, `html/dom`, `dom/nodes`.
 
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | console | 12 | 12 | 29 | 12 | 17 | 0 | 0 | 41.4% |
-| dom/nodes | 359 | 296 | 9656 | 7537 | 1363 | 80 | 676 | 78.1% |
-| encoding | 45 | 39 | 12003 | 11275 | 382 | 343 | 3 | 93.9% |
-| encoding/legacy-mb-japanese | 51 | 10 | 227170 | 0 | 66019 | 0 | 161151 | 0.0% |
-| encoding/legacy-mb-korean | 26 | 1 | 74430 | 0 | 3119 | 0 | 71311 | 0.0% |
-| encoding/legacy-mb-schinese | 4 | 4 | 660 | 2 | 658 | 0 | 0 | 0.3% |
-| encoding/legacy-mb-tchinese | 23 | 3 | 78893 | 0 | 14742 | 0 | 64151 | 0.0% |
+| dom/nodes | 359 | 294 | 9657 | 7707 | 1192 | 81 | 677 | 79.8% |
+| encoding | 45 | 39 | 12003 | 11277 | 380 | 343 | 3 | 94.0% |
+| encoding/legacy-mb-japanese | 51 | 12 | 333515 | 0 | 129825 | 1 | 203689 | 0.0% |
+| encoding/legacy-mb-korean | 26 | 3 | 239960 | 0 | 43264 | 0 | 196696 | 0.0% |
+| encoding/legacy-mb-schinese | 4 | 4 | 660 | 4 | 656 | 0 | 0 | 0.6% |
+| encoding/legacy-mb-tchinese | 23 | 5 | 193181 | 123 | 43390 | 0 | 149668 | 0.1% |
 | encoding/streams | 13 | 12 | 111 | 0 | 111 | 0 | 0 | 0.0% |
-| html/dom | 223 | 147 | 34513 | 2985 | 31439 | 41 | 48 | 8.6% |
-| html/webappapis | 321 | 197 | 1079 | 545 | 299 | 179 | 56 | 50.5% |
-| url | 41 | 40 | 573 | 471 | 101 | 1 | 0 | 82.2% |
-| **Total** | 1118 | 761 | 439117 | 22827 | 118250 | 644 | 297396 | 5.2% |
+| html/dom | 223 | 157 | 64260 | 62272 | 1888 | 46 | 54 | 96.9% |
+| html/webappapis | 321 | 196 | 1079 | 545 | 298 | 180 | 56 | 50.5% |
+| url | 41 | 39 | 573 | 472 | 94 | 2 | 5 | 82.4% |
+| **Total** | 1118 | 773 | 855028 | 82412 | 221115 | 653 | 550848 | 9.6% |
 
+- `html/dom/reflection-*.html`: 61266 / 61302 subtests (99.9%); fallan solo `link.nonce` y
+  `style.nonce` (36): el IDL `nonce` de HTMLOrSVGElement no refleja el atributo (guarda
+  `[[CryptographicNonce]]`), y el test lo trata como string reflejado.
 - `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
-  casi completo); `html/dom`: los `reflection-*` necesitan las interfaces `HTML*Element`
-  (parte 3 de E1). Sin ellas, `html/dom/reflection-*` da 2685/31723 subtests (8.5%); tres
-  archivos (`reflection-embedded`, `-forms`, `-text`) no llegan a reportar en 10 s.
+  casi completo).
