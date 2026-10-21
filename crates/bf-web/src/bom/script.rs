@@ -250,6 +250,30 @@ pub fn begin_parse_with(agent: &mut Agent, realm: RealmId, url: &Url, scripting:
     }
 }
 
+/// La red de una ventana tal como la instaló el navegador (para dársela a sus marcos).
+#[derive(Clone)]
+pub struct NetHookup {
+    pub backend: Arc<dyn crate::net::NetBackend>,
+    /// Peticiones en hilos aparte (el navegador llama a [`crate::net::pump`]).
+    pub threaded: bool,
+    pub waker: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// Instala la red de `fetch`/XHR en `realm`: el backend (la misma jarra de cookies que
+/// `document.cookie`) y, si las peticiones van en hilos, quién despierta al navegador.
+pub fn install_net(agent: &mut Agent, realm: RealmId, net: NetHookup) {
+    crate::net::set_backend(agent, realm, net.backend.clone(), net.threaded);
+    if let Some(w) = &net.waker {
+        crate::net::set_waker(agent, realm, w.clone());
+    }
+    agent.set_realm_data(realm, net);
+}
+
+/// La red instalada en `realm`.
+pub fn net_of(agent: &Agent, realm: RealmId) -> Option<NetHookup> {
+    agent.realm_data::<NetHookup>(realm).cloned()
+}
+
 /// Cambia la URL base de la ventana `realm` (y la de sus módulos).
 pub fn set_base(agent: &mut Agent, realm: RealmId, base: &Url) {
     WebContextHandle { realm }.get_mut(agent).base = base.clone();

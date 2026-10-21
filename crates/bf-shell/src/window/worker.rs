@@ -176,6 +176,8 @@ impl Documents {
 
 enum Msg {
     Job(Job),
+    /// Llegó una respuesta de red (`fetch`/XHR): hay tareas que correr.
+    NetWake,
     /// Cambió el desplazamiento o la escala (ver [`Documents::set_scroll`]).
     ViewChanged,
     Stop,
@@ -216,6 +218,8 @@ struct State {
     fonts: Arc<FontDb>,
     tx: Sender<FromDoc>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// El canal de este mismo hilo (para que la red lo despierte).
+    me: Sender<Msg>,
     view: Arc<Mutex<View>>,
     current: Option<Current>,
     last_frame: Instant,
@@ -236,6 +240,7 @@ impl DocumentThread {
         let (jobs, rx) = channel::<Msg>();
         let view = Arc::new(Mutex::new(View::default()));
         let shared = view.clone();
+        let me = jobs.clone();
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
@@ -246,6 +251,7 @@ impl DocumentThread {
                     fonts,
                     tx,
                     wake,
+                    me,
                     view: shared,
                     current: None,
                     last_frame: Instant::now(),
@@ -416,6 +422,10 @@ impl State {
                         self.view_changed();
                         continue;
                     }
+                    Some(Msg::NetWake) => {
+                        self.run_tasks();
+                        continue;
+                    }
                     Some(Msg::Job(j)) => queue.push_back(j),
                     None => {
                         self.run_tasks();
@@ -428,6 +438,7 @@ impl State {
                 match next {
                     Msg::Job(j) => queue.push_back(j),
                     Msg::ViewChanged => self.view_changed(),
+                    Msg::NetWake => {}
                     Msg::Stop => stop = true,
                 }
             }
@@ -510,7 +521,17 @@ impl State {
             referrer,
             screen,
         } = job;
+        let net_waker: Arc<dyn Fn() + Send + Sync> = {
+            let me = Mutex::new(self.me.clone());
+            Arc::new(move || {
+                let _ = me
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .send(Msg::NetWake);
+            })
+        };
         let env = PageEnv {
+            net_waker: Some(net_waker),
             defer_load: true,
             fonts: Some(self.fonts.clone()),
             net: net.clone(),

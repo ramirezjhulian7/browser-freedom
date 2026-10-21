@@ -119,6 +119,9 @@ pub struct PageEnv {
     /// El navegador avisa cuándo terminaron de cargar imágenes y hojas
     /// ([`Engine::resources_loaded`]); si no (línea de comandos), `load` sale al parsear.
     pub defer_load: bool,
+    /// Quién despierta el bucle del documento cuando llega una respuesta de `fetch`/XHR; sin
+    /// él (línea de comandos), las peticiones bloquean.
+    pub net_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl PageEnv {
@@ -131,6 +134,7 @@ impl PageEnv {
             screen: ScreenInfo::default(),
             fonts: None,
             defer_load: false,
+            net_waker: None,
         }
     }
 }
@@ -560,6 +564,16 @@ impl Engine {
             Box::new(ShellBom { env: env.clone() }),
         );
         bf_web::bom::script::install_scripting(&mut self.rt.agent, realm, url, loader);
+        // `fetch`/XHR con la red (y la jarra de cookies) de la pestaña.
+        bf_web::bom::script::install_net(
+            &mut self.rt.agent,
+            realm,
+            bf_web::bom::script::NetHookup {
+                backend: env.net.clone(),
+                threaded: env.net_waker.is_some(),
+                waker: env.net_waker.clone(),
+            },
+        );
         if let Some(db) = &env.fonts {
             let provider = ShellLayout {
                 fonts: bf_font::Fonts::new(db.clone()),
@@ -806,6 +820,12 @@ impl Engine {
 
     /// Corre las tareas que vencieron (temporizadores, async, …). Devuelve cuántas corrió.
     pub fn run_due_tasks(&mut self) -> usize {
+        // Las respuestas de red que llegaron (de esta ventana y de sus marcos).
+        for realm in 0..self.rt.agent.realms.len() {
+            if self.rt.agent.realm_data::<WebContext>(realm).is_some() {
+                bf_web::net::pump(&mut self.rt.agent, realm);
+            }
+        }
         let mut n = 0;
         loop {
             self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);

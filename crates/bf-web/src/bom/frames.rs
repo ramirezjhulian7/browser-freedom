@@ -270,6 +270,10 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
             requests,
         }),
     );
+    // La red de `fetch`/XHR es la de la pestaña.
+    if let Some(net) = super::script::net_of(agent, parent) {
+        super::script::install_net(agent, realm, net);
+    }
     if let Some(loader) =
         super::script::script_env(agent, parent).map(super::script::ScriptEnv::loader)
     {
