@@ -26,6 +26,9 @@ Las reglas no cambian:
 
 ## Fase 2: JavaScript y la plataforma web dinámica
 
+Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar) está en
+[`faltantes-web.md`](faltantes-web.md).
+
 ### 2.1 Motor JavaScript `bf-js` (ECMAScript 2026)
 
 - **Parser propio**: tokenizador y parser de ECMA-262 2026 (scripts y módulos, ASI, regex
