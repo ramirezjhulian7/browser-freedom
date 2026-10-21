@@ -2738,6 +2738,15 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, genv: Gc<Env>, op: Op) -
             let n = f.stack.len();
             let (a, b) = match (f.stack.get(n.wrapping_sub(2)), f.stack.get(n.wrapping_sub(1))) {
                 (Some(Value::Number(a)), Some(Value::Number(b))) => (*a, *b),
+                // Concatenación de primitivos sin conversiones con efectos (§13.15.3).
+                (Some(l), Some(r)) if op == Op::Add => {
+                    let Some(v) = fast_concat(l, r) else {
+                        return Fast::Slow;
+                    };
+                    f.stack.pop();
+                    *f.stack.last_mut().expect("pila") = v;
+                    return Fast::Done;
+                }
                 _ => return Fast::Slow,
             };
             let v = match op {
@@ -2929,4 +2938,26 @@ fn fast_ic_global(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, genv: G
             })
         })
         .flatten()
+}
+
+/// `l + r` con un string y un string o un número (ToString del número, §6.1.6.1.20).
+#[inline]
+fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
+    use crate::abstract_ops::number::number_to_string;
+    let (a, b) = match (l, r) {
+        (Value::String(a), Value::String(b)) => (a.clone(), b.clone()),
+        (Value::String(a), Value::Number(n)) => (a.clone(), number_to_string(*n)),
+        (Value::Number(n), Value::String(b)) => (number_to_string(*n), b.clone()),
+        _ => return None,
+    };
+    if a.is_empty() {
+        return Some(Value::String(b));
+    }
+    if b.is_empty() {
+        return Some(Value::String(a));
+    }
+    let mut u = Vec::with_capacity(a.len() + b.len());
+    u.extend_from_slice(a.units());
+    u.extend_from_slice(b.units());
+    Some(Value::String(JsString::from_units(u)))
 }
