@@ -37,9 +37,8 @@ pub fn normalize(v: &str) -> String {
 /// ¿Es `s` un `token` de HTTP (RFC 9110 §5.6.2)?
 pub fn is_token(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
-        })
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c))
 }
 
 /// "Header value" (Fetch §2.2.2): sin NUL, LF ni CR, ni espacios a los lados.
@@ -201,7 +200,11 @@ impl HeaderList {
 
     /// "Set": reemplaza el primero y quita los demás.
     pub fn set(&mut self, name: &str, value: &str) {
-        if let Some(i) = self.0.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        if let Some(i) = self
+            .0
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
             self.0[i].1 = value.to_owned();
             let mut k = 0;
             self.0.retain(|(n, _)| {
@@ -216,7 +219,11 @@ impl HeaderList {
 
     /// "Combine": agrega `value` al valor existente separado por `", "`.
     pub fn combine(&mut self, name: &str, value: &str) {
-        if let Some((_, v)) = self.0.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        if let Some((_, v)) = self
+            .0
+            .iter_mut()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
             v.push_str(", ");
             v.push_str(value);
         } else {
@@ -301,7 +308,9 @@ pub fn byte_string(agent: &mut Agent, v: &Value) -> JsResult<String> {
     let mut out = String::new();
     for u in s.units() {
         if *u > 0xFF {
-            return agent.type_error("Cannot convert argument to a ByteString because the character exceeds 255");
+            return agent.type_error(
+                "Cannot convert argument to a ByteString because the character exceeds 255",
+            );
         }
         out.push(char::from(*u as u8));
     }
@@ -373,8 +382,12 @@ pub fn fill(agent: &mut Agent, d: &mut HeadersData, init: &Value) -> JsResult<()
         let pairs = collect_iterable(agent, init, &method)?;
         for p in pairs {
             let items = match &p {
-                Value::Object(_) => {
-                    let m = agent.get_method_iterator(&p)?;
+                Value::Object(po) => {
+                    let ik = PropertyKey::Symbol(agent.well_known.iterator);
+                    let m = agent.get(*po, &ik, p.clone())?;
+                    if !agent.is_callable(&m) {
+                        return agent.type_error("Each header pair must be an iterable");
+                    }
                     collect_iterable(agent, &p, &m)?
                 }
                 _ => return agent.type_error("Each header pair must be an iterable"),
@@ -391,7 +404,7 @@ pub fn fill(agent: &mut Agent, d: &mut HeadersData, init: &Value) -> JsResult<()
     // record<ByteString, ByteString>: las claves propias enumerables en orden.
     let keys = agent.own_property_keys(o)?;
     for k in keys {
-        let PropertyKey::String(_) | PropertyKey::Index(_) = &k else {
+        let (PropertyKey::String(_) | PropertyKey::Index(_)) = &k else {
             continue;
         };
         let Some(desc) = agent.get_own_property(o, &k)? else {
@@ -400,7 +413,7 @@ pub fn fill(agent: &mut Agent, d: &mut HeadersData, init: &Value) -> JsResult<()
         if desc.enumerable != Some(true) {
             continue;
         }
-        let kv = k.to_value(agent);
+        let kv = k.to_value();
         let n = byte_string(agent, &kv)?;
         let v = agent.get(o, &k, init.clone())?;
         let v = byte_string(agent, &v)?;
@@ -550,7 +563,11 @@ fn for_each(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let Some((n, v)) = ps.get(i).cloned() else {
             break;
         };
-        agent.call(&cb, a.arg(1), &[Value::str(&v), Value::str(&n), a.this.clone()])?;
+        agent.call(
+            &cb,
+            a.arg(1),
+            &[Value::str(&v), Value::str(&n), a.this.clone()],
+        )?;
         i += 1;
     }
     Ok(Value::Undefined)
@@ -566,7 +583,7 @@ fn values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     iterator_from_pairs(agent, "Headers Iterator", ps, 1)
 }
 
-fn entries(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+pub fn entries(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let ps = pairs(agent, a)?;
     iterator_from_pairs(agent, "Headers Iterator", ps, 2)
 }
@@ -597,9 +614,15 @@ mod tests {
         l.set("a", "9");
         assert_eq!(l.get("A").as_deref(), Some("9"));
         assert!(is_forbidden_request_header("Sec-Fetch-Mode", ""));
-        assert!(is_forbidden_request_header("X-HTTP-Method-Override", "trace"));
+        assert!(is_forbidden_request_header(
+            "X-HTTP-Method-Override",
+            "trace"
+        ));
         assert!(!is_forbidden_request_header("X-Foo", ""));
-        assert!(is_cors_safelisted("content-type", "text/plain;charset=utf-8"));
+        assert!(is_cors_safelisted(
+            "content-type",
+            "text/plain;charset=utf-8"
+        ));
         assert!(!is_cors_safelisted("content-type", "application/json"));
         assert_eq!(normalize("  a b \t"), "a b");
     }

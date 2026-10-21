@@ -47,6 +47,7 @@ pub mod bom;
 pub mod cssom;
 pub mod dom;
 pub mod html;
+pub mod net; // E2: fetch, XMLHttpRequest, FormData, Blob
 
 pub use bf_dom::{Document, NodeId};
 pub use bf_html::Parser;
@@ -254,4 +255,5 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     html::register(agent, realm, ctx); // E1
     bom::register(agent, realm, ctx); // E4
     cssom::register(agent, realm, ctx); // E2
+    net::register(agent, realm, ctx); // E2
 }
