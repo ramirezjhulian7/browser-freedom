@@ -362,6 +362,8 @@ dependencies = [
 name = "bf-js"
 version = "0.1.0"
 dependencies = [
+ "bf-infra",
+ "bf-url",
  "serde_json",
  "unicode-normalization",
 ]

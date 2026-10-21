@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-20; 52017 archivos en 231 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-21; 52017 archivos en 136 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -222,24 +222,24 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/parseFloat | 54 | 0 | 0 | 0 | 100.0% |
 | built-ins/parseInt | 55 | 0 | 0 | 0 | 100.0% |
 | built-ins/undefined | 8 | 0 | 0 | 0 | 100.0% |
-| intl402 | 0 | 22 | 0 | 0 | 0.0% |
-| intl402/Array | 1 | 1 | 0 | 0 | 50.0% |
-| intl402/BigInt | 5 | 6 | 0 | 0 | 45.5% |
-| intl402/Collator | 0 | 65 | 0 | 0 | 0.0% |
-| intl402/Date | 8 | 4 | 0 | 0 | 66.7% |
-| intl402/DateTimeFormat | 0 | 245 | 0 | 0 | 0.0% |
-| intl402/DisplayNames | 0 | 57 | 0 | 0 | 0.0% |
+| intl402 | 22 | 0 | 0 | 0 | 100.0% |
+| intl402/Array | 2 | 0 | 0 | 0 | 100.0% |
+| intl402/BigInt | 10 | 1 | 0 | 0 | 90.9% |
+| intl402/Collator | 62 | 3 | 0 | 0 | 95.4% |
+| intl402/Date | 12 | 0 | 0 | 0 | 100.0% |
+| intl402/DateTimeFormat | 156 | 89 | 0 | 0 | 63.7% |
+| intl402/DisplayNames | 4 | 53 | 0 | 0 | 7.0% |
 | intl402/DurationFormat | 0 | 110 | 0 | 0 | 0.0% |
-| intl402/FallbackSymbol | 0 | 2 | 0 | 0 | 0.0% |
-| intl402/Intl | 0 | 66 | 0 | 0 | 0.0% |
-| intl402/ListFormat | 0 | 81 | 0 | 0 | 0.0% |
+| intl402/FallbackSymbol | 2 | 0 | 0 | 0 | 100.0% |
+| intl402/Intl | 56 | 10 | 0 | 0 | 84.8% |
+| intl402/ListFormat | 1 | 80 | 0 | 0 | 1.2% |
 | intl402/Locale | 0 | 190 | 0 | 0 | 0.0% |
-| intl402/Number | 3 | 4 | 0 | 0 | 42.9% |
-| intl402/NumberFormat | 0 | 251 | 0 | 0 | 0.0% |
-| intl402/PluralRules | 0 | 53 | 0 | 0 | 0.0% |
+| intl402/Number | 7 | 0 | 0 | 0 | 100.0% |
+| intl402/NumberFormat | 209 | 42 | 0 | 0 | 83.3% |
+| intl402/PluralRules | 51 | 2 | 0 | 0 | 96.2% |
 | intl402/RelativeTimeFormat | 0 | 80 | 0 | 0 | 0.0% |
-| intl402/Segmenter | 0 | 79 | 0 | 0 | 0.0% |
-| intl402/String | 7 | 12 | 0 | 0 | 36.8% |
+| intl402/Segmenter | 2 | 77 | 0 | 0 | 2.5% |
+| intl402/String | 15 | 4 | 0 | 0 | 78.9% |
 | intl402/Temporal | 0 | 2029 | 0 | 0 | 0.0% |
 | intl402/TypedArray | 1 | 0 | 0 | 0 | 100.0% |
 | language/arguments-object | 261 | 2 | 0 | 0 | 99.2% |
@@ -271,39 +271,39 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
 | language/white-space | 67 | 0 | 0 | 0 | 100.0% |
 | **language/ (total)** | 22369 | 825 | 532 | 0 | 96.4% |
-| **Total** | 41860 | 9358 | 797 | 2 | 81.7% |
+| **Total** | 42447 | 8771 | 797 | 2 | 82.9% |
 
 ### Los 30 errores más frecuentes
 
 | # | tests | error |
 |---:|---:|---|
-| 1 | 6136 | `ReferenceError: Temporal is not defined` |
-| 2 | 1186 | `ReferenceError: Intl is not defined` |
-| 3 | 429 | `InternalError: no implementado: import() (módulos, paso N)` |
-| 4 | 252 | `InternalError: no implementado: top-level await (requiere Promise)` |
-| 5 | 121 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
+| 1 | 6183 | `ReferenceError: Temporal is not defined` |
+| 2 | 429 | `InternalError: no implementado: import() (módulos, paso N)` |
+| 3 | 252 | `InternalError: no implementado: top-level await (requiere Promise)` |
+| 4 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
+| 5 | 119 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
 | 6 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'bind')` |
 | 7 | 103 | `InternalError: no implementado: using (explicit-resource-management)` |
-| 8 | 89 | `ReferenceError: DisposableStack is not defined` |
-| 9 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
-| 10 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
-| 11 | 63 | `TestNError: Expected a RangeError but got a ReferenceError` |
-| 12 | 61 | `ReferenceError: ShadowRealm is not defined` |
-| 13 | 34 | `RangeError: Maximum call stack size exceeded` |
-| 14 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
-| 15 | 28 | `TestNError: Expected a TypeError but got a ReferenceError` |
-| 16 | 22 | `TestNError: Expected a TestNError but got a ReferenceError` |
-| 17 | 19 | `ReferenceError: SuppressedError is not defined` |
-| 18 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
-| 19 | 18 | `TypeError: Cannot convert undefined to object` |
-| 20 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
-| 21 | 10 | `TestNError: Expected SameValue(«…», «…») to be true` |
-| 22 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
-| 23 | 8 | `TestNError: isConstructor invoked with a non-function value` |
-| 24 | 8 | `TestNError: no argument Expected a TypeError but got a ReferenceError` |
-| 25 | 7 | `TestNError: Expected a SyntaxError but got a TypeError` |
-| 26 | 7 | `TestNError: Fractional minutes not allowed in time string Expected a RangeError but got a ReferenceError` |
-| 27 | 7 | `TestNError: TypeError on wrong options type object Expected a TypeError but got a ReferenceError` |
-| 28 | 7 | `TestNError: bare date-time string is not a time zone Expected a RangeError but got a ReferenceError` |
-| 29 | 7 | `TestNError: from toString Expected a TestNError but got a ReferenceError` |
-| 30 | 7 | `TestNError: no more than N decimal places are allowed Expected a RangeError but got a ReferenceError` |
+| 8 | 90 | `TypeError: Intl.Locale is not a constructor` |
+| 9 | 89 | `ReferenceError: DisposableStack is not defined` |
+| 10 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
+| 11 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
+| 12 | 64 | `TypeError: Intl.DurationFormat is not a constructor` |
+| 13 | 61 | `ReferenceError: ShadowRealm is not defined` |
+| 14 | 58 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 15 | 58 | `TestNError: Expected a RangeError but got a ReferenceError` |
+| 16 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
+| 17 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
+| 18 | 40 | `TypeError: Cannot convert undefined to object` |
+| 19 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
+| 20 | 34 | `RangeError: Maximum call stack size exceeded` |
+| 21 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
+| 22 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
+| 23 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
+| 24 | 20 | `TestNError: Expected a TypeError but got a ReferenceError` |
+| 25 | 19 | `ReferenceError: SuppressedError is not defined` |
+| 26 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
+| 27 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
+| 28 | 10 | `TestNError: Expected a TestNError but got a ReferenceError` |
+| 29 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
+| 30 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
