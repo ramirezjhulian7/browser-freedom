@@ -203,6 +203,7 @@ impl Agent {
             g.this = global;
         }
         crate::builtins::global::init_global_object(self, global);
+        crate::host::on_realm_created(self, id); // E3
         self.current_realm = saved;
         id
     }

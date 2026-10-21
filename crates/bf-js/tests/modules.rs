@@ -237,3 +237,58 @@ fn import_bindings_are_immutable() {
     .unwrap();
     assert_eq!(out, "TypeError\n1\n");
 }
+
+#[test]
+fn top_level_await_order() {
+    // a espera; b (sin TLA) depende de a y se ejecuta cuando a termina; main al final.
+    let out = run(&[
+        (
+            "main.js",
+            "import './b.js'; import { log } from './log.js'; log.push('main'); print(log.join());",
+        ),
+        ("log.js", "export const log = [];"),
+        (
+            "a.js",
+            "import { log } from './log.js';
+             log.push('a1'); await Promise.resolve(); log.push('a2');
+             export const a = 1;",
+        ),
+        (
+            "b.js",
+            "import { log } from './log.js'; import { a } from './a.js'; log.push('b' + a);",
+        ),
+    ])
+    .unwrap();
+    assert_eq!(out, "a1,a2,b1,main\n");
+}
+
+#[test]
+fn top_level_await_rejection() {
+    let out = run(&[
+        ("main.js", "import './bad.js'; print('nunca');"),
+        ("bad.js", "await null; throw new TypeError('tarde');"),
+    ]);
+    assert_eq!(out.unwrap_err(), "TypeError|TypeError: tarde");
+}
+
+#[test]
+fn dynamic_import() {
+    let out = run(&[
+        (
+            "main.js",
+            "const p = import('./lib.js');
+             print(p instanceof Promise);
+             const ns = await p;
+             print(ns.x, ns === await import('./lib.js'));
+             const j = await import('./d.json', { with: { type: 'json' } });
+             print(j.default.ok);
+             try { await import('./nope.js'); } catch (e) { print(e.constructor.name); }
+             try { await import('./lib.js', { with: { bad: 'x' } }); } catch (e) { print(e.constructor.name); }
+             print(await eval(\"import('./lib.js')\") === ns);",
+        ),
+        ("lib.js", "export const x = 42;"),
+        ("d.json", r#"{ "ok": true }"#),
+    ])
+    .unwrap();
+    assert_eq!(out, "true\n42 true\ntrue\nTypeError\nTypeError\ntrue\n");
+}

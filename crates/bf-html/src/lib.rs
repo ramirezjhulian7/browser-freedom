@@ -7,5 +7,6 @@ pub mod tokenizer;
 pub mod tree_builder;
 pub mod xml;
 
+pub use tree_builder::script::{Parser, ParserStatus, ScriptDisposition, ScriptHost};
 pub use tree_builder::{FragmentContext, ParseOptions, parse_document, parse_fragment};
 pub use xml::parse_xml_document;

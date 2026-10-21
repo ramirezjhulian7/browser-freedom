@@ -20,6 +20,8 @@ pub struct Source {
     pub line_starts: Vec<u32>,
     /// El módulo de este código ([[ScriptOrModule]], para `import.meta`) (E1).
     pub module: Option<usize>,
+    /// La URL del script, el referrer de `import()` (sin ella, `name`) (E1).
+    pub url: Option<String>,
 }
 
 impl Source {
@@ -49,6 +51,7 @@ impl Source {
             units,
             line_starts,
             module: None,
+            url: None,
         }
     }
 
@@ -546,6 +549,8 @@ pub enum Op {
     // --- Módulos (E1) ---
     /// Empuja `import.meta` del módulo activo (§13.3.12.1).
     ImportMeta,
+    /// [especificador opciones] → [promesa]: EvaluateImportCall (§13.3.10.2).
+    ImportCall,
     // --- E3: iteración asíncrona ---
     /// [obj] → (): GetIterator(obj, async) (§7.4.3); iterador, next y done en slot..slot+2.
     GetAsyncIterator(u32),

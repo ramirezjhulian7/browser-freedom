@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-21; 52017 archivos en 136 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-21; 52017 archivos en 153 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -152,7 +152,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
   - `import-text`: stage 3: módulos de texto (`with { type: "text" }`).
   - `import-bytes`: stage 2.7: módulos de bytes (`with { type: "bytes" }`, sobre immutable ArrayBuffer).
 - Detalle por test: `target/test262/results.tsv`.
-- `language/` (referencia de regresión de `tests/test262_run.rs`): 96.44%
+- `language/` (referencia de regresión de `tests/test262_run.rs`): 99.35%
 
 | Directorio | passed | failed | skipped | timeout | % |
 |---|---:|---:|---:|---:|---:|
@@ -251,59 +251,59 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/directive-prologue | 62 | 0 | 0 | 0 | 100.0% |
 | language/eval-code | 347 | 0 | 0 | 0 | 100.0% |
 | language/export | 3 | 0 | 0 | 0 | 100.0% |
-| language/expressions | 10261 | 442 | 399 | 0 | 95.9% |
+| language/expressions | 10687 | 16 | 399 | 0 | 99.9% |
 | language/function-code | 217 | 0 | 0 | 0 | 100.0% |
 | language/future-reserved-words | 55 | 0 | 0 | 0 | 100.0% |
 | language/global-code | 42 | 0 | 0 | 0 | 100.0% |
 | language/identifier-resolution | 14 | 0 | 0 | 0 | 100.0% |
 | language/identifiers | 268 | 0 | 0 | 0 | 100.0% |
-| language/import | 15 | 1 | 113 | 0 | 93.8% |
+| language/import | 16 | 0 | 113 | 0 | 100.0% |
 | language/keywords | 25 | 0 | 0 | 0 | 100.0% |
 | language/line-terminators | 41 | 0 | 0 | 0 | 100.0% |
 | language/literals | 532 | 4 | 0 | 0 | 99.3% |
-| language/module-code | 352 | 243 | 4 | 0 | 59.2% |
+| language/module-code | 595 | 0 | 4 | 0 | 100.0% |
 | language/punctuators | 11 | 0 | 0 | 0 | 100.0% |
 | language/reserved-words | 27 | 0 | 0 | 0 | 100.0% |
 | language/rest-parameters | 11 | 0 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 0 | 100.0% |
 | language/statementList | 80 | 0 | 0 | 0 | 100.0% |
-| language/statements | 9199 | 132 | 16 | 0 | 98.6% |
+| language/statements | 9203 | 128 | 16 | 0 | 98.6% |
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
 | language/white-space | 67 | 0 | 0 | 0 | 100.0% |
-| **language/ (total)** | 22369 | 825 | 532 | 0 | 96.4% |
-| **Total** | 42447 | 8771 | 797 | 2 | 82.9% |
+| **language/ (total)** | 23043 | 151 | 532 | 0 | 99.3% |
+| **Total** | 43121 | 8097 | 797 | 2 | 84.2% |
 
 ### Los 30 errores más frecuentes
 
 | # | tests | error |
 |---:|---:|---|
 | 1 | 6183 | `ReferenceError: Temporal is not defined` |
-| 2 | 429 | `InternalError: no implementado: import() (módulos, paso N)` |
-| 3 | 252 | `InternalError: no implementado: top-level await (requiere Promise)` |
-| 4 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
-| 5 | 119 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
-| 6 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'bind')` |
-| 7 | 103 | `InternalError: no implementado: using (explicit-resource-management)` |
-| 8 | 90 | `TypeError: Intl.Locale is not a constructor` |
-| 9 | 89 | `ReferenceError: DisposableStack is not defined` |
-| 10 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
-| 11 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
-| 12 | 64 | `TypeError: Intl.DurationFormat is not a constructor` |
-| 13 | 61 | `ReferenceError: ShadowRealm is not defined` |
-| 14 | 58 | `TestNError: Expected SameValue(«…», «…») to be true` |
-| 15 | 58 | `TestNError: Expected a RangeError but got a ReferenceError` |
-| 16 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
-| 17 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
-| 18 | 40 | `TypeError: Cannot convert undefined to object` |
-| 19 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
-| 20 | 34 | `RangeError: Maximum call stack size exceeded` |
-| 21 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
-| 22 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
-| 23 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
-| 24 | 20 | `TestNError: Expected a TypeError but got a ReferenceError` |
-| 25 | 19 | `ReferenceError: SuppressedError is not defined` |
-| 26 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
-| 27 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
-| 28 | 10 | `TestNError: Expected a TestNError but got a ReferenceError` |
-| 29 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
-| 30 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
+| 2 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
+| 3 | 119 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
+| 4 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'bind')` |
+| 5 | 110 | `InternalError: no implementado: using (explicit-resource-management)` |
+| 6 | 90 | `TypeError: Intl.Locale is not a constructor` |
+| 7 | 89 | `ReferenceError: DisposableStack is not defined` |
+| 8 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
+| 9 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
+| 10 | 64 | `TypeError: Intl.DurationFormat is not a constructor` |
+| 11 | 61 | `ReferenceError: ShadowRealm is not defined` |
+| 12 | 58 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 13 | 58 | `TestNError: Expected a RangeError but got a ReferenceError` |
+| 14 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
+| 15 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
+| 16 | 40 | `TypeError: Cannot convert undefined to object` |
+| 17 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
+| 18 | 34 | `RangeError: Maximum call stack size exceeded` |
+| 19 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
+| 20 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
+| 21 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
+| 22 | 20 | `TestNError: Expected a TypeError but got a ReferenceError` |
+| 23 | 19 | `ReferenceError: SuppressedError is not defined` |
+| 24 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
+| 25 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
+| 26 | 10 | `TestNError: Expected a TestNError but got a ReferenceError` |
+| 27 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
+| 28 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
+| 29 | 8 | `TestNError: isConstructor invoked with a non-function value` |
+| 30 | 8 | `TestNError: no argument Expected a TypeError but got a ReferenceError` |

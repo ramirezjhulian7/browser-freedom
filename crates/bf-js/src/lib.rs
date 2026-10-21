@@ -11,6 +11,7 @@ pub mod builtins;
 pub mod compiler;
 pub mod estree;
 pub mod heap;
+pub mod host;
 pub mod lexer;
 pub mod object;
 pub mod parser;
@@ -19,6 +20,7 @@ pub mod string;
 pub mod value;
 pub mod vm;
 
+pub use host::{JsError, Runtime};
 pub use parser::{ParseOptions, SyntaxError};
 
 /// Parsea `src` con el símbolo inicial Script (§16.1).

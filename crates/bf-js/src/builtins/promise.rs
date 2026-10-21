@@ -175,6 +175,8 @@ pub enum Job {
     },
     /// HostEnqueueFinalizationRegistryCleanupJob (§9.5.6).
     FinalizationCleanup { registry: Gc<Object> },
+    /// Un callback de `queueMicrotask` (HTML §8.7): sus excepciones se reportan.
+    Microtask { callback: Value, realm: RealmId },
 }
 
 impl Trace for Job {
@@ -197,6 +199,7 @@ impl Trace for Job {
                 t.value(then);
             }
             Job::FinalizationCleanup { registry } => t.gc(*registry),
+            Job::Microtask { callback, .. } => t.value(callback),
         }
     }
 }
@@ -275,7 +278,7 @@ impl Agent {
         Ok(())
     }
 
-    fn drain_jobs(&mut self) -> JsResult<()> {
+    pub(crate) fn drain_jobs(&mut self) -> JsResult<()> {
         self.kept_alive.clear();
         while let Some(job) = self.jobs.pop_front() {
             self.running_jobs.push(job.clone());
@@ -320,6 +323,11 @@ impl Agent {
             }
             Job::FinalizationCleanup { registry } => {
                 crate::builtins::weak::cleanup_finalization_registry(self, registry)
+            }
+            Job::Microtask { callback, realm } => {
+                self.current_realm = realm;
+                self.call_internal(&callback, Value::Undefined, &[])
+                    .map(|_| ())
             }
         }
     }
@@ -522,6 +530,12 @@ impl Agent {
 
     /// HostPromiseRejectionTracker (§27.2.1.9): `reject` = operación "reject", si no "handle".
     fn promise_rejection_tracker(&mut self, p: Gc<Object>, reject: bool) {
+        let op = if reject {
+            crate::host::RejectionOperation::Reject
+        } else {
+            crate::host::RejectionOperation::Handle
+        };
+        self.host.hooks.promise_rejection(p, op);
         let t = &mut self.rejections;
         if reject {
             t.pending.push(p);
@@ -534,7 +548,7 @@ impl Agent {
     }
 
     /// Notifica las promesas rechazadas que siguen sin handler (al vaciar la cola).
-    fn notify_rejections(&mut self) {
+    pub(crate) fn notify_rejections(&mut self) {
         let pending = std::mem::take(&mut self.rejections.pending);
         for p in pending {
             if matches!(&self.heap[p].kind, ObjectKind::Promise(d) if !d.is_handled) {

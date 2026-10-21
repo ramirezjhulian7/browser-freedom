@@ -1,13 +1,100 @@
-# browser-freedom
+# Freedom
 
-<img src="crates/bf-shell/assets/logo-256.png" width="96" alt="logo de browser-freedom" align="right">
+<img src="crates/bf-shell/assets/mark-256.png" width="96" alt="Logo de Freedom" align="right">
 
-Un navegador web con un motor 100% propio, escrito en Rust.
+**Navega libre.** Freedom es un navegador web independiente: no está construido sobre Chrome,
+Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 
-browser-freedom no usa Chromium, WebKit, Gecko ni Servo: HTML, DOM, CSS, layout, pintura,
-URLs, red y (en la fase 2) JavaScript están escritos desde cero. Cada subsistema sigue su
-especificación (WHATWG, W3C, IETF, Unicode, ECMA) al pie de la letra, y la compatibilidad se
-mide con las suites de pruebas oficiales.
+> **Vista previa.** Freedom ya abre y muestra páginas web, pero todavía no ejecuta
+> JavaScript. Los sitios para leer (Wikipedia, blogs, noticias, documentación) se ven bien;
+> los que dependen de JavaScript (redes sociales, correo web, mapas, tiendas) todavía no
+> funcionan o se ven incompletos.
+
+## Instalar Freedom
+
+Por ahora Freedom se instala desde el código fuente. Son cuatro pasos:
+
+1. Instala Rust con el instalador oficial de [rustup.rs](https://rustup.rs) (en Windows,
+   acepta las opciones por defecto).
+2. Descarga Freedom: en [GitHub](https://github.com/ramirezjhulian7/browser-freedom), «Code →
+   Download ZIP» y descomprímelo, o con git:
+
+   ```sh
+   git clone https://github.com/ramirezjhulian7/browser-freedom.git
+   ```
+
+3. Abre una terminal en esa carpeta y compílalo (tarda unos minutos la primera vez):
+
+   ```sh
+   cargo build --release -p bf-shell
+   ```
+
+4. Abre Freedom: es `target/release/freedom` (en Windows, `target\release\freedom.exe`; puedes
+   abrirlo con doble clic y anclarlo a la barra de tareas).
+
+Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.org` o
+`freedom pagina.html`.
+
+## Cómo se usa
+
+- **Ir a un sitio o buscar:** escribe en la barra de arriba (o directamente en la página de
+  inicio) y presiona `Intro`. Si lo que escribes no parece una dirección, Freedom lo busca en
+  Google.
+- **Pestañas:** `Ctrl+T` abre una y `Ctrl+W` la cierra. El clic central o `Ctrl+clic` en un
+  enlace lo abre en otra pestaña.
+- **Copiar y pegar:** arrastra para seleccionar texto; doble clic selecciona una palabra y
+  triple clic un párrafo. `Ctrl+C` copia y `Ctrl+V` pega, también en la barra de direcciones y
+  en los formularios. El clic derecho muestra más opciones (copiar enlaces, guardar imágenes).
+- **Zoom:** `Ctrl` `+`, `Ctrl` `−` y `Ctrl` `0`, o `Ctrl` + rueda del ratón.
+- **Tema claro u oscuro:** Freedom sigue el de tu sistema.
+
+| Atajo | Qué hace |
+|---|---|
+| `Ctrl+L` | Ir a la barra de direcciones |
+| `Ctrl+T` · `Ctrl+W` | Pestaña nueva · cerrar pestaña |
+| `Ctrl+Tab` · `Ctrl+1…9` | Cambiar de pestaña |
+| `Alt+←` · `Alt+→` | Atrás · adelante |
+| `Ctrl+R` · `F5` | Recargar |
+| `Esc` | Detener la carga |
+| `Ctrl+H` | Página de inicio |
+| `Ctrl+A` · `Ctrl+C` · `Ctrl+V` | Seleccionar todo · copiar · pegar |
+| `Espacio` · `Mayús+Espacio` | Bajar · subir una pantalla |
+
+### Tu privacidad
+
+- Freedom no guarda nada en tu equipo: el historial y las cookies existen solo mientras está
+  abierto y se borran al cerrarlo (por eso, al volver a abrirlo, las sesiones iniciadas en
+  los sitios se cierran). Solo escribe archivos cuando tú lo pides, como al guardar una
+  imagen.
+- No envía datos de uso: solo se conecta a los sitios que visitas (y a Google cuando buscas).
+
+### Qué funciona y qué todavía no
+
+- **Funciona:** páginas hechas con HTML y CSS, con su texto, imágenes PNG, JPEG y GIF,
+  tablas y la mayoría de los diseños; enlaces, pestañas, atrás y adelante; formularios
+  simples (buscar, escribir y enviar); zoom; copiar y pegar.
+- **Todavía no:** JavaScript, video y audio, imágenes WebP y SVG, favoritos, historial que se
+  conserve al cerrar y descargas de archivos. El plan está en
+  [`docs/roadmap.md`](docs/roadmap.md).
+
+### ¿Algo no funciona?
+
+Abre un reporte en
+[GitHub Issues](https://github.com/ramirezjhulian7/browser-freedom/issues) con la dirección
+de la página y lo que esperabas ver. Si apareció una página de error, copia el detalle que
+muestra.
+
+---
+
+## Para desarrolladores
+
+Freedom tiene un motor 100% propio, escrito en Rust. No usa Chromium, WebKit, Gecko ni Servo:
+HTML, DOM, CSS, layout, pintura, URLs, red y (en la fase 2) JavaScript están escritos desde
+cero. Cada subsistema sigue su especificación (WHATWG, W3C, IETF, Unicode, ECMA) al pie de la
+letra, y la compatibilidad se mide con las suites de pruebas oficiales.
+
+El repositorio y los crates conservan el prefijo histórico `bf-` (de *browser-freedom*); el
+ejecutable se llama `freedom` y es el binario del paquete `bf-shell`.
 
 La **fase 1** está cerrada: el navegador carga y muestra páginas reales sin JavaScript (Google,
 Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, enlaces,
@@ -25,7 +112,7 @@ historial, scroll y zoom. El plan de las fases siguientes está en
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **76.4%** (con los módulos; 97.5% sin lo que espera a Promise); total **56.8%** (29 234 / 51 442) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.4%**; total **83.0%** (42 534 / 51 220) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
@@ -111,8 +198,8 @@ motor JavaScript.
   - imágenes y capas de `background-image`;
   - partes nativas de los controles;
   - rasterizado con `tiny-skia` y el harness de reftests de WPT.
-- **`bf-shell`**: el binario. Carga en un hilo de trabajo y muestra el resultado en una
-  ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
+- **`bf-shell`**: el navegador (ejecutable `freedom`). Carga en un hilo de trabajo y muestra
+  el resultado en una ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
   páginas `about:` (ver [La interfaz](#la-interfaz)).
 - **`bf-js`** (fase 2, en curso): el motor de ECMAScript 2026:
   - lexer (§12) con identificadores Unicode, números correctamente redondeados, templates y
@@ -129,8 +216,8 @@ motor JavaScript.
     `encodeURI`, `escape` de Annex B…);
   - módulos ECMAScript (§16.2): Source Text Module Records, ResolveExport con ciclos y
     ambigüedad, Link y Evaluate (Tarjan del spec), bindings de import vivos, el namespace
-    exótico, `export * as ns`, módulos JSON (`with { type: "json" }`) e `import.meta`;
-    `import()` y top-level await esperan a Promise;
+    exótico, `export * as ns`, módulos JSON (`with { type: "json" }`), `import.meta`,
+    `import()` dinámico (también desde scripts y `eval`) y top-level await;
   - `bf-js run archivo.js [--module]` ejecuta un script o un módulo (con sus imports desde
     el sistema de archivos) con `print`.
 
@@ -195,30 +282,31 @@ Requiere Rust estable (edición 2024) y Python 3 solo para regenerar tablas.
 cargo build --workspace --release
 ```
 
-El binario queda en `target/release/bf-shell` (`bf-shell.exe` en Windows).
+El ejecutable queda en `target/release/freedom` (`freedom.exe` en Windows).
 
 ## Uso
 
 `<url>` es una URL `http(s)://`, `file://`, `data:` o `about:`, o una ruta local.
 
 ```sh
-# Ventana navegable (sin argumento abre about:home)
-bf-shell open
-bf-shell open https://es.wikipedia.org/wiki/Navegador_web
+# Ventana navegable (sin argumentos abre la página de inicio); --version imprime la versión
+freedom
+freedom https://es.wikipedia.org/wiki/Navegador_web
+freedom open https://es.wikipedia.org/wiki/Navegador_web
 
 # PNG de 1024×768 con tiempos por fase en stderr
-bf-shell render https://www.google.com -o google.png --width 1024 --height 768
-bf-shell render about:home -o home.png
-bf-shell render "about:engine?https://www.google.com" -o motor.png --height 1100
+freedom render https://www.google.com -o google.png --width 1024 --height 768
+freedom render about:home -o home.png
+freedom render "about:engine?https://www.google.com" -o motor.png --height 1100
 
 # Volcados para depurar
-bf-shell dump-dom https://example.com
-bf-shell dump-css estilos.css
-bf-shell dump-style pagina.html --selector "nav a"
-bf-shell dump-layout pagina.html --width 800 --system-fonts
+freedom dump-dom https://example.com
+freedom dump-css estilos.css
+freedom dump-style pagina.html --selector "nav a"
+freedom dump-layout pagina.html --width 800 --system-fonts
 
 # La lógica de la ventana sin abrir una: un PNG por paso (con el cromo) y el estado en stdout
-bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"     "move:600,300" -o sesion
+freedom session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"     "move:600,300" -o sesion
 ```
 
 ### La interfaz
@@ -231,14 +319,13 @@ bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"
   botones de envío funcionan.
 - **Selección de texto**: arrastrar selecciona, doble clic una palabra y triple clic el
   párrafo; `Ctrl+A` selecciona toda la página y `Ctrl+C` (o «Copiar» en el menú contextual)
-  copia, con los saltos de línea suaves como espacios y un `
-` entre bloques. Dentro de un
+  copia, con los saltos de línea suaves como espacios y un `\n` entre bloques. Dentro de un
   campo, arrastrar selecciona su texto. En sesiones sin ventana: `drag:x,y>x,y`,
   `dblclick:x,y` y `tripleclick:x,y`.
 - **Menú contextual** (clic derecho): abrir enlaces o imágenes en otra pestaña, copiar sus
   direcciones, guardar una imagen o la página con un diálogo del sistema, cortar/copiar/pegar
   en un campo, ver el código fuente (`about:source?<url>`) e inspeccionar las cajas.
-- **Logo**: `assets/browser-freedom.png`. La marca vectorizada (`Icon::Brand`), sin fondo, es
+- **Logo**: `assets/freedom.png`. La marca vectorizada (`Icon::Brand`), sin fondo, es
   el icono de la ventana (barra de tareas, `Alt+Tab`) y la de la barra y las pestañas;
   `crates/bf-shell/assets/mark-256.png` es la misma marca sobre transparente para
   `about:home`.

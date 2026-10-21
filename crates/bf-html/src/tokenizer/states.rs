@@ -1119,7 +1119,13 @@ impl Tokenizer {
                     self.reconsume = false;
                     self.pos -= 1;
                 }
-                match super::match_named_entity(&self.input[self.pos..]) {
+                let (readable, real_end) = self.readable_from(self.pos);
+                let (found, exhausted) = super::match_named_entity(readable);
+                if exhausted && !real_end {
+                    // Un identificador más largo podría seguir en la entrada que falta.
+                    self.mark_starved();
+                }
+                match found {
                     Some((len, value)) => {
                         for _ in 0..len {
                             if let Some(c) = self.consume() {
@@ -1127,7 +1133,11 @@ impl Tokenizer {
                             }
                         }
                         let last_is_semicolon = self.current == Some(';');
-                        let next = self.input.get(self.pos).copied();
+                        let next = if self.char_ref_in_attribute() && !last_is_semicolon {
+                            self.peek_at(self.pos)
+                        } else {
+                            None
+                        };
                         if self.char_ref_in_attribute()
                             && !last_is_semicolon
                             && next

@@ -1781,6 +1781,12 @@ impl Agent {
                 let v = self.import_meta()?;
                 self.push(v);
             }
+            Op::ImportCall => {
+                let options = self.pop();
+                let specifier = self.pop();
+                let v = self.evaluate_import_call(specifier, options)?;
+                self.push(v);
+            }
         }
         Ok(Flow::Next)
     }
