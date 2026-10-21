@@ -108,13 +108,18 @@ impl Agent {
                     let mut n = 0u64;
                     let mut back = false;
                     {
-                        let genv = self.realms[self.current_realm].global_env;
+                        let realm = &self.realms[self.current_realm];
+                        let cx = FastCx {
+                            genv: realm.global_env,
+                            object_proto: realm.intrinsics.object_prototype,
+                            array_proto: realm.intrinsics.array_prototype,
+                        };
                         let heap = &mut self.heap;
                         let f = self.frames.last_mut().expect("frame");
                         loop {
                             let op = f.code.ops[f.pc];
                             f.pc += 1;
-                            match fast_op(f, heap, genv, op) {
+                            match fast_op(f, heap, &cx, op) {
                                 Fast::Done => n += 1,
                                 Fast::BackJump => {
                                     n += 1;
@@ -2516,7 +2521,8 @@ fn primitive_truthiness(v: &Value) -> Option<bool> {
 /// Las instrucciones más frecuentes que no necesitan el agente (locales, constantes, pila,
 /// saltos y aritmética Number × Number). Deja el frame igual si devuelve [`Fast::Slow`].
 #[inline]
-fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, genv: Gc<Env>, op: Op) -> Fast {
+fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> Fast {
+    let genv = cx.genv;
     use crate::abstract_ops::conversion::{to_int32, to_uint32};
     macro_rules! jump {
         ($t:expr) => {{
@@ -2669,6 +2675,47 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, genv: Gc<Env>, op: Op) -
             if matches!(op, Op::GetGlobalForCall(_)) {
                 f.stack.push(Value::Undefined);
             }
+        }
+        // Literales: crear un objeto no recolecta (la recolección es en los safepoints).
+        Op::NewObject => {
+            let o = heap.alloc(Object::ordinary(Some(cx.object_proto)));
+            f.stack.push(Value::Object(o));
+        }
+        Op::NewArray => {
+            let a = heap.alloc(Object::new(
+                Some(cx.array_proto),
+                ObjectKind::Array(crate::object::ArrayData {
+                    dense: Vec::new(),
+                    length: 0,
+                    length_writable: true,
+                }),
+            ));
+            f.stack.push(Value::Object(a));
+        }
+        Op::ArrayPush => {
+            let v = f.stack.pop().expect("pila");
+            let Some(Value::Object(a)) = f.stack.last() else {
+                f.stack.push(v);
+                return Fast::Slow;
+            };
+            if let ObjectKind::Array(d) = &mut heap[*a].kind {
+                d.dense.push(Some(v));
+                d.length += 1;
+            } else {
+                f.stack.push(v);
+                return Fast::Slow;
+            }
+        }
+        Op::InitProp(c) => {
+            let n = f.stack.len();
+            let Value::Object(o) = &f.stack[n - 2] else {
+                return Fast::Slow;
+            };
+            let o = *o;
+            if !fast_ic_init(heap, &f.code, c, o, &f.stack[n - 1]) {
+                return Fast::Slow;
+            }
+            f.stack.pop();
         }
         Op::Undefined => f.stack.push(Value::Undefined),
         Op::Null => f.stack.push(Value::Null),
@@ -2843,6 +2890,18 @@ fn fast_ic_get(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Obje
                     }) => Some(value.clone()),
                     _ => None,
                 },
+                Ic::Missing {
+                    shape: s,
+                    proto,
+                    proto_shape,
+                } if *s == shape
+                    && heap[o].proto == Some(*proto)
+                    && heap[*proto].proto.is_none()
+                    && fast_named(heap, *proto, key)
+                    && heap[*proto].props.shape_id() == *proto_shape =>
+                {
+                    Some(Value::Undefined)
+                }
                 Ic::Proto {
                     shape: s,
                     proto,
@@ -2960,4 +3019,35 @@ fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
     u.extend_from_slice(a.units());
     u.extend_from_slice(b.units());
     Some(Value::String(JsString::from_units(u)))
+}
+
+/// Lo que la ruta rápida necesita del realm.
+struct FastCx {
+    genv: Gc<Env>,
+    object_proto: Gc<Object>,
+    array_proto: Gc<Object>,
+}
+
+/// Un acierto de la inline cache de `InitProp` (la transición del literal).
+#[inline]
+fn fast_ic_init(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc<Object>, v: &Value) -> bool {
+    use crate::vm::ic::Ic;
+    let obj = &heap[o];
+    if !matches!(obj.kind, ObjectKind::Ordinary) || !obj.extensible {
+        return false;
+    }
+    let shape = obj.props.shape_id();
+    let to = code.ics.with(c, |site| {
+        site.ways.iter().find_map(|w| match w {
+            Ic::Init { from, to } if *from == shape => Some(to.clone()),
+            _ => None,
+        })
+    });
+    let Some(Some(to)) = to else {
+        return false;
+    };
+    heap[o]
+        .props
+        .push_with_shape(to, crate::object::Prop::data(v.clone(), true, true, true));
+    true
 }

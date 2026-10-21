@@ -37,6 +37,13 @@ pub enum Ic {
         proto_shape: u64,
         slot: u32,
     },
+    /// Una propiedad ausente: el receptor (con ese shape) no la tiene, su prototipo directo
+    /// (con ese shape) tampoco y ese prototipo no tiene prototipo. El valor es `undefined`.
+    Missing {
+        shape: u64,
+        proto: Gc<Object>,
+        proto_shape: u64,
+    },
     /// Una asignación que agrega la propiedad: el shape de partida, el prototipo (la cadena
     /// no tenía setter ni propiedad de solo lectura con ese [`crate::object::setter_epoch`])
     /// y el shape resultante.
@@ -183,6 +190,11 @@ impl Agent {
                     proto_shape,
                     slot,
                 } if *s == shape => Some((Some((*proto, *proto_shape)), *slot)),
+                Ic::Missing {
+                    shape: s,
+                    proto,
+                    proto_shape,
+                } if *s == shape => Some((Some((*proto, *proto_shape)), u32::MAX)),
                 _ => None,
             })
         })??;
@@ -196,6 +208,13 @@ impl Agent {
                     || self.heap[proto].props.shape_id() != proto_shape
                 {
                     return None;
+                }
+                if slot == u32::MAX {
+                    // Ausente (Missing): el prototipo no tiene prototipo.
+                    if self.heap[proto].proto.is_some() || !named_ordinary(self, proto, key) {
+                        return None;
+                    }
+                    return Some(Ok(Value::Undefined));
                 }
                 self.heap[proto].props.slot(slot as usize).cloned()
             }
@@ -238,6 +257,13 @@ impl Agent {
                 proto,
                 proto_shape: pp.shape_id(),
                 slot: slot as u32,
+            };
+            code.ics.push(n, len, ic);
+        } else if self.heap[proto].proto.is_none() {
+            let ic = Ic::Missing {
+                shape,
+                proto,
+                proto_shape: pp.shape_id(),
             };
             code.ics.push(n, len, ic);
         }
