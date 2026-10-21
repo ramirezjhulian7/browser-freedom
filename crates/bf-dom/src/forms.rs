@@ -264,6 +264,19 @@ impl Document {
         )
     }
 
+    /// `option.selected = value` (HTML §4.10.10): selectedness con dirtiness (E1).
+    pub fn set_option_selected(&mut self, option: NodeId, value: bool) {
+        if let ElementState::Option {
+            selectedness,
+            dirtiness,
+            ..
+        } = &mut self.get_mut(option).state
+        {
+            *selectedness = value;
+            *dirtiness = true;
+        }
+    }
+
     fn set_option_selectedness(&mut self, option: NodeId, value: bool) {
         if let ElementState::Option { selectedness, .. } = &mut self.get_mut(option).state {
             *selectedness = value;
