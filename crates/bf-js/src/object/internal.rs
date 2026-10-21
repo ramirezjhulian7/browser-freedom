@@ -74,6 +74,9 @@ impl Agent {
         if !crate::builtins::typed_array::can_prevent_extensions(self, o) {
             return Ok(false); // E3: TypedArray [[PreventExtensions]] (§10.4.5.1)
         }
+        if self.host_exotic(o).is_some() {
+            return Ok(false); // E3: objeto de plataforma legacy (WebIDL §3.9.4)
+        }
         if self.is_proxy(o) {
             return self.proxy_prevent_extensions(o);
         }
@@ -93,6 +96,9 @@ impl Agent {
     ) -> JsResult<Option<PropertyDescriptor>> {
         if let Some(i) = self.ta_numeric_key(o, key) {
             return Ok(crate::builtins::typed_array::get_own_element(self, o, i)); // E3
+        }
+        if let Some(ex) = self.host_exotic(o) {
+            return crate::host::exotic::get_own(self, o, key, ex, false); // E3
         }
         if self.is_proxy(o) {
             return self.proxy_get_own_property(o, key);
@@ -167,6 +173,10 @@ impl Agent {
     ) -> JsResult<bool> {
         match &self.heap[o].kind {
             ObjectKind::Proxy(_) => self.proxy_define_own_property(o, key, desc),
+            ObjectKind::Host(_) if self.host_exotic(o).is_some() => {
+                let ex = self.host_exotic(o).expect("exótico");
+                crate::host::exotic::define_own_property(self, o, key, desc, ex) // E3
+            }
             ObjectKind::ModuleNamespace(_) if !key.is_symbol() => {
                 self.namespace_define_own_property(o, &key, &desc)
             }
@@ -383,6 +393,19 @@ impl Agent {
             if self.is_proxy(cur) {
                 return self.proxy_has(cur, key);
             }
+            if let Some(ex) = self.host_exotic(cur) {
+                // E3: objeto de plataforma legacy (WebIDL §3.9).
+                if crate::host::exotic::get_own(self, cur, key, ex, false)?.is_some() {
+                    return Ok(true);
+                }
+                match self.get_prototype_of(cur)? {
+                    Some(p) => {
+                        cur = p;
+                        continue;
+                    }
+                    None => return Ok(false),
+                }
+            }
             if !key.is_symbol() && self.is_module_namespace(cur) {
                 return Ok(self.namespace_has(cur, key));
             }
@@ -405,6 +428,19 @@ impl Agent {
             }
             if self.is_proxy(cur) {
                 return self.proxy_get(cur, key, receiver);
+            }
+            if let Some(ex) = self.host_exotic(cur) {
+                // E3: objeto de plataforma legacy (WebIDL §3.9).
+                if let Some(v) = crate::host::exotic::get_here(self, cur, key, &receiver, ex)? {
+                    return Ok(v);
+                }
+                match self.get_prototype_of(cur)? {
+                    Some(p) => {
+                        cur = p;
+                        continue;
+                    }
+                    None => return Ok(Value::Undefined),
+                }
             }
             if !key.is_symbol() && self.is_module_namespace(cur) {
                 return self.namespace_get(cur, key);
@@ -450,6 +486,11 @@ impl Agent {
         }
         if self.is_proxy(o) {
             return self.proxy_set(o, key, v, receiver);
+        }
+        if let Some(ex) = self.host_exotic(o) {
+            // E3: LegacyPlatformObjectGetOwnProperty(O, P, true) (WebIDL §3.9.2).
+            let own = crate::host::exotic::get_own(self, o, &key, ex, true)?;
+            return self.ordinary_set_with_own_descriptor(o, key, v, receiver, own);
         }
         // §10.4.6.9: el namespace no se escribe.
         if self.is_module_namespace(o) {
@@ -517,6 +558,11 @@ impl Agent {
         if self.is_proxy(o) {
             return self.proxy_delete(o, key);
         }
+        if let Some(ex) = self.host_exotic(o)
+            && let Some(r) = crate::host::exotic::delete(self, o, key, ex)?
+        {
+            return Ok(r); // E3
+        }
         if !key.is_symbol() && self.is_module_namespace(o) {
             return Ok(self.namespace_delete(o, key));
         }
@@ -562,6 +608,9 @@ impl Agent {
         }
         if self.is_proxy(o) {
             return self.proxy_own_keys(o);
+        }
+        if let Some(ex) = self.host_exotic(o) {
+            return crate::host::exotic::own_keys(self, o, ex); // E3
         }
         if self.is_module_namespace(o) {
             return Ok(self.namespace_own_keys(o));

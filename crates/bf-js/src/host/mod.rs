@@ -16,6 +16,7 @@
 //!   microtasks y animation frames; [`webidl`]: conversiones; [`runtime`]: la fachada.
 
 pub mod event_loop;
+pub mod exotic;
 pub mod hooks;
 pub mod runtime;
 pub mod webidl;
@@ -31,6 +32,7 @@ use crate::vm::function::{CallArgs, NativeFn};
 use crate::vm::{Agent, JsResult, RealmId};
 
 pub use event_loop::{TimerHandler, TimerId};
+pub use exotic::HostExotic;
 pub use hooks::{ConsoleLevel, DefaultHooks, HostHooks, RejectionOperation, TaskSource};
 pub use runtime::{FromJs, IntoJs, JsError, Runtime};
 
@@ -96,6 +98,8 @@ pub struct HostClass {
     pub static_attributes: Vec<HostAttribute>,
     /// `[Symbol.hasInstance]` propio del objeto interfaz.
     pub has_instance: Option<NativeFn>,
+    /// Propiedades indexadas y con nombre (objeto de plataforma *legacy*, WebIDL §3.9).
+    pub exotic: Option<HostExotic>,
     /// ¿Se expone como propiedad del objeto global? (`[Exposed]`.)
     pub exposed: bool,
 }
@@ -113,6 +117,7 @@ impl HostClass {
             static_methods: Vec::new(),
             static_attributes: Vec::new(),
             has_instance: None,
+            exotic: None,
             exposed: true,
         }
     }
@@ -174,6 +179,12 @@ impl HostClass {
 
     pub fn has_instance(mut self, f: NativeFn) -> HostClass {
         self.has_instance = Some(f);
+        self
+    }
+
+    /// Getters indexado y con nombre (WebIDL §3.9).
+    pub fn exotic(mut self, exotic: HostExotic) -> HostClass {
+        self.exotic = Some(exotic);
         self
     }
 
