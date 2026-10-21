@@ -17,9 +17,6 @@ use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, Meta, fetch_documen
 use crate::theme::Theme;
 
 pub const STYLE: &str = include_str!("../pages/style.css");
-/// El logo (ver `assets/browser-freedom.png`) recortado a 64 px, con su fondo: el icono de la
-/// ventana.
-pub const LOGO_64: &[u8] = include_bytes!("../assets/logo-64.png");
 /// La marca sola, ámbar sobre transparente (256 px), para las páginas internas de los dos temas.
 pub const MARK_256: &[u8] = include_bytes!("../assets/mark-256.png");
 

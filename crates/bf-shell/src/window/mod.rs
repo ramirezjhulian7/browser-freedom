@@ -22,6 +22,7 @@ mod hit;
 mod icons;
 mod menu;
 mod overlay;
+mod select;
 mod worker;
 
 use std::cell::{Cell, RefCell};
@@ -54,6 +55,7 @@ use crate::theme::Theme;
 use chrome::{BAR, Chrome, PANEL, Region, STATUS, TabInfo};
 use edit::{Editable, Focus};
 use menu::{Menu, MenuAction, MenuItem};
+use select::{Selection, TextIndex};
 use worker::{Done, Job, LoadJob, Worker};
 
 /// Px CSS por "línea" de rueda y por pulsación de flecha.
@@ -71,6 +73,17 @@ const PROGRESS_FRAME: Duration = Duration::from_millis(33);
 
 /// Cuánto se muestra un aviso en la línea de estado.
 const NOTICE: Duration = Duration::from_secs(4);
+/// Ventana para contar un clic como doble o triple.
+const MULTI_CLICK: Duration = Duration::from_millis(500);
+
+/// Lo que mueve el puntero con el botón apretado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    /// Extiende la selección de texto de la página.
+    Text,
+    /// Extiende la selección dentro del campo con el foco.
+    Field,
+}
 
 struct Graphics {
     window: Rc<Window>,
@@ -133,6 +146,8 @@ struct TabState {
     raster: Cell<Option<Duration>>,
     panel_raster: Option<Duration>,
     focus: Option<Focus>,
+    selection: Option<Selection>,
+    text_index: RefCell<Option<(u64, Rc<TextIndex>)>>,
 }
 
 struct App {
@@ -142,6 +157,14 @@ struct App {
     active: usize,
     /// Control de la página con el foco de teclado (campo de texto en edición).
     focus: Option<Focus>,
+    /// Texto seleccionado en la página (vale para el maquetado `page_generation` actual).
+    selection: Option<Selection>,
+    /// Los fragmentos de texto de la página, armados al primer uso tras cada maquetado.
+    text_index: RefCell<Option<(u64, Rc<TextIndex>)>>,
+    /// Arrastre en curso con el botón izquierdo.
+    drag: Option<Drag>,
+    /// Último clic en la página (cuándo, dónde y cuántos seguidos), para el doble y triple.
+    last_click: Option<(Instant, (f32, f32), u8)>,
     /// Menú contextual abierto.
     menu: Option<Menu>,
     fonts: Arc<FontDb>,
@@ -280,9 +303,38 @@ impl RasterKey {
 }
 
 /// El icono de la ventana: el logo a 64 px.
+/// Lado en px del icono de la ventana.
+const ICON_SIZE: u32 = 64;
+
+/// La marca vectorizada en ámbar sobre transparente, rasterizada por el propio motor a
+/// `size` px, como RGBA sin premultiplicar.
+fn brand_rgba(size: u32) -> Vec<u8> {
+    let s = size as f32;
+    // Un margen de 1/32 para que el pájaro no toque el borde.
+    let m = s / 32.0;
+    let mut list = DisplayList::default();
+    list.items.extend(icons::icon(
+        icons::Icon::Brand,
+        Rect::new(m, m, s - 2.0 * m, s - 2.0 * m),
+        Theme::DARK.accent,
+    ));
+    let size = Size {
+        width: s,
+        height: s,
+    };
+    render(&list, size, 1.0, Rgba::TRANSPARENT)
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
+/// El icono de la ventana (barra de tareas, `Alt+Tab`): la marca sin fondo.
 fn window_icon() -> Option<winit::window::Icon> {
-    let img = bf_image::decode(internal::LOGO_64, Some("image/png")).ok()?;
-    winit::window::Icon::from_rgba(img.rgba, img.width, img.height).ok()
+    winit::window::Icon::from_rgba(brand_rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok()
 }
 
 /// Dos viewports se consideran iguales si difieren menos de medio px CSS: evita que un
@@ -474,6 +526,10 @@ impl App {
             tabs: vec![None],
             active: 0,
             focus: None,
+            selection: None,
+            text_index: RefCell::new(None),
+            drag: None,
+            last_click: None,
             menu: None,
             fonts: fonts.clone(),
             worker,
@@ -609,6 +665,8 @@ impl App {
         swap(&mut self.raster, &mut t.raster);
         swap(&mut self.panel_raster, &mut t.panel_raster);
         swap(&mut self.focus, &mut t.focus);
+        swap(&mut self.selection, &mut t.selection);
+        swap(&mut self.text_index, &mut t.text_index);
     }
 
     /// Ejecuta `f` con la pestaña `i` como activa (sin cambiar la pestaña visible).
@@ -996,6 +1054,12 @@ impl App {
             _ => None,
         };
         let mut items = Vec::new();
+        if field.is_none()
+            && let Some(text) = self.selected_text()
+        {
+            items.push(MenuItem::new("Copiar (Ctrl+C)", MenuAction::CopyText(text)));
+            items.push(MenuItem::separator());
+        }
         if let Some(l) = &link {
             items.push(MenuItem::new(
                 "Abrir enlace en una pestaña nueva",
@@ -1541,6 +1605,7 @@ impl App {
             self.relayout = None;
             self.page = Some(page);
             self.page_generation += 1;
+            self.selection = None;
             self.raster.set(None);
             self.clamp_scroll();
             self.refresh_panel();
@@ -1561,6 +1626,7 @@ impl App {
         self.current = Some(loaded);
         self.page = Some(page);
         self.page_generation += 1;
+        self.selection = None;
         self.raster.set(None);
         self.hover_link = None;
         self.overlay_hover = None;
@@ -1752,6 +1818,26 @@ impl App {
                 );
                 blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
+            if let Some(sel) = self.selection.filter(|s| !s.is_empty())
+                && let Some(index) = self.text_index()
+            {
+                let mut list = DisplayList::default();
+                for rect in index.highlight(&sel, self.scroll) {
+                    list.push(DisplayItem::Rect {
+                        rect,
+                        color: theme.selection,
+                        radii: Radii::default(),
+                    });
+                }
+                let layer = render_scrolled(
+                    &list,
+                    viewport,
+                    dpi * self.zoom,
+                    Rgba::TRANSPARENT,
+                    self.scroll,
+                );
+                blit(&mut frame, &layer, 0.0, area.y * dpi);
+            }
             if let (Some(f), Some(root), Some(current)) =
                 (&self.focus, p.tree.root.as_ref(), &self.current)
             {
@@ -1871,6 +1957,9 @@ impl App {
 
     fn mouse_moved(&mut self) {
         let (x, y) = self.mouse;
+        if let Some(drag) = self.drag {
+            self.drag_to(drag);
+        }
         if let Some(menu) = &mut self.menu {
             let item = menu.item_at(x, y);
             if menu.set_hover(item) {
@@ -1985,6 +2074,7 @@ impl App {
             self.refresh_chrome();
         }
         if let Some(url) = self.link_under_mouse() {
+            self.selection = None;
             if self.modifiers.control_key() {
                 self.new_tab(Some(url), true);
             } else {
@@ -2038,14 +2128,110 @@ impl App {
                     caret,
                     anchor,
                 });
+                self.selection = None;
+                self.drag = Some(Drag::Field);
                 self.redraw_later();
             }
             Hit::Submit(button) => {
                 self.focus = None;
+                self.selection = None;
                 self.submit(button);
             }
             Hit::Nothing => {
                 if self.focus.take().is_some() {
+                    self.redraw_later();
+                }
+                self.start_selection();
+            }
+        }
+    }
+
+    /// El índice de texto de la página actual.
+    fn text_index(&self) -> Option<Rc<TextIndex>> {
+        let (page, current) = (self.page.as_ref()?, self.current.as_ref()?);
+        let mut cache = self.text_index.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|(g, _)| *g != self.page_generation)
+        {
+            let index = TextIndex::build(&current.doc, page.tree.root.as_ref());
+            *cache = Some((self.page_generation, Rc::new(index)));
+        }
+        cache.as_ref().map(|(_, i)| i.clone())
+    }
+
+    /// El extremo de selección bajo el puntero.
+    fn text_point(&self) -> Option<select::Point> {
+        let (px, py) = self.page_point(self.mouse.0, self.mouse.1);
+        self.text_index()?.point_at(px, py, self.scroll)
+    }
+
+    /// El texto seleccionado en la página, si hay.
+    fn selected_text(&self) -> Option<String> {
+        let sel = self.selection.filter(|s| !s.is_empty())?;
+        let text = self.text_index()?.text(&sel);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Clic sobre la página fuera de enlaces y controles: empieza una selección (arrastrar),
+    /// selecciona la palabra (doble clic) o el párrafo (triple), o la extiende (Mayús).
+    fn start_selection(&mut self) {
+        let now = Instant::now();
+        let count = match self.last_click {
+            Some((at, (x, y), n))
+                if now.duration_since(at) < MULTI_CLICK
+                    && (x - self.mouse.0).abs() < 4.0
+                    && (y - self.mouse.1).abs() < 4.0 =>
+            {
+                n % 3 + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, self.mouse, count));
+        let had = self.selection.take().is_some_and(|s| !s.is_empty());
+        let (Some(index), Some(p)) = (self.text_index(), self.text_point()) else {
+            if had {
+                self.redraw_later();
+            }
+            return;
+        };
+        let sel = match count {
+            2 => index.word_at(p),
+            3 => index.block_at(p),
+            _ => Selection::collapsed(p),
+        };
+        self.selection = Some(sel);
+        self.drag = (count == 1).then_some(Drag::Text);
+        self.redraw_later();
+    }
+
+    /// El puntero se movió con el botón apretado.
+    fn drag_to(&mut self, drag: Drag) {
+        match drag {
+            Drag::Text => {
+                if let (Some(sel), Some(p)) = (self.selection, self.text_point())
+                    && sel.focus != p
+                {
+                    self.selection = Some(Selection {
+                        anchor: sel.anchor,
+                        focus: p,
+                    });
+                    self.redraw_later();
+                }
+            }
+            Drag::Field => {
+                let (px, py) = self.page_point(self.mouse.0, self.mouse.1);
+                let caret = match (&self.focus, &self.page) {
+                    (Some(f), Some(page)) => page.tree.root.as_ref().map(|r| {
+                        edit::caret_from_point(r, f.node, px + self.scroll.0, py + self.scroll.1)
+                    }),
+                    _ => None,
+                };
+                if let (Some(f), Some(caret)) = (&mut self.focus, caret)
+                    && caret != f.caret
+                {
+                    f.anchor.get_or_insert(f.caret);
+                    f.caret = caret;
                     self.redraw_later();
                 }
             }
@@ -2211,6 +2397,22 @@ impl App {
         if self.focus.is_some() && self.edit_key(key, text) {
             return;
         }
+        // Selección de texto de la página.
+        if ctrl && let Key::Character(c) = key {
+            if is(c, "c")
+                && let Some(t) = self.selected_text()
+            {
+                set_clipboard(&t);
+                return;
+            }
+            if is(c, "a")
+                && let Some(all) = self.text_index().and_then(|i| i.all())
+            {
+                self.selection = Some(all);
+                self.redraw_later();
+                return;
+            }
+        }
         // En `about:home`, escribir va al campo de URL.
         let on_home = self
             .current
@@ -2364,6 +2566,11 @@ impl ApplicationHandler<Wake> for App {
                 MouseButton::Forward => self.forward(),
                 _ => {}
             },
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.drag = None,
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.modifiers.control_key() {
                     let up = match delta {
@@ -2493,8 +2700,11 @@ impl App {
             ),
             _ => String::new(),
         };
+        let selection = self
+            .selected_text()
+            .map_or_else(String::new, |t| format!(" selección={t:?}"));
         format!(
-            "pestaña={}/{} url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus}{field} estado={:?} panel={} cajas={}",
+            "pestaña={}/{} url={url} título={title:?} scroll={:.0},{:.0} historial={}/{} zoom={} barra={:?}{focus}{field}{selection} estado={:?} panel={} cajas={}",
             self.active + 1,
             self.tabs.len(),
             self.scroll.0,
@@ -2558,10 +2768,31 @@ impl App {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
             }
+            // `drag:x,y>x,y`: apretar, mover y soltar el botón izquierdo.
+            "drag" => {
+                let (from, to) = arg.split_once('>').ok_or_else(bad)?;
+                self.mouse = point(from).ok_or_else(bad)?;
+                self.mouse_moved();
+                self.click();
+                self.mouse = point(to).ok_or_else(bad)?;
+                self.mouse_moved();
+                self.drag = None;
+            }
+            // `dblclick:x,y` y `tripleclick:x,y`.
+            "dblclick" | "tripleclick" => {
+                self.mouse = point(arg).ok_or_else(bad)?;
+                self.mouse_moved();
+                self.last_click = None;
+                for _ in 0..if verb == "dblclick" { 2 } else { 3 } {
+                    self.click();
+                    self.drag = None;
+                }
+            }
             "click" => {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
                 self.click();
+                self.drag = None;
             }
             "link" => {
                 self.mouse = self
@@ -2706,6 +2937,17 @@ mod tests {
         let c = Url::parse("https://a.test/p?r#x", None).unwrap();
         assert!(same_document(&a, &b));
         assert!(!same_document(&a, &c));
+    }
+
+    #[test]
+    fn window_icon_is_transparent_mark() {
+        let px = brand_rgba(ICON_SIZE);
+        let n = ICON_SIZE as usize;
+        assert_eq!(px.len(), n * n * 4);
+        // Las esquinas, transparentes; algo de la marca, ámbar opaco.
+        assert_eq!(px[3], 0);
+        assert_eq!(px[(n * n - 1) * 4 + 3], 0);
+        assert!(px.chunks(4).any(|c| c == [0xF5, 0xA5, 0x24, 0xFF]));
     }
 
     #[test]
