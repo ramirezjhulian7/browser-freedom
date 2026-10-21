@@ -381,7 +381,8 @@ fn error_event_listener_on_window() {
 
 #[test]
 fn event_handler_idl_attribute() {
-    let mut p = Page::new(SIMPLE).with_html_element();
+    // `x-a` usa la clase por defecto (el `HTMLElement` del test, con los handlers).
+    let mut p = Page::new("<!DOCTYPE html><body><x-a id=a></x-a></body>").with_html_element();
     assert_eq!(
         p.show(
             "var n = 0; var a = document.getElementById('a'); \
@@ -397,8 +398,8 @@ fn event_handler_idl_attribute() {
 #[test]
 fn event_handler_content_attribute() {
     let mut p = Page::new(
-        "<!DOCTYPE html><body><div id=a onclick=\"window.hit = this.id + ':' + event.type\">\
-         </div></body>",
+        "<!DOCTYPE html><body><x-a id=a onclick=\"window.hit = this.id + ':' + event.type\">\
+         </x-a></body>",
     )
     .with_html_element();
     assert_eq!(

@@ -18,6 +18,7 @@ pub mod mixins;
 pub mod node;
 pub mod observer;
 pub mod parser;
+pub mod range;
 pub mod state;
 pub mod traversal;
 pub mod window;
@@ -45,6 +46,10 @@ pub struct DomClasses {
     pub html_document: HostClassId,
     pub xml_document: HostClassId,
     pub dom_parser: HostClassId,
+    pub abstract_range: HostClassId,
+    pub range: HostClassId,
+    pub static_range: HostClassId,
+    pub selection: HostClassId,
     pub document_fragment: HostClassId,
     pub document_type: HostClassId,
     pub element: HostClassId,
@@ -127,6 +132,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         let xml_document =
             agent.register_host_class(bf_js::host::HostClass::new("XMLDocument").parent(document));
         let dom_parser = agent.register_host_class(parser::dom_parser_class());
+        let abstract_range = agent.register_host_class(range::abstract_range_class());
+        let range_c = agent.register_host_class(range::range_class(abstract_range));
+        let static_range = agent.register_host_class(range::static_range_class(abstract_range));
+        let selection = agent.register_host_class(range::selection_class());
         let document_fragment = agent.register_host_class(document::document_fragment_class(n));
         let document_type = agent.register_host_class(node::document_type_class(n));
         let element = agent.register_host_class(element::element_class(n));
@@ -190,6 +199,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
             html_document,
             xml_document,
             dom_parser,
+            abstract_range,
+            range: range_c,
+            static_range,
+            selection,
             document_fragment,
             document_type,
             element,

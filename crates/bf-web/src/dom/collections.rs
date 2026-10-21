@@ -185,37 +185,60 @@ pub fn child_nodes(agent: &mut Agent, parent: NodeRef) -> Value {
     ))
 }
 
-fn nl_nodes(agent: &Agent, d: &NodeListData) -> (DocIndex, Vec<NodeId>) {
-    match d {
-        NodeListData::Static { doc, nodes } => (*doc, nodes.clone()),
-        NodeListData::Children { doc, parent } => {
-            let ctx = WebContextHandle::current(agent).get(agent);
-            (*doc, ctx.doc(*doc).child_nodes(*parent))
-        }
+/// Los hijos de `parent` (caché por versión del documento: recorrer `childNodes` por índice
+/// no vuelve a armar la lista en cada acceso).
+fn cached_children(agent: &mut Agent, doc: DocIndex, parent: NodeId) -> std::rc::Rc<Vec<NodeId>> {
+    let version = crate::with_doc(agent, doc, |d| d.version());
+    let st = crate::dom::state::state(agent);
+    if let Some((v, list)) = st.child_cache.get(&(doc, parent))
+        && *v == version
+    {
+        return list.clone();
     }
+    let list = std::rc::Rc::new(crate::with_doc(agent, doc, |d| d.child_nodes(parent)));
+    let st = crate::dom::state::state(agent);
+    if st.child_cache.len() > 256 {
+        st.child_cache.clear();
+    }
+    st.child_cache.insert((doc, parent), (version, list.clone()));
+    list
+}
+
+/// El largo y el nodo `i` de una `NodeList` (sin copiar las listas estáticas).
+fn nl_get(agent: &mut Agent, v: &Value, i: Option<usize>) -> Option<(DocIndex, usize, Option<NodeId>)> {
+    let children = match agent.host_unwrap::<NodeListData>(v)? {
+        NodeListData::Static { doc, nodes } => {
+            return Some((*doc, nodes.len(), i.and_then(|i| nodes.get(i).copied())));
+        }
+        NodeListData::Children { doc, parent } => (*doc, *parent),
+    };
+    let list = cached_children(agent, children.0, children.1);
+    Some((children.0, list.len(), i.and_then(|i| list.get(i).copied())))
 }
 
 fn nl_len(agent: &mut Agent, o: Gc<Object>) -> usize {
-    payload_of::<NodeListData>(agent, o).map_or(0, |d| nl_nodes(agent, &d).1.len())
+    nl_get(agent, &Value::Object(o), None).map_or(0, |r| r.1)
 }
 
 fn nl_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
-    let d = payload_of::<NodeListData>(agent, o)?;
-    let (doc, nodes) = nl_nodes(agent, &d);
-    let n = *nodes.get(i as usize)?;
-    Some(wrap_node(agent, NodeRef::new(doc, n)))
+    let (doc, _, n) = nl_get(agent, &Value::Object(o), Some(i as usize))?;
+    Some(wrap_node(agent, NodeRef::new(doc, n?)))
 }
 
 fn nl_length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d: NodeListData = payload(agent, &a.this)?;
-    Ok(Value::Number(nl_nodes(agent, &d).1.len() as f64))
+    match nl_get(agent, &a.this, None) {
+        Some((_, len, _)) => Ok(Value::Number(len as f64)),
+        None => agent.type_error("Illegal invocation"),
+    }
 }
 
 fn nl_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d: NodeListData = payload(agent, &a.this)?;
+    if agent.host_unwrap::<NodeListData>(&a.this).is_none() {
+        return agent.type_error("Illegal invocation");
+    }
     let i = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
-    let (doc, nodes) = nl_nodes(agent, &d);
-    Ok(wrap_opt(agent, doc, nodes.get(i).copied()))
+    let (doc, _, n) = nl_get(agent, &a.this, Some(i)).expect("NodeList");
+    Ok(wrap_opt(agent, doc, n))
 }
 
 // --- HTMLCollection ---

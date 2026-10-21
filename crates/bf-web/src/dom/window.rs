@@ -45,7 +45,8 @@ pub fn window_class(event_target: HostClassId) -> HostClass {
         .unforgeable("top", Some(window_self), None)
         .attribute("frameElement", Some(null), None)
         .attribute("event", Some(current_event), Some(replaceable_event))
-        .method("postMessage", 1, post_message);
+        .method("postMessage", 1, post_message)
+        .method("getSelection", 0, crate::dom::range::window_get_selection);
     let mut names: Vec<&'static str> = GLOBAL_EVENT_HANDLERS.to_vec();
     names.extend_from_slice(WINDOW_EVENT_HANDLERS);
     with_event_handlers(c, &names)

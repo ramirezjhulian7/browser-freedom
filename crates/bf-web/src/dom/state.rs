@@ -59,6 +59,10 @@ pub struct DomState {
     /// Para los handlers de ventana: el `body`/`frameset` cuyo atributo `on…` cambió por
     /// último desde script (por tipo de evento).
     pub window_handler_source: HashMap<DomString, bf_dom::NodeId>,
+    /// La selección de cada documento.
+    pub selections: HashMap<DocIndex, crate::dom::range::SelectionState>,
+    /// `childNodes`: los hijos de (documento, padre) con la versión del documento.
+    pub child_cache: HashMap<(DocIndex, bf_dom::NodeId), (u64, std::rc::Rc<Vec<bf_dom::NodeId>>)>,
     /// Los documentos de `new Document()` (su interfaz es `Document`, no `XMLDocument`).
     pub plain_documents: HashSet<DocIndex>,
     /// Los wrappers de los eventos nativos en dispatch, por (dirección, `timeStamp`).
