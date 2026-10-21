@@ -13,10 +13,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use bf_dom::events::{
-    Event, EventInit, EventKind, EventTarget, FocusEventData, InputEventData,
+    Event, EventInit, EventKind, EventTarget, InputEventData,
     KeyboardEventData, Listener, ListenerOptions, MouseEventData, ScriptHost,
 };
-use bf_dom::{Document, NodeData};
+use bf_dom::Document;
 use bf_infra::DomString;
 use bf_js::heap::Gc;
 use bf_js::host::{HostClass, HostClassId, HostHandle, HostKey};
@@ -610,7 +610,7 @@ pub fn report_exception(agent: &mut Agent, e: &Value) {
     }
     state(agent).reporting = true;
     let ctx = WebContextHandle::current(agent);
-    let filename = ctx.get(agent).url.as_str().to_owned();
+    let filename = ctx.get(agent).url.serialize(false);
     let cell = Rc::new(RefCell::new(Event::new(
         "error",
         EventInit {
@@ -817,7 +817,6 @@ fn focus_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (view, _) = ui_init(agent, &dict)?;
     let related_target = dict_target(agent, &dict, "relatedTarget")?;
     let ev = Event::with_kind(type_, init, EventKind::Focus { related_target });
-    let _ = FocusEventData::default;
     construct_event(agent, a, EventIface::Focus, ev, [view, Value::Undefined])
 }
 
@@ -1730,5 +1729,3 @@ fn run_event_handler(
     Ok(result)
 }
 
-#[allow(dead_code)]
-fn _unused(_: NodeData) {}

@@ -13,10 +13,6 @@ use crate::dom::{
 };
 use crate::{NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
-pub fn event_target_class() -> HostClass {
-    HostClass::new("EventTarget")
-}
-
 pub fn node_class(event_target: HostClassId) -> HostClass {
     let mut c = HostClass::new("Node")
         .parent(event_target)

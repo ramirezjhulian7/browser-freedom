@@ -50,7 +50,7 @@ fn create_document_type(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     let public_id = to_dom_string(agent, &a.arg(1))?;
     let system_id = to_dom_string(agent, &a.arg(2))?;
     let r = with_doc_mut(agent, doc, |d| {
-        d.create_document_type(&qn, public_id, system_id)
+        d.create_document_type(qn, public_id, system_id)
     });
     match r {
         Ok(n) => Ok(wrap_node(agent, NodeRef::new(doc, n))),
