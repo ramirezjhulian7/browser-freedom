@@ -206,6 +206,10 @@ pub struct HostState {
     /// Valores que usa el código del host mientras corre (raíces).
     pub(crate) running: Vec<Value>,
     pub(crate) event_loop: event_loop::EventLoop,
+    /// Datos del embebedor por tipo (para todo el agente).
+    embedder: HashMap<std::any::TypeId, Box<dyn Any>>,
+    /// Datos del embebedor por realm y tipo (p. ej. el `WebContext` de cada ventana).
+    realm_data: HashMap<(RealmId, std::any::TypeId), Box<dyn Any>>,
 }
 
 impl Default for HostState {
@@ -220,6 +224,8 @@ impl Default for HostState {
             next_pin: 1,
             running: Vec::new(),
             event_loop: event_loop::EventLoop::default(),
+            embedder: HashMap::new(),
+            realm_data: HashMap::new(),
         }
     }
 }
@@ -664,6 +670,83 @@ impl Agent {
     /// Libera un valor fijado.
     pub fn host_unpin(&mut self, h: HostHandle) -> Option<Value> {
         self.host.pins.remove(&h.0)
+    }
+
+    /// Guarda un dato del embebedor para todo el agente (uno por tipo).
+    pub fn set_embedder_data<T: Any>(&mut self, data: T) {
+        self.host
+            .embedder
+            .insert(std::any::TypeId::of::<T>(), Box::new(data));
+    }
+
+    /// El dato del embebedor de tipo `T`.
+    pub fn embedder_data<T: Any>(&self) -> Option<&T> {
+        self.host
+            .embedder
+            .get(&std::any::TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref::<T>())
+    }
+
+    pub fn embedder_data_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.host
+            .embedder
+            .get_mut(&std::any::TypeId::of::<T>())
+            .and_then(|b| b.downcast_mut::<T>())
+    }
+
+    /// Guarda un dato del embebedor para `realm` (uno por tipo y realm).
+    pub fn set_realm_data<T: Any>(&mut self, realm: RealmId, data: T) {
+        self.host
+            .realm_data
+            .insert((realm, std::any::TypeId::of::<T>()), Box::new(data));
+    }
+
+    /// El dato de tipo `T` de `realm`.
+    pub fn realm_data<T: Any>(&self, realm: RealmId) -> Option<&T> {
+        self.host
+            .realm_data
+            .get(&(realm, std::any::TypeId::of::<T>()))
+            .and_then(|b| b.downcast_ref::<T>())
+    }
+
+    pub fn realm_data_mut<T: Any>(&mut self, realm: RealmId) -> Option<&mut T> {
+        self.host
+            .realm_data
+            .get_mut(&(realm, std::any::TypeId::of::<T>()))
+            .and_then(|b| b.downcast_mut::<T>())
+    }
+
+    /// Saca el dato de tipo `T` de `realm` (para devolverlo con `set_realm_data`).
+    pub fn take_realm_data<T: Any>(&mut self, realm: RealmId) -> Option<T> {
+        self.host
+            .realm_data
+            .remove(&(realm, std::any::TypeId::of::<T>()))
+            .and_then(|b| b.downcast::<T>().ok())
+            .map(|b| *b)
+    }
+
+    /// Convierte el objeto global de `realm` en un objeto host de `class` (p. ej. `Window`,
+    /// HTML §7.3): conserva sus propiedades y su prototipo pasa a ser el de la clase.
+    pub fn host_make_global(
+        &mut self,
+        realm: RealmId,
+        class: HostClassId,
+        payload: Box<dyn Any>,
+    ) -> Gc<Object> {
+        let proto = instantiate(self, realm, class).prototype;
+        let g = self.realms[realm].global_object;
+        self.heap[g].kind = ObjectKind::Host(Box::new(HostObject {
+            class,
+            key: None,
+            payload,
+            slots: Vec::new(),
+        }));
+        self.heap[g].proto = Some(proto);
+        let saved = self.current_realm;
+        self.current_realm = realm;
+        self.define_unforgeables(g, class);
+        self.current_realm = saved;
+        g
     }
 
     /// Cambia los hooks del embebedor.

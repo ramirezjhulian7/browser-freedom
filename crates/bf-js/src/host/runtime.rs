@@ -54,6 +54,26 @@ impl JsError {
                 };
                 (message, stack)
             }
+            // Los objetos host con `name`/`message` (p. ej. `DOMException`): sus getters son
+            // nativos.
+            Value::Object(o) if matches!(agent.heap[*o].kind, ObjectKind::Host(_)) => {
+                let o = *o;
+                let name = agent.get(o, &PropertyKey::from("name"), Value::Object(o));
+                let msg = agent.get(o, &PropertyKey::from("message"), Value::Object(o));
+                let stack = data_prop(agent, o, "stack")
+                    .and_then(|s| s.as_string().map(JsString::to_string_lossy))
+                    .unwrap_or_default();
+                match (name, msg) {
+                    (Ok(Value::String(n)), Ok(Value::String(m))) if m.is_empty() => {
+                        (n.to_string_lossy(), stack)
+                    }
+                    (Ok(Value::String(n)), Ok(Value::String(m))) => (
+                        format!("{}: {}", n.to_string_lossy(), m.to_string_lossy()),
+                        stack,
+                    ),
+                    _ => (display(agent, &Value::Object(o)), stack),
+                }
+            }
             other => (display(agent, other), String::new()),
         };
         JsError {
