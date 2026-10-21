@@ -12,7 +12,11 @@ Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 
 ## Instalar Freedom
 
-Por ahora Freedom se instala desde el código fuente. Son cuatro pasos:
+Descarga el instalador para tu sistema (Windows, macOS o Linux) desde
+[Releases](https://github.com/ramirezjhulian7/browser-freedom/releases); cada release explica
+cómo instalarlo.
+
+También puedes compilarlo desde el código fuente, en cuatro pasos:
 
 1. Instala Rust con el instalador oficial de [rustup.rs](https://rustup.rs) (en Windows,
    acepta las opciones por defecto).
@@ -274,6 +278,8 @@ El flujo de una página:
 
 Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) para el flujo de trabajo.
 
+Los instaladores y el proceso de release están en [`packaging/`](packaging/README.md).
+
 ## Compilar
 
 Requiere Rust estable (edición 2024) y Python 3 solo para regenerar tablas.
@@ -373,7 +379,8 @@ Sus partes:
     at-rules sin efecto, `display` degradados, formatos de imagen sin decodificador y
     controles sin interactividad;
   - las fuentes resueltas;
-  - botones para guardar PNG, volcar el layout y volcar el DOM (junto al ejecutable).
+  - botones para guardar PNG, volcar el layout y volcar el DOM (en la carpeta de
+    descargas).
 - **Línea de estado** (24 px): el destino del enlace bajo el puntero; zoom, viewport en px CSS
   y tiempo total de carga.
 - **Menú contextual**: tarjeta con sombra, resaltado ámbar tenue y el atajo de cada acción a la

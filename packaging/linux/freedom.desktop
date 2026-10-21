@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Freedom
+GenericName=Navegador web
+GenericName[en]=Web Browser
+Comment=Navega libre. Un navegador independiente, hecho desde cero.
+Comment[en]=Browse free. An independent web browser, built from scratch.
+Keywords=navegador;web;internet;browser;
+Exec=freedom %u
+Icon=freedom
+Terminal=false
+StartupNotify=true
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
