@@ -2580,6 +2580,17 @@ enum Fast {
     Slow,
 }
 
+/// ToBoolean (§7.1.2) con solo el heap (E3): un objeto es truthy salvo con [[IsHTMLDDA]]
+/// (B.3.6.1).
+#[inline]
+fn truthiness(heap: &crate::heap::Heap, v: &Value) -> bool {
+    match v {
+        Value::Object(o) => !matches!(heap[*o].kind, ObjectKind::HtmlDda),
+        Value::BigInt(b) => !heap[*b].is_zero(),
+        _ => primitive_truthiness(v).unwrap_or(true),
+    }
+}
+
 /// Valor de verdad de los primitivos (ToBoolean, §7.1.2); `None` para objetos y BigInt (los
 /// objetos con `[[IsHTMLDDA]]` y los BigInt los resuelve el agente).
 #[inline]
@@ -2842,7 +2853,8 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
         // la ruta lenta (su [[Get]] mira la cadena de prototipos).
         Op::IterStep { slot, done } => {
             let s = slot as usize;
-            let (Some(Value::Object(it)), Some(Value::Object(next))) = (&f.locals[s], &f.locals[s + 1])
+            let (Some(Value::Object(it)), Some(Value::Object(next))) =
+                (&f.locals[s], &f.locals[s + 1])
             else {
                 return Fast::Slow;
             };
@@ -2901,7 +2913,7 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
         },
         Op::Jump(t) => return jump!(t),
         Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
-            let Some(b) = f.stack.last().and_then(primitive_truthiness) else {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
                 return Fast::Slow;
             };
             f.stack.pop();
@@ -2910,7 +2922,7 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             }
         }
         Op::JumpIfTrueKeep(t) | Op::JumpIfFalseKeep(t) => {
-            let Some(b) = f.stack.last().and_then(primitive_truthiness) else {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
                 return Fast::Slow;
             };
             // Salta sin sacar; si no salta, saca.
@@ -2926,7 +2938,7 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             _ => return Fast::Slow,
         },
         Op::Not => {
-            let Some(b) = f.stack.last().and_then(primitive_truthiness) else {
+            let Some(b) = f.stack.last().map(|v| truthiness(heap, v)) else {
                 return Fast::Slow;
             };
             *f.stack.last_mut().expect("pila") = Value::Boolean(!b);

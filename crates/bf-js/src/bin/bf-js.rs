@@ -4,6 +4,8 @@
 //! `bf-js run <archivo.js> [--module]`: ejecuta un script (o, con `--module` o `.mjs`, un
 //! módulo con sus imports desde el sistema de archivos) con `print` (y `$262`); una
 //! excepción no atrapada se imprime en stderr y sale con código 1.
+//!
+//! `bf-js bench [opciones]`: el benchmark de la VM (ver `bench/mod.rs`).
 
 use std::process::ExitCode;
 
@@ -11,9 +13,15 @@ use bf_js::estree::{Options, to_json};
 use bf_js::vm::{Agent, AgentOptions, Throw};
 use bf_js::{ParseOptions, parse_module, parse_script};
 
-const USAGE: &str = "uso: bf-js dump-ast <archivo.js> [--module] [--check] [--no-locations]\n     bf-js run <archivo.js> [--module]";
+mod bench;
+
+const USAGE: &str = "uso: bf-js dump-ast <archivo.js> [--module] [--check] [--no-locations]\n     bf-js run <archivo.js> [--module]\n     bf-js bench [--filter texto] [--runs N] [--compare base.tsv] [--save x.tsv] [--gc]";
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "bench") {
+        return bench::main(args[1..].to_vec());
+    }
     // El parser y la VM corren en un hilo con pila grande: el anidamiento permitido depende
     // de ella.
     std::thread::Builder::new()
