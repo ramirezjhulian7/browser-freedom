@@ -537,6 +537,8 @@ pub fn dispatch_js_event(
     *ctx.get_mut(agent).doc_mut(doc) = document;
     *cell.borrow_mut() = ev;
     crate::dom::after_dom_mutation(agent, doc);
+    // E1: la activation behavior que el dispatch dejó en cola (HTML).
+    crate::html::activation::run_activations(agent, doc);
     Ok(r)
 }
 

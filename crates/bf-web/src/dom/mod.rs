@@ -373,6 +373,8 @@ pub fn mutated(agent: &mut Agent) {
     let n = ctx.get(agent).documents.len();
     for doc in 0..n as DocIndex {
         observer::schedule_delivery(agent, doc);
+        // E1: el `toggle` de los `details` cuyo `open` cambió.
+        crate::html::activation::queue_details_toggles(agent, doc);
     }
 }
 
@@ -380,4 +382,5 @@ pub fn mutated(agent: &mut Agent) {
 /// entrega de los observers de `doc`.
 pub fn after_dom_mutation(agent: &mut Agent, doc: DocIndex) {
     observer::schedule_delivery(agent, doc);
+    crate::html::activation::queue_details_toggles(agent, doc); // E1
 }

@@ -98,6 +98,10 @@ impl Document {
         // Attribute change steps de HTML.
         if ns.is_none() {
             self.attribute_changed(el, local);
+            // E1: `details` (HTML §4.11.1).
+            if *local == "open" {
+                self.details_open_changed(el, old_value.is_some());
+            }
         }
     }
 

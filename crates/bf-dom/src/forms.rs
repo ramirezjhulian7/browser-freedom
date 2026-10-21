@@ -66,6 +66,11 @@ impl Document {
             ElementState::None
         };
         self.get_mut(id).state = state;
+        // E1: un `details` creado con `open` (parser, clon) también dispara `toggle`: sus
+        // atributos se agregan con los "attribute change steps" (HTML §4.11.1).
+        if self.is_html_element(id, "details") && self.has_attr(id, "open") {
+            self.details_open_changed(id, false);
+        }
     }
 
     /// Cloning steps de `option`: la copia hereda selectedness y dirtiness.
@@ -121,6 +126,35 @@ impl Document {
                 self.set_option_selectedness(el, value);
             }
             _ => {}
+        }
+    }
+
+    /// E1: el "reset algorithm" de `input` (checkedness del atributo `checked`, sin dirty) y
+    /// de `select` (selectedness de los atributos `selected`, HTML §4.10.21.6).
+    pub fn reset_form_control(&mut self, el: NodeId) {
+        let has = |doc: &Self, n: NodeId, name: &str| {
+            doc.element(n).is_some_and(|e| e.attr(name).is_some())
+        };
+        let checked_attr = has(self, el, "checked");
+        if let ElementState::Input { checked, dirty } = &mut self.get_mut(el).state {
+            *checked = checked_attr;
+            *dirty = false;
+            return;
+        }
+        if self.is_html_element(el, "select") {
+            for o in self.list_of_options(el) {
+                let value = has(self, o, "selected");
+                if let ElementState::Option {
+                    selectedness,
+                    dirtiness,
+                    ..
+                } = &mut self.get_mut(o).state
+                {
+                    *selectedness = value;
+                    *dirtiness = false;
+                }
+            }
+            self.selectedness_setting(el);
         }
     }
 

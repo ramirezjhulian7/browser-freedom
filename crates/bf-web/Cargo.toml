@@ -15,6 +15,9 @@ bf-layout = { path = "../bf-layout" }
 bf-net = { path = "../bf-net" } # E2: fetch y XMLHttpRequest
 bf-url = { path = "../bf-url" }
 bf-style = { path = "../bf-style" }
+# E1: el bitmap del canvas y el texto con las fuentes del navegador
+bf-font = { path = "../bf-font" }
+tiny-skia = "0.11"
 
 [lints]
 workspace = true

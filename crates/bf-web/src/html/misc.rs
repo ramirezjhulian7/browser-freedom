@@ -57,11 +57,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
                     .attribute("contentWindow", Some(null), None)
             }
         }
-        "HTMLCanvasElement" => {
-            class
-                .method("getContext", 1, null)
-                .method("toDataURL", 0, canvas_to_data_url)
-        }
+        "HTMLCanvasElement" => super::canvas::extend_canvas(class),
         "HTMLBaseElement" => class.attribute("href", Some(base_href), Some(set_base_href)),
         // WindowEventHandlers (HTML §8.1.8.2): los handlers de `body`/`frameset` son los de la
         // ventana (los handlers de E3 los reenvían a `window`).
@@ -389,14 +385,6 @@ fn template_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
 }
 
-// --- HTMLCanvasElement (§4.12.5) ---
-
-/// `toDataURL()` sin contexto de dibujo: un PNG transparente no se codifica todavía; el
-/// spec permite `"data:,"` cuando el bitmap no tiene píxeles.
-fn canvas_to_data_url(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(js_str("data:,"))
-}
-
 // --- click(), focus(), blur() (§6.4.2, §6.6) ---
 
 /// ¿Es un control de formulario deshabilitado? ("click()" no hace nada.)
@@ -411,15 +399,21 @@ fn is_disabled_control(agent: &Agent, n: NodeRef) -> bool {
 /// `cancelable` y `composed`), salvo en un control deshabilitado o durante otro click.
 pub fn click(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    click_element(agent, n);
+    Ok(Value::Undefined)
+}
+
+/// Los pasos de "click()" sobre `n` (también los usa el `label` que reenvía su click).
+pub fn click_element(agent: &mut Agent, n: NodeRef) {
     if is_disabled_control(agent, n) {
-        return Ok(Value::Undefined);
+        return;
     }
     let realm = WebContextHandle::current(agent).realm;
     let in_progress = agent
         .realm_data::<ClickState>(realm)
         .is_some_and(|s| s.0.contains(&n));
     if in_progress {
-        return Ok(Value::Undefined);
+        return;
     }
     let mut s = agent
         .take_realm_data::<ClickState>(realm)
@@ -441,10 +435,11 @@ pub fn click(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         init,
         EventKind::Mouse(MouseEventData::default()),
     );
+    // Las acciones que el dispatch dejó en cola (enlaces, envíos, label, summary).
+    super::activation::run_activations(agent, n.doc);
     if let Some(s) = agent.realm_data_mut::<ClickState>(realm) {
         s.0.retain(|x| *x != n);
     }
-    Ok(Value::Undefined)
 }
 
 /// Los elementos con el *click in progress flag*.

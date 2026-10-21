@@ -24,6 +24,8 @@ const DEFAULT_DIRS: &[&str] = &[
     "dom",
     "html/dom",
     "html/semantics/scripting-1",
+    "html/semantics/forms",
+    "html/semantics/interactive-elements",
     "html/webappapis",
     "url",
     "encoding",
@@ -51,6 +53,8 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
 fn group(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
+        // `html/semantics` por área (`forms`, `scripting-1`…).
+        ["html", "semantics", c, _, ..] => format!("html/semantics/{c}"),
         [a, b, _, ..] => format!("{a}/{b}"),
         [a, ..] => (*a).to_owned(),
         [] => String::new(),

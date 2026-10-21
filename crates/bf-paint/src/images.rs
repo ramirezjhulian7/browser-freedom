@@ -38,6 +38,20 @@ impl PageImages {
     pub fn for_url(&self, url: &str) -> Option<&Arc<Pixmap>> {
         self.by_url.get(url)
     }
+
+    /// El bitmap de un `<canvas>` como la imagen `canvas:<id>` del elemento (E1).
+    pub fn insert_canvas(&mut self, node: NodeId, pixmap: Arc<Pixmap>) {
+        let url = format!("canvas:{}", node.index());
+        self.sizes.insert(
+            node,
+            ImageState::Loaded(Size {
+                width: pixmap.width() as f32,
+                height: pixmap.height() as f32,
+            }),
+        );
+        self.by_url.insert(url.clone(), pixmap);
+        self.element_url.insert(node, url);
+    }
 }
 
 fn is_image_element(el: &bf_dom::Element) -> bool {

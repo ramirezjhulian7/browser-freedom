@@ -60,39 +60,46 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 
 Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md`.
 
-- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `dom/nodes`, `dom/events`, `dom/collections`, `dom/traversal`, `dom/lists`, `html/dom`, `html/webappapis`, `url`, `encoding`, `console`; 1330 documentos en 95 s.
+- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `dom`, `html/dom`, `html/semantics/scripting-1`, `html/semantics/forms`, `html/semantics/interactive-elements`, `html/webappapis`, `url`, `encoding`, `console`; 2563 documentos en 88 s.
 - Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por documento (60 s con `<meta name=timeout content=long>` o `META: timeout=long`), un hilo por documento.
 - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). Detalle por subtest: `target/wpt-testharness/results.tsv`.
 
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | console | 12 | 12 | 29 | 12 | 17 | 0 | 0 | 41.4% |
+| dom | 11 | 11 | 142 | 122 | 20 | 0 | 0 | 85.9% |
+| dom/abort | 6 | 5 | 37 | 26 | 10 | 1 | 0 | 70.3% |
 | dom/collections | 12 | 12 | 60 | 55 | 5 | 0 | 0 | 91.7% |
-| dom/events | 177 | 83 | 784 | 425 | 228 | 54 | 77 | 54.2% |
+| dom/events | 177 | 89 | 817 | 584 | 82 | 62 | 89 | 71.5% |
 | dom/lists | 5 | 5 | 189 | 187 | 2 | 0 | 0 | 98.9% |
-| dom/nodes | 359 | 294 | 9657 | 7714 | 1185 | 81 | 677 | 79.9% |
+| dom/nodes | 359 | 299 | 9668 | 7872 | 1038 | 82 | 676 | 81.4% |
+| dom/observable | 29 | 25 | 251 | 0 | 242 | 4 | 5 | 0.0% |
+| dom/ranges | 68 | 61 | 41823 | 37394 | 253 | 0 | 4176 | 89.4% |
 | dom/traversal | 18 | 17 | 1607 | 1573 | 33 | 0 | 1 | 97.9% |
-| encoding | 45 | 39 | 12003 | 11277 | 380 | 343 | 3 | 94.0% |
+| encoding | 45 | 38 | 12003 | 11299 | 190 | 511 | 3 | 94.1% |
 | encoding/legacy-mb-japanese | 51 | 12 | 333515 | 0 | 129825 | 1 | 203689 | 0.0% |
 | encoding/legacy-mb-korean | 26 | 3 | 239960 | 0 | 43264 | 0 | 196696 | 0.0% |
 | encoding/legacy-mb-schinese | 4 | 4 | 660 | 4 | 656 | 0 | 0 | 0.6% |
 | encoding/legacy-mb-tchinese | 23 | 5 | 193181 | 123 | 43390 | 0 | 149668 | 0.1% |
 | encoding/streams | 13 | 12 | 111 | 0 | 111 | 0 | 0 | 0.0% |
-| html/dom | 223 | 157 | 64260 | 62272 | 1888 | 46 | 54 | 96.9% |
-| html/webappapis | 321 | 197 | 1079 | 566 | 278 | 180 | 55 | 52.5% |
-| url | 41 | 39 | 573 | 472 | 94 | 2 | 5 | 82.4% |
-| **Total** | 1330 | 891 | 857668 | 84680 | 221356 | 707 | 550925 | 9.9% |
+| html/dom | 223 | 158 | 64260 | 62278 | 1883 | 46 | 53 | 96.9% |
+| html/semantics/forms | 514 | 393 | 4689 | 1978 | 1862 | 85 | 764 | 42.2% |
+| html/semantics/interactive-elements | 114 | 68 | 418 | 49 | 171 | 33 | 165 | 11.7% |
+| html/semantics/scripting-1 | 491 | 332 | 2711 | 1441 | 959 | 24 | 287 | 53.2% |
+| html/webappapis | 321 | 198 | 1131 | 608 | 293 | 176 | 54 | 53.8% |
+| url | 41 | 39 | 8699 | 8489 | 193 | 17 | 0 | 97.6% |
+| **Total** | 2563 | 1798 | 915961 | 134094 | 224499 | 1042 | 556326 | 14.6% |
 
 Las causas más frecuentes de los archivos sin estado OK:
 
-- 413: `TIMEOUT `
+- 643: `TIMEOUT `
+- 34: `ERROR Uncaught TypeError: Cannot read properties of null (reading 'querySelectorAll')`
+- 28: `NORESULT `
+- 8: `ERROR Unhandled rejection: WebIDL2 is not defined`
 - 7: `NORESULT tiempo agotado`
+- 4: `ERROR Uncaught ReferenceError: unreachable is not defined`
 - 2: `ERROR TypeError: Document.parseHTMLUnsafe is not a function`
 - 2: `ERROR Unhandled rejection`
-- 2: `ERROR Unhandled rejection: action_sequence() is not implemented by testdriver-vendor.js`
-- 1: `ERROR Error: assert_equals: the meta charset must be in effect, making the main document windows-1252 expe`
-- 1: `ERROR Test named 'Reloading a document.open()'d page should reload the URL of the entry realm's responsibl`
-- 1: `ERROR Test named 'document.open() sets document to no-quirks mode (write no doctype)' specified 1 'cleanup`
 
 ## Notas de testharness
 
@@ -103,3 +110,9 @@ Las causas más frecuentes de los archivos sin estado OK:
 - `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
   casi completo); dominan el total de subtests.
 - Los tests que usan `test_driver` (WebDriver) terminan en `TIMEOUT`.
+- `html/semantics/forms`: la *activation behavior* (envío con `submit`/`formdata`/`invalid`,
+  reset, `label`) está; la mayoría de `form-submission-0` y `form-submission-target` leen el
+  resultado del envío en un `<iframe>` con `target` (sin navegación de iframes: `notrun`).
+  Faltan además `DataTransfer` (archivos), `HTMLInputElement.labels` y `attachShadow`.
+- `html/semantics/interactive-elements`: `the-dialog-element` (sin `HTMLDialogElement`) es
+  casi todo el directorio; en `details` falta la exclusividad por `name`.

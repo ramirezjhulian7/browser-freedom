@@ -482,6 +482,12 @@ fn activations(t: &mut Target<'_>, mods: Mods, out: &mut Vec<PageRequest>) {
                 }
             }
             bf_dom::events::Activation::Reset(_) => {}
+            // E1: `label` y `summary` los completa el motor (bf-web).
+            a @ (bf_dom::events::Activation::Label(_) | bf_dom::events::Activation::Summary(_)) => {
+                if let Some(e) = &mut t.engine {
+                    e.run_activation(a);
+                }
+            }
         }
     }
 }

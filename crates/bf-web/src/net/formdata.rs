@@ -333,7 +333,18 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 s.map(|s| s.node)
             }
         };
-        entries = with_doc(agent, n.doc, |d| form_entry_list(d, n.node, submitter));
+        // E1: "constructing the entry list" con los valores de los controles y `formdata`.
+        let submitter = submitter.map(|s| crate::NodeRef::new(n.doc, s));
+        match crate::html::submission::construct_entry_list(agent, n, submitter) {
+            Some(list) => entries = list,
+            None => {
+                return crate::net::dom_error(
+                    agent,
+                    "InvalidStateError",
+                    "The form is already constructing its entry list.",
+                );
+            }
+        }
     }
     let class = classes(agent).form_data;
     Ok(Value::Object(agent.host_create_from_new_target(
