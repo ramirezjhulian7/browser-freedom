@@ -69,6 +69,8 @@ fn run_script(path: &str, module: bool) -> ExitCode {
     agent.reset_stack_base();
     let realm = agent.current_realm;
     bf_js::builtins::host::install_test262(&mut agent, realm);
+    // E3: los timers, `queueMicrotask`, `requestAnimationFrame` y `console` (hooks por defecto).
+    bf_js::host::event_loop::install_globals(&mut agent, realm);
     let result = if module {
         // E1: módulos ESM con FileModuleLoader.
         use bf_js::vm::module::FileModuleLoader;
@@ -81,7 +83,11 @@ fn run_script(path: &str, module: bool) -> ExitCode {
         agent.eval_script(&src, path)
     };
     // E3: RunJobs al terminar el script.
-    match result.and_then(|v| agent.run_jobs().map(|_| v)) {
+    // y luego el bucle de eventos hasta que no quede nada pendiente.
+    let result = result
+        .and_then(|v| agent.run_jobs().map(|_| v))
+        .and_then(|v| run_event_loop(&mut agent).map(|_| v));
+    match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(Throw::Value(v)) => {
             let msg = describe_exception(&mut agent, &v);
@@ -144,6 +150,21 @@ fn dump_ast(path: &str, flags: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("{path}:{}:{}: {}", e.line, e.column, e.message);
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// E3: corre las tareas y los temporizadores hasta que no quede nada pendiente (durmiendo
+/// hasta el próximo vencimiento).
+fn run_event_loop(agent: &mut Agent) -> Result<(), Throw> {
+    loop {
+        agent.run_until_idle()?;
+        let Some(wake) = agent.next_wake() else {
+            return Ok(());
+        };
+        let now = agent.host.hooks.now();
+        if wake > now {
+            std::thread::sleep(std::time::Duration::from_secs_f64((wake - now) / 1000.0));
         }
     }
 }
