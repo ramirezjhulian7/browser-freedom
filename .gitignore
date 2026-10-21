@@ -2,3 +2,4 @@ target/
 tests/wpt/
 tests/test262/
 /dist
+/docs/*.visual-check.*

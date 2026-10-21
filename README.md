@@ -206,9 +206,9 @@ motor JavaScript.
   - imágenes y capas de `background-image`;
   - partes nativas de los controles;
   - rasterizado con `tiny-skia` y el harness de reftests de WPT.
-- **`bf-shell`**: el navegador (ejecutable `freedom`). Carga en un hilo de trabajo y muestra
-  el resultado en una ventana cuya interfaz dibuja el propio motor: panel del motor, superposición de cajas y
-  páginas `about:` (ver [La interfaz](#la-interfaz)).
+- **`bf-shell`**: el navegador (ejecutable `freedom`). Un hilo por pestaña carga, ejecuta los
+  scripts y maqueta; la ventana, cuya interfaz dibuja el propio motor, muestra el resultado:
+  panel del motor, superposición de cajas y páginas `about:` (ver [La interfaz](#la-interfaz)).
 - **`bf-js`** (fase 2, en curso): el motor de ECMAScript 2026:
   - lexer (§12) con identificadores Unicode, números correctamente redondeados, templates y
     re-escaneo de regex dirigido por el parser;
@@ -228,28 +228,56 @@ motor JavaScript.
     `import()` dinámico (también desde scripts y `eval`) y top-level await;
   - `bf-js run archivo.js [--module]` ejecuta un script o un módulo (con sus imports desde
     el sistema de archivos) con `print`.
+- **`bf-web`** (fase 2, en curso): el puente entre `bf-js` y la plataforma web. Las interfaces
+  WebIDL del DOM, de HTML, del BOM (`navigator`, `location`, `history`, storage…) y del CSSOM
+  como clases host de JavaScript, más el runner de testharness.js de WPT.
 
 ## Arquitectura
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/arquitectura-dark.png">
+  <img src="docs/arquitectura-light.png" alt="Arquitectura de Freedom: la ventana manda la URL al hilo de la pestaña, que la carga (bf-net), la parsea (bf-html) ejecutando los scripts (bf-js y bf-web), calcula estilos (bf-css y bf-style), maqueta (bf-layout, con bf-font y bf-image) y pinta (bf-paint); la lista de visualización vuelve a la ventana.">
+</picture>
+
+La versión interactiva, con zoom, búsqueda, recorridos guiados («Cargar una página» y
+«JavaScript») y enlaces al código de cada parte, es
+[`docs/arquitectura.html`](docs/arquitectura.html): descárgala y ábrela en un navegador. Se
+genera desde [`docs/arquitectura.json`](docs/arquitectura.json) con asimetrix-arq-generator
+y la identidad de Freedom (ver [`tools/arquitectura/`](tools/arquitectura/README.md)).
+
+Freedom trabaja con **dos clases de hilos**:
+
+- **La interfaz** (`bf-shell`, `window/`): la ventana, el cromo, la entrada del usuario y el
+  raster de la lista de visualización. Nunca espera a la red ni a los scripts.
+- **Un hilo por pestaña** (`window/worker.rs`): dueño del documento y de su motor de
+  JavaScript (`script.rs`). Carga, parsea ejecutando los scripts, calcula estilos, maqueta y
+  arma la lista de visualización; corre los temporizadores y, si los scripts cambian el DOM,
+  vuelve a maquetar (como mucho un cuadro cada 16 ms). Los clics y las teclas le llegan como
+  eventos del DOM (`window/events.rs`).
+
+El flujo de una página:
+1. La ventana manda la URL al hilo de la pestaña.
+2. `bf-net` la resuelve con `bf-url`, hace el fetch (HTTP/1.1, TLS) y elige el encoding.
+3. `bf-html` parsea a un árbol `bf-dom`. Cada `<script>` lo ejecuta `bf-js` con las
+   interfaces de `bf-web` (DOM, BOM, CSSOM); `localStorage` se guarda por origen en disco.
+4. `bf-style` carga las hojas (UA, autor, `@import`) con `bf-css` y calcula los valores
+   computados de cada elemento.
+5. `bf-layout` construye el árbol de cajas y produce un árbol de fragmentos con geometría
+   absoluta. Para eso usa `bf-font` (métricas y glifos) y los tamaños de `bf-image`.
+6. `bf-paint` lo convierte en una lista de visualización, que vuelve a la ventana: ahí se
+   rasteriza y se compone con el cromo.
+
+Dependencias entre crates:
 
 ```
  bf-url ─► bf-net ─► bf-html ─► bf-dom ─► bf-css / bf-style ─► bf-layout ─► bf-paint ─► bf-shell
   (URL)   (Fetch,    (parser)   (árbol)   (sintaxis, cascada,  (cajas,      (display     (ventana,
-          HTTP/TLS,                        valores computados)  fragmentos)  list, raster) navegación)
-          encoding)                                                 ▲
-                                               bf-font ─────────────┤ (métricas, shaping)
-                                               bf-image ────────────┘ (tamaños naturales; pixmaps a bf-paint)
- bf-infra: tipos comunes, ResourceLoader, encodings (lo usan todos)       bf-js: motor de JS (fase 2)
+          HTTP/TLS,       ▲                valores computados)  fragmentos)  list, raster) pestañas)
+          encoding)       │                                         ▲
+             bf-js ─► bf-web (DOM, BOM, CSSOM)   bf-font ───────────┤ (métricas, shaping)
+            (motor JS)                           bf-image ──────────┘ (tamaños naturales; pixmaps a bf-paint)
+ bf-infra: tipos comunes, ResourceLoader, encodings e identidad del navegador (lo usan todos)
 ```
-
-El flujo de una página:
-1. `bf-net` resuelve la URL con `bf-url`, hace el fetch y elige el encoding.
-2. `bf-html` parsea a un árbol `bf-dom`.
-3. `bf-style` carga las hojas (UA, autor, `@import`) con `bf-css` y calcula los valores
-   computados de cada elemento.
-4. `bf-layout` construye el árbol de cajas y produce un árbol de fragmentos con geometría
-   absoluta. Para eso usa `bf-font` (métricas y glifos) y los tamaños de `bf-image`.
-5. `bf-paint` lo convierte en una lista de visualización y la rasteriza.
-6. `bf-shell` compone la página con la barra y la muestra.
 
 ## Reglas del proyecto
 
