@@ -229,12 +229,19 @@ bf-shell session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"
 - **Formularios**: los campos de texto y `<textarea>` se editan (caret, selección con Mayús,
   `Ctrl+A/C/X/V`), `Enter` en un campo envía el formulario (GET o POST `urlencoded`) y los
   botones de envío funcionan.
+- **Selección de texto**: arrastrar selecciona, doble clic una palabra y triple clic el
+  párrafo; `Ctrl+A` selecciona toda la página y `Ctrl+C` (o «Copiar» en el menú contextual)
+  copia, con los saltos de línea suaves como espacios y un `
+` entre bloques. Dentro de un
+  campo, arrastrar selecciona su texto. En sesiones sin ventana: `drag:x,y>x,y`,
+  `dblclick:x,y` y `tripleclick:x,y`.
 - **Menú contextual** (clic derecho): abrir enlaces o imágenes en otra pestaña, copiar sus
   direcciones, guardar una imagen o la página con un diálogo del sistema, cortar/copiar/pegar
   en un campo, ver el código fuente (`about:source?<url>`) e inspeccionar las cajas.
-- **Logo**: `assets/browser-freedom.png`. `crates/bf-shell/assets/logo-64.png` es el icono de la
-  ventana y `mark-256.png` la marca sobre transparente de `about:home`; en la barra y las
-  pestañas la marca es el logo vectorizado (`Icon::Brand`), nítido a cualquier escala.
+- **Logo**: `assets/browser-freedom.png`. La marca vectorizada (`Icon::Brand`), sin fondo, es
+  el icono de la ventana (barra de tareas, `Alt+Tab`) y la de la barra y las pestañas;
+  `crates/bf-shell/assets/mark-256.png` es la misma marca sobre transparente para
+  `about:home`.
 
 ## La interfaz (detalle)
 
