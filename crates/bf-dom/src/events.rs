@@ -137,6 +137,9 @@ pub struct Event {
     initialized: bool,
     dispatch: bool,
     path: Vec<PathEntry>,
+    /// E2: "legacy-output did listeners throw" (DOM §2.9): algún listener lanzó durante el
+    /// último dispatch (lo usa IndexedDB para abortar la transacción).
+    pub listeners_threw: bool,
 }
 
 fn now_ms() -> f64 {
@@ -165,6 +168,7 @@ impl Event {
             initialized: true,
             dispatch: false,
             path: Vec::new(),
+            listeners_threw: false,
         }
     }
 
@@ -322,6 +326,9 @@ pub(crate) struct Listeners {
     /// E1: los `details` cuyo atributo `open` apareció o desapareció (HTML §4.11.1), con su
     /// estado nuevo.
     details_toggles: Vec<(NodeId, bool)>,
+    /// E2: el "get the parent" de los targets no-nodo (p. ej. IDBRequest → IDBTransaction →
+    /// IDBDatabase, IndexedDB §4.6).
+    object_parents: HashMap<u64, EventTarget>,
 }
 
 /// Una acción de *activation behavior* que debe completar el navegador.
@@ -524,7 +531,23 @@ impl Document {
                 }
                 _ => self.parent(n).map(EventTarget::Node),
             },
-            EventTarget::Window | EventTarget::Object(_) => None,
+            EventTarget::Object(id) => self.listeners.object_parents.get(&id).copied(),
+            EventTarget::Window => None,
+        }
+    }
+
+    /// E2: fija (o quita) el padre en el event path de un target no-nodo.
+    pub fn set_object_parent(&mut self, child: EventTarget, parent: Option<EventTarget>) {
+        let EventTarget::Object(id) = child else {
+            return;
+        };
+        match parent {
+            Some(p) => {
+                self.listeners.object_parents.insert(id, p);
+            }
+            None => {
+                self.listeners.object_parents.remove(&id);
+            }
         }
     }
 
@@ -742,7 +765,9 @@ impl Document {
                 Listener::Native(f) => f(self, event),
                 Listener::Script(h) => {
                     // Una excepción se reporta y el dispatch sigue.
-                    let _ = host.call_listener(self, *h, event);
+                    if host.call_listener(self, *h, event) {
+                        event.listeners_threw = true; // E2
+                    }
                 }
             }
             event.in_passive_listener = false;

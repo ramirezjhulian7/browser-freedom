@@ -48,6 +48,7 @@ pub mod cssom;
 pub mod dom;
 pub mod html;
 pub mod net; // E2: fetch, XMLHttpRequest, FormData, Blob
+pub mod storage; // E2: IndexedDB y navigator.storage
 
 pub use bf_dom::{Document, NodeId};
 pub use bf_html::Parser;
@@ -129,6 +130,11 @@ pub trait WebHooks {
     fn resource_needed(&mut self, _url: &str, _kind: ResourceKind) {}
     /// El DOM cambió y hay que volver a maquetar.
     fn dirty(&mut self) {}
+    /// E2: el directorio raíz del almacenamiento persistente (IndexedDB va a
+    /// `<dir>/<origen>/`); `None` lo deja en memoria.
+    fn storage_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// Hooks sin efectos.
@@ -270,4 +276,5 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     bom::register(agent, realm, ctx); // E4
     cssom::register(agent, realm, ctx); // E2
     net::register(agent, realm, ctx); // E2
+    storage::register(agent, realm, ctx); // E2
 }
