@@ -457,6 +457,8 @@ dependencies = [
  "bf-html",
  "bf-infra",
  "bf-js",
+ "bf-layout",
+ "bf-style",
 ]
 
 [[package]]

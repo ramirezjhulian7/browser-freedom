@@ -267,10 +267,29 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = slots(agent, a.callee);
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);
+    let f = agent.host.fns[idx];
+    // E2: WebIDL §3.7.7 ("create an operation function"): con `this` null o undefined se usa
+    // el objeto global del realm de la función (p. ej. `getComputedStyle(el)` sin `window.`).
+    if s[2].as_number() == Some(CALL_METHOD) && a.this.is_nullish() {
+        let realm = match &agent.heap[a.callee].kind {
+            ObjectKind::Builtin(b) => b.realm,
+            _ => agent.current_realm,
+        };
+        let global = Value::Object(agent.realms[realm].global_object);
+        if !agent.host_is_instance(&global, class) {
+            return agent.type_error("Illegal invocation");
+        }
+        let args = CallArgs {
+            this: global,
+            args: a.args,
+            new_target: a.new_target,
+            callee: a.callee,
+        };
+        return f(agent, &args);
+    }
     if s[2].as_number() == Some(CALL_METHOD) && !agent.host_is_instance(&a.this, class) {
         return agent.type_error("Illegal invocation");
     }
-    let f = agent.host.fns[idx];
     f(agent, a)
 }
 
@@ -464,6 +483,52 @@ impl Agent {
             instantiate(self, realm, id);
         }
         id
+    }
+
+    // E2: `partial interface` (WebIDL §2.5.2): agrega operaciones, atributos y operaciones
+    // estáticas de `ext` a una clase ya registrada, en su definición (realms futuros) y en
+    // los realms donde ya existe (p. ej. el CSSOM sobre `Element` y `Window`).
+    pub fn host_extend_class(&mut self, class: HostClassId, ext: HostClass) {
+        let ci = class.0 as usize;
+        {
+            let def = &mut self.host.classes[ci];
+            def.methods.extend(ext.methods.iter().copied());
+            def.attributes.extend(ext.attributes.iter().copied());
+            def.static_methods.extend(ext.static_methods.iter().copied());
+        }
+        for realm in 0..self.host.realm_classes.len() {
+            let Some(Some(objs)) = self.host.realm_classes[realm].get(ci).copied() else {
+                continue;
+            };
+            let saved = self.current_realm;
+            self.current_realm = realm;
+            for &(name, length, f) in &ext.methods {
+                let m = host_function(self, f, length, name, class, CALL_METHOD);
+                self.put_data(
+                    objs.prototype,
+                    PropertyKey::from(name),
+                    Value::Object(m),
+                    true,
+                    true,
+                    true,
+                );
+            }
+            for attr in &ext.attributes {
+                define_attribute(self, objs.prototype, attr, class, CALL_METHOD, true);
+            }
+            for &(name, length, f) in &ext.static_methods {
+                let m = host_function(self, f, length, name, class, CALL_STATIC);
+                self.put_data(
+                    objs.interface,
+                    PropertyKey::from(name),
+                    Value::Object(m),
+                    true,
+                    true,
+                    true,
+                );
+            }
+            self.current_realm = saved;
+        }
     }
 
     /// Los objetos (prototipo e interfaz) de `class` en `realm`.

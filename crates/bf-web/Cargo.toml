@@ -10,6 +10,9 @@ bf-dom = { path = "../bf-dom" }
 bf-html = { path = "../bf-html" }
 bf-infra = { path = "../bf-infra" }
 bf-js = { path = "../bf-js" }
+# E2: el CSSOM necesita la cascada y la maqueta
+bf-layout = { path = "../bf-layout" }
+bf-style = { path = "../bf-style" }
 
 [lints]
 workspace = true
