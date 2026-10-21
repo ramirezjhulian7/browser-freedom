@@ -594,6 +594,19 @@ impl Engine {
         self.document().cloned().unwrap_or_default()
     }
 
+    /// Los bitmaps de los `<canvas>` del documento (E1), para pintarlos como imágenes.
+    pub fn canvases(&self) -> Vec<(bf_dom::NodeId, Arc<bf_paint::Pixmap>)> {
+        bf_web::html::canvas::snapshot(&self.rt.agent, self.realm)
+            .into_iter()
+            .map(|(n, _, p)| (n, p))
+            .collect()
+    }
+
+    /// Cambia cada vez que un script dibuja en un `<canvas>` (E1).
+    pub fn canvas_version(&self) -> u64 {
+        bf_web::html::canvas::version(&self.rt.agent, self.realm)
+    }
+
     /// El documento de la ventana.
     pub fn document(&self) -> Option<&Document> {
         self.rt

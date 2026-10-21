@@ -17,7 +17,7 @@ use bf_infra::Url;
 use bf_js::host::ConsoleLevel;
 use bf_layout::Size;
 use bf_net::NetLoader;
-use bf_paint::{Page, PageContext, prepare_page};
+use bf_paint::{Page, PageContext, prepare_page_with_canvases};
 
 use crate::internal;
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
@@ -204,6 +204,9 @@ struct Current {
     engine: Option<Engine>,
     /// `Document::version` del último cuadro mandado.
     version: u64,
+    /// E1: los bitmaps de los `<canvas>` y su versión (dibujar no cambia el documento).
+    canvases: Vec<(bf_dom::NodeId, Arc<bf_paint::Pixmap>)>,
+    canvas_version: u64,
 }
 
 /// El estado del hilo.
@@ -370,7 +373,17 @@ impl State {
             loaded.doc = doc;
             current.loaded = Arc::new(loaded);
         }
-        if current.loaded.doc.version() != current.version {
+        // E1: un `<canvas>` dibujado pide un cuadro nuevo aunque el documento no cambie.
+        let mut canvas_changed = false;
+        if let Some(engine) = &current.engine {
+            let v = engine.canvas_version();
+            if v != current.canvas_version {
+                current.canvas_version = v;
+                current.canvases = engine.canvases();
+                canvas_changed = true;
+            }
+        }
+        if canvas_changed || current.loaded.doc.version() != current.version {
             let wait = FRAME.saturating_sub(self.last_frame.elapsed());
             if !wait.is_zero() {
                 std::thread::sleep(wait);
@@ -521,6 +534,8 @@ impl State {
             loaded: Arc::new(loaded),
             engine: Some(engine),
             version,
+            canvases: Vec::new(),
+            canvas_version: 0,
         });
         self.layout(id, Some(ctx));
     }
@@ -532,6 +547,7 @@ impl State {
         };
         let viewport = self.viewport();
         let fonts = self.fonts.clone();
+        let canvases = current.canvases.clone();
         let page = |loaded: &Loaded| {
             let pctx = PageContext {
                 base: &loaded.base,
@@ -541,7 +557,7 @@ impl State {
                 extra: &[],
             };
             catch_unwind(AssertUnwindSafe(|| {
-                prepare_page(&loaded.doc, &pctx, viewport)
+                prepare_page_with_canvases(&loaded.doc, &pctx, viewport, &canvases)
             }))
         };
         let loaded = current.loaded.clone();

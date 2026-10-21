@@ -57,11 +57,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
                     .attribute("contentWindow", Some(null), None)
             }
         }
-        "HTMLCanvasElement" => {
-            class
-                .method("getContext", 1, null)
-                .method("toDataURL", 0, canvas_to_data_url)
-        }
+        "HTMLCanvasElement" => super::canvas::extend_canvas(class),
         "HTMLBaseElement" => class.attribute("href", Some(base_href), Some(set_base_href)),
         // WindowEventHandlers (HTML §8.1.8.2): los handlers de `body`/`frameset` son los de la
         // ventana (los handlers de E3 los reenvían a `window`).
@@ -387,14 +383,6 @@ fn template_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Some(c) => Ok(wrap_node(agent, NodeRef::new(n.doc, c))),
         None => Ok(Value::Null),
     }
-}
-
-// --- HTMLCanvasElement (§4.12.5) ---
-
-/// `toDataURL()` sin contexto de dibujo: un PNG transparente no se codifica todavía; el
-/// spec permite `"data:,"` cuando el bitmap no tiene píxeles.
-fn canvas_to_data_url(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(js_str("data:,"))
 }
 
 // --- click(), focus(), blur() (§6.4.2, §6.6) ---

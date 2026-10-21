@@ -383,7 +383,8 @@ pub static INTERFACES: &[Interface] = &[
             s("value"),
         ],
     ),
-    iface("HTMLCanvasElement", &[ul("width", 300), ul("height", 150)]),
+    // `width`/`height` los define `canvas.rs` (reinician el bitmap).
+    iface("HTMLCanvasElement", &[]),
     iface("HTMLDataElement", &[s("value")]),
     iface("HTMLDataListElement", &[]),
     iface("HTMLDetailsElement", &[b("open")]),
