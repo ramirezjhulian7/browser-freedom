@@ -17,8 +17,8 @@ use crate::dom::adopt::adopt_into;
 use crate::dom::insertion::{inserted, roots_of};
 use crate::dom::state::state;
 use crate::dom::{
-    arg_node, arg_opt_node, classes, from_dom_string, mutated, this_node, throw_dom,
-    to_dom_string, wrap_node,
+    arg_node, arg_opt_node, classes, from_dom_string, mutated, this_node, throw_dom, to_dom_string,
+    wrap_node,
 };
 use crate::{DocIndex, NodeRef, with_doc, with_doc_mut};
 
@@ -56,7 +56,11 @@ pub fn range_class(abstract_range: HostClassId) -> HostClass {
     HostClass::new("Range")
         .parent(abstract_range)
         .constructor(range_ctor, 0)
-        .attribute("commonAncestorContainer", Some(common_ancestor_container), None)
+        .attribute(
+            "commonAncestorContainer",
+            Some(common_ancestor_container),
+            None,
+        )
         .method("setStart", 2, set_start)
         .method("setEnd", 2, set_end)
         .method("setStartBefore", 1, set_start_before)
@@ -271,7 +275,10 @@ fn static_range_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let start_o = bf_js::host::webidl::to_unsigned_long(agent, &start_offset)?;
     for n in [start_c, end_c] {
         let bad = with_doc(agent, n.doc, |d| {
-            matches!(d.get(n.node).data, NodeData::Doctype { .. } | NodeData::Attr(_))
+            matches!(
+                d.get(n.node).data,
+                NodeData::Doctype { .. } | NodeData::Attr(_)
+            )
         });
         if bad {
             return throw_dom(agent, DomException::InvalidNodeTypeError);
@@ -341,8 +348,16 @@ fn common_ancestor_container(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Va
 }
 
 /// "Set the start or end" (§5.5).
-fn set_boundary(agent: &mut Agent, this: &Value, n: NodeRef, offset: u32, start: bool) -> JsResult<()> {
-    let (len, doctype) = with_doc(agent, n.doc, |d| (d.node_length(n.node) as u32, is_doctype(d, n.node)));
+fn set_boundary(
+    agent: &mut Agent,
+    this: &Value,
+    n: NodeRef,
+    offset: u32,
+    start: bool,
+) -> JsResult<()> {
+    let (len, doctype) = with_doc(agent, n.doc, |d| {
+        (d.node_length(n.node) as u32, is_doctype(d, n.node))
+    });
     if doctype {
         return throw_dom(agent, DomException::InvalidNodeTypeError);
     }
@@ -355,15 +370,22 @@ fn set_boundary(agent: &mut Agent, this: &Value, n: NodeRef, offset: u32, start:
     let (doc, id) = (rd.doc.get(), rd.id.get());
     let mut r = range_bounds(agent, doc, id);
     let point = bp(n.node, offset);
-    let other_root = doc != n.doc
-        || with_doc(agent, doc, |d| !same_root(d, r.start.node, n.node));
+    let other_root = doc != n.doc || with_doc(agent, doc, |d| !same_root(d, r.start.node, n.node));
     if start {
-        if other_root || with_doc(agent, n.doc, |d| bp_cmp(d, point, r.end) == Ordering::Greater) {
+        if other_root
+            || with_doc(agent, n.doc, |d| {
+                bp_cmp(d, point, r.end) == Ordering::Greater
+            })
+        {
             r.end = point;
         }
         r.start = point;
     } else {
-        if other_root || with_doc(agent, n.doc, |d| bp_cmp(d, point, r.start) == Ordering::Less) {
+        if other_root
+            || with_doc(agent, n.doc, |d| {
+                bp_cmp(d, point, r.start) == Ordering::Less
+            })
+        {
             r.start = point;
         }
         r.end = point;
@@ -390,7 +412,9 @@ fn set_end(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// El padre de `n` y su índice (InvalidNodeTypeError sin padre).
 fn parent_and_index(agent: &mut Agent, n: NodeRef) -> JsResult<(NodeRef, u32)> {
-    let r = with_doc(agent, n.doc, |d| d.parent(n.node).map(|p| (p, d.index(n.node) as u32)));
+    let r = with_doc(agent, n.doc, |d| {
+        d.parent(n.node).map(|p| (p, d.index(n.node) as u32))
+    });
     match r {
         Some((p, i)) => Ok((NodeRef::new(n.doc, p), i)),
         None => throw_dom(agent, DomException::InvalidNodeTypeError),
@@ -457,7 +481,9 @@ fn select_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn select_contents(agent: &mut Agent, this: &Value, n: NodeRef) -> JsResult<()> {
-    let (len, doctype) = with_doc(agent, n.doc, |d| (d.node_length(n.node) as u32, is_doctype(d, n.node)));
+    let (len, doctype) = with_doc(agent, n.doc, |d| {
+        (d.node_length(n.node) as u32, is_doctype(d, n.node))
+    });
     if doctype {
         return throw_dom(agent, DomException::InvalidNodeTypeError);
     }
@@ -510,7 +536,9 @@ fn compare_boundary_points(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
         2 => (r.end, s.end),
         _ => (r.start, s.end),
     };
-    Ok(ord_value(with_doc(agent, doc, |d| bp_cmp(d, this_point, other_point))))
+    Ok(ord_value(with_doc(agent, doc, |d| {
+        bp_cmp(d, this_point, other_point)
+    })))
 }
 
 /// "Delete the contents" (§5.5).
@@ -527,7 +555,12 @@ fn delete(agent: &mut Agent, doc: DocIndex, this: &Value) -> JsResult<()> {
     let simple = with_doc(agent, doc, |d| s.node == e.node && is_char_data(d, s.node));
     if simple {
         let res = with_doc_mut(agent, doc, |d| {
-            d.replace_data(s.node, s.offset as usize, (e.offset - s.offset) as usize, &"".into())
+            d.replace_data(
+                s.node,
+                s.offset as usize,
+                (e.offset - s.offset) as usize,
+                &"".into(),
+            )
         });
         mutated(agent);
         return res.or_else(|err| throw_dom(agent, err));
@@ -537,9 +570,7 @@ fn delete(agent: &mut Agent, doc: DocIndex, this: &Value) -> JsResult<()> {
         let nodes: Vec<NodeId> = d
             .descendants(common)
             .into_iter()
-            .filter(|&n| {
-                contained(d, r, n) && d.parent(n).is_none_or(|p| !contained(d, r, p))
-            })
+            .filter(|&n| contained(d, r, n) && d.parent(n).is_none_or(|p| !contained(d, r, p)))
             .collect();
         let point = if d.is_inclusive_ancestor(s.node, e.node) {
             s
@@ -559,7 +590,12 @@ fn delete(agent: &mut Agent, doc: DocIndex, this: &Value) -> JsResult<()> {
     with_doc_mut(agent, doc, |d| {
         if is_char_data(d, s.node) {
             let len = d.node_length(s.node);
-            let _ = d.replace_data(s.node, s.offset as usize, len - s.offset as usize, &"".into());
+            let _ = d.replace_data(
+                s.node,
+                s.offset as usize,
+                len - s.offset as usize,
+                &"".into(),
+            );
         }
         for n in to_remove {
             d.remove(n);
@@ -614,7 +650,12 @@ fn extract_or_clone(
         let c = clone_char_data(d, s.node, s.offset, e.offset);
         d.append(fragment, c);
         if extract {
-            d.replace_data(s.node, s.offset as usize, (e.offset - s.offset) as usize, &"".into())?;
+            d.replace_data(
+                s.node,
+                s.offset as usize,
+                (e.offset - s.offset) as usize,
+                &"".into(),
+            )?;
         }
         return Ok((fragment, Some(s)));
     }
@@ -624,15 +665,25 @@ fn extract_or_clone(
     let first_partial = if d.is_inclusive_ancestor(s.node, e.node) {
         None
     } else {
-        children.iter().copied().find(|&c| partially_contained(d, r, c))
+        children
+            .iter()
+            .copied()
+            .find(|&c| partially_contained(d, r, c))
     };
     let last_partial = if d.is_inclusive_ancestor(e.node, s.node) {
         None
     } else {
-        children.iter().rev().copied().find(|&c| partially_contained(d, r, c))
+        children
+            .iter()
+            .rev()
+            .copied()
+            .find(|&c| partially_contained(d, r, c))
     };
-    let contained_children: Vec<NodeId> =
-        children.iter().copied().filter(|&c| contained(d, r, c)).collect();
+    let contained_children: Vec<NodeId> = children
+        .iter()
+        .copied()
+        .filter(|&c| contained(d, r, c))
+        .collect();
     // 10.
     if contained_children.iter().any(|&c| is_doctype(d, c)) {
         return Err(DomException::HierarchyRequestError);
@@ -648,7 +699,10 @@ fn extract_or_clone(
             }
             reference = p;
         }
-        bp(d.parent(reference).unwrap_or(reference), d.index(reference) as u32 + 1)
+        bp(
+            d.parent(reference).unwrap_or(reference),
+            d.index(reference) as u32 + 1,
+        )
     };
     // 13-14.
     if let Some(first) = first_partial {
@@ -657,7 +711,12 @@ fn extract_or_clone(
             let c = clone_char_data(d, s.node, s.offset, len);
             d.append(fragment, c);
             if extract {
-                d.replace_data(s.node, s.offset as usize, (len - s.offset) as usize, &"".into())?;
+                d.replace_data(
+                    s.node,
+                    s.offset as usize,
+                    (len - s.offset) as usize,
+                    &"".into(),
+                )?;
             }
         } else {
             let c = d.clone_node(first, false);
@@ -808,7 +867,9 @@ fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) ->
     });
     // 12.
     let roots = roots_of(agent, doc, node.node);
-    let res = with_doc_mut(agent, doc, |d| d.insert_before_checked(parent, node.node, reference));
+    let res = with_doc_mut(agent, doc, |d| {
+        d.insert_before_checked(parent, node.node, reference)
+    });
     if let Err(e) = res {
         return throw_dom(agent, e);
     }
@@ -911,7 +972,9 @@ fn point_checks(
     if n.doc != doc || with_doc(agent, doc, |d| !same_root(d, n.node, r.start.node)) {
         return Ok((doc, r, None));
     }
-    let (doctype, len) = with_doc(agent, doc, |d| (is_doctype(d, n.node), d.node_length(n.node) as u32));
+    let (doctype, len) = with_doc(agent, doc, |d| {
+        (is_doctype(d, n.node), d.node_length(n.node) as u32)
+    });
     if doctype {
         return throw_dom(agent, DomException::InvalidNodeTypeError);
     }
@@ -1073,7 +1136,8 @@ fn create_contextual_fragment(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<V
             }
             _ => None,
         };
-        let element = element.filter(|&e| !(d.is_html && d.element(e).is_some_and(|x| x.is_html("html"))));
+        let element =
+            element.filter(|&e| !(d.is_html && d.element(e).is_some_and(|x| x.is_html("html"))));
         let context = match element {
             Some(e) => e,
             None => d.create_element(&"body".into()).unwrap_or(node),
@@ -1173,7 +1237,11 @@ fn this_sel(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<DocIndex> {
 }
 
 fn sel_state(agent: &mut Agent, doc: DocIndex) -> SelectionState {
-    state(agent).selections.get(&doc).copied().unwrap_or_default()
+    state(agent)
+        .selections
+        .get(&doc)
+        .copied()
+        .unwrap_or_default()
 }
 
 /// El `Range` de la selección (el wrapper) y sus boundary points.
@@ -1202,7 +1270,11 @@ fn set_sel(agent: &mut Agent, doc: DocIndex, range: Option<Value>, dir: Directio
 }
 
 /// El anchor (`true`) o el focus de la selección.
-fn sel_point(agent: &mut Agent, a: &CallArgs<'_>, anchor: bool) -> JsResult<Option<(DocIndex, BoundaryPoint)>> {
+fn sel_point(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    anchor: bool,
+) -> JsResult<Option<(DocIndex, BoundaryPoint)>> {
     let doc = this_sel(agent, a)?;
     let dir = sel_state(agent, doc).direction;
     let Some((_, rdoc, b)) = sel_range(agent, doc) else {
@@ -1247,7 +1319,11 @@ fn sel_is_collapsed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn range_count(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    Ok(Value::Number(if sel_range(agent, doc).is_some() { 1.0 } else { 0.0 }))
+    Ok(Value::Number(if sel_range(agent, doc).is_some() {
+        1.0
+    } else {
+        0.0
+    }))
 }
 
 fn sel_type(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1324,7 +1400,9 @@ fn sel_arg_point(
     n: NodeRef,
     offset: u32,
 ) -> JsResult<Option<BoundaryPoint>> {
-    let (doctype, len) = with_doc(agent, n.doc, |d| (is_doctype(d, n.node), d.node_length(n.node) as u32));
+    let (doctype, len) = with_doc(agent, n.doc, |d| {
+        (is_doctype(d, n.node), d.node_length(n.node) as u32)
+    });
     if doctype {
         return throw_dom(agent, DomException::InvalidNodeTypeError);
     }
@@ -1382,18 +1460,44 @@ fn extend(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(new_focus) = sel_arg_point(agent, doc, n, offset)? else {
         return Ok(Value::Undefined);
     };
-    let old_anchor = if dir == Direction::Backwards { b.end } else { b.start };
+    let old_anchor = if dir == Direction::Backwards {
+        b.end
+    } else {
+        b.start
+    };
     let (bounds, backwards) = with_doc(agent, doc, |d| {
         if !same_root(d, new_focus.node, old_anchor.node) {
-            (RangeBounds { start: new_focus, end: new_focus }, false)
+            (
+                RangeBounds {
+                    start: new_focus,
+                    end: new_focus,
+                },
+                false,
+            )
         } else if bp_cmp(d, old_anchor, new_focus) != Ordering::Greater {
-            (RangeBounds { start: old_anchor, end: new_focus }, false)
+            (
+                RangeBounds {
+                    start: old_anchor,
+                    end: new_focus,
+                },
+                false,
+            )
         } else {
-            (RangeBounds { start: new_focus, end: old_anchor }, true)
+            (
+                RangeBounds {
+                    start: new_focus,
+                    end: old_anchor,
+                },
+                true,
+            )
         }
     });
     let r = new_range(agent, doc, bounds);
-    let dir = if backwards { Direction::Backwards } else { Direction::Forwards };
+    let dir = if backwards {
+        Direction::Backwards
+    } else {
+        Direction::Forwards
+    };
     set_sel(agent, doc, Some(r), dir);
     Ok(Value::Undefined)
 }
@@ -1411,12 +1515,22 @@ fn set_base_and_extent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let backwards = with_doc(agent, doc, |d| bp_cmp(d, focus, anchor) == Ordering::Less);
     let bounds = if backwards {
-        RangeBounds { start: focus, end: anchor }
+        RangeBounds {
+            start: focus,
+            end: anchor,
+        }
     } else {
-        RangeBounds { start: anchor, end: focus }
+        RangeBounds {
+            start: anchor,
+            end: focus,
+        }
     };
     let r = new_range(agent, doc, bounds);
-    let dir = if backwards { Direction::Backwards } else { Direction::Forwards };
+    let dir = if backwards {
+        Direction::Backwards
+    } else {
+        Direction::Forwards
+    };
     set_sel(agent, doc, Some(r), dir);
     Ok(Value::Undefined)
 }
@@ -1482,4 +1596,3 @@ fn sel_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = with_doc(agent, rdoc, |d| stringify(d, b));
     Ok(from_dom_string(&s))
 }
-

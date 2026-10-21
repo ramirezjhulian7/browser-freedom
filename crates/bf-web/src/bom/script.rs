@@ -656,3 +656,26 @@ fn fire_window_handler(agent: &mut Agent, realm: RealmId, type_: &str, state: Op
     }
     agent.current_realm = saved;
 }
+
+// E3: los `script` que inserta el DOM (no el parser) usan la misma carga y ejecución.
+/// Busca el script de `url` con el loader de la ventana de `realm` (`None` sin loader o si
+/// falló): el texto decodificado y la URL final.
+pub fn fetch_script(
+    agent: &mut Agent,
+    realm: RealmId,
+    url: &Url,
+    charset: &str,
+) -> Option<(String, String)> {
+    let mut host = WebScripts { agent, realm };
+    host.fetch(url, charset).map(|f| (f.source, f.url))
+}
+
+/// Ejecuta un script clásico (`module = false`) o un módulo como los del parser.
+pub fn run_script(agent: &mut Agent, realm: RealmId, source: &str, url: &str, module: bool) {
+    let mut host = WebScripts { agent, realm };
+    if module {
+        host.run_module(source, url);
+    } else {
+        host.run_classic(source, url);
+    }
+}

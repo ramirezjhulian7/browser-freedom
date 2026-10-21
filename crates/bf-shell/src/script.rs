@@ -609,7 +609,7 @@ impl Engine {
         self.rt
             .agent
             .realm_data_mut::<WebContext>(self.realm)
-            .is_some_and(|ctx| std::mem::take(&mut ctx.pending_dirty))
+            .is_some_and(WebContext::take_dirty) // E3: también los cambios sin `mutated()`.
     }
 
     /// Scripts ejecutados y con error.

@@ -1227,3 +1227,237 @@ fn mutation_observer_subtree_and_character_data() {
     );
     assert_eq!(p.show("types.join()"), "characterData:uno,childList:-");
 }
+
+// --- Parte 2: más eventos, documentos, Window [Global], Range y Selection ---
+
+#[test]
+fn dictionary_event_interfaces() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var h = new HashChangeEvent('hashchange', {oldURL: 'a', newURL: 'b'}); \
+             var m = new MessageEvent('message', {data: {x: 1}, origin: 'o'}); \
+             var s = new StorageEvent('storage', {key: 'k'}); \
+             var w = new WheelEvent('wheel', {deltaY: 3, clientX: 2}); \
+             var ps = new PopStateEvent('popstate', {state: 5}); \
+             [h.oldURL, h.newURL, m.data.x, m.origin, m.lastEventId, m.ports.length, s.key, \
+              s.oldValue, w.deltaY, w.clientX, w instanceof MouseEvent, WheelEvent.DOM_DELTA_LINE, \
+              ps.state, new CompositionEvent('c', {data: 'd'}).data, \
+              new AnimationEvent('a', {animationName: 'n'}).animationName, \
+              new TransitionEvent('t', {propertyName: 'p'}).propertyName].join()"
+        ),
+        "a,b,1,o,,0,k,,3,2,true,1,5,d,n,p"
+    );
+    assert_eq!(
+        p.show(
+            "var e = document.createEvent('MessageEvent'); \
+             e.initMessageEvent('message', true, false, 'datos', 'origen'); \
+             [e instanceof MessageEvent, e.type, e.bubbles, e.data, e.origin].join()"
+        ),
+        "true,message,true,datos,origen"
+    );
+}
+
+#[test]
+fn document_interfaces_and_dom_parser() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var x = new DOMParser().parseFromString('<a xmlns=\"urn:x\"><b/></a>', 'application/xml'); \
+             var h = new DOMParser().parseFromString('<p id=q>hola', 'text/html'); \
+             [document instanceof HTMLDocument, x instanceof XMLDocument, x.documentElement.namespaceURI, \
+              x.contentType, h instanceof HTMLDocument, h.getElementById('q').textContent, \
+              new Document() instanceof XMLDocument, \
+              document.implementation.createDocument(null, 'r') instanceof XMLDocument].join()"
+        ),
+        "true,true,urn:x,application/xml,true,hola,false,true"
+    );
+    assert!(
+        p.error("new DOMParser().parseFromString('x', 'text/plain')")
+            .contains("enum")
+    );
+}
+
+#[test]
+fn window_members_are_own_properties() {
+    let mut p = Page::new(SIMPLE);
+    assert!(p.truthy(
+        "Object.prototype.hasOwnProperty.call(window, 'event') && \
+         Object.prototype.hasOwnProperty.call(window, 'onload') && \
+         Object.prototype.hasOwnProperty.call(window, 'postMessage') && \
+         !Object.prototype.hasOwnProperty.call(Window.prototype, 'onload') && \
+         typeof Window.prototype.constructor === 'function'"
+    ));
+}
+
+#[test]
+fn content_handlers_run_in_native_dispatch() {
+    // Los handlers de atributo de contenido se registran en cualquier dispatch de bf-dom
+    // (aquí, el `change` de la activación de un checkbox).
+    let mut p = Page::new(
+        "<!DOCTYPE html><body><input id=c type=checkbox onchange=\"window.changed = this.checked\">\
+         </body>",
+    );
+    assert_eq!(
+        p.show(
+            "document.getElementById('c').dispatchEvent(new MouseEvent('click', {bubbles: true})); \
+             window.changed"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn nested_events_get_their_own_wrapper() {
+    let mut p = Page::new("<!DOCTYPE html><body><input id=r type=radio></body>");
+    assert_eq!(
+        p.show(
+            "var r = document.getElementById('r'); var click = new MouseEvent('click'); var seen; \
+             r.addEventListener('change', function (e) { seen = [e === click, e.type, click.eventPhase]; }); \
+             r.dispatchEvent(click); seen.join()"
+        ),
+        "false,change,0"
+    );
+}
+
+#[test]
+fn range_basics() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'); var r = document.createRange(); \
+             r.setStart(a.firstChild.firstChild, 1); r.setEnd(a.lastChild.firstChild, 2); \
+             [r.toString(), r.collapsed, r.commonAncestorContainer === a, \
+              r.startContainer.data, r.startOffset, r.endOffset, \
+              r.isPointInRange(a.lastChild, 0), r.comparePoint(a, 0), r.intersectsNode(a.firstChild), \
+              r instanceof AbstractRange].join()"
+        ),
+        "nodo,false,true,uno,1,2,true,-1,true,true"
+    );
+    assert!(
+        p.error("r.setStart(document.doctype, 0)")
+            .contains("InvalidNodeTypeError")
+    );
+    assert!(p.error("r.setStart(a, 9)").contains("IndexSizeError"));
+}
+
+#[test]
+fn range_is_live() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'); var r = new Range(); r.setStart(a, 1); r.setEnd(a, 2); \
+             a.insertBefore(document.createElement('i'), a.firstChild); var s1 = r.startOffset; \
+             a.removeChild(a.lastChild); var e = r.endContainer === a && r.endOffset; \
+             var t = document.createTextNode('abcdef'); document.body.appendChild(t); \
+             var r2 = new Range(); r2.setStart(t, 4); r2.setEnd(t, 5); var n = t.splitText(2); \
+             [s1, e, r2.startContainer === n, r2.startOffset, r2.endOffset].join()"
+        ),
+        "2,2,true,2,3"
+    );
+}
+
+#[test]
+fn range_mutations() {
+    let mut p = Page::new("<!DOCTYPE html><body><p id=p>uno <b>dos</b> tres</p></body>");
+    assert_eq!(
+        p.show(
+            "var p = document.getElementById('p'); var r = document.createRange(); \
+             r.setStart(p.firstChild, 2); r.setEnd(p.lastChild, 3); \
+             var c = r.cloneContents(); var cloned = c.textContent; \
+             var f = r.extractContents(); \
+             [cloned, f.childNodes.length, p.textContent, r.collapsed].join('|')"
+        ),
+        "o dos tr|3|unes|true"
+    );
+    assert_eq!(
+        p.show(
+            "var r = document.createRange(); r.selectNodeContents(p); \
+             r.setStart(p.firstChild, 2); r.collapse(true); \
+             r.insertNode(document.createElement('hr')); \
+             var s = document.createElement('span'); r.selectNode(p.childNodes[1]); \
+             r.surroundContents(s); \
+             [p.innerHTML, r.startContainer === p].join('|')"
+        ),
+        "un<span><hr></span>es|true"
+    );
+    assert_eq!(
+        p.show("var r = document.createRange(); r.selectNodeContents(p); r.deleteContents(); p.childNodes.length"),
+        "0"
+    );
+}
+
+#[test]
+fn static_range() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'); \
+             var s = new StaticRange({startContainer: a, startOffset: 0, endContainer: a, endOffset: 1}); \
+             [s.startContainer === a, s.endOffset, s.collapsed, s instanceof AbstractRange].join()"
+        ),
+        "true,1,false,true"
+    );
+    assert!(
+        p.error(
+            "new StaticRange({startContainer: document.doctype, startOffset: 0, \
+             endContainer: document, endOffset: 0})"
+        )
+        .contains("InvalidNodeTypeError")
+    );
+}
+
+#[test]
+fn selection() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var sel = getSelection(); var a = document.getElementById('a'); \
+             var before = [sel.rangeCount, sel.type, sel.anchorNode]; \
+             sel.setBaseAndExtent(a.lastChild.firstChild, 2, a.firstChild.firstChild, 1); \
+             var mid = [sel.rangeCount, sel.type, sel.direction, sel.anchorNode.data, sel.focusOffset, \
+                        sel.toString(), sel.containsNode(a.firstChild, true)]; \
+             sel.collapseToStart(); \
+             [before.join(), mid.join(), sel.isCollapsed, sel.type, document.getSelection() === sel].join('|')"
+        ),
+        "0,None,|1,Range,backward,dos,1,nodo,true|true|Caret|true"
+    );
+    assert_eq!(
+        p.show(
+            "var r = document.createRange(); r.selectNodeContents(a); sel.removeAllRanges(); \
+             sel.addRange(r); [sel.getRangeAt(0) === r, sel.toString()].join()"
+        ),
+        "true,unodos"
+    );
+    assert!(
+        p.error("sel.removeAllRanges(); sel.getRangeAt(0)")
+            .contains("IndexSizeError")
+    );
+}
+
+#[test]
+fn dirty_without_mutated_call() {
+    let mut p = Page::new(SIMPLE);
+    assert!(!p.ctx.get_mut(&mut p.rt.agent).take_dirty());
+    // Un cambio directo del documento (sin pasar por `mutated()`) también pide re-render.
+    let ctx = p.ctx.get_mut(&mut p.rt.agent);
+    let body = ctx.document().body().expect("body");
+    ctx.document_mut()
+        .set_attribute(body, &"x".into(), "1".into())
+        .expect("atributo");
+    assert!(ctx.take_dirty());
+    assert!(!ctx.take_dirty());
+}
+
+#[test]
+fn document_write_after_load_opens() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "document.write('<p id=n>nuevo</p>'); document.close(); \
+             [document.getElementById('n') && document.getElementById('n').textContent, \
+              document.getElementById('a')].join()"
+        ),
+        "nuevo,"
+    );
+}

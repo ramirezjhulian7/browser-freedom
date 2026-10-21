@@ -200,12 +200,17 @@ fn cached_children(agent: &mut Agent, doc: DocIndex, parent: NodeId) -> std::rc:
     if st.child_cache.len() > 256 {
         st.child_cache.clear();
     }
-    st.child_cache.insert((doc, parent), (version, list.clone()));
+    st.child_cache
+        .insert((doc, parent), (version, list.clone()));
     list
 }
 
 /// El largo y el nodo `i` de una `NodeList` (sin copiar las listas estáticas).
-fn nl_get(agent: &mut Agent, v: &Value, i: Option<usize>) -> Option<(DocIndex, usize, Option<NodeId>)> {
+fn nl_get(
+    agent: &mut Agent,
+    v: &Value,
+    i: Option<usize>,
+) -> Option<(DocIndex, usize, Option<NodeId>)> {
     let children = match agent.host_unwrap::<NodeListData>(v)? {
         NodeListData::Static { doc, nodes } => {
             return Some((*doc, nodes.len(), i.and_then(|i| nodes.get(i).copied())));
