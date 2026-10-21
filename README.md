@@ -5,10 +5,11 @@
 **Navega libre.** Freedom es un navegador web independiente: no está construido sobre Chrome,
 Firefox ni Safari, sino sobre un motor propio, hecho desde cero.
 
-> **Vista previa.** Freedom ya abre y muestra páginas web, pero todavía no ejecuta
-> JavaScript. Los sitios para leer (Wikipedia, blogs, noticias, documentación) se ven bien;
-> los que dependen de JavaScript (redes sociales, correo web, mapas, tiendas) todavía no
-> funcionan o se ven incompletos.
+> **Vista previa.** Freedom ya abre y muestra páginas web, y su JavaScript está en
+> construcción: ejecuta los scripts de las páginas, pero todavía faltan muchas de las funciones
+> que usan los sitios. Los sitios para leer (Wikipedia, blogs, noticias, documentación) se ven
+> bien; los muy interactivos (redes sociales, correo web, mapas, tiendas) todavía no funcionan
+> o se ven incompletos.
 
 ## Instalar Freedom
 
@@ -66,10 +67,12 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 
 ### Tu privacidad
 
-- Freedom no guarda nada en tu equipo: el historial y las cookies existen solo mientras está
-  abierto y se borran al cerrarlo (por eso, al volver a abrirlo, las sesiones iniciadas en
-  los sitios se cierran). Solo escribe archivos cuando tú lo pides, como al guardar una
-  imagen.
+- El historial y las cookies existen solo mientras Freedom está abierto y se borran al
+  cerrarlo (por eso, al volver a abrirlo, las sesiones iniciadas en los sitios se cierran).
+- Lo único que queda en tu equipo es el almacenamiento local que guardan algunos sitios
+  (`localStorage`), como en cualquier navegador: en `%APPDATA%\freedom\storage` (Windows) o
+  en `~/.freedom/storage` (macOS y Linux). Para borrarlo, elimina esa carpeta. Fuera de eso,
+  Freedom solo escribe archivos cuando tú lo pides, como al guardar una imagen.
 - No envía datos de uso: solo se conecta a los sitios que visitas (y a Google cuando buscas).
 - Se presenta ante los sitios como lo que es, Freedom: no se hace pasar por Chrome ni por
   otro navegador.
@@ -78,9 +81,11 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 
 - **Funciona:** páginas hechas con HTML y CSS, con su texto, imágenes PNG, JPEG y GIF,
   tablas y la mayoría de los diseños; enlaces, pestañas, atrás y adelante; formularios
-  simples (buscar, escribir y enviar); zoom; copiar y pegar.
-- **Todavía no:** JavaScript, video y audio, imágenes WebP y SVG, favoritos, historial que se
-  conserve al cerrar y descargas de archivos. El plan está en
+  simples (buscar, escribir y enviar); zoom; copiar y pegar; los scripts de las páginas, con
+  parte de las funciones del navegador que usan.
+- **Todavía no:** buena parte de las funciones de JavaScript que usan los sitios, video y
+  audio, imágenes WebP y SVG, favoritos, historial que se conserve al cerrar y descargas de
+  archivos. El plan está en
   [`docs/roadmap.md`](docs/roadmap.md).
 
 ### ¿Algo no funciona?
@@ -95,8 +100,7 @@ muestra.
 ## Para desarrolladores
 
 Freedom tiene un motor 100% propio, escrito en Rust. No usa Chromium, WebKit, Gecko ni Servo:
-HTML, DOM, CSS, layout, pintura, URLs, red y (en la fase 2) JavaScript están escritos desde
-cero. Cada subsistema sigue su especificación (WHATWG, W3C, IETF, Unicode, ECMA) al pie de la
+HTML, DOM, CSS, layout, pintura, URLs, red y JavaScript están escritos desde cero. Cada subsistema sigue su especificación (WHATWG, W3C, IETF, Unicode, ECMA) al pie de la
 letra, y la compatibilidad se mide con las suites de pruebas oficiales.
 
 El repositorio y los crates conservan el prefijo histórico `bf-` (de *browser-freedom*); el
@@ -104,48 +108,58 @@ ejecutable se llama `freedom` y es el binario del paquete `bf-shell`.
 
 La **fase 1** está cerrada: el navegador carga y muestra páginas reales sin JavaScript (Google,
 Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, enlaces,
-historial, scroll y zoom. El plan de las fases siguientes está en
+historial, scroll y zoom. La **fase 2** está en curso: el motor de JavaScript (`bf-js`) ya
+ejecuta los scripts de las páginas en un hilo por pestaña, y las interfaces del DOM, de HTML,
+del navegador y del CSSOM (`bf-web`) se están completando. El plan está en
 [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Estado por subsistema
 
 | Subsistema | Spec | Suite oficial | Resultado |
 |---|---|---|---|
-| Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7041** pasan, 0 fallan (3 *stale*, 4 irrepresentables) |
-| Tree construction | HTML §13.2.6, §13.4 | WPT `html/syntax/parsing` | **3898** pasan, 0 fallan (6 omitidos) |
+| Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) |
+| Tree construction | HTML §13.2.6, §13.4 | WPT `html/syntax/parsing` | **3900** pasan, 0 fallan (4 omitidos) |
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan (7 omitidos: encoders multibyte) |
-| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Selectors 4 | WPT reftests (13 directorios) | **3811 / 5067 ejecutables (75.2%)** |
+| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, UI 4, Selectors 4 | WPT reftests (17 directorios) | **5162 / 7134 ejecutables (72.4%)** |
+| APIs web | DOM, HTML, URL, Encoding, Console | WPT testharness.js (10 directorios, [`docs/wpt-status.md`](docs/wpt-status.md)) | **84 553 / 90 353 subtests (93.6%)** sin los encodings multibyte |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.4%**; total **83.0%** (42 534 / 51 220) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.3%**; total **84.2%** (43 121 / 51 220) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
-- *irrepresentables*: surrogates sueltos, que un `String` de Rust no admite. Llegan con el
-  `DomString` WTF-8 de la fase 2.
 - *omitidos*: casos de scripting o de encodings multibyte.
+- Los encodings multibyte (japonés, coreano y chino) se reconocen pero todavía se decodifican
+  como windows-1252 (fase 3), así que sus subtests de testharness casi no pasan: con ellos, el
+  total es 84 680 / 857 668.
 
 Detalle de los reftests por directorio (fuente: [`docs/wpt-status.md`](docs/wpt-status.md)):
 
 | Directorio | pass | fail | needs-js | % de los ejecutables |
 |---|---:|---:|---:|---:|
-| css/CSS2/box-display | 65 | 21 | 53 | 75.6% |
-| css/CSS2/margin-padding-clear | 575 | 107 | 57 | 84.3% |
-| css/CSS2/normal-flow | 621 | 72 | 162 | 89.5% |
-| css/CSS2/floats | 70 | 30 | 25 | 70.0% |
-| css/CSS2/floats-clear | 152 | 59 | 36 | 72.0% |
+| css/CSS2/box-display | 70 | 16 | 53 | 81.4% |
+| css/CSS2/margin-padding-clear | 659 | 23 | 57 | 96.6% |
+| css/CSS2/normal-flow | 652 | 42 | 162 | 93.9% |
+| css/CSS2/floats | 77 | 23 | 25 | 77.0% |
+| css/CSS2/floats-clear | 186 | 25 | 36 | 88.2% |
 | css/CSS2/positioning | 459 | 54 | 65 | 89.5% |
-| css/CSS2/linebox | 167 | 23 | 53 | 87.4% |
-| css/CSS2/text | 335 | 46 | 182 | 87.9% |
-| css/CSS2/colors | 11 | 8 | 3 | 57.9% |
-| css/CSS2/borders | 425 | 79 | 258 | 84.3% |
-| css/css-backgrounds | 259 | 357 | 334 | 42.0% |
-| css/css-flexbox | 565 | 384 | 478 | 59.5% |
+| css/CSS2/linebox | 176 | 14 | 53 | 92.1% |
+| css/CSS2/text | 350 | 31 | 182 | 91.9% |
+| css/CSS2/colors | 19 | 0 | 3 | 100.0% |
+| css/CSS2/borders | 498 | 6 | 258 | 98.8% |
+| css/CSS2/tables | 246 | 4 | 889 | 98.4% |
+| css/css-backgrounds | 321 | 295 | 334 | 52.0% |
+| css/css-flexbox | 603 | 346 | 478 | 63.5% |
+| css/css-tables | 102 | 36 | 164 | 73.9% |
+| css/css-grid | 562 | 992 | 913 | 35.9% |
+| css/css-ui | 75 | 37 | 1097 | 67.0% |
 | css/selectors | 107 | 13 | 404 | 89.2% |
 
-`needs-js` son los tests de testharness.js o con `<script>`: se ejecutarán cuando exista el
-motor JavaScript.
+`needs-js` son los reftests con `<script>` o testharness.js: el harness de reftests todavía no
+los ejecuta. Los de testharness.js de las APIs web se miden aparte (fila «APIs web» de la
+tabla de estado). En `css/css-grid`, 939 de los tests ejecutables son de `grid-lanes` o
+`subgrid`, que todavía no están; sin ellos pasan 434 de 628 (69.1%).
 
 ### Qué implementa cada crate
 
@@ -267,17 +281,18 @@ El flujo de una página:
 6. `bf-paint` lo convierte en una lista de visualización, que vuelve a la ventana: ahí se
    rasteriza y se compone con el cromo.
 
-Dependencias entre crates:
+### Dependencias entre crates
 
-```
- bf-url ─► bf-net ─► bf-html ─► bf-dom ─► bf-css / bf-style ─► bf-layout ─► bf-paint ─► bf-shell
-  (URL)   (Fetch,    (parser)   (árbol)   (sintaxis, cascada,  (cajas,      (display     (ventana,
-          HTTP/TLS,       ▲                valores computados)  fragmentos)  list, raster) pestañas)
-          encoding)       │                                         ▲
-             bf-js ─► bf-web (DOM, BOM, CSSOM)   bf-font ───────────┤ (métricas, shaping)
-            (motor JS)                           bf-image ──────────┘ (tamaños naturales; pixmaps a bf-paint)
- bf-infra: tipos comunes, ResourceLoader, encodings e identidad del navegador (lo usan todos)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dependencias-dark.png">
+  <img src="docs/dependencias-light.png" alt="Dependencias entre crates: bf-shell usa bf-paint y bf-web; bf-paint usa bf-font, bf-html y bf-image; bf-font usa bf-layout, que usa bf-style, que usa bf-css, que usa bf-dom; bf-html usa bf-dom; bf-web usa bf-html, bf-layout, bf-js y bf-net. bf-infra y bf-url los usan casi todos.">
+</picture>
+
+Cada flecha va de un crate al que usa directamente, y solo se muestran las dependencias
+necesarias: si A usa B y B usa C, la flecha de A a C se omite. `bf-infra` y `bf-url` los usan
+casi todos y van aparte. Versión interactiva, con enlaces al `Cargo.toml` de cada crate:
+[`docs/dependencias.html`](docs/dependencias.html) (se genera desde
+[`docs/dependencias.json`](docs/dependencias.json), igual que el diagrama de arquitectura).
 
 ## Reglas del proyecto
 
@@ -297,10 +312,12 @@ Dependencias entre crates:
   - descompresión HTTP: `flate2`, `brotli`;
   - códecs de imagen: `png`, `zune-jpeg`, `gif`;
   - NFC para IDNA: `unicode-normalization`;
+  - portapapeles y diálogos de archivo: `arboard`, `rfd`;
   - fuentes: `ttf-parser`, `rustybuzz`;
   - utilidades: `serde`/`serde_json` (solo tests y configuración), `tokio`, `thiserror`, `log`.
 
-  Hoy se usan todos menos `wgpu`, `tokio`, `serde`, `thiserror` y `log`.
+  Hoy se usan todos menos `wgpu`, `tokio`, `serde`, `thiserror` y `log` (`serde_json`, solo
+  en los tests).
 - **La compatibilidad se mide con suites oficiales**: html5lib-tests, web-platform-tests y
   (fase 2) test262. Ninguna funcionalidad se da por terminada sin su suite.
 - **Spec literal**: el código sigue el texto del spec y cita la sección. Si un test contradice
