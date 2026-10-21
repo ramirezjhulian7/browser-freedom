@@ -939,8 +939,9 @@ impl HitWalk {
 }
 
 /// Los elementos bajo `(x, y)` del viewport, del más alto al más bajo en el orden de
-/// pintura (con el elemento raíz al final).
-fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
+/// pintura (con el elemento raíz al final), retargeteados contra `this` (el documento o un
+/// shadow root, E1).
+fn hit_elements(agent: &mut Agent, x: f64, y: f64, this: NodeId) -> Vec<NodeId> {
     let m = window_metrics(agent);
     if x < 0.0 || y < 0.0 || x > f64::from(m.viewport.width) || y > f64::from(m.viewport.height) {
         return Vec::new();
@@ -961,6 +962,17 @@ fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
     let mut out: Vec<NodeId> = Vec::new();
     with_doc(agent, 0, |d| {
         for (_, n) in hits {
+            // E1: retargeting (DOM §4.8) contra el `DocumentOrShadowRoot`.
+            let n = match d.retarget(
+                Some(bf_dom::events::EventTarget::Node(n)),
+                bf_dom::events::EventTarget::Node(this),
+            ) {
+                Some(bf_dom::events::EventTarget::Node(t)) => t,
+                _ => n,
+            };
+            if d.tree_root(n) != this {
+                continue;
+            }
             let mut e = Some(n);
             while let Some(x) = e {
                 if d.element(x).is_some() {
@@ -974,7 +986,8 @@ fn hit_elements(agent: &mut Agent, x: f64, y: f64) -> Vec<NodeId> {
                 out.push(e);
             }
         }
-        if let Some(root) = d.children(d.root()).find(|c| d.element(*c).is_some())
+        if this == d.root()
+            && let Some(root) = d.children(d.root()).find(|c| d.element(*c).is_some())
             && !out.contains(&root)
         {
             out.push(root);
@@ -992,24 +1005,24 @@ fn point_args(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(f64, f64)> {
     Ok((x, y))
 }
 
-fn element_from_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+pub(crate) fn element_from_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let (x, y) = point_args(agent, a)?;
     if n.doc != 0 {
         return Ok(Value::Null);
     }
-    let hits = hit_elements(agent, x, y);
+    let hits = hit_elements(agent, x, y, n.node);
     Ok(match hits.first() {
         Some(e) => wrap_node(agent, NodeRef::new(0, *e)),
         None => Value::Null,
     })
 }
 
-fn elements_from_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+pub(crate) fn elements_from_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let (x, y) = point_args(agent, a)?;
     let hits = if n.doc == 0 {
-        hit_elements(agent, x, y)
+        hit_elements(agent, x, y, n.node)
     } else {
         Vec::new()
     };

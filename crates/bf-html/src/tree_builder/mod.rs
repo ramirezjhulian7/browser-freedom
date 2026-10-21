@@ -816,13 +816,13 @@ impl TreeBuilder {
         if !self.allow_declarative_shadow_roots {
             return false;
         }
-        // El adjusted current node antes de apilar el template.
+        // El nodo actual antes de apilar el template; como los navegadores, el elemento de
+        // contexto de un fragmento y el elemento raíz no reciben shadow roots declarativos.
         let n = self.open.len();
-        let host = match self.context {
-            Some(context) if n == 2 => context,
-            _ if n >= 2 => self.open[n - 2],
-            _ => return false,
-        };
+        if n < 2 {
+            return false;
+        }
+        let host = self.open[n - 2];
         if host == self.open[0] {
             return false;
         }

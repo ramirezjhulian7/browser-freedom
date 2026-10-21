@@ -381,6 +381,7 @@ pub fn mutated(agent: &mut Agent) {
         // E1: el `toggle` de los `details` cuyo `open` cambió.
         crate::html::activation::queue_details_toggles(agent, doc);
     }
+    crate::dom::shadow::sync_adopted(agent); // E1
 }
 
 /// Después de que un algoritmo de `bf-dom` corrió con script (dispatch, abort): agenda la

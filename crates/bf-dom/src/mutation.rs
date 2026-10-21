@@ -254,6 +254,8 @@ impl Document {
         // 7.7 y 10-11: insertion steps y post-connection steps.
         for &n in &nodes {
             self.run_insertion_steps(n);
+            // E1: 7.7.2, las reacciones de los custom elements conectados.
+            self.custom_connected(n);
         }
     }
 
@@ -348,12 +350,15 @@ impl Document {
         // 9-11.
         let old_previous = self.get(node).prev_sibling();
         let old_next = self.get(node).next_sibling();
+        let was_connected = self.is_connected(node); // E1
         self.unlink(node);
         self.bump_version();
         // E1: 12-14, slots.
         self.shadow_remove_steps(node, parent);
         // 15. Removing steps.
         self.run_removing_steps(node);
+        // E1: 16, las reacciones de los custom elements desconectados.
+        self.custom_disconnected(node, was_connected);
         // 17. Registros transitorios.
         self.add_transient_observers(parent, node);
         // 18.

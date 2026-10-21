@@ -76,6 +76,9 @@ pub(crate) struct ShadowState {
     /// La *signal slots* del agente (aquí, del documento): los slots con `slotchange`
     /// pendiente.
     signal_slots: Vec<NodeId>,
+    /// El texto de las `adoptedStyleSheets` de cada `DocumentOrShadowRoot` (la raíz del
+    /// documento o un shadow root), para la cascada.
+    adopted: HashMap<NodeId, Vec<String>>,
 }
 
 /// ¿Es un *valid shadow host name* (DOM §4.8)?
@@ -176,6 +179,44 @@ impl Document {
     /// El host del shadow root `root`.
     pub fn shadow_host(&self, root: NodeId) -> Option<NodeId> {
         self.shadow.roots.get(&root).map(|d| d.host)
+    }
+
+    /// Los shadow roots del documento, en orden de creación.
+    pub fn shadow_roots(&self) -> Vec<NodeId> {
+        let mut v: Vec<NodeId> = self.shadow.roots.keys().copied().collect();
+        v.sort();
+        v
+    }
+
+    /// La profundidad del árbol de `n`: 0 en el documento (o un árbol suelto), 1 en el
+    /// shadow tree de un host del documento…
+    pub fn shadow_depth(&self, n: NodeId) -> u8 {
+        let mut depth = 0u8;
+        let mut r = self.tree_root(n);
+        while let Some(h) = self.shadow_host(r) {
+            depth = depth.saturating_add(1);
+            r = self.tree_root(h);
+        }
+        depth
+    }
+
+    /// Fija el texto de las `adoptedStyleSheets` de `root` (el documento o un shadow root).
+    pub fn set_adopted_style_texts(&mut self, root: NodeId, texts: Vec<String>) {
+        if texts.is_empty() {
+            self.shadow.adopted.remove(&root);
+        } else {
+            self.shadow.adopted.insert(root, texts);
+        }
+        self.bump_version();
+    }
+
+    /// El texto de las `adoptedStyleSheets` de `root`.
+    pub fn adopted_style_texts(&self, root: NodeId) -> &[String] {
+        self.shadow
+            .adopted
+            .get(&root)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// ¿Hay algún shadow root en el documento?

@@ -20,6 +20,10 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
     if is_document {
         return throw_dom(agent, DomException::NotSupportedError);
     }
+    // E1: un shadow root no se adopta.
+    if with_doc(agent, n.doc, |d| d.is_shadow_root(n.node)) {
+        return throw_dom(agent, DomException::HierarchyRequestError);
+    }
     if n.doc == to {
         with_doc_mut(agent, to, |d| d.adopt(n.node));
         return Ok(n);

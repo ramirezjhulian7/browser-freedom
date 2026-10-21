@@ -309,6 +309,7 @@ impl Document {
         let copy = self.create(data);
         // 3. Cloning steps: `option` (selectedness) y `template` (template contents).
         self.clone_element_state(node, copy);
+        self.clone_custom_state(node, copy); // E1: el *is value*.
         self.clone_script_state(node, copy);
         if subtree
             && let (Some(source), Some(target)) = (
@@ -404,6 +405,10 @@ impl Document {
         id: NodeId,
         subtree: bool,
     ) -> Result<NodeId, DomException> {
+        // E1: un shadow root no se clona.
+        if self.is_shadow_root(id) {
+            return Err(DomException::NotSupportedError);
+        }
         Ok(self.clone_node(id, subtree))
     }
 

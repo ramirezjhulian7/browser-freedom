@@ -44,6 +44,27 @@ pub fn register(agent: &mut Agent) {
         c.text,
         HostClass::new("Text").attribute("assignedSlot", Some(assigned_slot), None),
     );
+    agent.host_extend_class(
+        c.document,
+        HostClass::new("Document")
+            .attribute("adoptedStyleSheets", Some(adopted_get), Some(adopted_set))
+            .static_method("parseHTMLUnsafe", 1, parse_html_unsafe),
+    );
+}
+
+/// `Document.parseHTMLUnsafe(html)` (HTML §8.5.1): un documento HTML nuevo, parseado con
+/// declarative shadow roots.
+fn parse_html_unsafe(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let html = to_dom_string(agent, &a.arg(0))?;
+    let opts = bf_html::ParseOptions {
+        allow_declarative_shadow_roots: true,
+        ..bf_html::ParseOptions::default()
+    };
+    let (doc, _) = bf_html::parse_document(&html.to_string_lossy(), &opts);
+    let ctx = crate::WebContextHandle::current(agent);
+    let i = ctx.get_mut(agent).add_document(doc);
+    let root = ctx.get(agent).doc(i).root();
+    Ok(wrap_node(agent, NodeRef::new(i, root)))
 }
 
 /// La clase de los wrappers de shadow roots (para `class_for`).
@@ -65,7 +86,18 @@ fn shadow_root_class(fragment: HostClassId) -> HostClass {
         .attribute("innerHTML", Some(sr_inner_html), Some(sr_set_inner_html))
         .attribute("activeElement", Some(sr_active_element), None)
         .method("getHTML", 0, sr_get_html)
-        .method("setHTMLUnsafe", 1, sr_set_html_unsafe);
+        .method("setHTMLUnsafe", 1, sr_set_html_unsafe)
+        .attribute("adoptedStyleSheets", Some(adopted_get), Some(adopted_set))
+        .method(
+            "elementFromPoint",
+            2,
+            crate::cssom::view::element_from_point,
+        )
+        .method(
+            "elementsFromPoint",
+            2,
+            crate::cssom::view::elements_from_point,
+        );
     crate::dom::events::with_event_handlers(class, &["slotchange"])
 }
 
@@ -461,6 +493,121 @@ fn slot_assign(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     with_doc_mut(agent, n.doc, |d| d.slot_assign(n.node, &nodes));
     mutated(agent);
     Ok(Value::Undefined)
+}
+
+// --- adoptedStyleSheets (CSSOM §6.2, DocumentOrShadowRoot) ---
+
+/// El array de `adoptedStyleSheets` de cada documento o shadow root.
+#[derive(Debug, Default)]
+struct Adopted(std::collections::HashMap<NodeRef, bf_js::host::HostHandle>);
+
+/// El documento o shadow root de `this`.
+fn this_root(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
+    let n = this_node(agent, a)?;
+    let ok = with_doc(agent, n.doc, |d| {
+        d.is_shadow_root(n.node) || matches!(d.get(n.node).data, NodeData::Document)
+    });
+    if !ok {
+        return agent.type_error("Illegal invocation");
+    }
+    Ok(n)
+}
+
+fn adopted_array(agent: &mut Agent, root: NodeRef) -> JsResult<Value> {
+    let realm = crate::WebContextHandle::current(agent).realm;
+    if agent.realm_data::<Adopted>(realm).is_none() {
+        agent.set_realm_data(realm, Adopted::default());
+    }
+    if let Some(h) = agent
+        .realm_data::<Adopted>(realm)
+        .and_then(|m| m.0.get(&root).copied())
+    {
+        return Ok(agent.host_pinned(h).unwrap_or_default());
+    }
+    let arr = Value::Object(agent.create_array_from_list(&[])?);
+    let h = agent.host_pin(arr.clone());
+    if let Some(m) = agent.realm_data_mut::<Adopted>(realm) {
+        m.0.insert(root, h);
+    }
+    Ok(arr)
+}
+
+fn adopted_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let root = this_root(agent, a)?;
+    adopted_array(agent, root)
+}
+
+/// El setter: una secuencia de hojas construidas (`NotAllowedError` si alguna no lo es).
+fn adopted_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let root = this_root(agent, a)?;
+    let values = sequence(agent, &a.arg(0))?;
+    for v in &values {
+        let Some(id) = crate::cssom::sheets::sheet_of(agent, v) else {
+            return agent.type_error(
+                "Failed to set the 'adoptedStyleSheets' property: Failed to convert value to                  'CSSStyleSheet'.",
+            );
+        };
+        if !crate::cssom::sheets::constructed_sheet(agent, id).is_some_and(|(c, _)| c) {
+            return crate::net::dom_error(
+                agent,
+                "NotAllowedError",
+                "Can't adopt non-constructed stylesheets.",
+            );
+        }
+    }
+    let arr = Value::Object(agent.create_array_from_list(&values)?);
+    let realm = crate::WebContextHandle::current(agent).realm;
+    let h = agent.host_pin(arr);
+    if agent.realm_data::<Adopted>(realm).is_none() {
+        agent.set_realm_data(realm, Adopted::default());
+    }
+    let old = agent
+        .realm_data_mut::<Adopted>(realm)
+        .and_then(|m| m.0.insert(root, h));
+    if let Some(old) = old {
+        agent.host_unpin(old);
+    }
+    sync_adopted(agent);
+    Ok(Value::Undefined)
+}
+
+/// Copia al documento el texto de las `adoptedStyleSheets` (lo lee la cascada).
+pub fn sync_adopted(agent: &mut Agent) {
+    let realm = crate::WebContextHandle::current(agent).realm;
+    let Some(entries) = agent
+        .realm_data::<Adopted>(realm)
+        .map(|m| m.0.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>())
+    else {
+        return;
+    };
+    for (root, h) in entries {
+        let arr = agent.host_pinned(h).unwrap_or_default();
+        let Value::Object(o) = arr else { continue };
+        let len = agent
+            .get_str(o, "length")
+            .ok()
+            .and_then(|v| v.as_number())
+            .unwrap_or(0.0) as usize;
+        let mut texts = Vec::new();
+        for i in 0..len {
+            let Ok(v) = agent.get_str(o, &i.to_string()) else {
+                continue;
+            };
+            if let Some(id) = crate::cssom::sheets::sheet_of(agent, &v)
+                && let Some((true, text)) = crate::cssom::sheets::constructed_sheet(agent, id)
+            {
+                texts.push(text);
+            }
+        }
+        let same = with_doc(agent, root.doc, |d| {
+            d.adopted_style_texts(root.node) == texts.as_slice()
+        });
+        if !same {
+            with_doc_mut(agent, root.doc, |d| {
+                d.set_adopted_style_texts(root.node, texts)
+            });
+        }
+    }
 }
 
 // --- slotchange ---

@@ -24,6 +24,7 @@
 pub mod abort;
 mod character_data;
 pub mod collections;
+pub mod custom; // E1
 mod document;
 mod element;
 pub mod events;
@@ -252,6 +253,7 @@ pub struct Document {
     pub(crate) scripts: script::ScriptLists,
     pub(crate) live_ranges: range::LiveRanges, // E3
     pub(crate) shadow: shadow::ShadowState,    // E1
+    pub(crate) custom: custom::CustomState,    // E1
 }
 
 impl Default for Document {
@@ -280,6 +282,7 @@ impl Document {
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
             shadow: shadow::ShadowState::default(),    // E1
+            custom: custom::CustomState::default(),    // E1
         };
         doc.push(NodeData::Document);
         doc

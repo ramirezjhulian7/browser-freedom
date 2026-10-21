@@ -345,7 +345,8 @@ impl Document {
 
     /// `Document.importNode(node, subtree)`.
     pub fn import_node(&mut self, node: NodeId, subtree: bool) -> Result<NodeId, DomException> {
-        if matches!(self.get(node).data, NodeData::Document) {
+        // E1: ni los documentos ni los shadow roots se importan.
+        if matches!(self.get(node).data, NodeData::Document) || self.is_shadow_root(node) {
             return Err(DomException::NotSupportedError);
         }
         Ok(self.clone_node(node, subtree))
@@ -355,6 +356,10 @@ impl Document {
     pub fn adopt_node(&mut self, node: NodeId) -> Result<NodeId, DomException> {
         if matches!(self.get(node).data, NodeData::Document) {
             return Err(DomException::NotSupportedError);
+        }
+        // E1: un shadow root no se adopta.
+        if self.is_shadow_root(node) {
+            return Err(DomException::HierarchyRequestError);
         }
         // Un fragmento que es template contents (con host) no se adopta.
         if self.template_host(node).is_some() {
