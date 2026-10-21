@@ -237,14 +237,51 @@ fn main() {
             }
         }
     }
+    // Las causas más frecuentes de los archivos sin estado OK.
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for r in &results {
+        if r.harness != Harness::Ok {
+            let m = r
+                .harness
+                .message()
+                .trim_start_matches("sin completion callback: ");
+            let m: String = m.chars().take(100).collect();
+            let key = format!("{} {}", r.harness.label(), m.trim());
+            *reasons.entry(key).or_default() += 1;
+        }
+    }
+    let mut reasons: Vec<(String, usize)> = reasons.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    reasons.truncate(8);
     if let Some(path) = out_doc {
-        write_status(&path, &dirs, &table, results.len(), start.elapsed());
+        write_status(
+            &path,
+            &dirs,
+            &table,
+            &reasons,
+            results.len(),
+            start.elapsed(),
+        );
     }
 }
 
 /// Escribe la sección "testharness" de `docs/wpt-status.md` (las demás quedan).
-fn write_status(path: &Path, dirs: &[String], table: &str, docs: usize, elapsed: Duration) {
+fn write_status(
+    path: &Path,
+    dirs: &[String],
+    table: &str,
+    reasons: &[(String, usize)],
+    docs: usize,
+    elapsed: Duration,
+) {
     let commit = fs::read_to_string("tools/wpt-commit.txt").unwrap_or_default();
+    let mut causes = String::new();
+    if !reasons.is_empty() {
+        causes.push_str("\nLas causas más frecuentes de los archivos sin estado OK:\n\n");
+        for (m, n) in reasons {
+            causes.push_str(&format!("- {n}: `{}`\n", m.replace('`', "'")));
+        }
+    }
     let dirs: Vec<String> = dirs.iter().map(|d| format!("`{d}`")).collect();
     let section = format!(
         "## testharness\n\n\
@@ -256,7 +293,7 @@ fn write_status(path: &Path, dirs: &[String], table: &str, docs: usize, elapsed:
          `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por archivo.\n\
          - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). \
          Detalle por subtest: `target/wpt-testharness/results.tsv`.\n\n\
-         {table}",
+         {table}{causes}",
         commit.trim(),
         dirs.join(", "),
         elapsed.as_secs_f64(),
