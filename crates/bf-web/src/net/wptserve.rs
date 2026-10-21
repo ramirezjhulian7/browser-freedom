@@ -27,7 +27,10 @@ struct Req<'a> {
 
 impl Req<'_> {
     fn param(&self, k: &str) -> Option<&str> {
-        self.get.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+        self.get
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
     }
 
     fn has(&self, k: &str) -> bool {
@@ -43,10 +46,16 @@ impl Req<'_> {
     }
 }
 
-fn resp<N: AsRef<str>>(status: u16, text: &str, headers: &[(N, String)], body: impl Into<Vec<u8>>) -> NetResponse {
+fn resp<N: AsRef<str>>(
+    status: u16,
+    text: &str,
+    headers: &[(N, String)],
+    body: impl Into<Vec<u8>>,
+) -> NetResponse {
     let mut h = HeaderList::default();
     for (n, v) in headers {
-        h.append(n.as_ref(), v);
+        // Como las verá el parser HTTP: sin espacios a los lados.
+        h.append(n.as_ref(), &super::headers::normalize(v));
     }
     let body = body.into();
     if !h.contains("content-length") {
@@ -120,7 +129,10 @@ impl WptServe {
         let body_bytes = req.body.unwrap_or(&[]).to_vec();
         Some(match name {
             "status.py" => {
-                let code = req.param("code").and_then(|c| c.parse().ok()).unwrap_or(200);
+                let code = req
+                    .param("code")
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(200);
                 let text = req.param("text").unwrap_or("OMG");
                 resp(
                     code,
@@ -147,8 +159,14 @@ impl WptServe {
                     &[
                         ("Content-type", ct),
                         ("X-Request-Method", req.method.to_owned()),
-                        ("X-Request-Query", if q.is_empty() { "NO".into() } else { q }),
-                        ("X-Request-Content-Length", req.header_or_no("content-length")),
+                        (
+                            "X-Request-Query",
+                            if q.is_empty() { "NO".into() } else { q },
+                        ),
+                        (
+                            "X-Request-Content-Length",
+                            req.header_or_no("content-length"),
+                        ),
                         ("X-Request-Content-Type", req.header_or_no("content-type")),
                     ],
                     content,
@@ -159,7 +177,10 @@ impl WptServe {
                 "OK",
                 &[
                     ("X-Request-Method", req.method.to_owned()),
-                    ("X-Request-Content-Length", req.header_or_no("content-length")),
+                    (
+                        "X-Request-Content-Length",
+                        req.header_or_no("content-length"),
+                    ),
                     ("X-Request-Content-Type", req.header_or_no("content-type")),
                     ("Content-Type", "text/plain".into()),
                 ],
@@ -175,7 +196,13 @@ impl WptServe {
                     h.push(("Access-Control-Expose-Headers", "x-request-method".into()));
                 }
                 h.push(("x-request-method", req.method.to_owned()));
-                for n in ["Content-Type", "Content-Length", "Content-Encoding", "Content-Language", "Content-Location"] {
+                for n in [
+                    "Content-Type",
+                    "Content-Length",
+                    "Content-Encoding",
+                    "Content-Language",
+                    "Content-Location",
+                ] {
                     h.push((
                         match n {
                             "Content-Type" => "x-request-content-type",
@@ -189,6 +216,50 @@ impl WptServe {
                 }
                 resp(200, "OK", &h, body_bytes)
             }
+            "inspect-headers.py" if dir.ends_with("/xhr/resources") => {
+                let mut h: Vec<(&str, String)> = Vec::new();
+                if req.has("cors") {
+                    h.push(("Access-Control-Allow-Origin", "*".into()));
+                    h.push(("Access-Control-Allow-Credentials", "true".into()));
+                    h.push(("Access-Control-Allow-Methods", "GET, POST, PUT, FOO".into()));
+                    h.push(("Access-Control-Allow-Headers", "x-test, x-foo".into()));
+                    h.push((
+                        "Access-Control-Expose-Headers",
+                        "x-request-method, x-request-content-type, x-request-query, x-request-content-length".into(),
+                    ));
+                }
+                h.push(("content-type", "text/plain".into()));
+                let fv = req.param("filter_value").unwrap_or("");
+                let fname = req.param("filter_name").unwrap_or("").to_ascii_lowercase();
+                let mut out = String::new();
+                for (n, v) in &req.headers.0 {
+                    if !fv.is_empty() {
+                        if v == fv {
+                            out.push_str(n);
+                            out.push(',');
+                        }
+                    } else if n.to_ascii_lowercase() == fname {
+                        out.push_str(&format!(
+                            "{n}: {v}
+"
+                        ));
+                    }
+                }
+                resp(200, "OK", &h, out.into_bytes())
+            }
+            "parse-headers.py" => {
+                let mut h: Vec<(&str, String)> = Vec::new();
+                if let Some(v) = req.param("my-custom-header") {
+                    h.push(("My-Custom-Header", v.to_owned()));
+                }
+                resp(200, "OK", &h, Vec::new())
+            }
+            "echo-method.py" => resp(
+                200,
+                "OK",
+                &[("Content-type", "text/plain".into())],
+                req.method.as_bytes().to_vec(),
+            ),
             "inspect-headers.py" => {
                 let mut h: Vec<(String, String)> = Vec::new();
                 let checked: Vec<String> = req
@@ -205,7 +276,10 @@ impl WptServe {
                     let o = origin_hdr.clone().unwrap_or_else(|| "*".into());
                     h.push(("Access-Control-Allow-Origin".into(), o));
                     h.push(("Access-Control-Allow-Credentials".into(), "true".into()));
-                    h.push(("Access-Control-Allow-Methods".into(), "GET, POST, HEAD".into()));
+                    h.push((
+                        "Access-Control-Allow-Methods".into(),
+                        "GET, POST, HEAD".into(),
+                    ));
                     h.push(("Access-Control-Expose-Headers".into(), names.join(", ")));
                     let allow = req.param("allow_headers").map_or_else(
                         || {
@@ -224,9 +298,17 @@ impl WptServe {
                 resp(200, "OK", &h, Vec::new())
             }
             "redirect.py" if dir.ends_with("/xhr/resources") => {
-                let code = req.param("code").and_then(|c| c.parse().ok()).unwrap_or(302);
+                let code = req
+                    .param("code")
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(302);
                 if req.has("followed") {
-                    return Some(resp(200, "OK", &[("Content:Type", "text/plain".into())], b"MAGIC HAPPENED".to_vec()));
+                    return Some(resp(
+                        200,
+                        "OK",
+                        &[("Content:Type", "text/plain".into())],
+                        b"MAGIC HAPPENED".to_vec(),
+                    ));
                 }
                 let mut location = req
                     .param("location")
@@ -234,7 +316,12 @@ impl WptServe {
                 if location.starts_with("redirect.py") {
                     location.push_str(&format!("&code={code}"));
                 }
-                resp(code, "WEBSRT MARKETING", &[("Location", location)], b"TEST".to_vec())
+                resp(
+                    code,
+                    "WEBSRT MARKETING",
+                    &[("Location", location)],
+                    b"TEST".to_vec(),
+                )
             }
             "redirect.py" => {
                 let mut h: Vec<(&str, String)> = vec![
@@ -280,7 +367,10 @@ impl WptServe {
                 resp(status, "Found", &h, Vec::new())
             }
             "trickle.py" => {
-                let count: usize = req.param("count").and_then(|c| c.parse().ok()).unwrap_or(50);
+                let count: usize = req
+                    .param("count")
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(50);
                 let chunk = b"TEST_TRICKLE\n";
                 let mut h = vec![("Content-type", "text/plain".to_owned())];
                 if req.has("specifylength") {
@@ -324,7 +414,12 @@ impl WptServe {
                     }
                     p
                 };
-                resp(200, "OK", &[("Content-Type", "text/plain".into())], body.into_bytes())
+                resp(
+                    200,
+                    "OK",
+                    &[("Content-Type", "text/plain".into())],
+                    body.into_bytes(),
+                )
             }
             "corsenabled.py" => {
                 let q = req.query();
@@ -342,8 +437,14 @@ impl WptServe {
                     h.push(("Access-Control-Allow-Headers", "content-type".into()));
                 }
                 h.push(("X-Request-Method", req.method.to_owned()));
-                h.push(("X-Request-Query", if q.is_empty() { "NO".into() } else { q }));
-                h.push(("X-Request-Content-Length", req.header_or_no("content-length")));
+                h.push((
+                    "X-Request-Query",
+                    if q.is_empty() { "NO".into() } else { q },
+                ));
+                h.push((
+                    "X-Request-Content-Length",
+                    req.header_or_no("content-length"),
+                ));
                 h.push(("X-Request-Content-Type", req.header_or_no("content-type")));
                 h.push(("X-Request-Data", latin1(&body_bytes)));
                 resp(200, "OK", &h, b"Test".to_vec())
@@ -354,7 +455,10 @@ impl WptServe {
                 &[
                     ("Content-Type", "text/plain".into()),
                     ("Access-Control-Allow-Credentials", "true".into()),
-                    ("Access-Control-Allow-Origin", origin_hdr.unwrap_or_default()),
+                    (
+                        "Access-Control-Allow-Origin",
+                        origin_hdr.unwrap_or_default(),
+                    ),
                 ],
                 b"PASS: Cross-domain access allowed.".to_vec(),
             ),
@@ -433,8 +537,10 @@ impl NetBackend for WptServe {
                     return Err("bad Location".into());
                 };
                 let post = method.eq_ignore_ascii_case("POST");
-                let get_or_head = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
-                if (matches!(res.status, 301 | 302) && post) || (res.status == 303 && !get_or_head) {
+                let get_or_head =
+                    method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+                if (matches!(res.status, 301 | 302) && post) || (res.status == 303 && !get_or_head)
+                {
                     method = "GET".into();
                     body = None;
                 }

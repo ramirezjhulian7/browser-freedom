@@ -176,7 +176,7 @@ pub fn package(
             let entries = match essence.as_deref() {
                 Some("multipart/form-data") => {
                     let b = mime
-                        .and_then(|m| parse_mime(m))
+                        .and_then(parse_mime)
                         .and_then(|(_, p)| p.into_iter().find(|(k, _)| k == "boundary"))
                         .map(|(_, v)| v);
                     match b.and_then(|b| formdata::parse_multipart(bytes, &b)) {
@@ -218,7 +218,7 @@ pub fn stringify_json(agent: &mut Agent, v: &Value) -> JsResult<Option<String>> 
         return agent.type_error("JSON no está disponible");
     };
     let f = agent.get(j, &PropertyKey::from("stringify"), json.clone())?;
-    let r = agent.call(&f, json, &[v.clone()])?;
+    let r = agent.call(&f, json, std::slice::from_ref(v))?;
     if r.is_undefined() {
         return Ok(None);
     }

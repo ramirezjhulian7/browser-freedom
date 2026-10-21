@@ -547,18 +547,85 @@ impl Default for RequestOptions {
     }
 }
 
-/// La respuesta `200 OK` de una URL `blob:` (Fetch §4.2, "scheme fetch").
+/// La respuesta de una URL `blob:` (Fetch §4.2, "scheme fetch"): `200 OK`, o `206` con una
+/// cabecera `Range` de un solo rango.
 fn blob_response(url: &Url, redirects: usize) -> Result<Response, FetchError> {
+    blob_response_range(url, redirects, None)
+}
+
+/// "Parse a single range header value" (Fetch §2.2.6, con espacios permitidos).
+fn parse_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let v = v.trim_matches([' ', '\t']);
+    let rest = v.strip_prefix("bytes")?.trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('=')?.trim_matches([' ', '\t']);
+    let (a, b) = rest.split_once('-')?;
+    let (a, b) = (a.trim_matches([' ', '\t']), b.trim_matches([' ', '\t']));
+    let num = |s: &str| -> Option<Option<u64>> {
+        if s.is_empty() {
+            Some(None)
+        } else if s.chars().all(|c| c.is_ascii_digit()) {
+            s.parse().ok().map(Some)
+        } else {
+            None
+        }
+    };
+    let (start, end) = (num(a)?, num(b)?);
+    if start.is_none() && end.is_none() {
+        return None;
+    }
+    if let (Some(s), Some(e)) = (start, end)
+        && s > e
+    {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn blob_response_range(
+    url: &Url,
+    redirects: usize,
+    range: Option<&str>,
+) -> Result<Response, FetchError> {
     let entry = blob::resolve(url).ok_or(FetchError::NotFound)?;
     let mut headers = Headers::default();
-    headers.push("Content-Length", &entry.bytes.len().to_string());
+    let Some(range) = range else {
+        headers.push("Content-Length", &entry.bytes.len().to_string());
+        headers.push("Content-Type", &entry.mime);
+        return Ok(Response {
+            url: url.clone(),
+            status: 200,
+            status_text: "OK".into(),
+            headers,
+            body: entry.bytes.to_vec(),
+            redirects,
+        });
+    };
+    let len = entry.bytes.len() as u64;
+    let bad = || FetchError::Io(io::Error::other("invalid range"));
+    let (start, end) = parse_range(range).ok_or_else(bad)?;
+    let (start, end) = match (start, end) {
+        (None, Some(suffix)) => (len.saturating_sub(suffix), len.saturating_sub(1)),
+        (Some(s), e) => {
+            if s >= len {
+                return Err(bad());
+            }
+            (s, e.map_or(len - 1, |e| e.min(len - 1)))
+        }
+        (None, None) => return Err(bad()),
+    };
+    if len == 0 || start > end {
+        return Err(bad());
+    }
+    let body = entry.bytes[start as usize..=end as usize].to_vec();
+    headers.push("Content-Length", &body.len().to_string());
     headers.push("Content-Type", &entry.mime);
+    headers.push("Content-Range", &format!("bytes {start}-{end}/{len}"));
     Ok(Response {
         url: url.clone(),
-        status: 200,
-        status_text: "OK".into(),
+        status: 206,
+        status_text: "Partial Content".into(),
         headers,
-        body: entry.bytes.to_vec(),
+        body,
         redirects,
     })
 }
@@ -582,7 +649,8 @@ impl Fetcher {
                 if !method.eq_ignore_ascii_case("GET") {
                     return Err(FetchError::NotFound);
                 }
-                return blob_response(&url, redirects).map(|r| (r, list));
+                let range = headers.get("range");
+                return blob_response_range(&url, redirects, range).map(|r| (r, list));
             }
             if !matches!(url.scheme.as_str(), "http" | "https") {
                 let res = load_local(&url, &[]).ok_or(FetchError::NotFound)?;

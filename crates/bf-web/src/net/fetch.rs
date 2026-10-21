@@ -326,10 +326,8 @@ fn build_request(
         Some(v) => Some(agent.to_string(&v)?.to_string()),
         None => None,
     };
-    let keepalive = match member(agent, init, "keepalive")? {
-        Some(v) => Some(bf_js::host::webidl::to_boolean(agent, &v)),
-        None => None,
-    };
+    let keepalive =
+        member(agent, init, "keepalive")?.map(|v| bf_js::host::webidl::to_boolean(agent, &v));
     let method = match member(agent, init, "method")? {
         Some(v) => Some(headers::byte_string(agent, &v)?),
         None => None,
@@ -405,13 +403,13 @@ fn build_request(
         } else {
             match Url::parse(&rf, Some(&base)) {
                 Ok(u) => {
-                    r.referrer = if u.scheme == "about" && u.path_string() == "client" {
-                        "about:client".into()
-                    } else if u.origin().to_string() != super::document_origin(agent) {
-                        "about:client".into()
-                    } else {
-                        u.href()
-                    };
+                    let client = u.scheme == "about" && u.path_string() == "client";
+                    r.referrer =
+                        if client || u.origin().to_string() != super::document_origin(agent) {
+                            "about:client".into()
+                        } else {
+                            u.href()
+                        };
                 }
                 Err(_) => {
                     return agent.type_error(&format!(

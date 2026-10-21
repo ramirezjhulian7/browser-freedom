@@ -447,10 +447,7 @@ fn for_each(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("FormData.forEach: callback is not a function");
     }
     let mut i = 0;
-    loop {
-        let Some((n, e)) = this_entries(agent, a)?.get(i).cloned() else {
-            break;
-        };
+    while let Some((n, e)) = this_entries(agent, a)?.get(i).cloned() {
         let v = entry_value(agent, &e);
         agent.call(&cb, a.arg(1), &[v, Value::str(&n), a.this.clone()])?;
         i += 1;
