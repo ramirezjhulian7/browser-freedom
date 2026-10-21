@@ -55,11 +55,15 @@ pub enum DialogKind {
 
 /// Lo que un documento le pide a la interfaz.
 pub enum PageRequest {
-    /// Navegar la pestaña (`replace`: sin entrada nueva en el historial).
+    /// Navegar la pestaña (`replace`: sin entrada nueva en el historial; `post`: cuerpo y
+    /// `Content-Type` de un formulario).
     Navigate {
         url: Url,
         replace: bool,
+        post: Option<(Vec<u8>, String)>,
     },
+    /// El `contextmenu` no se canceló: abrir el menú contextual del navegador.
+    ContextMenu,
     /// La URL cambió sin cargar otro documento (`pushState`, fragmento).
     SameDocument {
         url: Url,
@@ -240,6 +244,7 @@ impl BomHooks for ShellBom {
         self.request(PageRequest::Navigate {
             url: url.clone(),
             replace,
+            post: None,
         });
     }
 
@@ -595,6 +600,89 @@ impl Engine {
             .agent
             .realm_data::<WebContext>(self.realm)
             .map(WebContext::document)
+    }
+
+    /// El documento de la ventana, mutable.
+    pub fn document_mut(&mut self) -> Option<&mut Document> {
+        self.rt
+            .agent
+            .realm_data_mut::<WebContext>(self.realm)
+            .map(WebContext::document_mut)
+    }
+
+    /// Despacha un evento de confianza (del usuario o del navegador) en el documento de la
+    /// ventana; `false` si se canceló.
+    pub fn dispatch(
+        &mut self,
+        target: bf_dom::events::EventTarget,
+        event: &mut bf_dom::events::Event,
+    ) -> bool {
+        let realm = self.realm;
+        let r = bf_web::bom::script::dispatch_trusted(&mut self.rt.agent, realm, target, event);
+        self.flush_rejections();
+        r
+    }
+
+    /// El valor que escribió el usuario en un campo: el *dirty value* de los controles
+    /// (`HTMLInputElement.value`, HTML §4.10.5.4).
+    pub fn set_control_value(&mut self, node: bf_dom::NodeId, value: &str) {
+        let realm = self.realm;
+        let agent = &mut self.rt.agent;
+        if agent
+            .realm_data::<bf_web::html::forms::ControlStates>(realm)
+            .is_none()
+        {
+            agent.set_realm_data(realm, bf_web::html::forms::ControlStates::default());
+        }
+        if let Some(states) = agent.realm_data_mut::<bf_web::html::forms::ControlStates>(realm) {
+            states
+                .0
+                .entry(bf_web::NodeRef::new(0, node))
+                .or_default()
+                .value = Some(value.to_owned());
+        }
+        if let Some(ctx) = agent.realm_data_mut::<WebContext>(realm) {
+            ctx.pending_dirty = true;
+        }
+    }
+
+    /// El elemento con el foco (`document.activeElement`, el `Focus` de los controles).
+    pub fn set_focus(&mut self, node: Option<bf_dom::NodeId>) {
+        let realm = self.realm;
+        self.rt.agent.set_realm_data(
+            realm,
+            bf_web::html::misc::Focus(node.map(|n| bf_web::NodeRef::new(0, n))),
+        );
+    }
+
+    /// Una copia del documento para maquetar y mostrar: con los valores que escribió el
+    /// usuario (el *dirty value* de los controles) en el atributo `value` o el texto del
+    /// `textarea`, que es lo que pinta el navegador.
+    pub fn render_copy(&self) -> Option<Document> {
+        let mut doc = self.document()?.clone();
+        let Some(states) = self
+            .rt
+            .agent
+            .realm_data::<bf_web::html::forms::ControlStates>(self.realm)
+        else {
+            return Some(doc);
+        };
+        for (n, st) in &states.0 {
+            let Some(value) = &st.value else { continue };
+            if n.doc != 0 || !doc.is_connected(n.node) {
+                continue;
+            }
+            let Some(el) = doc.element(n.node) else {
+                continue;
+            };
+            if el.is_html("textarea") {
+                let t = doc.create_text_node(value.as_str().into());
+                doc.replace_all(Some(t), n.node);
+            } else if el.is_html("input") {
+                let _ = doc.set_attribute(n.node, &"value".into(), value.as_str().into());
+            }
+        }
+        Some(doc)
     }
 
     /// Reemplaza el documento de la ventana (la interfaz editó un campo).

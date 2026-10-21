@@ -24,7 +24,29 @@ pub enum CollectionFilter {
     },
     /// "List of elements with class names".
     ClassNames(Vec<DomString>),
+    /// Una lista calculada por la interfaz que la expone (las de HTML: `rows`, `tBodies`,
+    /// `cells`, `options`, `elements`…) (E1).
+    Computed(ComputedList),
 }
+
+/// La función que calcula los elementos de una colección [`CollectionFilter::Computed`] a
+/// partir de su raíz, en el orden de la colección (E1).
+#[derive(Clone, Copy)]
+pub struct ComputedList(pub fn(&Document, NodeId) -> Vec<NodeId>);
+
+impl std::fmt::Debug for ComputedList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ComputedList")
+    }
+}
+
+impl PartialEq for ComputedList {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.0, other.0)
+    }
+}
+
+impl Eq for ComputedList {}
 
 /// `HTMLCollection` viva.
 #[derive(Debug, Clone)]
@@ -49,6 +71,7 @@ impl HtmlCollection {
         };
         match &self.filter {
             CollectionFilter::Children => doc.parent(n) == Some(self.root),
+            CollectionFilter::Computed(f) => (f.0)(doc, self.root).contains(&n),
             CollectionFilter::QualifiedName(q) => {
                 if *q == "*" {
                     return true;
@@ -101,6 +124,7 @@ impl HtmlCollection {
         }
         let items: Vec<NodeId> = match self.filter {
             CollectionFilter::Children => doc.element_children(self.root),
+            CollectionFilter::Computed(f) => (f.0)(doc, self.root),
             _ => doc
                 .descendants(self.root)
                 .into_iter()

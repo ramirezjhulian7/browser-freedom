@@ -18,7 +18,9 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
-use super::elements::{attr_value, html_element_arg, html_local_name, parse_url, set_attr};
+use super::elements::{
+    attr_value, html_element_arg, html_local_name, live_collection, parse_url, set_attr,
+};
 use super::reflect::parse_float;
 use super::scripting::fire_event;
 use crate::dom::{from_dom_string, mutated, this_node, throw_dom, wrap_node, wrap_opt};
@@ -128,7 +130,9 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             .method("reportValidity", 0, check_validity)
             .method("setCustomValidity", 1, set_custom_validity)
             .attribute("validationMessage", Some(validation_message), None)
-            .method("item", 1, select_item),
+            .method("item", 1, select_item)
+            .attribute("options", Some(select_options_attr), None)
+            .attribute("selectedOptions", Some(selected_options_attr), None),
         "HTMLOptionElement" => class
             .attribute("text", Some(option_text), Some(set_child_text_all))
             .attribute("value", Some(option_value), Some(set_option_value))
@@ -151,6 +155,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
         "HTMLFormElement" => class
             .attribute("action", Some(form_action), Some(set_form_action))
             .attribute("length", Some(form_length), None)
+            .attribute("elements", Some(form_elements_attr), None)
             .method("submit", 0, form_submit)
             .method("requestSubmit", 0, form_request_submit)
             .method("reset", 0, form_reset)
@@ -161,6 +166,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             .attribute("form", Some(label_form), None),
         "HTMLFieldSetElement" => class
             .attribute("type", Some(type_fieldset), None)
+            .attribute("elements", Some(fieldset_elements_attr), None)
             .attribute("form", Some(form_owner), None)
             .attribute("willValidate", Some(false_value), None)
             .method("checkValidity", 0, check_validity)
@@ -1381,4 +1387,95 @@ fn progress_position(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         None => Ok(Value::Number(-1.0)),
         Some(v) => Ok(Value::Number(v.min(max) / max)),
     }
+}
+
+// --- Colecciones (sobre el `Document`, sin el agente) ---
+
+fn is_html_el(d: &bf_dom::Document, n: bf_dom::NodeId, name: &str) -> bool {
+    d.element(n).is_some_and(|e| e.is_html(name))
+}
+
+/// ¿Es un *listed element* (§4.10.2)? (`input type=image` no entra en `elements`.)
+fn is_listed_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> bool {
+    let Some(e) = d.element(n) else { return false };
+    if e.ns != Namespace::Html {
+        return false;
+    }
+    match e.name.to_string().as_str() {
+        "button" | "fieldset" | "object" | "output" | "select" | "textarea" => true,
+        "input" => !e
+            .attr("type")
+            .is_some_and(|t| t.eq_ignore_ascii_case("image")),
+        _ => false,
+    }
+}
+
+/// El form owner calculado sobre el documento (como [`form_owner_of`]).
+fn form_owner_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> Option<bf_dom::NodeId> {
+    if let Some(id) = d
+        .element(n)
+        .and_then(|e| e.attr("form"))
+        .map(DomString::from)
+    {
+        return d
+            .get_element_by_id(&id)
+            .filter(|f| is_html_el(d, *f, "form"));
+    }
+    let mut cur = d.parent(n);
+    while let Some(p) = cur {
+        if is_html_el(d, p, "form") {
+            return Some(p);
+        }
+        cur = d.parent(p);
+    }
+    None
+}
+
+/// `form.elements` (§4.10.3): los listed elements cuyo form owner es el form, en orden de
+/// árbol.
+fn form_elements_list(d: &bf_dom::Document, form: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    let root = *d.inclusive_ancestors(form).last().unwrap_or(&form);
+    d.descendants(root)
+        .into_iter()
+        .filter(|c| is_listed_doc(d, *c) && form_owner_doc(d, *c) == Some(form))
+        .collect()
+}
+
+/// `fieldset.elements` (§4.10.15): los listed elements descendientes.
+fn fieldset_elements_list(d: &bf_dom::Document, fs: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    d.descendants(fs)
+        .into_iter()
+        .filter(|c| *c != fs && is_listed_doc(d, *c))
+        .collect()
+}
+
+fn select_options_list(d: &bf_dom::Document, s: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    d.list_of_options(s)
+}
+
+fn selected_options_list(d: &bf_dom::Document, s: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    d.list_of_options(s)
+        .into_iter()
+        .filter(|o| d.option_selectedness(*o))
+        .collect()
+}
+
+fn form_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(live_collection(agent, n, 5, form_elements_list))
+}
+
+fn fieldset_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(live_collection(agent, n, 6, fieldset_elements_list))
+}
+
+fn select_options_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(live_collection(agent, n, 7, select_options_list))
+}
+
+fn selected_options_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(live_collection(agent, n, 8, selected_options_list))
 }

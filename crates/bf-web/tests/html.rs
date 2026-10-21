@@ -219,3 +219,40 @@ fn html_element_api() {
         "11"
     );
 }
+
+#[test]
+fn live_collections_and_token_lists() {
+    let mut p = Page::new(DOC);
+    assert_eq!(
+        p.show(
+            "var t = document.getElementById('t'); var rows = t.rows; t.insertRow(); \
+                [rows.length, rows === t.rows, t.tBodies.length, rows[0].cells.length].join()"
+        ),
+        "2,true,1,2"
+    );
+    assert_eq!(
+        p.show(
+            "var f = document.getElementById('f'); [f.elements.length, f.elements[0].id, \
+                f.elements.n.id, document.getElementById('s').options.length, \
+                document.getElementById('s').selectedOptions[0].value].join()"
+        ),
+        "2,i,i,2,2"
+    );
+    assert_eq!(
+        p.show("var a = document.getElementById('a'); a.relList.add('noopener'); \
+                a.relList = 'x y'; [a.getAttribute('rel'), a.relList.length, a.relList === a.relList].join()"),
+        "x y,2,true"
+    );
+}
+
+#[test]
+fn body_window_event_handlers() {
+    let mut p = Page::new("<!DOCTYPE html><body></body>");
+    assert_eq!(
+        p.show("var f = function () {}; document.body.onhashchange = f; \
+                document.body.onload = f; \
+                [window.onhashchange === f, window.onload === f, \
+                 'onhashchange' in HTMLBodyElement.prototype, 'onhashchange' in HTMLDivElement.prototype].join()"),
+        "true,true,true,false"
+    );
+}
