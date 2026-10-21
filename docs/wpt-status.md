@@ -60,14 +60,18 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 
 Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md`.
 
-- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `url`, `encoding`, `console`, `html/webappapis`, `html/dom`, `dom/nodes`; 1118 documentos en 102 s.
+- Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`; directorios: `dom/nodes`, `dom/events`, `dom/collections`, `dom/traversal`, `dom/lists`, `html/dom`, `html/webappapis`, `url`, `encoding`, `console`; 1330 documentos en 95 s.
 - Cada `*.html` con `testharness.js`, `*.any.js` (variante `window`) y `*.window.js` corre en un agente nuevo: el parser con los scripts clásicos (inline y `src` desde `tests/wpt` montado en `http://web-platform.test:8000/`), el bucle de eventos con reloj virtual y un `testharnessreport.js` propio que pasa los resultados al runner. Límite: 10 s por documento (60 s con `<meta name=timeout content=long>` o `META: timeout=long`), un hilo por documento.
 - `archivos OK`: el harness terminó con estado OK (no implica que pasen todos sus subtests). Detalle por subtest: `target/wpt-testharness/results.tsv`.
 
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | console | 12 | 12 | 29 | 12 | 17 | 0 | 0 | 41.4% |
-| dom/nodes | 359 | 294 | 9657 | 7713 | 1186 | 81 | 677 | 79.9% |
+| dom/collections | 12 | 12 | 60 | 55 | 5 | 0 | 0 | 91.7% |
+| dom/events | 177 | 83 | 784 | 425 | 228 | 54 | 77 | 54.2% |
+| dom/lists | 5 | 5 | 189 | 187 | 2 | 0 | 0 | 98.9% |
+| dom/nodes | 359 | 294 | 9657 | 7714 | 1185 | 81 | 677 | 79.9% |
+| dom/traversal | 18 | 17 | 1607 | 1573 | 33 | 0 | 1 | 97.9% |
 | encoding | 45 | 39 | 12003 | 11277 | 380 | 343 | 3 | 94.0% |
 | encoding/legacy-mb-japanese | 51 | 12 | 333515 | 0 | 129825 | 1 | 203689 | 0.0% |
 | encoding/legacy-mb-korean | 26 | 3 | 239960 | 0 | 43264 | 0 | 196696 | 0.0% |
@@ -77,21 +81,22 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | html/dom | 223 | 157 | 64260 | 62272 | 1888 | 46 | 54 | 96.9% |
 | html/webappapis | 321 | 197 | 1079 | 566 | 278 | 180 | 55 | 52.5% |
 | url | 41 | 39 | 573 | 472 | 94 | 2 | 5 | 82.4% |
-| **Total** | 1118 | 774 | 855028 | 82439 | 221089 | 653 | 550847 | 9.6% |
+| **Total** | 1330 | 891 | 857668 | 84680 | 221356 | 707 | 550925 | 9.9% |
 
 Las causas más frecuentes de los archivos sin estado OK:
 
-- 321: `TIMEOUT `
-- 6: `NORESULT tiempo agotado`
+- 413: `TIMEOUT `
+- 7: `NORESULT tiempo agotado`
 - 2: `ERROR TypeError: Document.parseHTMLUnsafe is not a function`
 - 2: `ERROR Unhandled rejection`
+- 2: `ERROR Unhandled rejection: action_sequence() is not implemented by testdriver-vendor.js`
 - 1: `ERROR Error: assert_equals: the meta charset must be in effect, making the main document windows-1252 expe`
 - 1: `ERROR Test named 'Reloading a document.open()'d page should reload the URL of the entry realm's responsibl`
 - 1: `ERROR Test named 'document.open() sets document to no-quirks mode (write no doctype)' specified 1 'cleanup`
-- 1: `ERROR Uncaught ReferenceError: Blob is not defined`
 
 ## Notas de testharness
 
+- Sin `encoding/legacy-mb-*`: 84553 / 90353 subtests (93.6%).
 - `html/dom/reflection-*.html`: 61266 / 61302 subtests (99.9%); fallan solo `link.nonce` y
   `style.nonce` (36): el IDL `nonce` de HTMLOrSVGElement no refleja el atributo (guarda
   `[[CryptographicNonce]]`), y el test lo trata como string reflejado.

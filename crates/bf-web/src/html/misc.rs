@@ -63,6 +63,12 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
                 .method("toDataURL", 0, canvas_to_data_url)
         }
         "HTMLBaseElement" => class.attribute("href", Some(base_href), Some(set_base_href)),
+        // WindowEventHandlers (HTML §8.1.8.2): los handlers de `body`/`frameset` son los de la
+        // ventana (los handlers de E3 los reenvían a `window`).
+        "HTMLBodyElement" | "HTMLFrameSetElement" => crate::dom::events::with_event_handlers(
+            class,
+            crate::dom::events::WINDOW_EVENT_HANDLERS,
+        ),
         _ => class,
     }
 }

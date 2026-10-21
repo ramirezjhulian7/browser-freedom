@@ -244,3 +244,15 @@ fn live_collections_and_token_lists() {
         "x y,2,true"
     );
 }
+
+#[test]
+fn body_window_event_handlers() {
+    let mut p = Page::new("<!DOCTYPE html><body></body>");
+    assert_eq!(
+        p.show("var f = function () {}; document.body.onhashchange = f; \
+                document.body.onload = f; \
+                [window.onhashchange === f, window.onload === f, \
+                 'onhashchange' in HTMLBodyElement.prototype, 'onhashchange' in HTMLDivElement.prototype].join()"),
+        "true,true,true,false"
+    );
+}
