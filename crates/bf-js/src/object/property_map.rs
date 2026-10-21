@@ -3,13 +3,72 @@
 //! final los símbolos en orden de creación. Redefinir una propiedad no cambia su posición.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::{Rc, Weak};
 
 use crate::heap::{Gc, Trace, Tracer};
 use crate::object::Object;
 use crate::value::{PropertyKey, Value};
+
+/// Las tablas de claves de los shapes y diccionarios (E3): un hash multiplicativo rápido (al
+/// estilo Fx) en lugar de SipHash. Las claves de un objeto las elige la página, que a lo sumo
+/// se hace lenta a sí misma.
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<KeyHasher>>;
+
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(Self::K);
+    }
+}
+
+impl Hasher for KeyHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().expect("8 bytes")));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut b = [0u8; 8];
+            b[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(b));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
 
 /// Una propiedad propia (§6.1.7.1).
 #[derive(Debug, Clone)]
@@ -233,7 +292,7 @@ impl Shape {
             keys: Vec::new(),
             lookup: None,
             first: RefCell::new(None),
-            transitions: RefCell::new(HashMap::new()),
+            transitions: RefCell::new(HashMap::default()),
         }
     }
 
@@ -287,7 +346,7 @@ impl Shape {
             keys,
             lookup,
             first: RefCell::new(None),
-            transitions: RefCell::new(HashMap::new()),
+            transitions: RefCell::new(HashMap::default()),
         });
         let mut first = self.first.borrow_mut();
         let free = first.as_ref().is_none_or(|(_, w)| w.strong_count() == 0);

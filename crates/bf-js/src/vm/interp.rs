@@ -2669,6 +2669,10 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
                     Some(v) => v,
                     None => return Fast::Slow,
                 },
+                (Value::Object(o), Value::String(k)) => match fast_get_named(heap, *o, k) {
+                    Some(v) => v,
+                    None => return Fast::Slow,
+                },
                 _ => return Fast::Slow,
             };
             f.stack.pop();
@@ -2680,6 +2684,15 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
         }
         Op::SetElem(_) => {
             let n = f.stack.len();
+            if let (Value::Object(o), Value::String(k)) = (&f.stack[n - 3], &f.stack[n - 2]) {
+                if !fast_set_named(heap, *o, k, &f.stack[n - 1]) {
+                    return Fast::Slow;
+                }
+                let v = f.stack.pop().expect("pila");
+                f.stack.truncate(n - 3);
+                f.stack.push(v);
+                return Fast::Done;
+            }
             let (Value::Object(o), Value::Number(i)) = (&f.stack[n - 3], &f.stack[n - 2]) else {
                 return Fast::Slow;
             };
@@ -3058,22 +3071,49 @@ fn fast_ic_global(heap: &crate::heap::Heap, code: &FunctionCode, c: u32, genv: G
 #[inline]
 fn fast_concat(l: &Value, r: &Value) -> Option<Value> {
     use crate::abstract_ops::number::number_to_string;
-    let (a, b) = match (l, r) {
-        (Value::String(a), Value::String(b)) => (a.clone(), b.clone()),
-        (Value::String(a), Value::Number(n)) => (a.clone(), number_to_string(*n)),
-        (Value::Number(n), Value::String(b)) => (number_to_string(*n), b.clone()),
+    // Un entero corto se escribe directo (sus dígitos decimales son su ToString).
+    let mut buf = [0u16; 20];
+    let mut digits = |n: f64| -> Option<std::ops::Range<usize>> {
+        if n.fract() != 0.0 || n.abs() >= 1e15 {
+            return None;
+        }
+        let (neg, mut m) = (n < 0.0, n.abs() as u64);
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = 0x30 + (m % 10) as u16;
+            m /= 10;
+            if m == 0 {
+                break;
+            }
+        }
+        if neg {
+            i -= 1;
+            buf[i] = u16::from(b'-');
+        }
+        Some(i..buf.len())
+    };
+    let s = match (l, r) {
+        (Value::String(a), Value::String(b)) => {
+            if a.is_empty() {
+                return Some(r.clone());
+            }
+            if b.is_empty() {
+                return Some(l.clone());
+            }
+            JsString::concat(a.units(), b.units())
+        }
+        (Value::String(a), Value::Number(n)) => match digits(*n) {
+            Some(d) => JsString::concat(a.units(), &buf[d]),
+            None => JsString::concat(a.units(), number_to_string(*n).units()),
+        },
+        (Value::Number(n), Value::String(b)) => match digits(*n) {
+            Some(d) => JsString::concat(&buf[d], b.units()),
+            None => JsString::concat(number_to_string(*n).units(), b.units()),
+        },
         _ => return None,
     };
-    if a.is_empty() {
-        return Some(Value::String(b));
-    }
-    if b.is_empty() {
-        return Some(Value::String(a));
-    }
-    let mut u = Vec::with_capacity(a.len() + b.len());
-    u.extend_from_slice(a.units());
-    u.extend_from_slice(b.units());
-    Some(Value::String(JsString::from_units(u)))
+    Some(Value::String(s))
 }
 
 /// Lo que la ruta rápida necesita del realm.
@@ -3105,4 +3145,56 @@ fn fast_ic_init(heap: &mut crate::heap::Heap, code: &FunctionCode, c: u32, o: Gc
         .props
         .push_with_shape(to, crate::object::Prop::data(v.clone(), true, true, true));
     true
+}
+
+/// `o[k]` con una clave string que no es un índice (E3): el `[[Get]]` ordinario recorriendo
+/// la cadena de prototipos por las propiedades de datos. `None` si hace falta el agente (un
+/// getter, un objeto exótico o un índice).
+#[inline]
+fn fast_get_named(heap: &crate::heap::Heap, o: Gc<Object>, k: &JsString) -> Option<Value> {
+    let key = PropertyKey::from_js_string(k.clone());
+    if matches!(key, PropertyKey::Index(_)) {
+        return None;
+    }
+    let mut cur = o;
+    loop {
+        if !fast_named(heap, cur, &key) {
+            return None;
+        }
+        let obj = &heap[cur];
+        if let Some(slot) = obj.props.find_slot(&key) {
+            return match &obj.props.slot(slot)?.value {
+                crate::object::PropValue::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            };
+        }
+        match obj.proto {
+            Some(p) => cur = p,
+            None => return Some(Value::Undefined),
+        }
+    }
+}
+
+/// `o[k] = v` sobre una propiedad de datos propia y escribible ya existente, con una clave
+/// string que no es un índice (E3): el `[[Set]]` ordinario solo cambia el valor (§10.1.9.2).
+#[inline]
+fn fast_set_named(heap: &mut crate::heap::Heap, o: Gc<Object>, k: &JsString, v: &Value) -> bool {
+    let key = PropertyKey::from_js_string(k.clone());
+    if matches!(key, PropertyKey::Index(_)) || !fast_named(heap, o, &key) {
+        return false;
+    }
+    let props = &mut heap[o].props;
+    let Some(slot) = props.find_slot(&key) else {
+        return false;
+    };
+    match props.slot_mut(slot) {
+        Some(crate::object::Prop {
+            value: crate::object::PropValue::Data { value, writable: true },
+            ..
+        }) => {
+            *value = v.clone();
+            true
+        }
+        _ => false,
+    }
 }

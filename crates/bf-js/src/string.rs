@@ -17,6 +17,11 @@ impl JsString {
         JsString(units.into())
     }
 
+    /// `a` seguido de `b`, con una sola reserva de memoria (E3).
+    pub fn concat(a: &[u16], b: &[u16]) -> JsString {
+        JsString(a.iter().chain(b).copied().collect())
+    }
+
     pub fn units(&self) -> &[u16] {
         &self.0
     }
