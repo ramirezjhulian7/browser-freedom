@@ -497,6 +497,38 @@ fn set_clipboard(text: &str) -> bool {
         .is_ok()
 }
 
+/// Dónde se guardan las capturas y los volcados: la carpeta de descargas del usuario (instalado,
+/// el ejecutable no puede escribir junto a sí mismo), o su carpeta personal, o la del
+/// ejecutable si no hay ninguna.
+fn output_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_dir());
+    // En Linux el nombre de la carpeta depende del idioma: `user-dirs.dirs` (XDG).
+    let xdg = home.as_ref().and_then(|h| {
+        let dirs = std::fs::read_to_string(h.join(".config/user-dirs.dirs")).ok()?;
+        let line = dirs
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?;
+        let path = line
+            .trim_matches('"')
+            .replace("$HOME", &h.to_string_lossy());
+        Some(PathBuf::from(path))
+    });
+    xdg.into_iter()
+        .chain(home.as_ref().map(|h| h.join("Downloads")))
+        .find(|d| d.is_dir())
+        .or(home)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        })
+        .unwrap_or_default()
+}
+
 /// El nombre de una página sin título: el archivo, la página interna o el host.
 fn short_name(url: &Url) -> String {
     match &url.path {
@@ -1501,7 +1533,7 @@ impl App {
         }
     }
 
-    /// Ruta junto al ejecutable con el host de la página y la fecha.
+    /// Ruta en la carpeta de descargas con el host de la página y la fecha.
     fn output_path(&self, extension: &str) -> std::path::PathBuf {
         let host = self
             .current
@@ -1515,11 +1547,7 @@ impl App {
                 }
             })
             .unwrap_or_else(|| "Freedom".to_owned());
-        let dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-            .unwrap_or_default();
-        dir.join(format!("{host}-{}.{extension}", timestamp()))
+        output_dir().join(format!("{host}-{}.{extension}", timestamp()))
     }
 
     /// `Ctrl+S`: un PNG del cuadro completo (cromo incluido).

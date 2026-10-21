@@ -2,6 +2,8 @@
 //! motor. El ejecutable se llama `freedom`.
 
 #![forbid(unsafe_code)]
+// Con `--features gui` (los instaladores), Windows abre Freedom sin la consola detrás.
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 

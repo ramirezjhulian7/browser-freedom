@@ -9,6 +9,11 @@ license.workspace = true
 name = "freedom"
 path = "src/main.rs"
 
+[features]
+# Compilación para los instaladores: en Windows, una aplicación de ventana sin consola (las
+# órdenes de línea de comandos dejan de imprimir en la terminal).
+gui = []
+
 [dependencies]
 bf-font = { path = "../bf-font" }
 bf-infra = { path = "../bf-infra" }
