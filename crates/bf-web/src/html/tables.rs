@@ -13,7 +13,7 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
-use super::elements::html_element_arg;
+use super::elements::{html_element_arg, live_collection};
 use crate::dom::{mutated, this_node, throw_dom, wrap_node, wrap_opt};
 use crate::{NodeRef, with_doc, with_doc_mut};
 
@@ -31,16 +31,18 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             .method("createTFoot", 0, create_tfoot)
             .method("deleteTFoot", 0, delete_tfoot)
             .method("createTBody", 0, create_tbody)
+            .attribute("rows", Some(table_rows_attr), None)
+            .attribute("tBodies", Some(table_bodies_attr), None)
             .method("insertRow", 0, table_insert_row)
             .method("deleteRow", 1, table_delete_row),
-        "HTMLTableSectionElement" => class.method("insertRow", 0, section_insert_row).method(
-            "deleteRow",
-            1,
-            section_delete_row,
-        ),
+        "HTMLTableSectionElement" => class
+            .attribute("rows", Some(section_rows_attr), None)
+            .method("insertRow", 0, section_insert_row)
+            .method("deleteRow", 1, section_delete_row),
         "HTMLTableRowElement" => class
             .attribute("rowIndex", Some(row_index), None)
             .attribute("sectionRowIndex", Some(section_row_index), None)
+            .attribute("cells", Some(row_cells_attr), None)
             .method("insertCell", 0, insert_cell)
             .method("deleteCell", 1, delete_cell),
         "HTMLTableCellElement" => class.attribute("cellIndex", Some(cell_index), None),
@@ -435,4 +437,24 @@ fn cell_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         row_cells(d, p).iter().position(|x| *x == c.node)
     });
     Ok(Value::Number(i.map_or(-1.0, |i| i as f64)))
+}
+
+fn table_rows_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = this_node(agent, a)?;
+    Ok(live_collection(agent, t, 1, table_rows))
+}
+
+fn table_bodies_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = this_node(agent, a)?;
+    Ok(live_collection(agent, t, 2, table_bodies))
+}
+
+fn section_rows_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let s = this_node(agent, a)?;
+    Ok(live_collection(agent, s, 3, section_rows))
+}
+
+fn row_cells_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let r = this_node(agent, a)?;
+    Ok(live_collection(agent, r, 4, row_cells))
 }

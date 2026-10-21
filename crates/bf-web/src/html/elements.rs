@@ -52,7 +52,12 @@ fn extend(name: &str, class: HostClass) -> HostClass {
 }
 
 fn html_element_class(element: HostClassId) -> HostClass {
-    HostClass::new("HTMLElement")
+    // HTMLElement incluye GlobalEventHandlers (HTML §8.1.8.2): los manejadores del DOM.
+    let class = crate::dom::events::with_event_handlers(
+        HostClass::new("HTMLElement"),
+        crate::dom::events::GLOBAL_EVENT_HANDLERS,
+    );
+    class
         .parent(element)
         .attribute("tabIndex", Some(get_tab_index), Some(set_tab_index))
         .attribute("innerText", Some(get_inner_text), Some(set_inner_text))
@@ -321,14 +326,13 @@ fn define_reflection(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     for (i, (class, attr)) in classes.reflected.iter().enumerate() {
-        // Los `DOMTokenList` reflejados esperan la clase del DOM (E3).
-        if matches!(attr.kind, Kind::TokenList) {
-            continue;
-        }
         let proto = agent.host_class_objects(realm, *class).prototype;
         let slot = vec![Value::Number(i as f64)];
         let (get, set): (bf_js::vm::function::NativeFn, bf_js::vm::function::NativeFn) =
-            (reflect_get, reflect_set);
+            match attr.kind {
+                Kind::TokenList => (token_list_get, token_list_set),
+                _ => (reflect_get, reflect_set),
+            };
         let g = agent.create_builtin_with_slots(get, 0, &format!("get {}", attr.idl), slot.clone());
         let s = agent.create_builtin_with_slots(set, 1, &format!("set {}", attr.idl), slot);
         let _ = agent.define_own_property(
@@ -931,4 +935,54 @@ fn set_outer_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 pub fn html_element_arg(agent: &Agent, v: &Value) -> Option<NodeRef> {
     let n = unwrap_node(agent, v)?;
     html_local_name(agent, n).map(|_| n)
+}
+
+// --- DOMTokenList reflejados y colecciones vivas ---
+
+/// `[SameObject, PutForwards=value] readonly attribute DOMTokenList` (`relList`, `sandbox`,
+/// `sizes`, `htmlFor` de `output`): el `DOMTokenList` del DOM sobre el atributo.
+fn token_list_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let attr = reflected_attr(agent, a)?;
+    let n = this_node(agent, a)?;
+    Ok(crate::dom::collections::token_list(agent, n, attr.content))
+}
+
+/// `[PutForwards=value]`: asignar el atributo IDL fija el `value` del `DOMTokenList`, es
+/// decir, el atributo de contenido.
+fn token_list_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let attr = reflected_attr(agent, a)?;
+    let n = this_node(agent, a)?;
+    let v = webidl::to_dom_string(agent, &a.arg(0))?;
+    set_attr(agent, n, attr.content, DomString::from_utf16(v.units()))?;
+    Ok(Value::Undefined)
+}
+
+/// Una `HTMLCollection` viva de `owner` calculada por `list`, siempre el mismo objeto
+/// mientras JavaScript la alcance (`[SameObject]`); `which` distingue las colecciones de un
+/// mismo elemento.
+pub fn live_collection(
+    agent: &mut Agent,
+    owner: NodeRef,
+    which: u64,
+    list: fn(&bf_dom::Document, bf_dom::NodeId) -> Vec<bf_dom::NodeId>,
+) -> Value {
+    let realm = agent.current_realm;
+    let key = bf_js::host::HostKey(owner.key().0 ^ ((which & 0xff) << 52) | (1 << 62));
+    if let Some(o) = agent.host_lookup(realm, key) {
+        return Value::Object(o);
+    }
+    let class = dom::classes(agent).html_collection;
+    let coll = bf_dom::collections::HtmlCollection::new(
+        owner.node,
+        bf_dom::collections::CollectionFilter::Computed(bf_dom::collections::ComputedList(list)),
+    );
+    Value::Object(agent.host_wrap(
+        realm,
+        key,
+        class,
+        Box::new(crate::dom::collections::HtmlCollectionData {
+            doc: owner.doc,
+            coll,
+        }),
+    ))
 }
