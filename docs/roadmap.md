@@ -280,3 +280,14 @@ Pendientes que no tienen `TODO(` en el código pero están medidos en
 - las dos referencias contradictorias y `letter-spacing-080` (sección "Tests con expectativa
   dudosa");
 - el ajuste vertical de contornos, que es una aproximación al hinting.
+
+## Pendiente E2
+
+- Hecho y en `master`: Web APIs puras e `Intl` mínimo (`bf-js/src/builtins/{web,intl}`), CSSOM y CSSOM View (`bf-web/src/cssom/`), red desde JS (`bf-web/src/net/`: fetch, XHR, FormData, Blob/File/FileReader, `blob:`, sendBeacon, Streams, WebSocket, EventSource, MessageChannel/BroadcastChannel) e IndexedDB 3.0 + `navigator.storage` (`bf-web/src/storage/`).
+- Archivos clave: `net/mod.rs` (backend de red, `set_backend`/`set_waker`/`pump`, bandeja de eventos con sondeo interno), `net/streams.js`, `net/wptserve.rs` (handlers de wptserve emulados para el runner), `storage/idb1.js` + `idb2.js` (lógica de IndexedDB), `storage/backend.rs` (log por base de datos con fsync y compactación), `bf-net/src/{websocket,streaming,blob}.rs`.
+- Tests propios: `bf-web/tests/{cssom,net,realtime,idb}.rs`. WPT: fetch/api 83%, xhr 68,5%, streams 80,3%, IndexedDB 82,8%, eventsource 50%, websockets 58,4% (raíz).
+- Falta en red: cuerpos de `fetch()` por partes en tiempo real (`bf-net/src/streaming.rs` ya lo permite; falta engancharlo a `fetch`), CORS con preflight, caché HTTP (`cache.py` de WPT), byte streams/BYOB y streams transferibles.
+- Falta en IndexedDB: `versionchange` entre pestañas (cada pestaña ve los cambios de otra al reabrir), microtasks después de cada listener (hoy después de todos), bases mayores que la RAM (todo el estado vive en memoria).
+- Falta en mensajería: `BroadcastChannel` entre pestañas (necesita un canal entre los hilos de las pestañas en el shell) y `postMessage` de ventanas/iframes.
+- Falta en CSSOM: hojas de `<link>` sin reglas (no hay cargador en `cssom`), listeners de `MediaQueryList`, reglas anidadas.
+- Próximo paso sugerido: enganchar `streaming.rs` a `fetch()` para entregar chunks según llegan, y luego preflight CORS.
