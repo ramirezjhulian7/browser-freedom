@@ -33,6 +33,24 @@ pub struct TestDoc {
     pub path: String,
     pub url: String,
     pub html: String,
+    /// `<meta name=timeout content=long>` o `META: timeout=long`: el límite es 6 veces
+    /// mayor (como en WPT: 60 s en vez de 10 s).
+    pub long: bool,
+}
+
+/// El límite de un documento: `limit`, o 6 veces `limit` si pide el timeout largo.
+pub fn doc_limit(doc: &TestDoc, limit: std::time::Duration) -> std::time::Duration {
+    if doc.long { limit * 6 } else { limit }
+}
+
+/// ¿El HTML tiene `<meta name="timeout" content="long">`?
+fn has_long_timeout(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.match_indices("<meta").any(|(i, _)| {
+        let tag = &lower[i..lower[i..].find('>').map_or(lower.len(), |e| i + e)];
+        let norm: String = tag.chars().filter(|c| *c != '"' && *c != '\'').collect();
+        norm.contains("name=timeout") && norm.contains("content=long")
+    })
 }
 
 /// El estado de un subtest (`Test.statuses` de testharness.js).
@@ -193,6 +211,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         return vec![TestDoc {
             path: rel.to_owned(),
             url: format!("{ORIGIN}/{rel}"),
+            long: has_long_timeout(&src),
             html: src,
         }];
     }
@@ -200,6 +219,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
     if is_any && !includes_window(&metas) {
         return Vec::new();
     }
+    let long = metas.iter().any(|(k, v)| k == "timeout" && v == "long");
     let base = rel.trim_end_matches(".js");
     let script_name = rel.rsplit('/').next().unwrap_or(rel);
     let mut html = String::from("<!doctype html>\n<meta charset=utf-8>\n");
@@ -239,6 +259,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
             path: format!("{base}.html{v}"),
             url: format!("{ORIGIN}/{base}.html{v}"),
             html: html.clone(),
+            long,
         })
         .collect()
 }
