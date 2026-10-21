@@ -246,6 +246,15 @@ impl WebHooks for ShellWeb {
             None => false,
         }
     }
+
+    // E2: IndexedDB en `%APPDATA%\freedom\idb\<origen>\` (`$HOME/.freedom/idb` fuera de
+    // Windows).
+    fn storage_dir(&self) -> Option<PathBuf> {
+        std::env::var_os("APPDATA")
+            .map(|d| PathBuf::from(d).join("freedom"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".freedom")))
+            .map(|b| b.join("idb"))
+    }
 }
 
 /// Los hooks del BOM: cookies de `bf-net`, `localStorage` en disco y la interfaz.
