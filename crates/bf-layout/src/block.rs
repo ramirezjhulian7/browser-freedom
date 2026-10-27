@@ -89,6 +89,8 @@ pub(crate) struct Layout<'a> {
     pub table_paint: Option<crate::fragment::TablePaint>,
     pub grid_baseline: Option<f32>, // E4 grid: baseline del último contenedor grid maquetado
     pub bfc_items: Vec<usize>,      // E4 grid: ítems en curso (raíces de formato independientes)
+    /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
+    pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -316,6 +318,7 @@ impl<'a> Layout<'a> {
             table_paint: None,
             grid_baseline: None,   // E4 grid
             bfc_items: Vec::new(), // E4 grid
+            subgrids: std::collections::HashMap::new(),
         }
     }
 

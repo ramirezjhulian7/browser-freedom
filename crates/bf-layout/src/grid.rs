@@ -33,7 +33,8 @@
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
     BoxSizing, ContentAlign, Display, Gap, GridLine, GridTemplate, GridTemplateAreas, ItemAlign,
-    MaxSize, Overflow, Position, RepeatCount, Size, TrackBreadth, TrackListItem, TrackSize,
+    MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth, TrackListItem,
+    TrackSize,
 };
 
 use crate::block::{
@@ -74,6 +75,26 @@ fn gap_px(g: &Gap, basis: Option<f32>) -> f32 {
     }
 }
 
+/// E5: gap de un eje; en un eje subgrid, `normal` es el gap del padre (§9).
+fn axis_gap(g: &Gap, basis: Option<f32>, sub: Option<&SubgridAxis>) -> f32 {
+    match (g, sub) {
+        (Gap::Normal, Some(p)) => p.gap,
+        _ => gap_px(g, basis),
+    }
+}
+
+/// E5: margen (`auto` = 0), borde y padding de una caja en los dos bordes de un eje.
+fn mbp_edges(s: &ComputedStyle, basis: f32, columns: bool) -> (f32, f32) {
+    let m = crate::block::margin_edges(s, basis);
+    let b = border_edges(s);
+    let p = padding_edges(s, basis);
+    if columns {
+        (m.left + b.left + p.left, m.right + b.right + p.right)
+    } else {
+        (m.top + b.top + p.top, m.bottom + b.bottom + p.bottom)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Rejilla explícita (§7)
 // ---------------------------------------------------------------------------------------------
@@ -101,6 +122,8 @@ struct ExplicitAxis {
     auto_fit: Option<(usize, usize)>,
     /// Número de pistas explícitas (puede superar `sizes.len()` por `grid-template-areas`).
     count: usize,
+    /// E5: eje de un subgrid (§9): sin rejilla implícita, las líneas se recortan a la explícita.
+    subgrid: bool,
 }
 
 impl ExplicitAxis {
@@ -259,6 +282,91 @@ fn explicit_axis(
         names,
         auto_fit,
         count,
+        subgrid: false,
+    }
+}
+
+/// E5: lo que un contenedor grid pasa a un ítem subgrid en un eje (§9).
+#[derive(Clone, Debug)]
+pub(crate) struct SubgridAxis {
+    /// Nombres de línea del padre en las líneas que abarca (`span + 1` entradas).
+    names: Vec<Vec<String>>,
+    /// Tamaños de las pistas en el sistema del subgrid (sin el margen, borde y padding de sus
+    /// bordes ni la mitad de la diferencia de gaps); vacío mientras se dimensiona el padre.
+    sizes: Vec<f32>,
+    /// Gap del padre en el eje (el del subgrid con `normal`).
+    gap: f32,
+}
+
+/// E5: ejes subgrid de un ítem, con los datos del padre.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SubgridParent {
+    cols: Option<SubgridAxis>,
+    rows: Option<SubgridAxis>,
+}
+
+/// E5: ¿es `b` un subgrid en las columnas y en las filas (§9)? Un contenedor grid en flujo
+/// con `subgrid` en `grid-template-*` que no establece un formato independiente por contención.
+fn subgrid_axes(b: &LayoutBox) -> (bool, bool) {
+    let s = &b.style;
+    if !is_grid_container(b)
+        || b.is_absolutely_positioned()
+        || s.contain.layout
+        || s.contain.paint
+        || s.contain.size
+    {
+        return (false, false);
+    }
+    (
+        matches!(s.grid_template_columns, GridTemplate::Subgrid(_)),
+        matches!(s.grid_template_rows, GridTemplate::Subgrid(_)),
+    )
+}
+
+/// E5: rejilla explícita de un eje subgrid (§9): tantas pistas como abarca en el padre, con los
+/// nombres de línea del padre más los de su `<line-name-list>` (§7.2.1) y los de sus áreas.
+fn subgrid_axis(
+    own: &SubgridNames,
+    parent: &SubgridAxis,
+    areas: &GridTemplateAreas,
+    columns: bool,
+) -> ExplicitAxis {
+    let count = parent.names.len().saturating_sub(1).max(1);
+    let mut names = parent.names.clone();
+    names.resize(count + 1, Vec::new());
+    let mut list = own.names.clone();
+    if let Some((at, rep)) = &own.auto_fill {
+        // `repeat(auto-fill, ...)` llena las líneas que sobran (§7.2.1).
+        let room = (count + 1).saturating_sub(own.names.len());
+        let times = room / rep.len().max(1);
+        let filled: Vec<Vec<String>> = (0..times).flat_map(|_| rep.iter().cloned()).collect();
+        let at = (*at).min(list.len());
+        list.splice(at..at, filled);
+    }
+    for (line, n) in names.iter_mut().zip(list) {
+        line.extend(n);
+    }
+    if let GridTemplateAreas::Areas { areas, .. } = areas {
+        for a in areas {
+            let (s, e) = if columns {
+                (a.column_start, a.column_end)
+            } else {
+                (a.row_start, a.row_end)
+            };
+            if let Some(l) = names.get_mut(s as usize - 1) {
+                l.push(format!("{}-start", a.name));
+            }
+            if let Some(l) = names.get_mut(e as usize - 1) {
+                l.push(format!("{}-end", a.name));
+            }
+        }
+    }
+    ExplicitAxis {
+        sizes: Vec::new(),
+        names,
+        auto_fit: None,
+        count,
+        subgrid: true,
     }
 }
 
@@ -335,6 +443,10 @@ fn span_from(from: i32, n: u32, name: Option<&str>, forward: bool, ax: &Explicit
 }
 
 fn clamp_line(l: i32, ax: &ExplicitAxis) -> i32 {
+    if ax.subgrid {
+        // §9: en un eje subgrid no hay rejilla implícita.
+        return l.clamp(0, ax.count as i32);
+    }
     l.clamp(-MAX_LINE, ax.count as i32 + MAX_LINE)
 }
 
@@ -697,6 +809,22 @@ fn build_tracks(
                 &auto[(i - before - ax.sizes.len()) % m]
             };
             Track::new(t, basis)
+        })
+        .collect()
+}
+
+/// E5: pistas de un eje subgrid (§9): las del padre con su tamaño ya resuelto, o `auto`
+/// mientras se dimensiona el padre (solo se usan para colocar los ítems).
+fn subgrid_tracks(p: &SubgridAxis, n: usize) -> Vec<Track> {
+    (0..n)
+        .map(|i| match p.sizes.get(i) {
+            Some(&v) if p.sizes.len() == n => {
+                let px = TrackBreadth::Length(bf_style::values::LengthPercentage::Length(
+                    bf_style::values::Length::px(v.max(0.0)),
+                ));
+                Track::new(&TrackSize::Breadth(px), None)
+            }
+            _ => Track::new(&TrackSize::AUTO, None),
         })
         .collect()
 }
@@ -1376,11 +1504,19 @@ fn rows_have_percentages(s: &ComputedStyle) -> bool {
 }
 
 /// Un ítem en flujo ya colocado.
+#[derive(Clone)]
 struct GridItem<'a> {
     b: &'a LayoutBox,
     /// Área en índices de pista: `[inicio, fin)` de columnas y filas.
     col: (usize, usize),
     row: (usize, usize),
+    /// E5: margen extra que le suman los subgrids que lo contienen (§9: su margen, borde y
+    /// padding en los bordes y la mitad de la diferencia de gaps): inicio y fin de las columnas
+    /// y de las filas.
+    extra: [f32; 4],
+    /// E5: ancho del área ya conocido (ítems de un subgrid solo en filas: sus columnas son las
+    /// del subgrid).
+    area_w: Option<f32>,
 }
 
 /// Rejilla colocada de un contenedor.
@@ -1394,6 +1530,8 @@ struct Grid<'a> {
     /// Pistas implícitas antes de la línea 1 en cada eje.
     col_before: usize,
     row_before: usize,
+    /// E5: ejes subgrid de este contenedor (§9).
+    sub: SubgridParent,
 }
 
 /// Espacio para las repeticiones automáticas de las columnas: el ancho si es definido (o el del
@@ -1470,20 +1608,43 @@ impl<'a> Layout<'a> {
         let bp_v = border_edges(cs).vertical() + padding_edges(cs, width.unwrap_or(0.0)).vertical();
         let col_gap = gap_px(&cs.column_gap, width);
         let row_gap = gap_px(&cs.row_gap, height);
-        let col_axis = explicit_axis(
-            &cs.grid_template_columns,
-            &cs.grid_template_areas,
-            true,
-            column_repeat_space(container, width),
-            col_gap,
-        );
-        let row_axis = explicit_axis(
-            &cs.grid_template_rows,
-            &cs.grid_template_areas,
-            false,
-            row_repeat_space(cs, height, bp_v),
-            row_gap,
-        );
+        // E5: ejes subgrid (§9), con lo que registró el contenedor padre.
+        let (sc, sr) = subgrid_axes(container);
+        let mut sub = self
+            .subgrids
+            .get(&(container as *const LayoutBox as usize))
+            .cloned()
+            .unwrap_or_default();
+        if !sc {
+            sub.cols = None;
+        }
+        if !sr {
+            sub.rows = None;
+        }
+        let col_axis = match (&cs.grid_template_columns, &sub.cols) {
+            (GridTemplate::Subgrid(n), Some(p)) => {
+                subgrid_axis(n, p, &cs.grid_template_areas, true)
+            }
+            _ => explicit_axis(
+                &cs.grid_template_columns,
+                &cs.grid_template_areas,
+                true,
+                column_repeat_space(container, width),
+                col_gap,
+            ),
+        };
+        let row_axis = match (&cs.grid_template_rows, &sub.rows) {
+            (GridTemplate::Subgrid(n), Some(p)) => {
+                subgrid_axis(n, p, &cs.grid_template_areas, false)
+            }
+            _ => explicit_axis(
+                &cs.grid_template_rows,
+                &cs.grid_template_areas,
+                false,
+                row_repeat_space(cs, height, bp_v),
+                row_gap,
+            ),
+        };
         // Ítems en orden modificado por `order` (§8.5 y CSS Display 3 §3).
         let mut children: Vec<&'a LayoutBox> = Vec::new();
         let mut abs = Vec::new();
@@ -1530,7 +1691,7 @@ impl<'a> Layout<'a> {
         let cols: Vec<Placement> = cols.into_iter().map(|p| shift(p, col_before)).collect();
         let rows: Vec<Placement> = rows.into_iter().map(|p| shift(p, row_before)).collect();
         let flow = cs.grid_auto_flow;
-        let areas: Vec<Area> = if flow.column {
+        let mut areas: Vec<Area> = if flow.column {
             auto_place(&cols, &rows, row_before + row_axis.count, flow.dense)
         } else {
             auto_place(&rows, &cols, col_before + col_axis.count, flow.dense)
@@ -1538,6 +1699,19 @@ impl<'a> Layout<'a> {
                 .map(|(r, c)| (c, r))
                 .collect()
         };
+        // E5: en un eje subgrid las áreas se recortan a la rejilla explícita (§9).
+        let clamp_span = |sp: &mut (usize, usize), n: usize| {
+            sp.0 = sp.0.min(n - 1);
+            sp.1 = sp.1.min(n).max(sp.0 + 1);
+        };
+        for (c, r) in &mut areas {
+            if col_axis.subgrid {
+                clamp_span(c, col_axis.count);
+            }
+            if row_axis.subgrid {
+                clamp_span(r, row_axis.count);
+            }
+        }
         let n_cols = areas
             .iter()
             .map(|(c, _)| c.1)
@@ -1550,15 +1724,30 @@ impl<'a> Layout<'a> {
             .max()
             .unwrap_or(0)
             .max(row_before + row_axis.count);
-        let mut col_tracks = build_tracks(
-            &col_axis,
-            &cs.grid_auto_columns.0,
-            col_before,
-            n_cols,
-            width,
-        );
-        let mut row_tracks =
-            build_tracks(&row_axis, &cs.grid_auto_rows.0, row_before, n_rows, height);
+        let n_cols = if col_axis.subgrid {
+            col_axis.count
+        } else {
+            n_cols
+        };
+        let n_rows = if row_axis.subgrid {
+            row_axis.count
+        } else {
+            n_rows
+        };
+        let mut col_tracks = match &sub.cols {
+            Some(p) if col_axis.subgrid => subgrid_tracks(p, n_cols),
+            _ => build_tracks(
+                &col_axis,
+                &cs.grid_auto_columns.0,
+                col_before,
+                n_cols,
+                width,
+            ),
+        };
+        let mut row_tracks = match &sub.rows {
+            Some(p) if row_axis.subgrid => subgrid_tracks(p, n_rows),
+            _ => build_tracks(&row_axis, &cs.grid_auto_rows.0, row_before, n_rows, height),
+        };
         // §7.2.3.4: las pistas vacías de `auto-fit` se colapsan.
         for (tracks, ax, before, columns) in [
             (&mut col_tracks, &col_axis, col_before, true),
@@ -1582,7 +1771,13 @@ impl<'a> Layout<'a> {
         let items = children
             .into_iter()
             .zip(areas)
-            .map(|(b, (col, row))| GridItem { b, col, row })
+            .map(|(b, (col, row))| GridItem {
+                b,
+                col,
+                row,
+                extra: [0.0; 4],
+                area_w: None,
+            })
             .collect();
         Grid {
             items,
@@ -1593,6 +1788,7 @@ impl<'a> Layout<'a> {
             row_axis,
             col_before,
             row_before,
+            sub,
         }
     }
 
@@ -1610,9 +1806,14 @@ impl<'a> Layout<'a> {
         let b = it.b;
         let s = &b.style;
         let (mut min_c, mut max_c) = self.outer_intrinsic_widths(b);
+        // E5: el margen extra de los subgrids que lo contienen (§9) cuenta como margen.
+        let ex = it.extra[0] + it.extra[1];
+        min_c += ex;
+        max_c += ex;
         let bp = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
         let margins = margin_value(&s.margin_left, 0.0).unwrap_or(0.0)
-            + margin_value(&s.margin_right, 0.0).unwrap_or(0.0);
+            + margin_value(&s.margin_right, 0.0).unwrap_or(0.0)
+            + ex;
         // Reemplazados "comprimibles" (CSS Sizing 3 §5.2.2): un porcentaje en `width` o
         // `max-width` se resuelve contra 0 para la contribución min-content.
         let pct_w = matches!(&s.width, Size::LengthPercentage(lp) if lp.has_percentage());
@@ -1680,8 +1881,18 @@ impl<'a> Layout<'a> {
     ) -> (f32, Option<f32>, Option<f32>) {
         let s = &b.style;
         let bp = border_edges(s).horizontal() + padding_edges(s, area_w).horizontal();
-        let ml = margin_value(&s.margin_left, area_w);
-        let mr = margin_value(&s.margin_right, area_w);
+        let mut ml = margin_value(&s.margin_left, area_w);
+        let mut mr = margin_value(&s.margin_right, area_w);
+        // E5: un subgrid en las columnas ocupa siempre su área (§9).
+        if subgrid_axes(b).0 {
+            ml = ml.or(Some(0.0));
+            mr = mr.or(Some(0.0));
+            return (
+                (area_w - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - bp).max(0.0),
+                ml,
+                mr,
+            );
+        }
         let avail = (area_w - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - bp).max(0.0);
         let align = self_align(s.justify_self, container.justify_items, is_replaced(b));
         let stretch = align == ItemAlign::Stretch && ml.is_some() && mr.is_some();
@@ -1777,6 +1988,9 @@ impl<'a> Layout<'a> {
             let baseline = crate::flex::first_baseline(&f).map(|y| y - f.rect.y + mt);
             (f.rect.height, baseline)
         });
+        // E5: el margen extra de los subgrids que lo contienen (§9) cuenta como margen.
+        let (mt, mb) = (mt + it.extra[2], mb + it.extra[3]);
+        let baseline = baseline.map(|v| v + it.extra[2]);
         let outer = h + mt + mb;
         let bp_v = border_edges(s).vertical() + padding_edges(s, area_w).vertical();
         let minimum = if !pref_auto(&s.height) {
@@ -1817,39 +2031,35 @@ impl<'a> Layout<'a> {
     pub(crate) fn grid_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
         let cs = &container.style;
         let mut grid = self.grid_setup(container, Some(cb.width), cb.height);
-        let col_gap = gap_px(&cs.column_gap, Some(cb.width));
-        let row_gap = gap_px(&cs.row_gap, cb.height);
+        let col_gap = axis_gap(&cs.column_gap, Some(cb.width), grid.sub.cols.as_ref());
+        let row_gap = axis_gap(&cs.row_gap, cb.height, grid.sub.rows.as_ref());
+        // E5: los subgrids hijos heredan los nombres de línea (§9).
+        self.register_subgrids(&grid, col_gap, row_gap);
         let stretch_content =
             |a: ContentAlign| matches!(a, ContentAlign::Normal | ContentAlign::Stretch);
 
         // --- Columnas (§12.1 paso 1) ---
-        let contribs: Vec<Contrib> = grid
-            .items
-            .iter()
-            .map(|it| self.column_contrib(it, &grid.cols, col_gap))
-            .collect();
-        size_tracks(
-            &mut grid.cols,
-            &contribs,
-            col_gap,
-            Space::Definite(cb.width),
-            (cb.width, cb.width),
-            stretch_content(cs.justify_content),
-        );
         let (col_starts, col_ends) =
-            track_positions(&grid.cols, col_gap, cb.width, cs.justify_content);
+            self.size_grid_columns(container, &mut grid, cb.width, col_gap);
+        self.store_subgrid_sizes(&grid, true, (&col_starts, &col_ends), col_gap, cb.width);
         let area_w = |it: &GridItem<'_>| {
-            (line_pos(&col_starts, &col_ends, it.col.1, false)
-                - line_pos(&col_starts, &col_ends, it.col.0, true))
-            .max(0.0)
+            it.area_w.unwrap_or_else(|| {
+                (line_pos(&col_starts, &col_ends, it.col.1, false)
+                    - line_pos(&col_starts, &col_ends, it.col.0, true)
+                    - it.extra[0]
+                    - it.extra[1])
+                    .max(0.0)
+            })
         };
 
         // --- Filas (§12.1 paso 2) ---
         let bp_v = border_edges(cs).vertical() + padding_edges(cs, cb.width).vertical();
         let (hmin, hmax) = height_limits(cs, None, bp_v);
-        let mut row_contribs = Vec::with_capacity(grid.items.len());
-        let mut baselines = Vec::with_capacity(grid.items.len());
-        for it in &grid.items {
+        // E5: en lugar de cada subgrid en las filas, sus ítems (§9).
+        let row_items = self.axis_items(&grid, false, Some((&col_starts, &col_ends)), cb.width);
+        let mut row_contribs = Vec::with_capacity(row_items.len());
+        let mut baselines = Vec::with_capacity(row_items.len());
+        for it in &row_items {
             let (c, bl) = self.row_contrib(it, cs, &grid.rows, row_gap, area_w(it));
             row_contribs.push(c);
             baselines.push(bl);
@@ -1862,18 +2072,18 @@ impl<'a> Layout<'a> {
                 == ItemAlign::Baseline
                 && it.row.1 - it.row.0 == 1
         };
-        let mut shims = vec![0.0f32; grid.items.len()];
+        let mut shims = vec![0.0f32; row_items.len()];
         {
             let mut groups: std::collections::HashMap<usize, f32> =
                 std::collections::HashMap::new();
-            for (i, it) in grid.items.iter().enumerate() {
+            for (i, it) in row_items.iter().enumerate() {
                 if baseline_aligned(it) {
                     let bl = baselines[i].unwrap_or(row_contribs[i].max_content);
                     let e = groups.entry(it.row.0).or_insert(0.0);
                     *e = e.max(bl);
                 }
             }
-            for (i, it) in grid.items.iter().enumerate() {
+            for (i, it) in row_items.iter().enumerate() {
                 if baseline_aligned(it)
                     && let Some(&max) = groups.get(&it.row.0)
                 {
@@ -1910,7 +2120,7 @@ impl<'a> Layout<'a> {
         // Lo mismo con las pistas flexibles: con la altura ya conocida se vuelve a buscar el
         // tamaño del `fr` (§12.7.1 con espacio definido).
         let rerun = rows_have_percentages(cs) || grid.rows.iter().any(|t| t.flex().is_some());
-        let row_gap = if cb.height.is_none() && rerun {
+        let row_gap = if cb.height.is_none() && rerun && !grid.row_axis.subgrid {
             let collapsed: Vec<bool> = grid.rows.iter().map(|t| t.collapsed).collect();
             grid.rows = build_tracks(
                 &grid.row_axis,
@@ -1937,6 +2147,13 @@ impl<'a> Layout<'a> {
         };
         let (row_starts, row_ends) =
             track_positions(&grid.rows, row_gap, content_h, cs.align_content);
+        self.store_subgrid_sizes(&grid, false, (&row_starts, &row_ends), row_gap, cb.width);
+        // Desplazamiento por baseline de cada ítem (por dirección de la caja).
+        let shim_of: std::collections::HashMap<usize, f32> = row_items
+            .iter()
+            .zip(&shims)
+            .map(|(it, &v)| (it.b as *const LayoutBox as usize, v))
+            .collect();
 
         // --- Layout final y alineación de los ítems (§10.3 y §10.4) ---
         let mut out = Vec::with_capacity(grid.items.len() + grid.abs.len());
@@ -1963,9 +2180,17 @@ impl<'a> Layout<'a> {
                 width: aw,
                 height: Some(ah),
             };
+            // E5: un subgrid se estira siempre en sus ejes subgrid, con los márgenes `auto`
+            // a 0 (§9).
+            let sub_rows = subgrid_axes(b).1;
+            let (mt, mb) = if sub_rows {
+                (mt.or(Some(0.0)), mb.or(Some(0.0)))
+            } else {
+                (mt, mb)
+            };
             // Estiramiento en el eje de bloque: alto forzado al del área (§10.4).
-            let forced = if align == ItemAlign::Stretch
-                && matches!(s.height, Size::Auto)
+            let forced = if (align == ItemAlign::Stretch || sub_rows)
+                && (matches!(s.height, Size::Auto) || sub_rows)
                 && mt.is_some()
                 && mb.is_some()
             {
@@ -1995,7 +2220,14 @@ impl<'a> Layout<'a> {
             }
             let free_v = ah - f.rect.height - mt.unwrap_or(0.0) - mb.unwrap_or(0.0);
             let (dy, mt_used, mb_used) = if baseline_aligned(it) && mt.is_some() && mb.is_some() {
-                (shims[i], mt.unwrap_or(0.0), mb.unwrap_or(0.0))
+                (
+                    shim_of
+                        .get(&(b as *const LayoutBox as usize))
+                        .copied()
+                        .unwrap_or(0.0),
+                    mt.unwrap_or(0.0),
+                    mb.unwrap_or(0.0),
+                )
             } else {
                 place_in_area(free_v, mt, mb, align)
             };
@@ -2103,14 +2335,226 @@ impl<'a> Layout<'a> {
         (out, content_h)
     }
 
+    /// Dimensiona las columnas de `grid` con el ancho de contenido `width` (§12.1 paso 1) y
+    /// devuelve el inicio y el fin de cada pista.
+    fn size_grid_columns(
+        &mut self,
+        container: &'a LayoutBox,
+        grid: &mut Grid<'a>,
+        width: f32,
+        gap: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let cs = &container.style;
+        // E5: en lugar de cada subgrid en las columnas, sus ítems (§9).
+        let items = self.axis_items(grid, true, None, width);
+        let contribs: Vec<Contrib> = items
+            .iter()
+            .map(|it| self.column_contrib(it, &grid.cols, gap))
+            .collect();
+        size_tracks(
+            &mut grid.cols,
+            &contribs,
+            gap,
+            Space::Definite(width),
+            (width, width),
+            matches!(
+                cs.justify_content,
+                ContentAlign::Normal | ContentAlign::Stretch
+            ),
+        );
+        track_positions(&grid.cols, gap, width, cs.justify_content)
+    }
+
+    /// E5: registra para cada ítem subgrid de `grid` los nombres de línea del padre en las
+    /// líneas que abarca y el gap del padre (§9); los tamaños llegan después.
+    fn register_subgrids(&mut self, grid: &Grid<'a>, col_gap: f32, row_gap: f32) {
+        let names = |ax: &ExplicitAxis, before: usize, span: (usize, usize)| {
+            (span.0..=span.1)
+                .map(|l| {
+                    l.checked_sub(before)
+                        .and_then(|e| ax.names.get(e))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+        };
+        for it in &grid.items {
+            let (sc, sr) = subgrid_axes(it.b);
+            if !sc && !sr {
+                continue;
+            }
+            let entry = SubgridParent {
+                cols: sc.then(|| SubgridAxis {
+                    names: names(&grid.col_axis, grid.col_before, it.col),
+                    sizes: Vec::new(),
+                    gap: col_gap,
+                }),
+                rows: sr.then(|| SubgridAxis {
+                    names: names(&grid.row_axis, grid.row_before, it.row),
+                    sizes: Vec::new(),
+                    gap: row_gap,
+                }),
+            };
+            self.subgrids
+                .insert(it.b as *const LayoutBox as usize, entry);
+        }
+    }
+
+    /// E5: pasa a cada subgrid de `grid` los tamaños de las pistas del padre que abarca en un
+    /// eje (§9): sin su margen, borde y padding en los bordes y sin la mitad de la diferencia
+    /// entre su gap y el del padre en cada línea interior.
+    fn store_subgrid_sizes(
+        &mut self,
+        grid: &Grid<'a>,
+        columns: bool,
+        (starts, ends): (&[f32], &[f32]),
+        gap: f32,
+        basis: f32,
+    ) {
+        for it in &grid.items {
+            let (sc, sr) = subgrid_axes(it.b);
+            if !(if columns { sc } else { sr }) {
+                continue;
+            }
+            let span = if columns { it.col } else { it.row };
+            let n = span.1 - span.0;
+            if n == 0 || span.1 > starts.len() {
+                continue;
+            }
+            let s = &it.b.style;
+            let (m0, m1) = mbp_edges(s, basis, columns);
+            let own = if columns { &s.column_gap } else { &s.row_gap };
+            let total = ends[span.1 - 1] - starts[span.0];
+            let own_gap = match own {
+                Gap::Normal => gap,
+                g => gap_px(g, Some(total)),
+            };
+            let d = (own_gap - gap) / 2.0;
+            let mut sizes: Vec<f32> = (span.0..span.1).map(|k| ends[k] - starts[k]).collect();
+            sizes[0] -= m0;
+            sizes[n - 1] -= m1;
+            for (k, v) in sizes.iter_mut().enumerate() {
+                if k > 0 {
+                    *v -= d;
+                }
+                if k + 1 < n {
+                    *v -= d;
+                }
+                *v = v.max(0.0);
+            }
+            let entry = self
+                .subgrids
+                .entry(it.b as *const LayoutBox as usize)
+                .or_default();
+            let axis = if columns {
+                &mut entry.cols
+            } else {
+                &mut entry.rows
+            };
+            if let Some(a) = axis {
+                a.sizes = sizes;
+            }
+        }
+    }
+
+    /// E5: los ítems que dimensionan un eje de `grid`: los suyos y, en lugar de cada subgrid
+    /// en ese eje, sus ítems (recursivamente) con el área en pistas del padre y el margen
+    /// extra de §9. `cols` son las posiciones de las columnas ya dimensionadas (para el ancho
+    /// del área al dimensionar las filas).
+    fn axis_items(
+        &mut self,
+        grid: &Grid<'a>,
+        columns: bool,
+        cols: Option<(&[f32], &[f32])>,
+        basis: f32,
+    ) -> Vec<GridItem<'a>> {
+        let mut out = Vec::with_capacity(grid.items.len());
+        for it in &grid.items {
+            self.push_axis_item(it.clone(), columns, cols, basis, &mut out, 0);
+        }
+        out
+    }
+
+    fn push_axis_item(
+        &mut self,
+        it: GridItem<'a>,
+        columns: bool,
+        cols: Option<(&[f32], &[f32])>,
+        basis: f32,
+        out: &mut Vec<GridItem<'a>>,
+        depth: usize,
+    ) {
+        let (sc, sr) = subgrid_axes(it.b);
+        if !(if columns { sc } else { sr }) || depth > 32 {
+            out.push(it);
+            return;
+        }
+        let sb = it.b;
+        let s = &sb.style;
+        let (ml, mr) = mbp_edges(s, basis, true);
+        let (mt, mbt) = mbp_edges(s, basis, false);
+        // Ancho del contenido del subgrid si sus columnas son propias (para el ancho de las
+        // áreas de sus ítems al dimensionar las filas del padre).
+        let own_w = if !columns && !sc {
+            let aw = it.area_w.or_else(|| {
+                cols.map(|(st, en)| {
+                    line_pos(st, en, it.col.1, false)
+                        - line_pos(st, en, it.col.0, true)
+                        - it.extra[0]
+                        - it.extra[1]
+                })
+            });
+            aw.map(|w| (w - ml - mr).max(0.0))
+        } else {
+            None
+        };
+        let mut sg = self.grid_setup(sb, own_w, None);
+        let gc = axis_gap(&s.column_gap, own_w, sg.sub.cols.as_ref());
+        let gr = axis_gap(&s.row_gap, None, sg.sub.rows.as_ref());
+        self.register_subgrids(&sg, gc, gr);
+        let own_cols = match own_w {
+            Some(w) => Some(self.size_grid_columns(sb, &mut sg, w, gc)),
+            None => None,
+        };
+        let dc = sg.sub.cols.as_ref().map_or(0.0, |p| (gc - p.gap) / 2.0);
+        let dr = sg.sub.rows.as_ref().map_or(0.0, |p| (gr - p.gap) / 2.0);
+        let (nc, nr) = (sg.cols.len(), sg.rows.len());
+        for d in &sg.items {
+            let mut e = GridItem {
+                b: d.b,
+                col: it.col,
+                row: it.row,
+                extra: [0.0; 4],
+                area_w: None,
+            };
+            if sc {
+                e.col = (it.col.0 + d.col.0, it.col.0 + d.col.1);
+                e.extra[0] = if d.col.0 == 0 { it.extra[0] + ml } else { dc };
+                e.extra[1] = if d.col.1 == nc { it.extra[1] + mr } else { dc };
+            } else if let Some((st, en)) = &own_cols {
+                e.area_w = Some(
+                    (line_pos(st, en, d.col.1, false) - line_pos(st, en, d.col.0, true)).max(0.0),
+                );
+            }
+            if sr {
+                e.row = (it.row.0 + d.row.0, it.row.0 + d.row.1);
+                e.extra[2] = if d.row.0 == 0 { it.extra[2] + mt } else { dr };
+                e.extra[3] = if d.row.1 == nr { it.extra[3] + mbt } else { dr };
+            }
+            self.push_axis_item(e, columns, cols, basis, out, depth + 1);
+        }
+    }
+
     /// Anchos intrínsecos (min-content, max-content) de un contenedor grid: el algoritmo de
     /// §12.1 con el espacio disponible bajo una restricción min-content o max-content.
     pub(crate) fn grid_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         let cs = &b.style;
         let grid = self.grid_setup(b, None, None);
-        let gap = gap_px(&cs.column_gap, None);
-        let contribs: Vec<Contrib> = grid
-            .items
+        let gap = axis_gap(&cs.column_gap, None, grid.sub.cols.as_ref());
+        let row_gap = axis_gap(&cs.row_gap, None, grid.sub.rows.as_ref());
+        self.register_subgrids(&grid, gap, row_gap);
+        let items = self.axis_items(&grid, true, None, 0.0);
+        let contribs: Vec<Contrib> = items
             .iter()
             .map(|it| self.column_contrib(it, &grid.cols, gap))
             .collect();
