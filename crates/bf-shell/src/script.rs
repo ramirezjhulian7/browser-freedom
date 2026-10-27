@@ -967,7 +967,8 @@ impl Engine {
         event: bf_dom::events::Event,
         delta: (f32, f32),
     ) -> bool {
-        let r = bf_web::bom::script::dispatch_wheel(&mut self.rt.agent, realm, target, event, delta);
+        let r =
+            bf_web::bom::script::dispatch_wheel(&mut self.rt.agent, realm, target, event, delta);
         self.flush_rejections();
         r
     }

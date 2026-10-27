@@ -792,13 +792,7 @@ fn cross_origin_object(agent: &mut Agent, viewer: RealmId, target: RealmId) -> J
     super::accessor(agent, inner, "length", xo_length, None);
     super::accessor(agent, inner, "closed", xo_false, None);
     super::accessor(agent, inner, "opener", xo_null, None);
-    super::accessor(
-        agent,
-        inner,
-        "location",
-        xo_location,
-        Some(xo_set_location),
-    );
+    super::accessor(agent, inner, "location", xo_location, Some(xo_set_location));
     super::method(agent, inner, "postMessage", 1, xo_post_message);
     for name in ["close", "focus", "blur"] {
         super::method(agent, inner, name, 0, xo_noop);
@@ -813,11 +807,7 @@ fn cross_origin_object(agent: &mut Agent, viewer: RealmId, target: RealmId) -> J
     let Value::Object(ctor) = agent.get(g, &PropertyKey::from("Proxy"), Value::Object(g))? else {
         return Ok(Value::Null);
     };
-    let proxy = agent.construct(
-        ctor,
-        &[Value::Object(inner), Value::Object(handler)],
-        None,
-    )?;
+    let proxy = agent.construct(ctor, &[Value::Object(inner), Value::Object(handler)], None)?;
     let view = CrossOriginView {
         viewer,
         target,
@@ -950,13 +940,11 @@ fn xo_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(view) = view_of(agent, &a.this) else {
         return Ok(Value::Null);
     };
-    let existing = agent
-        .embedder_data::<CrossOriginLocations>()
-        .and_then(|l| {
-            l.0.iter()
-                .find(|(_, v)| v.viewer == view.viewer && v.target == view.target)
-                .map(|(h, _)| *h)
-        });
+    let existing = agent.embedder_data::<CrossOriginLocations>().and_then(|l| {
+        l.0.iter()
+            .find(|(_, v)| v.viewer == view.viewer && v.target == view.target)
+            .map(|(h, _)| *h)
+    });
     if let Some(v) = existing.and_then(|h| agent.host_pinned(h)) {
         return Ok(v);
     }
@@ -1058,10 +1046,7 @@ pub fn post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// "Window post message steps" (HTML §9.3.3).
 fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Value> {
     // La ventana que llama (el "incumbent settings object"): la del script que corre.
-    let incumbent = agent
-        .frames
-        .last()
-        .map_or(agent.current_realm, |f| f.realm);
+    let incumbent = agent.frames.last().map_or(agent.current_realm, |f| f.realm);
     let (target_origin, transfer) = match a.arg(1) {
         Value::Object(o) => {
             let t = agent.get(o, &PropertyKey::from("targetOrigin"), Value::Object(o))?;
@@ -1131,16 +1116,16 @@ fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Val
                 }
                 Err(_) => Value::Null,
             };
-            let ev =
-                crate::net::channels::create_message_event(agent, "message", data, &origin, "", ports);
+            let ev = crate::net::channels::create_message_event(
+                agent, "message", data, &origin, "", ports,
+            );
             if let Some(s) = agent.host_slots_mut(ev)
                 && let Some(slot) = s.get_mut(6)
             {
                 *slot = source;
             }
             let pin = agent.host_pin(Value::Object(ev));
-            let _ =
-                crate::dom::events::dispatch_js_event(agent, 0, EventTarget::Window, ev, false);
+            let _ = crate::dom::events::dispatch_js_event(agent, 0, EventTarget::Window, ev, false);
             agent.host_unpin(pin);
             agent.current_realm = saved;
         }),

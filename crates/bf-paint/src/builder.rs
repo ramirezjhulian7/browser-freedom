@@ -748,7 +748,13 @@ impl<'a> Builder<'a> {
     /// E4: el documento de un `<iframe>` (HTML §4.8.5): su lista, desplazada al content box
     /// (el viewport del marco) y recortada a él. Lo fijo del marco queda fijo respecto de ese
     /// viewport, no del de la página.
-    fn frame_content(&mut self, f: &Fragment, clip: &ClipChain, list: &DisplayList, scroll: (f32, f32)) {
+    fn frame_content(
+        &mut self,
+        f: &Fragment,
+        clip: &ClipChain,
+        list: &DisplayList,
+        scroll: (f32, f32),
+    ) {
         let rect = f.content_rect();
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return;

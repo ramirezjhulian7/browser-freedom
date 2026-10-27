@@ -238,7 +238,11 @@ pub fn prepare_page_with_frames(
 }
 
 /// Maqueta los marcos de `frames` que tienen caja en `tree`.
-fn prepare_frames(tree: &FragmentTree, ctx: &PageContext<'_>, frames: &[FrameDoc]) -> Vec<FramePage> {
+fn prepare_frames(
+    tree: &FragmentTree,
+    ctx: &PageContext<'_>,
+    frames: &[FrameDoc],
+) -> Vec<FramePage> {
     if frames.is_empty() {
         return Vec::new();
     }
