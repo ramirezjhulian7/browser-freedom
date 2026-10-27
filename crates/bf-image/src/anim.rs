@@ -141,6 +141,9 @@ impl ImageFrames {
     }
 }
 
+/// Disposición pendiente: cómo, en qué región, y el lienzo guardado para `Previous`.
+type Pending = (Dispose, (u32, u32, u32, u32), Option<Vec<u8>>);
+
 /// Compone fotogramas parciales (RGBA sin premultiplicar) sobre el lienzo.
 pub(crate) struct Compositor {
     width: u32,
@@ -148,7 +151,7 @@ pub(crate) struct Compositor {
     /// Lienzo premultiplicado.
     canvas: Vec<u8>,
     /// Disposición pendiente del fotograma anterior.
-    pending: Option<(Dispose, (u32, u32, u32, u32), Option<Vec<u8>>)>,
+    pending: Option<Pending>,
     pub frames: Vec<Frame>,
     bytes: usize,
 }

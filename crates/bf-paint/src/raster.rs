@@ -934,10 +934,8 @@ impl Canvas {
                     });
                 }
                 DisplayItem::PushClipText { glyphs } => self.push_clip_text(glyphs),
-                DisplayItem::PopClip => {
-                    if self.masks.len() > clips {
-                        self.masks.pop();
-                    }
+                DisplayItem::PopClip if self.masks.len() > clips => {
+                    self.masks.pop();
                 }
                 _ => {}
             }

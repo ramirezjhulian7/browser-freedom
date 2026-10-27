@@ -99,7 +99,7 @@ pub(crate) fn from_element(
                 .and_then(|e| e.attr("type"))
                 .is_none_or(|t| t.trim().is_empty() || t.eq_ignore_ascii_case("text/css"))
         {
-            sheets.push(Stylesheet::parse(&text_content(&doc, n), Origin::Author));
+            sheets.push(Stylesheet::parse(&text_content(doc, n), Origin::Author));
         }
     }
     let sheet_refs: Vec<&Stylesheet> = sheets.iter().collect();
@@ -207,7 +207,7 @@ fn cascade(
             decls.push(((level, (0, 0, 0), i), d.name.to_ascii_lowercase(), d.value));
         }
     }
-    decls.sort_by(|a, b| a.0.cmp(&b.0));
+    decls.sort_by_key(|d| d.0);
     let mut out = HashMap::new();
     for (_, name, value) in decls {
         out.insert(name, value);
