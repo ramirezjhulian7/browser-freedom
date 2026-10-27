@@ -24,6 +24,6 @@ fn wpt_svg_reftests() {
         eprintln!("aviso: falta tests/wpt/svg (git -C tests/wpt sparse-checkout add svg); se salta");
         return;
     }
-    let results = bf_paint::reftest::run_and_report(&workspace, Some("/wpt/svg/"), false);
+    let results = bf_paint::reftest::run_and_report(&workspace, Some(&std::env::var("BF_SVG_FILTER").unwrap_or_else(|_| "/wpt/svg/".into())), false);
     assert!(!results.is_empty());
 }

@@ -503,15 +503,23 @@ impl Harness {
                 .map(|h| (h, true))
                 .chain(m.mismatches.iter().map(|h| (h, false)));
             for (href, expect_match) in refs {
-                let ref_path = self
-                    .resolve(href, path)
-                    .ok_or_else(|| format!("referencia no resoluble {href}"))?;
-                let expected = match self.reference(&ref_path) {
-                    Ok(p) => p,
-                    Err(e) if e == "js" => {
-                        return Ok((Status::NeedsJs, "referencia con <script>".into()));
+                // E7: `about:blank` es una página en blanco.
+                let expected = if href.trim().eq_ignore_ascii_case("about:blank") {
+                    let mut blank = Pixmap::new(VIEWPORT.width as u32, VIEWPORT.height as u32)
+                        .expect("tamaño válido");
+                    blank.fill(tiny_skia::Color::WHITE);
+                    Arc::new(blank)
+                } else {
+                    let ref_path = self
+                        .resolve(href, path)
+                        .ok_or_else(|| format!("referencia no resoluble {href}"))?;
+                    match self.reference(&ref_path) {
+                        Ok(p) => p,
+                        Err(e) if e == "js" => {
+                            return Ok((Status::NeedsJs, "referencia con <script>".into()));
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => return Err(e),
                 };
                 let file = href.rsplit('/').next().unwrap_or(href);
                 let fuzzy = m
