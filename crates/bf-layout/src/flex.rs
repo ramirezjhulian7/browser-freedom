@@ -282,9 +282,8 @@ impl<'a> Layout<'a> {
             // E5: en filas, `width` con keyword cuenta como tamaño principal especificado
             // (CSS Sizing 3 §3.2); con `aspect-ratio` y alto definido, el ancho transferido
             // (CSS Sizing 4 §5.1).
-            let main_avail = (cb.width - margins[0].unwrap_or(0.0) - margins[1].unwrap_or(0.0)
-                - bp_h)
-                .max(0.0);
+            let main_avail =
+                (cb.width - margins[0].unwrap_or(0.0) - margins[1].unwrap_or(0.0) - bp_h).max(0.0);
             let spec_main = if row {
                 let kw = s.width.clone();
                 specified_width(s, cb.width, bp_h)
