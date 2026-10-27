@@ -165,6 +165,8 @@ pub enum ObjectKind {
     DisposeCapability(Box<crate::builtins::disposable::DisposeData>),
     DisposableStack(Box<crate::builtins::disposable::DisposeData>),
     AsyncDisposableStack(Box<crate::builtins::disposable::DisposeData>),
+    // E8: los objetos de Temporal (sus internal slots no tienen referencias al heap).
+    Temporal(Box<crate::builtins::temporal::TemporalData>),
 }
 
 #[derive(Debug)]
@@ -290,6 +292,7 @@ impl Trace for Object {
             ObjectKind::DisposeCapability(d)
             | ObjectKind::DisposableStack(d)
             | ObjectKind::AsyncDisposableStack(d) => d.trace(t),
+            ObjectKind::Temporal(_) => {}
             ObjectKind::ArrayBuffer(_) => {}
             ObjectKind::TypedArray(ta) => t.gc(ta.buffer),
             ObjectKind::DataView(dv) => t.gc(dv.buffer),

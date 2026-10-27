@@ -551,7 +551,11 @@ fn main() {
         std::process::exit(2);
     }
     let mut files = Vec::new();
-    collect(&test_dir, &mut files);
+    // Un filtro que es un directorio: se recorre solo ese subárbol.
+    match filter.as_ref().map(|f| test_dir.join(f)) {
+        Some(sub) if sub.is_dir() => collect(&sub, &mut files),
+        _ => collect(&test_dir, &mut files),
+    }
     files.sort();
     let rels: Vec<String> = files
         .iter()
