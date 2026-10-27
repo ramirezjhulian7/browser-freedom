@@ -32,9 +32,9 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BoxSizing, ContentAlign, Display, Gap, GridLine, GridTemplate, GridTemplateAreas, ItemAlign,
-    MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth, TrackListItem,
-    TrackSize,
+    BoxSizing, ContentAlign, Direction, Display, Gap, GridLine, GridTemplate, GridTemplateAreas,
+    ItemAlign, MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth,
+    TrackListItem, TrackSize,
 };
 
 use crate::block::{
@@ -1466,6 +1466,12 @@ fn fixed_span(tracks: &[Track], span: (usize, usize), gap: f32) -> Option<f32> {
     Some(sum)
 }
 
+/// E5: ¿tiene `left` y `right` `auto` (se alinea en su área en el eje inline)?
+fn abs_auto_inline(s: &ComputedStyle) -> bool {
+    use bf_style::properties::types::LengthPercentageAuto as L;
+    matches!(s.left, L::Auto) && matches!(s.right, L::Auto)
+}
+
 /// Desplazamiento de un elemento absoluto con los insets `auto` en un eje dentro de su área
 /// (CSS Box Alignment 3 §6.1 y §6.2 para cajas absolutas): `f` está colocado al inicio del área.
 fn abs_align_offset(
@@ -2194,14 +2200,18 @@ impl<'a> Layout<'a> {
             .map(|(it, &v)| (it.b as *const LayoutBox as usize, v))
             .collect();
 
+        let rtl = cs.direction == Direction::Rtl;
         // --- Layout final y alineación de los ítems (§10.3 y §10.4) ---
         let mut out = Vec::with_capacity(grid.items.len() + grid.abs.len());
         let mut first: Option<(usize, usize, usize)> = None;
         for (i, it) in grid.items.iter().enumerate() {
             let b = it.b;
             let s = &b.style;
-            let x0 = line_pos(&col_starts, &col_ends, it.col.0, true);
             let aw = area_w(it);
+            // E5: con `direction: rtl` las columnas van de derecha a izquierda (§7.1 y CSS
+            // Writing Modes 4 §2.1): el área se refleja en el content box.
+            let x0 = line_pos(&col_starts, &col_ends, it.col.0, true);
+            let x0 = if rtl { cb.width - x0 - aw } else { x0 };
             let y0 = line_pos(&row_starts, &row_ends, it.row.0, true);
             let ah = (line_pos(&row_starts, &row_ends, it.row.1, false) - y0).max(0.0);
             let (w, ml, mr) = self.grid_item_width(b, cs, aw, Some(ah));
@@ -2209,7 +2219,10 @@ impl<'a> Layout<'a> {
             let bp_v = border_edges(s).vertical() + padding_edges(s, aw).vertical();
             let justify = self_align(s.justify_self, cs.justify_items, has_ratio(b));
             let free_h = aw - w - bp_h - ml.unwrap_or(0.0) - mr.unwrap_or(0.0);
+            let both = ml.is_some() && mr.is_some();
             let (dx, ml, mr) = place_in_area(free_h, ml, mr, justify);
+            // En rtl `start` es la derecha: el desplazamiento se refleja en el área.
+            let dx = if rtl && both { free_h - dx } else { dx };
             let mt = margin_value(&s.margin_top, aw);
             let mb = margin_value(&s.margin_bottom, aw);
             let align = self_align(s.align_self, cs.align_items, has_ratio(b));
@@ -2311,12 +2324,23 @@ impl<'a> Layout<'a> {
                 resolve_abs_placement(&s.grid_column_start, &s.grid_column_end, &grid.col_axis);
             let (r0, r1) =
                 resolve_abs_placement(&s.grid_row_start, &s.grid_row_end, &grid.row_axis);
-            let left = to_index(c0, grid.col_before, nc).map_or(padding_box.x, |l| {
-                cb.x + line_pos(&col_starts, &col_ends, l, true)
+            // Posiciones en el eje inline desde el inicio del content box (en rtl, desde la
+            // derecha); `auto` es el borde del padding box.
+            let (pad_s, pad_e) = if rtl {
+                (pad.right, pad.left)
+            } else {
+                (pad.left, pad.right)
+            };
+            let u0 = to_index(c0, grid.col_before, nc)
+                .map_or(-pad_s, |l| line_pos(&col_starts, &col_ends, l, true));
+            let u1 = to_index(c1, grid.col_before, nc).map_or(cb.width + pad_e, |l| {
+                line_pos(&col_starts, &col_ends, l, false)
             });
-            let right = to_index(c1, grid.col_before, nc).map_or(padding_box.right(), |l| {
-                cb.x + line_pos(&col_starts, &col_ends, l, false)
-            });
+            let (left, right) = if rtl {
+                (cb.x + cb.width - u1, cb.x + cb.width - u0)
+            } else {
+                (cb.x + u0, cb.x + u1)
+            };
             let top = to_index(r0, grid.row_before, nr).map_or(padding_box.y, |l| {
                 cb.y + line_pos(&row_starts, &row_ends, l, true)
             });
@@ -2354,6 +2378,11 @@ impl<'a> Layout<'a> {
                     this.absolute(p, content_box)
                 });
                 let (dx, dy) = abs_align_offset(c, cs, &f, content_box);
+                let dx = if rtl {
+                    content_box.width - f.margin_rect().width - dx
+                } else {
+                    dx
+                };
                 self.add_abs(c, content_box.x + dx, content_box.y + dy);
                 continue;
             }
@@ -2367,6 +2396,11 @@ impl<'a> Layout<'a> {
                 area,
             );
             let (dx, dy) = abs_align_offset(c, cs, &f, area);
+            let dx = if rtl && abs_auto_inline(s) {
+                area.width - f.margin_rect().width - dx
+            } else {
+                dx
+            };
             f.translate(dx, dy);
             out.push(f);
         }
