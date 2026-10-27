@@ -1685,8 +1685,7 @@ impl<'a> Layout<'a> {
         let avail = (area_w - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - bp).max(0.0);
         let align = self_align(s.justify_self, container.justify_items, is_replaced(b));
         let stretch = align == ItemAlign::Stretch && ml.is_some() && mr.is_some();
-        let (lo, hi) = width_limits(s, area_w, bp);
-        let lo = self.keyword_min_width(b).map_or(lo, |v| lo.max(v));
+        let (lo, hi) = self.width_limits_for(b, area_w, bp, avail);
         if let Some(w) = self.table_fixed_width(b, avail, area_w) {
             // Una tabla con `width: auto` también se estira (no se ajusta a su contenido).
             let w = if stretch && matches!(s.width, Size::Auto) {
@@ -1697,6 +1696,9 @@ impl<'a> Layout<'a> {
             return (w, ml, mr);
         }
         let w = if let Some(w) = specified_width(s, area_w, bp) {
+            w
+        } else if let Some(w) = self.keyword_width(b, avail, area_w) {
+            // E5: `width` con keyword de tamaño (CSS Sizing 3 §3.2, CSS Sizing 4 §6.1).
             w
         } else if let BoxKind::Replaced { natural, ratio } = &b.kind {
             if stretch {

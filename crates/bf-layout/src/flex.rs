@@ -264,9 +264,14 @@ impl<'a> Layout<'a> {
             } else {
                 let outer = margins[2].unwrap_or(0.0) + margins[3].unwrap_or(0.0) + bp_h;
                 let available = (cb.width - outer).max(0.0);
-                let (wmin, wmax) = width_limits(s, cb.width, bp_h);
+                let (wmin, wmax) = self.width_limits_for(b, cb.width, bp_h, available);
+                let kw = s.width.clone();
                 match specified_width(s, cb.width, bp_h) {
                     Some(w) => w,
+                    // E5: keywords de tamaño (CSS Sizing 3 §3.2, CSS Sizing 4 §6.1).
+                    None if kw != Size::Auto => self
+                        .width_for_keyword(b, &kw, available, cb.width)
+                        .unwrap_or(available),
                     None if align == ItemAlign::Stretch && !auto_cross_margin => available,
                     None => self.item_fit_width(b, available),
                 }
@@ -274,8 +279,17 @@ impl<'a> Layout<'a> {
                 .max(wmin)
             };
             // Tamaño principal especificado (content box).
+            // E5: en filas, `width` con keyword cuenta como tamaño principal especificado
+            // (CSS Sizing 3 §3.2); con `aspect-ratio` y alto definido, el ancho transferido
+            // (CSS Sizing 4 §5.1).
+            let main_avail = (cb.width - margins[0].unwrap_or(0.0) - margins[1].unwrap_or(0.0)
+                - bp_h)
+                .max(0.0);
             let spec_main = if row {
+                let kw = s.width.clone();
                 specified_width(s, cb.width, bp_h)
+                    .or_else(|| self.width_for_keyword(b, &kw, main_avail, cb.width))
+                    .or_else(|| self.ratio_width(b, cb))
             } else {
                 specified_height(s, cb.height, bp_v)
             };
@@ -316,14 +330,34 @@ impl<'a> Layout<'a> {
                     }
                 }
                 FlexBasis::Size(Size::Auto) if spec_main.is_some() => spec_main.unwrap_or(0.0),
+                // E5: `flex-basis` con keyword de tamaño (CSS Flexbox 1 §7.2.3 y CSS Sizing 3
+                // §3.2): en filas, el ancho de esa keyword; en columnas, el alto del contenido.
+                FlexBasis::Size(kw) if row && *kw != Size::Auto => {
+                    let kw = kw.clone();
+                    match self.width_for_keyword(b, &kw, main_avail, cb.width) {
+                        Some(w) => w,
+                        None => content_main(self),
+                    }
+                }
                 _ => content_main(self),
             };
             // --- min/max en el eje principal, con el mínimo automático (§4.5) ---
-            let (mut min_main, max_main) = if row {
-                width_limits(s, cb.width, bp_h)
+            let (mut min_main, mut max_main) = if row {
+                self.width_limits_for(b, cb.width, bp_h, main_avail)
             } else {
                 height_limits(s, cb.height, bp_v)
             };
+            // E5: en columnas, `min-height`/`max-height` con keyword intrínseca son el alto del
+            // contenido (CSS Sizing 3 §3.2).
+            if !row && (s.min_height.is_intrinsic() || s.max_height.as_size().is_intrinsic()) {
+                let h = self.item_content_height(b, cb, column_cross, bp_v);
+                if s.min_height.is_intrinsic() {
+                    min_main = min_main.max(h);
+                }
+                if s.max_height.as_size().is_intrinsic() {
+                    max_main = h;
+                }
+            }
             let min_auto = if row {
                 matches!(s.min_width, Size::Auto)
             } else {
