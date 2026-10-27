@@ -1653,8 +1653,11 @@ impl<'a> Layout<'a> {
                     }
                 }
                 Size::LengthPercentage(lp) => adjust(lp.resolve(0.0)),
-                Size::MinContent | Size::FitContent => self.intrinsic_widths(b).0,
+                Size::MinContent | Size::FitContent | Size::FitContentFn(_) => {
+                    self.intrinsic_widths(b).0
+                }
                 Size::MaxContent => self.intrinsic_widths(b).1,
+                Size::Stretch => 0.0,
             };
             used_min + bp + margins
         };
