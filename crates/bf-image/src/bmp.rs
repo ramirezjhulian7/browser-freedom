@@ -154,6 +154,16 @@ pub(crate) fn decode_dib(
     let start = pixels.unwrap_or(masks_end + palette_len * palette_entry);
     let data = dib.get(start..).ok_or_else(|| invalid("BMP truncado"))?;
     let stride = ((w as usize * bpp as usize).div_ceil(32)) * 4;
+    // Una cabecera que promete mucho más de lo que trae es un archivo dañado: no se reserva
+    // un lienzo enorme para unos pocos bytes (RLE expande hasta 255 píxeles por par).
+    let promised = if compression == 1 || compression == 2 {
+        w as usize * h as usize / 128
+    } else {
+        stride * h as usize / 4
+    };
+    if promised > data.len() + 4096 {
+        return Err(invalid("BMP truncado"));
+    }
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     // Fila de archivo → fila de la imagen.
     let row_of = |r: u32| if top_down { r } else { h - 1 - r };
@@ -172,7 +182,7 @@ pub(crate) fn decode_dib(
                     let Some(&byte) = row.get(bit / 8) else {
                         break;
                     };
-                    let idx = (byte >> (8 - bpp as usize - bit % 8)) & ((1 << bpp) - 1);
+                    let idx = (u16::from(byte) >> (8 - bpp as usize - bit % 8)) & ((1 << bpp) - 1);
                     let o = ((y * w + x) * 4) as usize;
                     rgba[o..o + 4].copy_from_slice(&pal(idx as usize));
                 }
