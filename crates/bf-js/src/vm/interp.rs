@@ -1768,6 +1768,66 @@ impl Agent {
             Op::AsyncYieldStarResult { slot, done } => {
                 return self.async_yield_star_result(slot, done);
             }
+            // E8: Explicit Resource Management.
+            Op::DisposeInit(slot) => {
+                let cap = self.new_dispose_capability();
+                frame!(self).locals[slot as usize] = Some(Value::Object(cap));
+            }
+            Op::AddDispose { slot, is_async } => {
+                let v = self.pop();
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let hint = if is_async {
+                    crate::builtins::disposable::Hint::Async
+                } else {
+                    crate::builtins::disposable::Hint::Sync
+                };
+                self.add_disposable_resource(cap, v, hint, None)?;
+            }
+            Op::DisposeSync {
+                slot,
+                kind_slot,
+                value_slot,
+            } => {
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                let c = self.dispose_resources_sync(cap, c)?;
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+            }
+            Op::DisposeAsyncStep {
+                slot,
+                kind_slot,
+                value_slot,
+                done,
+            } => {
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let mut c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                let step = self.dispose_async_step(cap, &mut c)?;
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+                match step {
+                    crate::builtins::disposable::AsyncStep::Await(v) => self.push(v),
+                    crate::builtins::disposable::AsyncStep::Done => {
+                        frame!(self).pc = done as usize;
+                    }
+                }
+            }
+            Op::DisposeAwaitError {
+                kind_slot,
+                value_slot,
+            } => {
+                let e = self.pop();
+                let mut c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                self.merge_dispose_error(&mut c, e);
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+            }
 
             // --- Funciones ---
             Op::CreateArguments(table) => {
@@ -2437,6 +2497,29 @@ const YS_CLOSE: i32 = 4;
 
 impl Agent {
     /// ¿La completion guardada en `kind_slot` es throw? (`u32::MAX`: completion normal.)
+    /// E8: la completion de un finally de DisposeResources (Some: throw).
+    fn dispose_completion(&self, kind_slot: u32, value_slot: u32) -> Option<Value> {
+        self.completion_is_throw(kind_slot)
+            .then(|| self.local(value_slot))
+    }
+
+    /// E8: guarda la completion de DisposeResources si cambió.
+    fn set_dispose_completion(
+        &mut self,
+        kind_slot: u32,
+        value_slot: u32,
+        was_throw: bool,
+        c: Option<Value>,
+    ) {
+        if let Some(e) = c {
+            let f = frame!(self);
+            f.locals[kind_slot as usize] = Some(Value::Number(f64::from(COMPLETION_THROW)));
+            f.locals[value_slot as usize] = Some(e);
+        } else {
+            debug_assert!(!was_throw, "una throw completion no vuelve a ser normal");
+        }
+    }
+
     fn completion_is_throw(&self, kind_slot: u32) -> bool {
         kind_slot != u32::MAX
             && matches!(self.local(kind_slot), Value::Number(n) if n as u32 == COMPLETION_THROW)

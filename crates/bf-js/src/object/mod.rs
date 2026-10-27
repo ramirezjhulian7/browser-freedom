@@ -160,6 +160,11 @@ pub enum ObjectKind {
     Web(Box<crate::builtins::web::WebData>),
     // E3: objetos de plataforma (`crate::host`).
     Host(Box<crate::host::HostObject>),
+    // E8: Explicit Resource Management: el DisposeCapability de un scope con `using`,
+    // DisposableStack (§27.3) y AsyncDisposableStack (§27.4).
+    DisposeCapability(Box<crate::builtins::disposable::DisposeData>),
+    DisposableStack(Box<crate::builtins::disposable::DisposeData>),
+    AsyncDisposableStack(Box<crate::builtins::disposable::DisposeData>),
 }
 
 #[derive(Debug)]
@@ -282,6 +287,9 @@ impl Trace for Object {
             ObjectKind::WeakMap(w) | ObjectKind::WeakSet(w) => w.trace(t),
             ObjectKind::WeakRef(w) => w.trace(t),
             ObjectKind::FinalizationRegistry(f) => f.trace(t),
+            ObjectKind::DisposeCapability(d)
+            | ObjectKind::DisposableStack(d)
+            | ObjectKind::AsyncDisposableStack(d) => d.trace(t),
             ObjectKind::ArrayBuffer(_) => {}
             ObjectKind::TypedArray(ta) => t.gc(ta.buffer),
             ObjectKind::DataView(dv) => t.gc(dv.buffer),

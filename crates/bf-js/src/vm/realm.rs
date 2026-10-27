@@ -141,6 +141,12 @@ intrinsics!(
     date_ctor,
     date_prototype,
     web_registry,
+    // E8
+    suppressed_error_prototype,
+    disposable_stack_ctor,
+    disposable_stack_prototype,
+    async_disposable_stack_ctor,
+    async_disposable_stack_prototype,
 );
 
 pub struct Realm {

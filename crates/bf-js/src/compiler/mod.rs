@@ -128,6 +128,8 @@ pub(crate) struct FnState {
     /// La última posición que es destino de un salto (E3): la mirilla no fusiona a través
     /// de ella.
     barrier: u32,
+    /// E8: el slot del DisposeCapability del scope con `using` más cercano.
+    pub dispose_slot: Option<u32>,
 }
 
 pub struct Codegen<'t> {
@@ -271,6 +273,7 @@ impl FnState {
             next_completion_kind: COMPLETION_RETURN + 1,
             global_lex: Vec::new(),
             barrier: 0,
+            dispose_slot: None,
         }
     }
 }
@@ -293,6 +296,8 @@ fn patch_target(op: &mut Op, t: u32) {
         // E3
         Op::AsyncIterResult { done, .. } | Op::AsyncYieldStarResult { done, .. } => *done = t,
         Op::AsyncIterClose { skip, .. } => *skip = t,
+        // E8
+        Op::DisposeAsyncStep { done, .. } => *done = t,
         _ => panic!("instrucción sin destino: {op:?}"),
     }
 }
@@ -1029,7 +1034,8 @@ impl<'t> Codegen<'t> {
         self.prologue(&info, params, body.stmts());
         match body {
             FnBodyRef::Block(b) => {
-                self.statements(b);
+                // E8: DisposeResources al final del cuerpo (EvaluateBody).
+                self.dispose_region(crate::compiler::stmt::using_hint(b), |cg| cg.statements(b));
                 self.emit(Op::Undefined);
                 self.emit(Op::Return);
             }

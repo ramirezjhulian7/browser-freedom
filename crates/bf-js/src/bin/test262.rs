@@ -425,7 +425,8 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for e in entries.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        // `file_type` viene del listado del directorio (sin otro stat por archivo).
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
             collect(&p, out);
         } else if p.extension().is_some_and(|x| x == "js")
             && !p.to_string_lossy().contains("_FIXTURE")
