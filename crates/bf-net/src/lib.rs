@@ -8,6 +8,7 @@
 
 pub mod blob; // E2: el almacén de URLs blob:
 pub mod cookies;
+pub mod hpack;
 pub mod http;
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
