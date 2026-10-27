@@ -1719,6 +1719,31 @@
         () => resolved(),
         0,
       ),
+    // Un stream que llena la red (Fetch §4.5 "fetch response handover"): devuelve
+    // [stream, ops]; `ops` encola un Uint8Array, cierra o da error. `onCancel(reason)` corre
+    // si el autor cancela el stream.
+    pushed: (onCancel) => {
+      let cst;
+      const s = createStream(
+        (c) => {
+          cst = C.get(c);
+        },
+        () => resolved(),
+        (r) => {
+          try { onCancel(r); } catch (e) {}
+          return resolved();
+        },
+        0,
+      );
+      const ops = {
+        enqueue: (u8) => {
+          if (canCloseOrEnqueue(cst)) controllerEnqueue(cst, u8);
+        },
+        close: () => controllerClose(cst),
+        error: (e) => controllerError(cst, e),
+      };
+      return [s, ops];
+    },
     tee: (s) => streamTee(s),
     cancel: (s, r) => streamCancel(s, r),
     // Lee todo el stream: una promesa con un Uint8Array (TypeError si un chunk no lo es).

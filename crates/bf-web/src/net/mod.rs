@@ -31,12 +31,14 @@ pub mod wptserve;
 pub mod xhr;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bf_infra::{ResourceLoader, Url};
 use bf_js::host::{HostClassId, TaskSource};
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::{Agent, JsResult, RealmId};
+use bf_net::streaming::{StreamHead, StreamSink};
 
 use crate::WebContextHandle;
 use headers::HeaderList;
@@ -77,6 +79,56 @@ pub trait NetBackend: Send + Sync {
     fn network(&self) -> bool {
         false
     }
+    /// La petición con la respuesta entregada por partes (Fetch §4.5, "incrementally read"):
+    /// la cabecera en cuanto llega y luego cada trozo del cuerpo. Por defecto, la respuesta
+    /// entera de [`NetBackend::fetch`] en un trozo.
+    fn fetch_streaming(&self, req: &NetRequest, sink: &mut dyn StreamSink) -> Result<(), String> {
+        let r = self.fetch(req)?;
+        let head = StreamHead {
+            url: r
+                .url_list
+                .last()
+                .cloned()
+                .unwrap_or_else(|| req.url.clone()),
+            url_list: r.url_list,
+            status: r.status,
+            status_text: r.status_text,
+            headers: bf_net::Headers(r.headers.0),
+        };
+        if sink.head(&head) && !r.body.is_empty() {
+            sink.chunk(&r.body);
+        }
+        Ok(())
+    }
+}
+
+/// Por partes por la red: `http(s)` con `bf_net::streaming` y la jarra de `f`; lo demás
+/// (`data:`, `blob:`, `file:`) entero.
+fn fetcher_streaming(
+    f: &bf_net::Fetcher,
+    req: &NetRequest,
+    sink: &mut dyn StreamSink,
+) -> Result<(), String> {
+    if !matches!(req.url.scheme.as_str(), "http" | "https") {
+        let r = from_bf_net(f.fetch_request(&req.url, &req.options))?;
+        let head = StreamHead {
+            url: r
+                .url_list
+                .last()
+                .cloned()
+                .unwrap_or_else(|| req.url.clone()),
+            url_list: r.url_list,
+            status: r.status,
+            status_text: r.status_text,
+            headers: bf_net::Headers(r.headers.0),
+        };
+        if sink.head(&head) && !r.body.is_empty() {
+            sink.chunk(&r.body);
+        }
+        return Ok(());
+    }
+    bf_net::streaming::fetch_streaming(&req.url, &req.options, Some(&f.cookies), sink)
+        .map_err(|e| e.to_string())
 }
 
 fn from_bf_net(r: Result<(bf_net::Response, Vec<Url>), bf_net::FetchError>) -> NetResult {
@@ -105,6 +157,9 @@ impl NetBackend for bf_net::Fetcher {
     fn network(&self) -> bool {
         true
     }
+    fn fetch_streaming(&self, req: &NetRequest, sink: &mut dyn StreamSink) -> Result<(), String> {
+        fetcher_streaming(self, req, sink)
+    }
 }
 
 impl NetBackend for bf_net::NetLoader {
@@ -120,16 +175,21 @@ impl NetBackend for bf_net::NetLoader {
     fn network(&self) -> bool {
         true
     }
+    fn fetch_streaming(&self, req: &NetRequest, sink: &mut dyn StreamSink) -> Result<(), String> {
+        fetcher_streaming(&self.fetcher, req, sink)
+    }
 }
 
 /// Un evento de una conexión que sigue abierta (WebSocket, EventSource), desde su hilo.
 #[derive(Debug, Clone)]
 pub enum NetEvent {
     Ws(bf_net::websocket::WsEvent),
-    /// La cabecera de una respuesta por partes.
+    /// La cabecera de una respuesta por partes (`url` es la última de `url_list`).
     Head {
         url: Url,
+        url_list: Vec<Url>,
         status: u16,
+        status_text: String,
         headers: HeaderList,
     },
     Chunk(Vec<u8>),
@@ -188,6 +248,36 @@ pub fn unlisten(agent: &mut Agent, id: u64) {
 impl EventSink {
     pub fn id(&self) -> u64 {
         self.id
+    }
+}
+
+/// Un `StreamSink` que manda las partes de una respuesta a un [`EventSink`] hasta que se
+/// active `cancel`.
+pub(crate) struct PartSink {
+    pub out: EventSink,
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl StreamSink for PartSink {
+    fn head(&mut self, h: &StreamHead) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.out.push(NetEvent::Head {
+            url: h.url.clone(),
+            url_list: h.url_list.clone(),
+            status: h.status,
+            status_text: h.status_text.clone(),
+            headers: HeaderList(h.headers.0.clone()),
+        });
+        true
+    }
+    fn chunk(&mut self, bytes: &[u8]) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.out.push(NetEvent::Chunk(bytes.to_vec()));
+        true
     }
 }
 

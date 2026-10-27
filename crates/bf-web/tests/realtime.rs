@@ -1,10 +1,12 @@
 //! Conexiones abiertas desde JavaScript (`bf_web::net`): `WebSocket` (contra un servidor
-//! RFC 6455 local), `EventSource` (un servidor `text/event-stream` local, con reconexión) y
+//! RFC 6455 local), `EventSource` (un servidor `text/event-stream` local, con reconexión),
+//! cuerpos de `fetch()` por partes (Fetch §4.6 "incrementally read") y
 //! `MessageChannel`/`MessagePort`/`BroadcastChannel`.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bf_js::host::DefaultHooks;
@@ -176,6 +178,51 @@ fn sse(r: BufReader<TcpStream>, path: &str, headers: &[(String, String)]) {
     }
 }
 
+/// Las fichas liberadas con `/release?<ficha>` (las espera `/chunks?<ficha>`).
+static RELEASED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+fn released(tok: &str) -> bool {
+    RELEASED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|s| s.contains(tok))
+}
+
+/// Cuerpos por partes (`Transfer-Encoding: chunked`). `/chunks?<ficha>` manda `uno,` y no
+/// sigue hasta que la página pida `/release?<ficha>` (así el test prueba que la página leyó
+/// el primer trozo antes de que llegara el resto); `/chunks-fast` manda tres trozos seguidos.
+fn chunks(r: BufReader<TcpStream>, path: &str) {
+    let mut s = r.into_inner();
+    let chunk = |s: &mut TcpStream, data: &[u8]| {
+        let _ = s.write_all(format!("{:x}\r\n", data.len()).as_bytes());
+        let _ = s.write_all(data);
+        let _ = s.write_all(b"\r\n");
+        let _ = s.flush();
+    };
+    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Parts: si\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+    if path == "/chunks-fast" {
+        for part in [&b"a"[..], b"b", b"c"] {
+            chunk(&mut s, part);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    } else {
+        let tok = path.split_once('?').map_or("", |(_, q)| q).to_owned();
+        chunk(&mut s, b"uno,");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !released(&tok) {
+            if Instant::now() > deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        chunk(&mut s, b"dos,");
+        std::thread::sleep(Duration::from_millis(5));
+        chunk(&mut s, b"tres");
+    }
+    let _ = s.write_all(b"0\r\n\r\n");
+}
+
 fn handle(stream: TcpStream) {
     let mut r = BufReader::new(stream);
     let Some((path, headers)) = read_head(&mut r) else {
@@ -185,6 +232,16 @@ fn handle(stream: TcpStream) {
         websocket(r, &path, &headers);
     } else if path.starts_with("/sse") {
         sse(r, &path, &headers);
+    } else if path.starts_with("/chunks") {
+        chunks(r, &path);
+    } else if let Some(tok) = path.strip_prefix("/release?") {
+        RELEASED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashSet::new)
+            .insert(tok.to_owned());
+        let mut s = r.into_inner();
+        let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
     } else {
         let mut s = r.into_inner();
         let _ = s.write_all(
@@ -444,6 +501,51 @@ rt!(
     sse_with_credentials,
     "var es = new EventSource('/sse', {withCredentials: true}); var r = es.withCredentials + ' ' + EventSource.CLOSED; es.close(); finish(r);",
     "true 2"
+);
+
+// --- fetch() por partes (Fetch §4.6 paso 12, "incrementally read") ---
+
+// La página lee `uno,` antes de que el servidor mande el resto: sin cuerpos por partes el
+// servidor nunca recibiría `/release` y el test se colgaría.
+rt!(
+    fetch_body_streams_progressively,
+    "fetch(BASE + '/chunks?p1').then(r => { var rd = r.body.getReader(), td = new TextDecoder(), out = ''; log.push(r.status + ' ' + r.headers.get('content-type')); function step() { return rd.read().then(x => { if (x.done) { finish(log[0] + ' ' + out); return; } out += td.decode(x.value, {stream: true}); if (out === 'uno,') fetch(BASE + '/release?p1'); return step(); }); } return step(); }).catch(fail);",
+    "200 text/plain uno,dos,tres"
+);
+rt!(
+    fetch_streamed_text,
+    "fetch(BASE + '/chunks-fast').then(r => r.text().then(t => finish([r.type, r.ok, r.bodyUsed, t, r.headers.get('x-parts')].join()))).catch(fail);",
+    "basic,true,true,abc,si"
+);
+rt!(
+    fetch_streamed_async_iteration,
+    "(async () => { var r = await fetch(BASE + '/chunks-fast'), n = 0, len = 0; for await (var c of r.body) { n++; len += c.byteLength; log.push(c instanceof Uint8Array); } finish(len + ' ' + (n >= 1) + ' ' + log.every(x => x)); })().catch(fail);",
+    "3 true true"
+);
+rt!(
+    fetch_streamed_clone,
+    "fetch(BASE + '/chunks-fast').then(r => { var c = r.clone(); return Promise.all([r.text(), c.text()]); }).then(v => finish(v.join('|'))).catch(fail);",
+    "abc|abc"
+);
+rt!(
+    fetch_streamed_abort_errors_body,
+    "var ac = new AbortController(); fetch(BASE + '/chunks?p2', {signal: ac.signal}).then(r => { var rd = r.body.getReader(); return rd.read().then(x => { log.push(new TextDecoder().decode(x.value)); ac.abort(); return rd.read(); }); }).then(() => finish('no'), e => finish(log[0] + ' ' + e.name));",
+    "uno, AbortError"
+);
+rt!(
+    fetch_streamed_cancel,
+    "fetch(BASE + '/chunks?p3').then(r => { var rd = r.body.getReader(); return rd.read().then(x => rd.cancel('basta')).then(v => rd.closed).then(() => finish('cancelado ' + r.bodyUsed)); }).catch(fail);",
+    "cancelado true"
+);
+rt!(
+    fetch_streamed_network_error,
+    "fetch('http://127.0.0.1:2/x').then(() => finish('no'), e => finish(e.name));",
+    "TypeError"
+);
+rt!(
+    fetch_streamed_null_body_status,
+    "fetch(BASE + '/release?p4').then(r => finish(r.status + ' ' + r.body)).catch(fail);",
+    "204 null"
 );
 
 // --- MessageChannel / MessagePort / BroadcastChannel ---
