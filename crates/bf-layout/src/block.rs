@@ -89,6 +89,9 @@ pub(crate) struct Layout<'a> {
     pub table_paint: Option<crate::fragment::TablePaint>,
     pub grid_baseline: Option<f32>, // E4 grid: baseline del último contenedor grid maquetado
     pub bfc_items: Vec<usize>,      // E4 grid: ítems en curso (raíces de formato independientes)
+    /// E5: alto definido del containing block para los porcentajes de altura al calcular
+    /// tamaños intrínsecos (p. ej. el área de un ítem de grid con filas fijas).
+    pub pct_height_basis: Option<f32>,
     /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
     pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
 }
@@ -319,6 +322,7 @@ impl<'a> Layout<'a> {
             grid_baseline: None,   // E4 grid
             bfc_items: Vec::new(), // E4 grid
             subgrids: std::collections::HashMap::new(),
+            pct_height_basis: None,
         }
     }
 
@@ -530,6 +534,27 @@ impl<'a> Layout<'a> {
             border.horizontal() + padding.horizontal(),
             border.vertical() + padding.vertical(),
         );
+        // E5: `aspect-ratio` (CSS Sizing 4 §5.1): `<ratio>` sustituye a la relación natural;
+        // `auto <ratio>` solo se usa si no la hay.
+        let (natural, ratio) = match s.aspect_ratio.preferred() {
+            Some(r) if !s.aspect_ratio.auto || ratio.is_none() => {
+                let n = if natural.width > 0.0 {
+                    LayoutSize {
+                        width: natural.width,
+                        height: natural.width / r,
+                    }
+                } else if natural.height > 0.0 {
+                    LayoutSize {
+                        width: natural.height * r,
+                        height: natural.height,
+                    }
+                } else {
+                    natural
+                };
+                (n, Some(r))
+            }
+            _ => (natural, ratio),
+        };
         let sw = specified_width(s, cb.width, eh);
         let sh = specified_height(s, cb.height, ev);
         let (wmin, wmax) = width_limits(s, cb.width, eh);
@@ -1254,12 +1279,27 @@ impl<'a> Layout<'a> {
 
     /// Anchos intrínsecos (min-content, max-content) del contenido de `b`.
     pub(crate) fn intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        // E5: los porcentajes de altura de los descendientes se resuelven contra el alto de
+        // `b` si es definido respecto a `pct_height_basis` (CSS Sizing 3 §5.2.1).
+        if matches!(b.kind, BoxKind::Replaced { .. }) {
+            return self.intrinsic_widths_inner(b);
+        }
+        let st = &b.style;
+        let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
+        let inner = specified_height(st, self.pct_height_basis, ev);
+        let saved = std::mem::replace(&mut self.pct_height_basis, inner);
+        let r = self.intrinsic_widths_inner(b);
+        self.pct_height_basis = saved;
+        r
+    }
+
+    fn intrinsic_widths_inner(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         if let BoxKind::Replaced { natural, ratio } = &b.kind {
             let cb = Cb {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
-                height: None,
+                height: self.pct_height_basis,
             };
             let w = if matches!(&b.style.width, Size::LengthPercentage(lp) if lp.has_percentage()) {
                 natural.width
@@ -1279,16 +1319,16 @@ impl<'a> Layout<'a> {
             return (w, w);
         }
         // E5: con `aspect-ratio` y un alto definido, el ancho transferido (CSS Sizing 4 §5.1).
+        // `self.pct_height_basis` ya es el alto de `b`: su propio alto se resuelve contra la
+        // base anterior, que [`Self::intrinsic_widths`] restaura después; aquí se usa el alto
+        // de contenido ya resuelto.
         if let Some(r) = st.aspect_ratio.preferred()
             && st.width == Size::Auto
-            && let Size::LengthPercentage(lp) = &st.height
-            && !lp.has_percentage()
+            && let Some(h) = self.pct_height_basis
         {
             let eh = border_edges(st).horizontal() + padding_edges(st, 0.0).horizontal();
             let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
-            let h = specified_height(st, None, ev).unwrap_or(0.0);
-            let (hmin, hmax) = height_limits(st, None, ev);
-            let w = ratio_transfer(st, h.min(hmax).max(hmin), ev, eh, r);
+            let w = ratio_transfer(st, h, ev, eh, r);
             return (w, w);
         }
         if crate::flex::is_flex_container(b) {

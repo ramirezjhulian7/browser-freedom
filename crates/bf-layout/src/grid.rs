@@ -1416,6 +1416,12 @@ fn is_replaced(b: &LayoutBox) -> bool {
     matches!(b.kind, BoxKind::Replaced { .. })
 }
 
+/// E5: ¿tiene relación de aspecto preferida (reemplazado o `aspect-ratio`)? Para ella `normal`
+/// alinea como `start` (§6.2 y CSS Box Alignment 3 §6.1).
+fn has_ratio(b: &LayoutBox) -> bool {
+    is_replaced(b) || b.style.aspect_ratio.preferred().is_some()
+}
+
 /// ¿El tamaño preferido "se comporta como auto" o depende del containing block (§6.6)?
 fn pref_auto(s: &Size) -> bool {
     match s {
@@ -1442,6 +1448,18 @@ fn fixed_max_sum(tracks: &[Track], span: (usize, usize), gap: f32) -> Option<f32
     for t in &tracks[span.0..span.1] {
         match t.max {
             Sizing::Fixed(f) => sum += f,
+            _ => return None,
+        }
+    }
+    Some(sum)
+}
+
+/// E5: tamaño de un span cuyas pistas son todas de tamaño fijo (mínimo y máximo), con sus gaps.
+fn fixed_span(tracks: &[Track], span: (usize, usize), gap: f32) -> Option<f32> {
+    let mut sum = gaps_in(tracks, span, gap);
+    for t in tracks.get(span.0..span.1)? {
+        match (t.min, t.max) {
+            (Sizing::Fixed(a), Sizing::Fixed(b)) => sum += a.max(b),
             _ => return None,
         }
     }
@@ -1802,9 +1820,18 @@ impl<'a> Layout<'a> {
     }
 
     /// Contribuciones de un ítem en el eje de las columnas (§11.5 y §6.6).
-    fn column_contrib(&mut self, it: &GridItem<'a>, tracks: &[Track], gap: f32) -> Contrib {
+    fn column_contrib(
+        &mut self,
+        it: &GridItem<'a>,
+        tracks: &[Track],
+        gap: f32,
+        area_h: Option<f32>,
+    ) -> Contrib {
         let b = it.b;
         let s = &b.style;
+        // E5: con filas fijas el área tiene alto definido y los porcentajes de altura del ítem
+        // (y de sus descendientes) se resuelven contra él (§12.1 y CSS Sizing 3 §5.2.1).
+        let saved = std::mem::replace(&mut self.pct_height_basis, area_h);
         let (mut min_c, mut max_c) = self.outer_intrinsic_widths(b);
         // E5: el margen extra de los subgrids que lo contienen (§9) cuenta como margen.
         let ex = it.extra[0] + it.extra[1];
@@ -1862,6 +1889,7 @@ impl<'a> Layout<'a> {
             };
             used_min + bp + margins
         };
+        self.pct_height_basis = saved;
         Contrib {
             span: it.col,
             minimum,
@@ -1894,7 +1922,7 @@ impl<'a> Layout<'a> {
             );
         }
         let avail = (area_w - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - bp).max(0.0);
-        let align = self_align(s.justify_self, container.justify_items, is_replaced(b));
+        let align = self_align(s.justify_self, container.justify_items, has_ratio(b));
         let stretch = align == ItemAlign::Stretch && ml.is_some() && mr.is_some();
         let (lo, hi) = self.width_limits_for(b, area_w, bp, avail);
         if let Some(w) = self.table_fixed_width(b, avail, area_w) {
@@ -1910,6 +1938,17 @@ impl<'a> Layout<'a> {
             w
         } else if let Some(w) = self.keyword_width(b, avail, area_w) {
             // E5: `width` con keyword de tamaño (CSS Sizing 3 §3.2, CSS Sizing 4 §6.1).
+            w
+        } else if let Some(w) = self.ratio_width(
+            b,
+            Cb {
+                x: 0.0,
+                y: 0.0,
+                width: area_w,
+                height: area_h,
+            },
+        ) {
+            // E5: ancho transferido por `aspect-ratio` desde un alto definido (CSS Sizing 4 §5.1).
             w
         } else if let BoxKind::Replaced { natural, ratio } = &b.kind {
             if stretch {
@@ -2068,7 +2107,7 @@ impl<'a> Layout<'a> {
         // `align-self: baseline` de una fila comparten baseline; su contribución incluye el
         // desplazamiento.
         let baseline_aligned = |it: &GridItem<'_>| {
-            self_align(it.b.style.align_self, cs.align_items, is_replaced(it.b))
+            self_align(it.b.style.align_self, cs.align_items, has_ratio(it.b))
                 == ItemAlign::Baseline
                 && it.row.1 - it.row.0 == 1
         };
@@ -2168,12 +2207,12 @@ impl<'a> Layout<'a> {
             let (w, ml, mr) = self.grid_item_width(b, cs, aw, Some(ah));
             let bp_h = border_edges(s).horizontal() + padding_edges(s, aw).horizontal();
             let bp_v = border_edges(s).vertical() + padding_edges(s, aw).vertical();
-            let justify = self_align(s.justify_self, cs.justify_items, is_replaced(b));
+            let justify = self_align(s.justify_self, cs.justify_items, has_ratio(b));
             let free_h = aw - w - bp_h - ml.unwrap_or(0.0) - mr.unwrap_or(0.0);
             let (dx, ml, mr) = place_in_area(free_h, ml, mr, justify);
             let mt = margin_value(&s.margin_top, aw);
             let mb = margin_value(&s.margin_bottom, aw);
-            let align = self_align(s.align_self, cs.align_items, is_replaced(b));
+            let align = self_align(s.align_self, cs.align_items, has_ratio(b));
             let item_cb = Cb {
                 x: cb.x + x0,
                 y: cb.y + y0,
@@ -2347,9 +2386,13 @@ impl<'a> Layout<'a> {
         let cs = &container.style;
         // E5: en lugar de cada subgrid en las columnas, sus ítems (§9).
         let items = self.axis_items(grid, true, None, width);
+        let row_gap = axis_gap(&cs.row_gap, None, grid.sub.rows.as_ref());
         let contribs: Vec<Contrib> = items
             .iter()
-            .map(|it| self.column_contrib(it, &grid.cols, gap))
+            .map(|it| {
+                let area_h = fixed_span(&grid.rows, it.row, row_gap);
+                self.column_contrib(it, &grid.cols, gap, area_h)
+            })
             .collect();
         size_tracks(
             &mut grid.cols,
@@ -2556,7 +2599,10 @@ impl<'a> Layout<'a> {
         let items = self.axis_items(&grid, true, None, 0.0);
         let contribs: Vec<Contrib> = items
             .iter()
-            .map(|it| self.column_contrib(it, &grid.cols, gap))
+            .map(|it| {
+                let area_h = fixed_span(&grid.rows, it.row, row_gap);
+                self.column_contrib(it, &grid.cols, gap, area_h)
+            })
             .collect();
         let mut sizes = [0.0f32; 2];
         for (k, space) in [Space::MinContent, Space::MaxContent]
