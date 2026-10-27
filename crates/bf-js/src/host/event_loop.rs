@@ -288,6 +288,10 @@ impl Agent {
 
     /// HTML "report an exception" (§8.1.4.6) a través de los hooks.
     pub fn report_exception(&mut self, e: &Value) {
+        if let Some(f) = self.host.exception_reporter {
+            f(self, e);
+            return;
+        }
         let err = crate::host::runtime::JsError::from_value(self, e.clone());
         self.host.hooks.report_exception(&err.message, &err.stack);
     }
