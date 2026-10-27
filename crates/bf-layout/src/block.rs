@@ -536,24 +536,56 @@ impl<'a> Layout<'a> {
         );
         // E5: `aspect-ratio` (CSS Sizing 4 §5.1): `<ratio>` sustituye a la relación natural;
         // `auto <ratio>` solo se usa si no la hay.
-        let (natural, ratio) = match s.aspect_ratio.preferred() {
+        // Con `<ratio>` (sin `auto`) la relación se aplica a la caja de `box-sizing`; la
+        // natural, al content box.
+        let bb = s.box_sizing == BoxSizing::BorderBox;
+        let (natural, ratio, ratio_bb) = match s.aspect_ratio.preferred() {
             Some(r) if !s.aspect_ratio.auto || ratio.is_none() => {
+                let bb = bb && !s.aspect_ratio.auto;
+                let w_to_h = |w: f32| {
+                    if bb {
+                        ((w + eh) / r - ev).max(0.0)
+                    } else {
+                        w / r
+                    }
+                };
+                let h_to_w = |h: f32| {
+                    if bb {
+                        ((h + ev) * r - eh).max(0.0)
+                    } else {
+                        h * r
+                    }
+                };
                 let n = if natural.width > 0.0 {
                     LayoutSize {
                         width: natural.width,
-                        height: natural.width / r,
+                        height: w_to_h(natural.width),
                     }
                 } else if natural.height > 0.0 {
                     LayoutSize {
-                        width: natural.height * r,
+                        width: h_to_w(natural.height),
                         height: natural.height,
                     }
                 } else {
                     natural
                 };
-                (n, Some(r))
+                (n, Some(r), bb)
             }
-            _ => (natural, ratio),
+            _ => (natural, ratio, false),
+        };
+        let w_to_h = |w: f32, r: f32| {
+            if ratio_bb {
+                ((w + eh) / r - ev).max(0.0)
+            } else {
+                w / r
+            }
+        };
+        let h_to_w = |h: f32, r: f32| {
+            if ratio_bb {
+                ((h + ev) * r - eh).max(0.0)
+            } else {
+                h * r
+            }
         };
         let sw = specified_width(s, cb.width, eh);
         let sh = specified_height(s, cb.height, ev);
@@ -572,7 +604,7 @@ impl<'a> Layout<'a> {
             (None, Some(h), Some(r)) => {
                 let h = h.min(hmax).max(hmin);
                 LayoutSize {
-                    width: (h * r).min(wmax).max(wmin),
+                    width: h_to_w(h, r).min(wmax).max(wmin),
                     height: h,
                 }
             }
@@ -580,7 +612,7 @@ impl<'a> Layout<'a> {
                 let w = w.min(wmax).max(wmin);
                 LayoutSize {
                     width: w,
-                    height: (w / r).min(hmax).max(hmin),
+                    height: w_to_h(w, r).min(hmax).max(hmin),
                 }
             }
             _ => LayoutSize {
@@ -1251,7 +1283,11 @@ impl<'a> Layout<'a> {
         let h = specified_height(s, cb.height, ev)?;
         let (hmin, hmax) = height_limits(s, cb.height, ev);
         let h = h.min(hmax).max(hmin);
-        let w = ratio_transfer(s, h, ev, eh, r);
+        let mut w = ratio_transfer(s, h, ev, eh, r);
+        // Mínimo automático (CSS Sizing 4 §5.2): no por debajo del min-content.
+        if s.min_width == Size::Auto && matches!(s.overflow_x, Overflow::Visible | Overflow::Clip) {
+            w = w.max(self.content_intrinsic_widths(b).0);
+        }
         let (lo, hi) = width_limits(s, cb.width, eh);
         Some(w.min(hi).max(lo))
     }
@@ -1341,9 +1377,21 @@ impl<'a> Layout<'a> {
         {
             let eh = border_edges(st).horizontal() + padding_edges(st, 0.0).horizontal();
             let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
-            let w = ratio_transfer(st, h, ev, eh, r);
+            let mut w = ratio_transfer(st, h, ev, eh, r);
+            // Mínimo automático (CSS Sizing 4 §5.2): no por debajo del min-content.
+            if st.min_width == Size::Auto
+                && matches!(st.overflow_x, Overflow::Visible | Overflow::Clip)
+            {
+                w = w.max(self.content_intrinsic_widths(b).0);
+            }
             return (w, w);
         }
+        self.content_intrinsic_widths(b)
+    }
+
+    /// Anchos intrínsecos del contenido de `b` según su tipo de formato (sin contención ni
+    /// relación de aspecto).
+    fn content_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         if crate::flex::is_flex_container(b) {
             return self.flex_intrinsic_widths(b);
         }

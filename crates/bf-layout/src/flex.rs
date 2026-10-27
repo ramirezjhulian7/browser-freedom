@@ -280,20 +280,23 @@ impl<'a> Layout<'a> {
             };
             // Tamaño principal especificado (content box).
             // E5: en filas, `width` con keyword cuenta como tamaño principal especificado
-            // (CSS Sizing 3 §3.2); con `aspect-ratio` y alto definido, el ancho transferido
-            // (CSS Sizing 4 §5.1).
+            // (CSS Sizing 3 §3.2).
             let main_avail =
                 (cb.width - margins[0].unwrap_or(0.0) - margins[1].unwrap_or(0.0) - bp_h).max(0.0);
             let spec_main = if row {
                 let kw = s.width.clone();
                 specified_width(s, cb.width, bp_h)
                     .or_else(|| self.width_for_keyword(b, &kw, main_avail, cb.width))
-                    .or_else(|| self.ratio_width(b, cb))
             } else {
                 specified_height(s, cb.height, bp_v)
             };
-            // Tamaño de contenido en el eje principal (max-content en filas).
+            // Tamaño de contenido en el eje principal (max-content en filas). E5: con
+            // `aspect-ratio` y alto definido, el ancho transferido (CSS Flexbox 1 §9.2.3 B).
+            let ratio_main = if row { self.ratio_width(b, cb) } else { None };
             let content_main = |this: &mut Self| -> f32 {
+                if let Some(w) = ratio_main {
+                    return w;
+                }
                 if row {
                     if let BoxKind::Replaced { natural, ratio } = &b.kind {
                         let rcb = Cb {

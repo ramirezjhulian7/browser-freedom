@@ -558,6 +558,10 @@ keyword_enum!(
         FlexEnd = "flex-end",
         Center = "center",
         Baseline = "baseline",
+        // E5: `left`/`right` (`justify-self`, CSS Box Alignment 3 §6.1) y `last baseline`.
+        Left = "left",
+        Right = "right",
+        LastBaseline = "last-baseline",
     }
 );
 
@@ -565,6 +569,10 @@ impl PropValue for ItemAlign {
     fn parse(input: &[ComponentValue]) -> Option<Self> {
         let items = components(input);
         let last = match items.as_slice() {
+            [m, v] if is_ident(m, "last") && is_ident(v, "baseline") => {
+                return Some(ItemAlign::LastBaseline);
+            }
+            [v] if is_ident(v, "last-baseline") => return None,
             [v] => *v,
             [m, v] if is_ident(m, "safe") || is_ident(m, "unsafe") || is_ident(m, "first") => *v,
             _ => return None,
@@ -572,7 +580,10 @@ impl PropValue for ItemAlign {
         ItemAlign::from_ident(ident(last)?)
     }
     fn to_css(&self) -> String {
-        self.as_str().to_owned()
+        match self {
+            ItemAlign::LastBaseline => "last baseline".into(),
+            a => a.as_str().to_owned(),
+        }
     }
 }
 

@@ -1391,9 +1391,24 @@ fn self_align(item: ItemAlign, container: ItemAlign, replaced: bool) -> ItemAlig
 
 fn align_offset(a: ItemAlign, free: f32) -> f32 {
     match a {
-        ItemAlign::End | ItemAlign::FlexEnd | ItemAlign::SelfEnd => free,
+        // `last baseline` sin baseline compartida cae a `safe end` (CSS Box Alignment 3 §9.3).
+        ItemAlign::End
+        | ItemAlign::FlexEnd
+        | ItemAlign::SelfEnd
+        | ItemAlign::Right
+        | ItemAlign::LastBaseline => free,
         ItemAlign::Center => free / 2.0,
         _ => 0.0,
+    }
+}
+
+/// E5: en rtl el desplazamiento inline se refleja en el área; `left`/`right` son físicos y se
+/// intercambian antes para que el reflejo los deje en su sitio.
+fn physical(a: ItemAlign, rtl: bool) -> ItemAlign {
+    match a {
+        ItemAlign::Left if rtl => ItemAlign::Right,
+        ItemAlign::Right if rtl => ItemAlign::Left,
+        a => a,
     }
 }
 
@@ -1541,6 +1556,8 @@ struct GridItem<'a> {
     /// E5: ancho del área ya conocido (ítems de un subgrid solo en filas: sus columnas son las
     /// del subgrid).
     area_w: Option<f32>,
+    /// E5: ítem hipotético vacío de un subgrid (§9): solo aporta su margen extra.
+    empty: bool,
 }
 
 /// Rejilla colocada de un contenedor.
@@ -1801,6 +1818,7 @@ impl<'a> Layout<'a> {
                 row,
                 extra: [0.0; 4],
                 area_w: None,
+                empty: false,
             })
             .collect();
         Grid {
@@ -1833,6 +1851,15 @@ impl<'a> Layout<'a> {
         gap: f32,
         area_h: Option<f32>,
     ) -> Contrib {
+        if it.empty {
+            let ex = it.extra[0] + it.extra[1];
+            return Contrib {
+                span: it.col,
+                minimum: ex,
+                min_content: ex,
+                max_content: ex,
+            };
+        }
         let b = it.b;
         let s = &b.style;
         // E5: con filas fijas el área tiene alto definido y los porcentajes de altura del ítem
@@ -1959,15 +1986,17 @@ impl<'a> Layout<'a> {
         } else if let Some(w) = self.keyword_width(b, avail, area_w) {
             // E5: `width` con keyword de tamaño (CSS Sizing 3 §3.2, CSS Sizing 4 §6.1).
             w
-        } else if let Some(w) = self.ratio_width(
-            b,
-            Cb {
-                x: 0.0,
-                y: 0.0,
-                width: area_w,
-                height: area_h,
-            },
-        ) {
+        } else if !stretch
+            && let Some(w) = self.ratio_width(
+                b,
+                Cb {
+                    x: 0.0,
+                    y: 0.0,
+                    width: area_w,
+                    height: area_h,
+                },
+            )
+        {
             // E5: ancho transferido por `aspect-ratio` desde un alto definido (CSS Sizing 4 §5.1).
             w
         } else if let BoxKind::Replaced { natural, ratio } = &b.kind {
@@ -2025,6 +2054,16 @@ impl<'a> Layout<'a> {
         gap: f32,
         area_w: f32,
     ) -> (Contrib, Option<f32>) {
+        if it.empty {
+            let ex = it.extra[2] + it.extra[3];
+            let c = Contrib {
+                span: it.row,
+                minimum: ex,
+                min_content: ex,
+                max_content: ex,
+            };
+            return (c, None);
+        }
         let b = it.b;
         let s = &b.style;
         let (w, ml, mr) = self.grid_item_width(b, container, area_w, None);
@@ -2231,7 +2270,10 @@ impl<'a> Layout<'a> {
             let (w, ml, mr) = self.grid_item_width(b, cs, aw, Some(ah));
             let bp_h = border_edges(s).horizontal() + padding_edges(s, aw).horizontal();
             let bp_v = border_edges(s).vertical() + padding_edges(s, aw).vertical();
-            let justify = self_align(s.justify_self, cs.justify_items, has_ratio(b));
+            let justify = physical(
+                self_align(s.justify_self, cs.justify_items, has_ratio(b)),
+                rtl,
+            );
             let free_h = aw - w - bp_h - ml.unwrap_or(0.0) - mr.unwrap_or(0.0);
             let both = ml.is_some() && mr.is_some();
             let (dx, ml, mr) = place_in_area(free_h, ml, mr, justify);
@@ -2610,6 +2652,36 @@ impl<'a> Layout<'a> {
         let dc = sg.sub.cols.as_ref().map_or(0.0, |p| (gc - p.gap) / 2.0);
         let dr = sg.sub.rows.as_ref().map_or(0.0, |p| (gr - p.gap) / 2.0);
         let (nc, nr) = (sg.cols.len(), sg.rows.len());
+        // Ítems hipotéticos vacíos en las pistas de los bordes con el margen, borde y padding
+        // del subgrid (§9), aunque no tenga ítems ahí.
+        let (n, base, e0, e1) = if columns {
+            (nc, it.col.0, it.extra[0] + ml, it.extra[1] + mr)
+        } else {
+            (nr, it.row.0, it.extra[2] + mt, it.extra[3] + mbt)
+        };
+        let edges: Vec<((usize, usize), f32, f32)> = if n <= 1 {
+            vec![((base, base + 1), e0, e1)]
+        } else {
+            vec![
+                ((base, base + 1), e0, 0.0),
+                ((base + n - 1, base + n), 0.0, e1),
+            ]
+        };
+        for (span, a, z) in edges {
+            let mut e = it.clone();
+            e.empty = true;
+            e.extra = [0.0; 4];
+            if columns {
+                e.col = span;
+                e.extra[0] = a;
+                e.extra[1] = z;
+            } else {
+                e.row = span;
+                e.extra[2] = a;
+                e.extra[3] = z;
+            }
+            out.push(e);
+        }
         for d in &sg.items {
             let mut e = GridItem {
                 b: d.b,
@@ -2617,6 +2689,7 @@ impl<'a> Layout<'a> {
                 row: it.row,
                 extra: [0.0; 4],
                 area_w: None,
+                empty: false,
             };
             if sc {
                 e.col = (it.col.0 + d.col.0, it.col.0 + d.col.1);
