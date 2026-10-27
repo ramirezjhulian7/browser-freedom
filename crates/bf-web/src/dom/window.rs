@@ -143,28 +143,10 @@ fn current_event(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(h.and_then(|h| agent.host_pinned(h)).unwrap_or_default())
 }
 
-/// `postMessage(message, targetOrigin)` (HTML §9.3.3) a la propia ventana: una tarea de
-/// *posted message* que dispara `message` (como `Event` con `data` en la propiedad `data`).
+/// `postMessage(message, targetOrigin, transfer)` (HTML §9.3.3): un `MessageEvent` con
+/// `origin` y `source` en la ventana de destino (`crate::bom::frames`, E4).
 fn post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let data = agent.host_pin(a.arg(0));
-    let realm = WebContextHandle::current(agent).realm;
-    agent.queue_task(
-        TaskSource::PostedMessage,
-        Box::new(move |agent: &mut Agent| {
-            let saved = agent.current_realm;
-            agent.current_realm = realm;
-            let data = agent.host_unpin(data).unwrap_or_default();
-            let cell = Rc::new(RefCell::new(Event::new("message", EventInit::default())));
-            cell.borrow_mut().is_trusted = true;
-            let o = create_event_object(agent, EventIface::Event, cell, 0);
-            let _ = agent.create_data_property_or_throw(o, PropertyKey::from("data"), data);
-            let pin = agent.host_pin(Value::Object(o));
-            let _ = dispatch_js_event(agent, 0, EventTarget::Window, o, false);
-            agent.host_unpin(pin);
-            agent.current_realm = saved;
-        }),
-    );
-    Ok(Value::Undefined)
+    crate::bom::frames::post_message(agent, a)
 }
 
 /// HTML "notify about rejected promises" (§8.1.7.3): una tarea que dispara

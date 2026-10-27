@@ -80,7 +80,13 @@ struct Builder<'a> {
     /// Caja cuyo `overflow` se propaga al viewport (la raíz o, si la raíz tiene `visible`, el
     /// `body`): no recorta su contenido (E4).
     viewport_overflow: Option<&'a Fragment>,
+    /// Las listas de los documentos de los `<iframe>` y su desplazamiento (E4).
+    frames: &'a FrameLists<'a>,
 }
+
+/// La lista de visualización (en coordenadas de su viewport) y el desplazamiento del
+/// documento de cada `<iframe>` (E4).
+pub type FrameLists<'a> = HashMap<NodeId, (&'a DisplayList, (f32, f32))>;
 
 /// Índice de la capa `i` en una lista que se repite hasta la cantidad de imágenes (CSS
 /// Backgrounds 3 §2.2).
@@ -714,6 +720,10 @@ impl<'a> Builder<'a> {
         if !visible(&f.style) {
             return;
         }
+        if let Some(&(list, scroll)) = f.node.and_then(|n| self.frames.get(&n)) {
+            self.frame_content(f, clip, list, scroll);
+            return;
+        }
         let Some(image) = f.node.and_then(|n| self.images.for_node(n)).cloned() else {
             return;
         };
@@ -733,6 +743,40 @@ impl<'a> Builder<'a> {
             }
             self.emit(&clip, DisplayItem::Image { rect, image });
         }
+    }
+
+    /// E4: el documento de un `<iframe>` (HTML §4.8.5): su lista, desplazada al content box
+    /// (el viewport del marco) y recortada a él. Lo fijo del marco queda fijo respecto de ese
+    /// viewport, no del de la página.
+    fn frame_content(&mut self, f: &Fragment, clip: &ClipChain, list: &DisplayList, scroll: (f32, f32)) {
+        let rect = f.content_rect();
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let radii = border_radii(&f.style, &f.rect).shrink(&Edges {
+            top: f.border.top + f.padding.top,
+            right: f.border.right + f.padding.right,
+            bottom: f.border.bottom + f.padding.bottom,
+            left: f.border.left + f.padding.left,
+        });
+        let mut clip = clip.clone();
+        clip.push(Clip { rect, radii });
+        self.set_clip(&clip);
+        self.list.push(DisplayItem::PushTransform {
+            dx: rect.x - scroll.0,
+            dy: rect.y - scroll.1,
+        });
+        for item in &list.items {
+            self.list.push(match item {
+                DisplayItem::PushFixed => DisplayItem::PushTransform {
+                    dx: scroll.0,
+                    dy: scroll.1,
+                },
+                DisplayItem::PopFixed => DisplayItem::PopTransform,
+                other => other.clone(),
+            });
+        }
+        self.list.push(DisplayItem::PopTransform);
     }
 
     /// Marcador con `list-style-image`: la imagen en lugar del texto, apoyada en la baseline
@@ -1562,6 +1606,18 @@ pub fn build_display_list_with_images(
     fonts: &dyn FontProvider,
     images: &PageImages,
 ) -> DisplayList {
+    build_display_list_with_frames(doc, tree, fonts, images, &HashMap::new())
+}
+
+/// Como [`build_display_list_with_images`], con las listas de los documentos de los
+/// `<iframe>` (E4).
+pub fn build_display_list_with_frames(
+    doc: &Document,
+    tree: &FragmentTree,
+    fonts: &dyn FontProvider,
+    images: &PageImages,
+    frames: &FrameLists<'_>,
+) -> DisplayList {
     let mut builder = Builder {
         fonts,
         images,
@@ -1579,6 +1635,7 @@ pub fn build_display_list_with_images(
         viewport: Rect::new(0.0, 0.0, tree.viewport.width, tree.viewport.height),
         root: tree.root.as_ref(),
         viewport_overflow: None,
+        frames,
     };
     // Raíz sin caja (`display: none`): el canvas queda sin fondo (CSS Backgrounds 3 §2.11.2;
     // CSS2/box-display/root-box-003 espera lo contrario, según CSS 2.1).
