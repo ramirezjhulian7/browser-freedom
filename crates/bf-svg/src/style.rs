@@ -234,7 +234,11 @@ fn cascade(
     let mut decls: Vec<(Priority, String, Vec<ComponentValue>)> = Vec::new();
     for (i, name) in PRESENTATION.iter().enumerate() {
         if let Some(v) = attrs.get(*name) {
-            decls.push(((0, (0, 0, 0), i), (*name).to_owned(), parse_component_value_list(v)));
+            decls.push((
+                (0, (0, 0, 0), i),
+                (*name).to_owned(),
+                parse_component_value_list(v),
+            ));
         }
     }
     let supports = |_: &str, _: &[ComponentValue]| true;

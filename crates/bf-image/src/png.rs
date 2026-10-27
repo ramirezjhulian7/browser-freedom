@@ -51,7 +51,11 @@ pub fn decode(bytes: &[u8]) -> Result<Image, ImageError> {
     let (w, h) = (reader.info().width, reader.info().height);
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(err)?;
-    let mut rgba = to_rgba(&buf[..info.buffer_size()], info.color_type, (w * h) as usize)?;
+    let mut rgba = to_rgba(
+        &buf[..info.buffer_size()],
+        info.color_type,
+        (w * h) as usize,
+    )?;
     premultiply(&mut rgba);
     Ok(Image {
         width: w,
@@ -89,11 +93,7 @@ pub fn decode_frames(bytes: &[u8]) -> Result<ImageFrames, ImageError> {
             info.color_type,
             (info.width * info.height) as usize,
         )?;
-        let den = if fc.delay_den == 0 {
-            100
-        } else {
-            fc.delay_den
-        };
+        let den = if fc.delay_den == 0 { 100 } else { fc.delay_den };
         let delay = Duration::from_secs_f64(f64::from(fc.delay_num) / f64::from(den));
         let dispose = match fc.dispose_op {
             ::png::DisposeOp::None => Dispose::None,

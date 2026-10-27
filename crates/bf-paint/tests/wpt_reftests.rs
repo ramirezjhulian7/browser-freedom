@@ -21,9 +21,15 @@ fn wpt_reftests() {
 fn wpt_svg_reftests() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     if !workspace.join("tests/wpt/svg").is_dir() {
-        eprintln!("aviso: falta tests/wpt/svg (git -C tests/wpt sparse-checkout add svg); se salta");
+        eprintln!(
+            "aviso: falta tests/wpt/svg (git -C tests/wpt sparse-checkout add svg); se salta"
+        );
         return;
     }
-    let results = bf_paint::reftest::run_and_report(&workspace, Some(&std::env::var("BF_SVG_FILTER").unwrap_or_else(|_| "/wpt/svg/".into())), false);
+    let results = bf_paint::reftest::run_and_report(
+        &workspace,
+        Some(&std::env::var("BF_SVG_FILTER").unwrap_or_else(|_| "/wpt/svg/".into())),
+        false,
+    );
     assert!(!results.is_empty());
 }

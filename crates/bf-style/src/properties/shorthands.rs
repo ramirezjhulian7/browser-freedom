@@ -242,9 +242,13 @@ fn mask(input: &[ComponentValue]) -> Option<Vec<Value>> {
         .any(|v| ident(v).and_then(BackgroundBox::from_ident).is_some());
     if !explicit_box {
         out.retain(|v| !matches!(v, Value::MaskClip(_)));
-        out.push((L::MaskClip.def().parse)(&bf_css::syntax::parse_component_value_list("border-box"))?);
+        out.push((L::MaskClip.def().parse)(
+            &bf_css::syntax::parse_component_value_list("border-box"),
+        )?);
     }
-    out.push((L::MaskOrigin.def().parse)(&bf_css::syntax::parse_component_value_list("border-box"))?);
+    out.push((L::MaskOrigin.def().parse)(
+        &bf_css::syntax::parse_component_value_list("border-box"),
+    )?);
     Some(out)
 }
 

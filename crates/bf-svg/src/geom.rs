@@ -379,12 +379,7 @@ fn arc_to(
         out.push(Seg::LineTo(x2, y2));
         return;
     }
-    let (x1, y1, x2, y2) = (
-        f64::from(x1),
-        f64::from(y1),
-        f64::from(x2),
-        f64::from(y2),
-    );
+    let (x1, y1, x2, y2) = (f64::from(x1), f64::from(y1), f64::from(x2), f64::from(y2));
     let phi = f64::from(rot).to_radians();
     let (sin, cos) = phi.sin_cos();
     let dx = (x1 - x2) / 2.0;
@@ -428,7 +423,9 @@ fn arc_to(
     } else if sweep && delta < 0.0 {
         delta += 2.0 * std::f64::consts::PI;
     }
-    let segments = (delta.abs() / (std::f64::consts::FRAC_PI_2) - 1e-7).ceil().max(1.0) as usize;
+    let segments = (delta.abs() / (std::f64::consts::FRAC_PI_2) - 1e-7)
+        .ceil()
+        .max(1.0) as usize;
     let step = delta / segments as f64;
     let k = 4.0 / 3.0 * (step / 4.0).tan();
     let point = |t: f64| {
@@ -447,11 +444,7 @@ fn arc_to(
         let t2 = t + step;
         let (p1, p2) = (point(t), point(t2));
         let (d1, d2) = (deriv(t), deriv(t2));
-        let end = if i + 1 == segments {
-            (x2, y2)
-        } else {
-            p2
-        };
+        let end = if i + 1 == segments { (x2, y2) } else { p2 };
         out.push(Seg::CubicTo(
             (p1.0 + k * d1.0) as f32,
             (p1.1 + k * d1.1) as f32,
@@ -620,10 +613,7 @@ fn cubic_extrema(
     let mut ts = roots(p0.0, p1.0, p2.0, p3.0);
     ts.extend(roots(p0.1, p1.1, p2.1, p3.1));
     for t in ts {
-        add(
-            at(t, p0.0, p1.0, p2.0, p3.0),
-            at(t, p0.1, p1.1, p2.1, p3.1),
-        );
+        add(at(t, p0.0, p1.0, p2.0, p3.0), at(t, p0.1, p1.1, p2.1, p3.1));
     }
 }
 

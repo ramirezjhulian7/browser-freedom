@@ -5,8 +5,8 @@
 use bf_layout::{FontProvider, FontRequest, PathCommand};
 use bf_style::properties::types::{FamilyName, FontFamily};
 use bf_svg::{
-    Chunk, ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node,
-    Paint, Rgba, Seg, Spread, Stroke, Text, TextAnchor, Tree,
+    Chunk, ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node, Paint,
+    Rgba, Seg, Spread, Stroke, Text, TextAnchor, Tree,
 };
 use tiny_skia::{
     Color, FillRule as SkFillRule, GradientStop, LinearGradient, Mask, Path, PathBuilder, Pixmap,
@@ -182,7 +182,12 @@ impl Raster<'_> {
         }
         for text in &clip.texts {
             for (p, _, _) in self.text_paths(text) {
-                mask.fill_path(&p, SkFillRule::Winding, true, ts.pre_concat(sk(&text.transform)));
+                mask.fill_path(
+                    &p,
+                    SkFillRule::Winding,
+                    true,
+                    ts.pre_concat(sk(&text.transform)),
+                );
             }
         }
         Some(mask)
@@ -309,7 +314,14 @@ impl Raster<'_> {
 
 /// Familia de CSS a partir de los nombres de `font-family`.
 fn family(names: &[String]) -> FontFamily {
-    const GENERIC: &[&str] = &["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui"];
+    const GENERIC: &[&str] = &[
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+    ];
     FontFamily(
         names
             .iter()

@@ -74,7 +74,9 @@ fn calc(values: &[ComponentValue]) -> Option<CalcVal> {
                 (CalcVal::Num(a), CalcVal::Num(b), '*') => CalcVal::Num(a * b),
                 (CalcVal::Num(a), CalcVal::Num(b), _) => CalcVal::Num(a / b),
                 (CalcVal::Num(k), CalcVal::Len(a, b, c), '*')
-                | (CalcVal::Len(a, b, c), CalcVal::Num(k), '*') => CalcVal::Len(a * k, b * k, c * k),
+                | (CalcVal::Len(a, b, c), CalcVal::Num(k), '*') => {
+                    CalcVal::Len(a * k, b * k, c * k)
+                }
                 (CalcVal::Len(a, b, c), CalcVal::Num(k), '/') => CalcVal::Len(a / k, b / k, c / k),
                 _ => return None,
             };
@@ -344,9 +346,7 @@ impl Viewport {
             Len::Px(v) => v,
             Len::Em(v) => v * font,
             Len::Ex(v) => v * font * 0.5,
-            Len::Calc(px, pct, em) => {
-                px + em * font + self.resolve(Len::Pct(pct), axis, font)
-            }
+            Len::Calc(px, pct, em) => px + em * font + self.resolve(Len::Pct(pct), axis, font),
             Len::Pct(p) => {
                 let base = match axis {
                     Axis::X => self.w,
@@ -578,8 +578,7 @@ impl<'a> Builder<'a> {
     }
 
     fn len(&self, n: &DocNode, name: &str, axis: Axis, vp: Viewport, st: &St) -> Option<f32> {
-        self.len_attr(n, name)
-            .map(|l| vp.resolve(l, axis, st.size))
+        self.len_attr(n, name).map(|l| vp.resolve(l, axis, st.size))
     }
 
     fn display_none(n: &DocNode) -> bool {
@@ -621,7 +620,9 @@ impl<'a> Builder<'a> {
             .props
             .get("transform-box")
             .and_then(|v| ident(v))
-            .is_some_and(|b| b == "fill-box" || b == "content-box" || b == "stroke-box" || b == "border-box");
+            .is_some_and(|b| {
+                b == "fill-box" || b == "content-box" || b == "stroke-box" || b == "border-box"
+            });
         let (rx, ry, rw, rh) = if fill_box {
             node_bbox(node, &Transform::IDENTITY).unwrap_or((0.0, 0.0, 0.0, 0.0))
         } else {
@@ -883,7 +884,9 @@ impl<'a> Builder<'a> {
             None => Viewport { w, h },
         };
         let par = c.attr("preserveAspectRatio").unwrap_or("");
-        let vb_t = view_box.map_or(Transform::IDENTITY, |vb| view_box_transform(vb, par, (w, h)));
+        let vb_t = view_box.map_or(Transform::IDENTITY, |vb| {
+            view_box_transform(vb, par, (w, h))
+        });
         let children = self.children(content, st, inner_vp);
         let overflow_visible = c
             .props
@@ -892,7 +895,11 @@ impl<'a> Builder<'a> {
             .is_some_and(|o| o == "visible" || o == "auto");
         let clip = (!overflow_visible).then(|| ClipPath {
             transform: Transform::IDENTITY,
-            shapes: vec![(geom::rect(0.0, 0.0, w, h, 0.0, 0.0), FillRule::NonZero, Transform::IDENTITY)],
+            shapes: vec![(
+                geom::rect(0.0, 0.0, w, h, 0.0, 0.0),
+                FillRule::NonZero,
+                Transform::IDENTITY,
+            )],
             texts: Vec::new(),
         });
         Some(Node::Group(Group {
@@ -958,15 +965,24 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    fn resolve_paint(&self, spec: &PaintSpec, st: &St, bbox: Option<Bbox>, vp: Viewport) -> Option<Paint> {
+    fn resolve_paint(
+        &self,
+        spec: &PaintSpec,
+        st: &St,
+        bbox: Option<Bbox>,
+        vp: Viewport,
+    ) -> Option<Paint> {
         match spec {
             PaintSpec::None => None,
             PaintSpec::Color(c) => Some(Paint::Color(*c)),
             PaintSpec::CurrentColor => Some(Paint::Color(st.color)),
             PaintSpec::Url(url, fallback) => {
-                let server = self
-                    .by_id(url)
-                    .filter(|&s| matches!(self.node(s).name.as_str(), "linearGradient" | "radialGradient"));
+                let server = self.by_id(url).filter(|&s| {
+                    matches!(
+                        self.node(s).name.as_str(),
+                        "linearGradient" | "radialGradient"
+                    )
+                });
                 match server.map(|s| self.gradient(s, bbox, vp, st)) {
                     Some(Ok(paint)) => paint,
                     // Referencia inválida (o transformación no invertible): el respaldo, o nada
@@ -1118,7 +1134,9 @@ impl<'a> Builder<'a> {
             .and_then(geom::parse_transform)
             .unwrap_or_default();
         let coord = |name: &str, default: &str, axis: Axis| -> f32 {
-            let l = attr(name).and_then(parse_len).or_else(|| parse_len(default));
+            let l = attr(name)
+                .and_then(parse_len)
+                .or_else(|| parse_len(default));
             match (l, bbox_units) {
                 (Some(Len::Pct(p)), true) => p / 100.0,
                 (Some(Len::Px(v)), true) => v,
@@ -1182,7 +1200,13 @@ impl<'a> Builder<'a> {
     }
 
     /// `clipPath` referenciado por un elemento con caja `bbox`.
-    fn clip_path(&mut self, c: usize, st: &St, vp: Viewport, bbox: Option<Bbox>) -> Option<ClipPath> {
+    fn clip_path(
+        &mut self,
+        c: usize,
+        st: &St,
+        vp: Viewport,
+        bbox: Option<Bbox>,
+    ) -> Option<ClipPath> {
         let cn = self.node(c);
         let bbox_units = cn
             .attr("clipPathUnits")
@@ -1207,10 +1231,20 @@ impl<'a> Builder<'a> {
         let kids = self.node(c).children.clone();
         for k in kids {
             let kn = self.node(k);
-            if kn.is_text() || !matches!(
-                kn.name.as_str(),
-                "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" | "text" | "use"
-            ) {
+            if kn.is_text()
+                || !matches!(
+                    kn.name.as_str(),
+                    "rect"
+                        | "circle"
+                        | "ellipse"
+                        | "line"
+                        | "polyline"
+                        | "polygon"
+                        | "path"
+                        | "text"
+                        | "use"
+                )
+            {
                 continue;
             }
             // En un recorte cuenta solo la geometría: relleno opaco, sin trazo (§6.3).
@@ -1234,7 +1268,11 @@ impl<'a> Builder<'a> {
         if let Some(first) = chunks.iter_mut().flat_map(|c| c.spans.iter_mut()).next() {
             first.text = first.text.trim_start().to_owned();
         }
-        if let Some(last) = chunks.iter_mut().flat_map(|c| c.spans.iter_mut()).next_back() {
+        if let Some(last) = chunks
+            .iter_mut()
+            .flat_map(|c| c.spans.iter_mut())
+            .next_back()
+        {
             last.text = last.text.trim_end().to_owned();
         }
         chunks.retain(|c| !c.spans.is_empty());
@@ -1376,7 +1414,9 @@ fn node_bbox(node: &Node, t: &Transform) -> Option<Bbox> {
 
 fn flatten_clip(node: &Node, t: &Transform, rule: crate::FillRule, out: &mut ClipPath) {
     match node {
-        Node::Path(p) => out.shapes.push((p.segs.clone(), rule, t.then(&p.transform))),
+        Node::Path(p) => out
+            .shapes
+            .push((p.segs.clone(), rule, t.then(&p.transform))),
         Node::Group(g) => {
             let t = t.then(&g.transform);
             for c in &g.children {
@@ -1503,7 +1543,10 @@ fn view_box_transform((vx, vy, vw, vh): Bbox, par: &str, (w, h): (f32, f32)) -> 
         return Transform::scale(sx, sy).then(&Transform::translate(-vx, -vy));
     }
     let s = if slice { sx.max(sy) } else { sx.min(sy) };
-    let (ax, ay) = (align.get(0..4).unwrap_or("xMid"), align.get(4..8).unwrap_or("YMid"));
+    let (ax, ay) = (
+        align.get(0..4).unwrap_or("xMid"),
+        align.get(4..8).unwrap_or("YMid"),
+    );
     let tx = match ax {
         "xMin" => 0.0,
         "xMax" => w - vw * s,
@@ -1650,7 +1693,9 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
             .and_then(|v| v.par.as_deref())
             .or_else(|| r.attr("preserveAspectRatio"))
             .unwrap_or("");
-        root.transform = vb.map_or(Transform::IDENTITY, |vb| view_box_transform(vb, par, (width, height)));
+        root.transform = vb.map_or(Transform::IDENTITY, |vb| {
+            view_box_transform(vb, par, (width, height))
+        });
         if let Some(t) = view.and_then(|v| v.transform) {
             root.transform = root.transform.then(&t);
         }

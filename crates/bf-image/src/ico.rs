@@ -4,7 +4,11 @@
 use crate::{Image, ImageError, invalid};
 
 pub fn decode(bytes: &[u8]) -> Result<Image, ImageError> {
-    let u16_at = |o: usize| bytes.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
+    let u16_at = |o: usize| {
+        bytes
+            .get(o..o + 2)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]))
+    };
     let u32_at = |o: usize| {
         bytes
             .get(o..o + 4)

@@ -28,7 +28,9 @@ const SVG_NS: &str = "xmlns='http://www.w3.org/2000/svg'";
 #[test]
 fn shapes_and_view_box() {
     let p = raster(
-        &format!("<svg {SVG_NS} viewBox='0 0 20 20'><rect x='0' y='0' width='10' height='10' fill='red'/><circle cx='15' cy='15' r='4' fill='#00f'/></svg>"),
+        &format!(
+            "<svg {SVG_NS} viewBox='0 0 20 20'><rect x='0' y='0' width='10' height='10' fill='red'/><circle cx='15' cy='15' r='4' fill='#00f'/></svg>"
+        ),
         40,
         40,
     );
@@ -38,7 +40,9 @@ fn shapes_and_view_box() {
     // `preserveAspectRatio` por defecto (xMidYMid meet): un viewBox de 10×20 en 40×40 queda
     // centrado en x ∈ [10, 30).
     let p = raster(
-        &format!("<svg {SVG_NS} viewBox='0 0 10 20'><rect width='10' height='20' fill='lime'/></svg>"),
+        &format!(
+            "<svg {SVG_NS} viewBox='0 0 10 20'><rect width='10' height='20' fill='lime'/></svg>"
+        ),
         40,
         40,
     );
@@ -112,7 +116,10 @@ fn gradients_opacity_and_clip() {
 
 #[test]
 fn intrinsic_sizes() {
-    let s = Svg::parse(&format!("<svg {SVG_NS} width='18' height='18' viewBox='0 0 4 4'/>")).unwrap();
+    let s = Svg::parse(&format!(
+        "<svg {SVG_NS} width='18' height='18' viewBox='0 0 4 4'/>"
+    ))
+    .unwrap();
     assert_eq!(s.default_size(), (18.0, 18.0));
     let s = Svg::parse(&format!("<svg {SVG_NS} viewBox='0 0 20 10'/>")).unwrap();
     assert_eq!(s.intrinsic().ratio, Some(2.0));
@@ -165,7 +172,11 @@ fn mask_image_with_svg_icon() {
          mask-size:20px;mask-repeat:no-repeat;mask-position:center\"></div>"
     ));
     assert_eq!(px(&p, 10, 10), (255, 0, 0, 255));
-    assert_eq!(px(&p, 1, 1), (255, 255, 255, 255), "fuera del icono no se pinta");
+    assert_eq!(
+        px(&p, 1, 1),
+        (255, 255, 255, 255),
+        "fuera del icono no se pinta"
+    );
 }
 
 #[test]

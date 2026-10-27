@@ -107,7 +107,12 @@ fn bmp_rle8() {
 
 #[test]
 fn truncated_bitmaps_do_not_panic() {
-    for name in ["bmp/bgr24.bmp", "bmp/pal8.bmp", "bmp/icon_bmp.ico", "bmp/icon_png.ico"] {
+    for name in [
+        "bmp/bgr24.bmp",
+        "bmp/pal8.bmp",
+        "bmp/icon_bmp.ico",
+        "bmp/icon_png.ico",
+    ] {
         let bytes = vector(name);
         for cut in (0..bytes.len()).step_by(7) {
             let _ = decode(&bytes[..cut], None);
@@ -140,11 +145,21 @@ fn animated_vectors() {
             "{name}"
         );
         // El primer fotograma es la imagen fija.
-        assert_eq!(frames.frames[0].image, decode(&bytes, None).unwrap(), "{name}");
+        assert_eq!(
+            frames.frames[0].image,
+            decode(&bytes, None).unwrap(),
+            "{name}"
+        );
         assert_ne!(frames.frames[0].image, frames.frames[1].image, "{name}");
         let at = |ms| frames.index_at(Duration::from_millis(ms));
-        assert_eq!([at(0), at(99), at(100), at(250), at(300), at(1010)], [0, 0, 1, 2, 0, 1]);
-        assert_eq!(frames.frame_at(Duration::from_millis(150)), &frames.frames[1].image);
+        assert_eq!(
+            [at(0), at(99), at(100), at(250), at(300), at(1010)],
+            [0, 0, 1, 2, 0, 1]
+        );
+        assert_eq!(
+            frames.frame_at(Duration::from_millis(150)),
+            &frames.frames[1].image
+        );
         assert_eq!(
             frames.next_change(Duration::from_millis(30)),
             Some(Duration::from_millis(70))
@@ -184,7 +199,10 @@ fn apng_dispose_and_blend() {
     // 0.5 verde sobre rojo: (127, 128, 0, 255) premultiplicado.
     assert_eq!(frames.frames[1].image.rgba, [127, 128, 0, 255, 0, 0, 0, 0]);
     assert_eq!(frames.frames[1].dispose, Dispose::Previous);
-    assert_eq!(frames.frames[2].image.rgba, [255, 0, 0, 255, 0, 0, 255, 255]);
+    assert_eq!(
+        frames.frames[2].image.rgba,
+        [255, 0, 0, 255, 0, 0, 255, 255]
+    );
     assert_eq!(frames.frames[2].region, (1, 0, 1, 1));
     // 3 fotogramas de 500 ms, dos pasadas: desde 2.5 s queda el último.
     let at = |ms| frames.index_at(Duration::from_millis(ms));
@@ -202,5 +220,8 @@ fn still_images_have_one_frame() {
     let frames = decode_frames(&bytes, None).unwrap();
     assert!(!frames.is_animated());
     assert_eq!(frames.next_change(Duration::ZERO), None);
-    assert_eq!(frames.frame_at(Duration::from_secs(5)), &decode(&bytes, None).unwrap());
+    assert_eq!(
+        frames.frame_at(Duration::from_secs(5)),
+        &decode(&bytes, None).unwrap()
+    );
 }

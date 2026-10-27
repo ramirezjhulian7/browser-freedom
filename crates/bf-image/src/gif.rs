@@ -45,7 +45,13 @@ fn frames(bytes: &[u8], max_frames: usize) -> Result<ImageFrames, ImageError> {
     }
     if comp.frames.is_empty() {
         // Sin cuadros: el lienzo vacío.
-        comp.push((0, 0, 0, 0), Vec::new(), Duration::ZERO, Dispose::None, Blend::Over);
+        comp.push(
+            (0, 0, 0, 0),
+            Vec::new(),
+            Duration::ZERO,
+            Dispose::None,
+            Blend::Over,
+        );
     }
     // NETSCAPE2.0: el contador es de repeticiones (0 = sin fin); sin la extensión, una vez.
     let plays = match decoder.repeat() {

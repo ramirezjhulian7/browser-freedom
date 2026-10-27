@@ -106,11 +106,7 @@ fn real_sc(f: &Fragment) -> bool {
 
 /// ¿Tiene `mask-image` (CSS Masking 1 §7.1)? Crea un stacking context (E7).
 fn masked(style: &ComputedStyle) -> bool {
-    style
-        .mask_image
-        .0
-        .iter()
-        .any(|i| !matches!(i, Image::None))
+    style.mask_image.0.iter().any(|i| !matches!(i, Image::None))
 }
 
 fn is_float(f: &Fragment) -> bool {
@@ -556,10 +552,9 @@ impl<'a> Builder<'a> {
         s.background_size = s.mask_size.clone();
         s.background_origin = s.mask_origin.clone();
         s.background_clip = s.mask_clip.clone();
-        s.background_attachment =
-            bf_style::properties::types::BackgroundAttachment(vec![
-                bf_style::properties::types::Attachment::Scroll,
-            ]);
+        s.background_attachment = bf_style::properties::types::BackgroundAttachment(vec![
+            bf_style::properties::types::Attachment::Scroll,
+        ]);
         self.set_clip(clip);
         let start = self.list.items.len();
         self.image_layers(f, &s, None, clip);
@@ -773,10 +768,10 @@ impl<'a> Builder<'a> {
         }
         let rect = f.content_rect();
         // E7: los SVG se rasterizan al tamaño del content box.
-        let Some(image) = f
-            .node
-            .and_then(|n| self.images.for_node_at(n, rect.width, rect.height, Some(self.fonts)))
-        else {
+        let Some(image) = f.node.and_then(|n| {
+            self.images
+                .for_node_at(n, rect.width, rect.height, Some(self.fonts))
+        }) else {
             return;
         };
         if rect.width > 0.0 && rect.height > 0.0 {

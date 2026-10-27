@@ -318,9 +318,11 @@ fn inline_svgs(doc: &Document, styles: &StyleMap, images: &mut PageImages) {
             None => bf_svg::Inherited::default(),
         };
         let result = bf_svg::Svg::from_element(doc, node, css, inherited);
-        images.stats.record(&result.as_ref().map_err(|e| {
-            bf_image::ImageError::Decode(e.to_string())
-        }));
+        images.stats.record(
+            &result
+                .as_ref()
+                .map_err(|e| bf_image::ImageError::Decode(e.to_string())),
+        );
         let Ok(svg) = result else {
             continue;
         };

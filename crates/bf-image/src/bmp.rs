@@ -119,7 +119,12 @@ pub(crate) fn decode_dib(
         } else {
             0
         };
-        Some([u32_at(dib, at)?, u32_at(dib, at + 4)?, u32_at(dib, at + 8)?, a])
+        Some([
+            u32_at(dib, at)?,
+            u32_at(dib, at + 4)?,
+            u32_at(dib, at + 8)?,
+            a,
+        ])
     } else {
         None
     };
@@ -135,11 +140,7 @@ pub(crate) fn decode_dib(
     let palette_len = if bpp <= 8 {
         let used = if header >= 36 { u32_at(dib, 32)? } else { 0 };
         let max = 1u32 << bpp;
-        if used == 0 || used > max {
-            max
-        } else {
-            used
-        }
+        if used == 0 || used > max { max } else { used }
     } else {
         0
     } as usize;
@@ -318,7 +319,9 @@ fn rle(
                 } else {
                     (count as usize).div_ceil(2)
                 };
-                let run = data.get(i..i + bytes).ok_or_else(|| invalid("RLE truncado"))?;
+                let run = data
+                    .get(i..i + bytes)
+                    .ok_or_else(|| invalid("RLE truncado"))?;
                 for k in 0..count as usize {
                     let idx = if bpp == 8 {
                         run[k]
