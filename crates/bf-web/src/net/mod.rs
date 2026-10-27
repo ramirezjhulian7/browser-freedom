@@ -465,9 +465,16 @@ pub fn set_waker(agent: &mut Agent, realm: RealmId, waker: Arc<dyn Fn() + Send +
     state_of(agent, realm).waker = Some(waker);
 }
 
+/// E3: el waker de `realm`, si el embebedor instaló uno (los workers despiertan por él).
+pub(crate) fn waker(agent: &mut Agent, realm: RealmId) -> Option<Arc<dyn Fn() + Send + Sync>> {
+    state_of(agent, realm).waker.clone()
+}
+
 /// Encola una tarea *networking* por cada resultado llegado de los hilos de red; devuelve
 /// cuántas encoló.
 pub fn pump(agent: &mut Agent, realm: RealmId) -> usize {
+    // E3: los mensajes de los workers (el shell llama a `pump` cuando lo despierta el waker).
+    let from_workers = crate::workers::pump(agent);
     let done: Vec<(u64, NetResult)> = {
         let s = state_of(agent, realm);
         std::mem::take(&mut *s.inbox.lock().unwrap_or_else(|e| e.into_inner()))
@@ -499,7 +506,7 @@ pub fn pump(agent: &mut Agent, realm: RealmId) -> usize {
         );
         n += 1;
     }
-    n
+    n + from_workers
 }
 
 /// El backend de la ventana en curso (para las conexiones abiertas).

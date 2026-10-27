@@ -49,6 +49,7 @@ pub mod dom;
 pub mod html;
 pub mod net; // E2: fetch, XMLHttpRequest, FormData, Blob
 pub mod storage; // E2: IndexedDB y navigator.storage
+pub mod workers; // E3: Worker, SharedWorker, MessagePort entre hilos
 
 pub use bf_dom::{Document, NodeId};
 pub use bf_html::Parser;
@@ -277,4 +278,5 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     cssom::register(agent, realm, ctx); // E2
     net::register(agent, realm, ctx); // E2
     storage::register(agent, realm, ctx); // E2
+    workers::register(agent, realm, ctx); // E3
 }

@@ -726,6 +726,30 @@ impl NetBackend for WptServe {
         if req.url.scheme == "blob" || req.url.scheme == "data" {
             return NetBackend::fetch(&bf_net::Fetcher::new(), req);
         }
+        // E3: `x.any.worker.js`, generado a partir de `x.any.js` (como wptserve).
+        let path = req.url.path_string();
+        if let Some(stem) = path.strip_suffix(".any.worker.js") {
+            let mut any = req.url.clone();
+            any.set_pathname(&format!("{stem}.any.js"));
+            any.query = None;
+            let src = self.files.fetch(&NetRequest {
+                url: any,
+                options: bf_net::RequestOptions::default(),
+            })?;
+            let text = crate::html::testharness::any_worker_script(
+                &String::from_utf8_lossy(&src.body),
+                &format!("{stem}.any.js"),
+            );
+            let mut headers = HeaderList::default();
+            headers.append("Content-Type", "text/javascript; charset=utf-8");
+            return Ok(NetResponse {
+                url_list: vec![req.url.clone()],
+                status: 200,
+                status_text: "OK".into(),
+                headers,
+                body: text.into_bytes(),
+            });
+        }
         let mut url = req.url.clone();
         let mut method = req.options.method.clone();
         let mut body = req.options.body.clone();
