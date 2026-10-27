@@ -889,6 +889,74 @@ impl Canvas {
     }
 }
 
+// --- E7: máscaras ---
+
+impl Canvas {
+    /// Cierra una capa de `mask-image`: pinta las capas de la máscara en otra capa y compone
+    /// la de contenido con el alfa de esa como máscara.
+    fn pop_mask(&mut self, items: &[DisplayItem]) {
+        if self.layers.len() <= 1 {
+            return;
+        }
+        let Some(layer) = Pixmap::new(self.width, self.height) else {
+            return;
+        };
+        self.layers.push((layer, 1.0));
+        let clips = self.masks.len();
+        for item in items {
+            match item {
+                DisplayItem::BackgroundImage {
+                    area,
+                    radii,
+                    tile,
+                    xs,
+                    ys,
+                    image,
+                } => self.background_image(area, radii, tile, xs.as_deref(), ys.as_deref(), image),
+                DisplayItem::Gradient {
+                    area,
+                    radii,
+                    tile,
+                    xs,
+                    ys,
+                    gradient,
+                } => self.gradient(area, radii, tile, xs.as_deref(), ys.as_deref(), gradient),
+                DisplayItem::PushClip { rect, radii } => self.push_clip(rect, radii),
+                DisplayItem::PushClipBorder {
+                    rect,
+                    widths,
+                    styles,
+                    radii,
+                } => {
+                    let (rect, widths, styles, radii) = (*rect, *widths, *styles, *radii);
+                    self.push_clip_drawn(|c| {
+                        c.border(&rect, &widths, &[Rgba::BLACK; 4], &styles, &radii);
+                    });
+                }
+                DisplayItem::PushClipText { glyphs } => self.push_clip_text(glyphs),
+                DisplayItem::PopClip => {
+                    if self.masks.len() > clips {
+                        self.masks.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.masks.truncate(clips);
+        let (alpha, _) = self.layers.pop().expect("capa de la máscara");
+        let (content, _) = self.layers.pop().expect("capa enmascarada");
+        let mask = Mask::from_pixmap(alpha.as_ref(), tiny_skia::MaskType::Alpha);
+        self.target().draw_pixmap(
+            0,
+            0,
+            content.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            Some(&mask),
+        );
+    }
+}
+
 // --- E4: gradientes y sombras ---
 
 /// Rectángulo de píxeles de dispositivo `[x0, x1) × [y0, y1)`.
@@ -1484,6 +1552,11 @@ pub fn render_scrolled(
                     );
                 }
             }
+            DisplayItem::PushMask => {
+                let layer = Pixmap::new(width, height).expect("tamaño de pixmap válido");
+                canvas.layers.push((layer, 1.0));
+            }
+            DisplayItem::PopMask { layers } => canvas.pop_mask(layers), // E7
             DisplayItem::PushTransform { dx, dy } => {
                 let ts = canvas.ts().pre_translate(*dx, *dy);
                 canvas.transforms.push(ts);

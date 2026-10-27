@@ -100,7 +100,17 @@ fn real_sc(f: &Fragment) -> bool {
     is_box(f)
         && ((positioned(f) && f.z_index.is_some())
             || f.style.opacity.0 < 1.0
-            || f.style.position == Position::Fixed)
+            || f.style.position == Position::Fixed
+            || masked(&f.style))
+}
+
+/// ¿Tiene `mask-image` (CSS Masking 1 §7.1)? Crea un stacking context (E7).
+fn masked(style: &ComputedStyle) -> bool {
+    style
+        .mask_image
+        .0
+        .iter()
+        .any(|i| !matches!(i, Image::None))
 }
 
 fn is_float(f: &Fragment) -> bool {
@@ -216,6 +226,11 @@ impl<'a> Builder<'a> {
             self.set_clip(clip);
             self.list.push(DisplayItem::PushOpacity(opacity.max(0.0)));
         }
+        let mask = masked(&f.style); // E7
+        if mask {
+            self.set_clip(clip);
+            self.list.push(DisplayItem::PushMask);
+        }
         let outer_outlines = std::mem::take(&mut self.outlines); // E4
         let mut layers = Layers::default();
         self.collect(f, clip, &mut layers);
@@ -245,6 +260,11 @@ impl<'a> Builder<'a> {
             self.child_context(e);
         }
         self.flush_outlines(outer_outlines); // E4
+        if mask {
+            let layers = self.mask_layers(f, clip);
+            self.set_clip(clip);
+            self.list.push(DisplayItem::PopMask { layers });
+        }
         if opacity < 1.0 {
             self.set_clip(clip);
             self.list.push(DisplayItem::PopOpacity);
@@ -522,12 +542,45 @@ impl<'a> Builder<'a> {
     ///
     /// TODO(backgrounds): `background-attachment: fixed` se pinta como `scroll`.
     fn background_images(&mut self, f: &Fragment, canvas: Option<Rect>, clip: &ClipChain) {
-        /// La fuente de una capa: imagen decodificada o gradiente (E4).
+        let style = f.style.clone();
+        self.image_layers(f, &style, canvas, clip);
+    }
+
+    /// Las capas de `mask-image` de `f` (E7), con la geometría de las de fondo: los ítems que
+    /// la máscara pinta (su alfa recorta el contenido).
+    fn mask_layers(&mut self, f: &Fragment, clip: &ClipChain) -> Vec<DisplayItem> {
+        let mut s = (*f.style).clone();
+        s.background_image = s.mask_image.clone();
+        s.background_repeat = s.mask_repeat.clone();
+        s.background_position = s.mask_position.clone();
+        s.background_size = s.mask_size.clone();
+        s.background_origin = s.mask_origin.clone();
+        s.background_clip = s.mask_clip.clone();
+        s.background_attachment =
+            bf_style::properties::types::BackgroundAttachment(vec![
+                bf_style::properties::types::Attachment::Scroll,
+            ]);
+        self.set_clip(clip);
+        let start = self.list.items.len();
+        self.image_layers(f, &s, None, clip);
+        self.set_clip(clip);
+        self.list.items.split_off(start)
+    }
+
+    /// Capas de imagen con las propiedades `background-*` de `s` (las del fragmento, o las de
+    /// su máscara).
+    fn image_layers(
+        &mut self,
+        f: &Fragment,
+        s: &ComputedStyle,
+        canvas: Option<Rect>,
+        clip: &ClipChain,
+    ) {
+        /// La fuente de una capa: imagen decodificada (por URL) o gradiente (E4).
         enum Source<'g> {
-            Image(std::sync::Arc<tiny_skia::Pixmap>),
+            Image(&'g str),
             Gradient(&'g bf_style::properties::gradient::Gradient),
         }
-        let s = &f.style;
         let layers = &s.background_image.0;
         let n = layers.len();
         let radii = border_radii(s, &f.rect);
@@ -539,16 +592,9 @@ impl<'a> Builder<'a> {
         };
         for i in (0..n).rev() {
             let source = match &layers[i] {
-                Image::Url(url) => match self.images.for_url(url) {
-                    Some(image) => Source::Image(image.clone()),
-                    None => continue,
-                },
+                Image::Url(url) if self.images.for_url(url).is_some() => Source::Image(url),
+                Image::Url(_) | Image::None => continue,
                 Image::Gradient(g) => Source::Gradient(g),
-                Image::None => continue,
-            };
-            let natural = match &source {
-                Source::Image(image) => Some((image.width() as f32, image.height() as f32)),
-                Source::Gradient(_) => None,
             };
             let boxed = |b: BackgroundBox| match b {
                 BackgroundBox::PaddingBox => (f.padding_rect(), radii.shrink(&f.border)),
@@ -592,6 +638,11 @@ impl<'a> Builder<'a> {
             }
             let size = &s.background_size.0[pick(&s.background_size.0, i)];
             let (pw, ph) = (positioning.width, positioning.height);
+            // E7: los SVG completan su tamaño natural contra el área de posicionamiento.
+            let natural = match &source {
+                Source::Image(url) => self.images.natural_size(url, (pw, ph)),
+                Source::Gradient(_) => None,
+            };
             // Sin tamaño natural (gradientes): el área de posicionamiento (§3.9).
             let (iw, ih) = natural.unwrap_or((pw, ph));
             let (mut w, mut h) = match size {
@@ -679,14 +730,20 @@ impl<'a> Builder<'a> {
             let ys = positions(ry, positioning.y, y, ph, h, (area.y, area.bottom()));
             let tile = Rect::new(x, y, w, h);
             let item = match source {
-                Source::Image(image) => DisplayItem::BackgroundImage {
-                    area,
-                    radii: area_radii,
-                    tile,
-                    xs,
-                    ys,
-                    image,
-                },
+                Source::Image(url) => {
+                    // E7: los SVG se rasterizan al tamaño del tile.
+                    let Some(image) = self.images.image_at(url, w, h, Some(self.fonts)) else {
+                        continue;
+                    };
+                    DisplayItem::BackgroundImage {
+                        area,
+                        radii: area_radii,
+                        tile,
+                        xs,
+                        ys,
+                        image,
+                    }
+                }
                 Source::Gradient(g) => {
                     let Some(gradient) = resolve_gradient(g, w, h, s.color.rgba()) else {
                         continue;
@@ -714,10 +771,14 @@ impl<'a> Builder<'a> {
         if !visible(&f.style) {
             return;
         }
-        let Some(image) = f.node.and_then(|n| self.images.for_node(n)).cloned() else {
+        let rect = f.content_rect();
+        // E7: los SVG se rasterizan al tamaño del content box.
+        let Some(image) = f
+            .node
+            .and_then(|n| self.images.for_node_at(n, rect.width, rect.height, Some(self.fonts)))
+        else {
             return;
         };
-        let rect = f.content_rect();
         if rect.width > 0.0 && rect.height > 0.0 {
             // E4: el contenido reemplazado se recorta a la curva interior del content box
             // (CSS Backgrounds 3 §5.3).

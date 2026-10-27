@@ -13,3 +13,17 @@ fn wpt_reftests() {
     let results = bf_paint::reftest::run_and_report(&workspace, None, true);
     assert!(!results.is_empty());
 }
+
+/// Solo `svg/` (E7), sin tocar `docs/`: `cargo test -p bf-paint --test wpt_reftests -- --ignored
+/// wpt_svg --nocapture`.
+#[test]
+#[ignore = "lento: correr con --ignored"]
+fn wpt_svg_reftests() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !workspace.join("tests/wpt/svg").is_dir() {
+        eprintln!("aviso: falta tests/wpt/svg (git -C tests/wpt sparse-checkout add svg); se salta");
+        return;
+    }
+    let results = bf_paint::reftest::run_and_report(&workspace, Some("/wpt/svg/"), false);
+    assert!(!results.is_empty());
+}
