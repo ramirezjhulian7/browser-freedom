@@ -22,6 +22,120 @@ enum Len {
     Pct(f32),
     Em(f32),
     Ex(f32),
+    /// `calc()`: px + % + em.
+    Calc(f32, f32, f32),
+}
+
+/// Valor de un `calc()` (CSS Values 4 §10): número puro o combinación lineal px/%/em.
+#[derive(Debug, Clone, Copy)]
+enum CalcVal {
+    Num(f32),
+    Len(f32, f32, f32),
+}
+
+impl CalcVal {
+    fn lin(self) -> (f32, f32, f32) {
+        match self {
+            CalcVal::Num(n) => (n, 0.0, 0.0),
+            CalcVal::Len(a, b, c) => (a, b, c),
+        }
+    }
+}
+
+/// Evalúa la suma de productos de un `calc()` (sin `min()`/`max()`).
+fn calc(values: &[ComponentValue]) -> Option<CalcVal> {
+    let t = toks(values);
+    let factor = |c: &ComponentValue| -> Option<CalcVal> {
+        match c {
+            ComponentValue::Function(f) if f.name.eq_ignore_ascii_case("calc") => calc(&f.value),
+            ComponentValue::Block(b) => calc(&b.value),
+            _ => match c.token()? {
+                TokenKind::Number(n) => Some(CalcVal::Num(n.value as f32)),
+                _ => match cv_len(c)? {
+                    Len::Px(v) => Some(CalcVal::Len(v, 0.0, 0.0)),
+                    Len::Pct(v) => Some(CalcVal::Len(0.0, v, 0.0)),
+                    Len::Em(v) => Some(CalcVal::Len(0.0, 0.0, v)),
+                    Len::Ex(v) => Some(CalcVal::Len(0.0, 0.0, v / 2.0)),
+                    Len::Calc(a, b, c) => Some(CalcVal::Len(a, b, c)),
+                },
+            },
+        }
+    };
+    let mut sum: Option<CalcVal> = None;
+    let mut sign = 1.0f32;
+    let mut i = 0;
+    while i < t.len() {
+        let mut term = factor(t[i])?;
+        i += 1;
+        while let Some(TokenKind::Delim(op @ ('*' | '/'))) = t.get(i).and_then(|c| c.token()) {
+            let rhs = factor(t.get(i + 1)?)?;
+            i += 2;
+            term = match (term, rhs, op) {
+                (CalcVal::Num(a), CalcVal::Num(b), '*') => CalcVal::Num(a * b),
+                (CalcVal::Num(a), CalcVal::Num(b), _) => CalcVal::Num(a / b),
+                (CalcVal::Num(k), CalcVal::Len(a, b, c), '*')
+                | (CalcVal::Len(a, b, c), CalcVal::Num(k), '*') => CalcVal::Len(a * k, b * k, c * k),
+                (CalcVal::Len(a, b, c), CalcVal::Num(k), '/') => CalcVal::Len(a / k, b / k, c / k),
+                _ => return None,
+            };
+        }
+        let term = match term {
+            CalcVal::Num(n) => CalcVal::Num(n * sign),
+            CalcVal::Len(a, b, c) => CalcVal::Len(a * sign, b * sign, c * sign),
+        };
+        sum = Some(match (sum, term) {
+            (None, t) => t,
+            (Some(CalcVal::Num(a)), CalcVal::Num(b)) => CalcVal::Num(a + b),
+            (Some(s), t) => {
+                let ((a, b, c), (d, e, f)) = (s.lin(), t.lin());
+                CalcVal::Len(a + d, b + e, c + f)
+            }
+        });
+        match t.get(i).and_then(|c| c.token()) {
+            None => break,
+            Some(TokenKind::Delim('+')) => sign = 1.0,
+            Some(TokenKind::Delim('-')) => sign = -1.0,
+            _ => return None,
+        }
+        i += 1;
+    }
+    sum
+}
+
+/// ¿Es `prop` una propiedad de geometría de `element` (SVG 2 §9.1–§10)? Las demás longitudes
+/// solo se leen del atributo (`use` ignora `width` de CSS, por ejemplo).
+fn geometry_property(element: &str, prop: &str) -> bool {
+    match prop {
+        "x" | "y" | "width" | "height" => {
+            // Los `svg` anidados no toman `width`/`height` de CSS (como los navegadores).
+            matches!(element, "rect" | "image" | "foreignObject")
+        }
+        "cx" | "cy" => matches!(element, "circle" | "ellipse"),
+        "r" => element == "circle",
+        "rx" | "ry" => matches!(element, "rect" | "ellipse"),
+        _ => false,
+    }
+}
+
+/// Pruebas de procesamiento condicional (§5.7): no soportamos extensiones salvo XHTML, y el
+/// idioma del usuario es inglés.
+fn conditions_pass(n: &DocNode) -> bool {
+    if let Some(ext) = n.attr("requiredExtensions") {
+        let list: Vec<&str> = ext.split_ascii_whitespace().collect();
+        if list.is_empty() || list.iter().any(|e| *e != "http://www.w3.org/1999/xhtml") {
+            return false;
+        }
+    }
+    if let Some(langs) = n.attr("systemLanguage") {
+        let ok = langs.split(',').map(str::trim).any(|l| {
+            let l = l.to_ascii_lowercase();
+            l == "en" || l.starts_with("en-")
+        });
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 /// Eje contra el que se resuelven los porcentajes (§8.9).
@@ -84,6 +198,12 @@ fn ident(v: &[ComponentValue]) -> Option<String> {
 }
 
 fn cv_len(c: &ComponentValue) -> Option<Len> {
+    if let ComponentValue::Function(f) = c
+        && f.name.eq_ignore_ascii_case("calc")
+    {
+        let (a, b, c) = calc(&f.value)?.lin();
+        return Some(Len::Calc(a, b, c));
+    }
     match c.token()? {
         TokenKind::Number(n) => Some(Len::Px(n.value as f32)),
         TokenKind::Percentage(n) => Some(Len::Pct(n.value as f32)),
@@ -224,6 +344,9 @@ impl Viewport {
             Len::Px(v) => v,
             Len::Em(v) => v * font,
             Len::Ex(v) => v * font * 0.5,
+            Len::Calc(px, pct, em) => {
+                px + em * font + self.resolve(Len::Pct(pct), axis, font)
+            }
             Len::Pct(p) => {
                 let base = match axis {
                     Axis::X => self.w,
@@ -444,12 +567,14 @@ impl<'a> Builder<'a> {
     }
 
     fn len_attr(&self, n: &DocNode, name: &str) -> Option<Len> {
-        if let Some(v) = n.props.get(name)
+        if geometry_property(&n.name, name)
+            && let Some(v) = n.props.get(name)
             && let Some(l) = one(v).and_then(cv_len)
         {
             return Some(l);
         }
-        parse_len(n.attr(name)?)
+        let a = n.attr(name)?;
+        parse_len(a).or_else(|| one(&parse_component_value_list(a)).and_then(cv_len))
     }
 
     fn len(&self, n: &DocNode, name: &str, axis: Axis, vp: Viewport, st: &St) -> Option<f32> {
@@ -477,13 +602,78 @@ impl<'a> Builder<'a> {
             .unwrap_or_default()
     }
 
+    /// La transformación de un elemento: la propiedad `transform` de CSS si está (si no, el
+    /// atributo), alrededor de `transform-origin` en su `transform-box` (CSS Transforms 1 §6).
+    fn element_transform(&self, n: &DocNode, node: &Node, vp: Viewport, st: &St) -> Transform {
+        let base = n
+            .props
+            .get("transform")
+            .filter(|v| !v.is_empty())
+            .and_then(|v| css_transform(v, vp, st.size))
+            .unwrap_or_else(|| Self::transform(n));
+        let Some(origin) = n.props.get("transform-origin").filter(|v| !v.is_empty()) else {
+            return base;
+        };
+        if base.is_identity() {
+            return base;
+        }
+        let fill_box = n
+            .props
+            .get("transform-box")
+            .and_then(|v| ident(v))
+            .is_some_and(|b| b == "fill-box" || b == "content-box" || b == "stroke-box" || b == "border-box");
+        let (rx, ry, rw, rh) = if fill_box {
+            node_bbox(node, &Transform::IDENTITY).unwrap_or((0.0, 0.0, 0.0, 0.0))
+        } else {
+            (0.0, 0.0, vp.w, vp.h)
+        };
+        let parts = toks(origin);
+        let mut ox = None;
+        let mut oy = None;
+        for (k, c) in parts.iter().take(2).enumerate() {
+            let key = c.token().and_then(|t| match t {
+                TokenKind::Ident(s) => Some(s.to_ascii_lowercase()),
+                _ => None,
+            });
+            match key.as_deref() {
+                Some("left") => ox = Some(0.0),
+                Some("right") => ox = Some(rw),
+                Some("top") => oy = Some(0.0),
+                Some("bottom") => oy = Some(rh),
+                Some("center") => {
+                    if k == 0 && ox.is_none() {
+                        ox = Some(rw / 2.0);
+                    } else {
+                        oy = Some(rh / 2.0);
+                    }
+                }
+                _ => {
+                    let l = cv_len(c);
+                    let v = l.map(|l| {
+                        let size = if k == 0 { rw } else { rh };
+                        Viewport { w: size, h: size }.resolve(l, Axis::X, st.size)
+                    });
+                    if k == 0 {
+                        ox = v;
+                    } else {
+                        oy = v;
+                    }
+                }
+            }
+        }
+        let (ox, oy) = (rx + ox.unwrap_or(rw / 2.0), ry + oy.unwrap_or(rh / 2.0));
+        Transform::translate(ox, oy)
+            .then(&base)
+            .then(&Transform::translate(-ox, -oy))
+    }
+
     /// Un elemento renderizable (o `None`).
     fn element(&mut self, i: usize, parent: &St, vp: Viewport) -> Option<Node> {
         if self.stack.len() > MAX_DEPTH * 4 || self.stack.contains(&i) {
             return None;
         }
         let n = self.node(i);
-        if n.is_text() || Self::display_none(n) {
+        if n.is_text() || Self::display_none(n) || !conditions_pass(n) {
             return None;
         }
         let st = self.computed(n, parent, vp);
@@ -492,7 +682,7 @@ impl<'a> Builder<'a> {
         self.stack.pop();
         let n = self.node(i);
         let mut node = content?;
-        let transform = Self::transform(n);
+        let transform = self.element_transform(n, &node, vp, &st);
         let opacity = Self::opacity(n);
         let clip = n
             .props
@@ -557,7 +747,7 @@ impl<'a> Builder<'a> {
                 let kids = n.children.clone();
                 let child = kids.into_iter().find_map(|c| {
                     let cn = self.node(c);
-                    if cn.is_text() || cn.attrs.contains_key("requiredExtensions") {
+                    if cn.is_text() || !conditions_pass(cn) {
                         return None;
                     }
                     self.element(c, st, vp)
@@ -684,7 +874,10 @@ impl<'a> Builder<'a> {
         if w <= 0.0 || h <= 0.0 {
             return None;
         }
-        let view_box = view_box(c);
+        let view_box = match view_box_state(c) {
+            Err(()) => return None,
+            Ok(vb) => vb,
+        };
         let inner_vp = match view_box {
             Some((_, _, vw, vh)) => Viewport { w: vw, h: vh },
             None => Viewport { w, h },
@@ -717,10 +910,12 @@ impl<'a> Builder<'a> {
 
     fn use_element(&mut self, i: usize, st: &St, vp: Viewport) -> Option<Node> {
         let n = self.node(i);
-        let target = n
+        let original = n
             .attr("href")
             .and_then(|h| self.by_id(h))
             .filter(|&t| !self.stack.contains(&t))?;
+        // El clon del shadow tree (con la cascada de un árbol aparte), si lo hay.
+        let target = self.svg.shadows.get(&original).copied().unwrap_or(original);
         let x = self.len(n, "x", Axis::X, vp, st).unwrap_or(0.0);
         let y = self.len(n, "y", Axis::Y, vp, st).unwrap_or(0.0);
         let w = self.len(n, "width", Axis::X, vp, st);
@@ -748,7 +943,12 @@ impl<'a> Builder<'a> {
                     other => other?,
                 }
             }
-            _ => self.element(target, st, vp)?,
+            _ => {
+                self.stack.push(original);
+                let node = self.element(target, st, vp);
+                self.stack.pop();
+                node?
+            }
         };
         Some(Node::Group(Group {
             transform: Transform::translate(x, y),
@@ -767,10 +967,11 @@ impl<'a> Builder<'a> {
                 let server = self
                     .by_id(url)
                     .filter(|&s| matches!(self.node(s).name.as_str(), "linearGradient" | "radialGradient"));
-                match server {
-                    Some(s) => self.gradient(s, bbox, vp, st),
-                    // Referencia inválida: el respaldo, o nada (§13.2).
-                    None => fallback
+                match server.map(|s| self.gradient(s, bbox, vp, st)) {
+                    Some(Ok(paint)) => paint,
+                    // Referencia inválida (o transformación no invertible): el respaldo, o nada
+                    // (§13.2).
+                    Some(Err(())) | None => fallback
                         .as_deref()
                         .and_then(|f| self.resolve_paint(f, st, bbox, vp)),
                 }
@@ -829,7 +1030,28 @@ impl<'a> Builder<'a> {
         out
     }
 
-    fn gradient(&self, s: usize, bbox: Option<Bbox>, vp: Viewport, st: &St) -> Option<Paint> {
+    /// `Err` si el gradiente no se puede usar (transformación no invertible): cuenta como una
+    /// referencia inválida.
+    fn gradient(
+        &self,
+        s: usize,
+        bbox: Option<Bbox>,
+        vp: Viewport,
+        st: &St,
+    ) -> Result<Option<Paint>, ()> {
+        let gt = self
+            .chain(s)
+            .iter()
+            .find_map(|&c| self.node(c).attr("gradientTransform"))
+            .and_then(geom::parse_transform)
+            .unwrap_or_default();
+        if !gt.is_invertible() {
+            return Err(());
+        }
+        Ok(self.gradient_paint(s, bbox, vp, st))
+    }
+
+    fn gradient_paint(&self, s: usize, bbox: Option<Bbox>, vp: Viewport, st: &St) -> Option<Paint> {
         let chain = self.chain(s);
         let attr = |name: &str| chain.iter().find_map(|&c| self.node(c).attr(name));
         let bbox_units = attr("gradientUnits").is_none_or(|u| u.trim() != "userSpaceOnUse");
@@ -1170,11 +1392,102 @@ fn flatten_clip(node: &Node, t: &Transform, rule: crate::FillRule, out: &mut Cli
 }
 
 fn view_box(n: &DocNode) -> Option<Bbox> {
-    let v = geom::parse_numbers(n.attr("viewBox")?)?;
+    view_box_state(n).ok().flatten()
+}
+
+/// `viewBox` (§8.6): `Err` si su ancho o alto es cero o negativo (desactiva el render del
+/// elemento); `Ok(None)` si falta o no se puede parsear.
+fn view_box_state(n: &DocNode) -> Result<Option<Bbox>, ()> {
+    let Some(v) = n.attr("viewBox").and_then(geom::parse_numbers) else {
+        return Ok(None);
+    };
     match v.as_slice() {
-        &[x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
-        _ => None,
+        &[x, y, w, h] if w > 0.0 && h > 0.0 => Ok(Some((x, y, w, h))),
+        &[_, _, _, _] => Err(()),
+        _ => Ok(None),
     }
+}
+
+/// La propiedad `transform` de CSS (CSS Transforms 1 §7): funciones con unidades.
+fn css_transform(v: &[ComponentValue], vp: Viewport, font: f32) -> Option<Transform> {
+    if ident(v).as_deref() == Some("none") {
+        return Some(Transform::IDENTITY);
+    }
+    let mut t = Transform::IDENTITY;
+    for c in toks(v) {
+        let ComponentValue::Function(f) = c else {
+            return None;
+        };
+        let args: Vec<&ComponentValue> = toks(&f.value)
+            .into_iter()
+            .filter(|a| !matches!(a.token(), Some(TokenKind::Comma)))
+            .collect();
+        let len = |k: usize, axis: Axis| -> Option<f32> {
+            args.get(k)
+                .and_then(|a| cv_len(a))
+                .map(|l| vp.resolve(l, axis, font))
+        };
+        let num = |k: usize| -> Option<f32> {
+            match args.get(k)?.token()? {
+                TokenKind::Number(n) => Some(n.value as f32),
+                TokenKind::Percentage(n) => Some(n.value as f32 / 100.0),
+                _ => None,
+            }
+        };
+        let angle = |k: usize| -> Option<f32> {
+            match args.get(k)?.token()? {
+                TokenKind::Number(n) => Some(n.value as f32),
+                TokenKind::Dimension(n, u) => {
+                    let v = n.value as f32;
+                    Some(match u.to_ascii_lowercase().as_str() {
+                        "deg" => v,
+                        "rad" => v.to_degrees(),
+                        "grad" => v * 0.9,
+                        "turn" => v * 360.0,
+                        _ => return None,
+                    })
+                }
+                _ => None,
+            }
+        };
+        let skew = |a: f32| (a * std::f32::consts::PI / 180.0).tan();
+        let m = match f.name.to_ascii_lowercase().as_str() {
+            "translate" => Transform::translate(len(0, Axis::X)?, len(1, Axis::Y).unwrap_or(0.0)),
+            "translatex" => Transform::translate(len(0, Axis::X)?, 0.0),
+            "translatey" => Transform::translate(0.0, len(0, Axis::Y)?),
+            "scale" => {
+                let sx = num(0)?;
+                Transform::scale(sx, num(1).unwrap_or(sx))
+            }
+            "scalex" => Transform::scale(num(0)?, 1.0),
+            "scaley" => Transform::scale(1.0, num(0)?),
+            "rotate" => Transform::rotate(angle(0)?),
+            "skew" => Transform {
+                c: skew(angle(0)?),
+                b: skew(angle(1).unwrap_or(0.0)),
+                ..Transform::IDENTITY
+            },
+            "skewx" => Transform {
+                c: skew(angle(0)?),
+                ..Transform::IDENTITY
+            },
+            "skewy" => Transform {
+                b: skew(angle(0)?),
+                ..Transform::IDENTITY
+            },
+            "matrix" => Transform {
+                a: num(0)?,
+                b: num(1)?,
+                c: num(2)?,
+                d: num(3)?,
+                e: num(4)?,
+                f: num(5)?,
+            },
+            _ => return None,
+        };
+        t = t.then(&m);
+    }
+    Some(t)
 }
 
 /// Transformación del `viewBox` al viewport de `w`×`h` (§8.7).
@@ -1217,18 +1530,56 @@ fn absolute(n: &DocNode, name: &str) -> Option<f32> {
         Len::Px(v) => Some(v),
         Len::Em(v) => Some(v * 16.0),
         Len::Ex(v) => Some(v * 8.0),
-        Len::Pct(_) => None,
+        Len::Calc(px, pct, em) if pct == 0.0 => Some(px + em * 16.0),
+        Len::Pct(_) | Len::Calc(..) => None,
     }
     .filter(|v| *v >= 0.0)
+}
+
+/// Región de un fragmento `#xywh=` (Media Fragments URI 1.0 §4.2.2), en px del tamaño por
+/// defecto de la imagen y recortada a ella.
+fn crop_region(svg: &Svg) -> Option<Bbox> {
+    let crop = svg.view.as_ref()?.crop?;
+    let mut inner = svg.clone();
+    if let Some(v) = &mut inner.view {
+        v.crop = None;
+    }
+    let (dw, dh) = inner.default_size();
+    let (x, y, w, h) = match crop {
+        crate::Crop::Pixel(x, y, w, h) => (x, y, w, h),
+        crate::Crop::Percent(x, y, w, h) => (
+            x * dw / 100.0,
+            y * dh / 100.0,
+            w * dw / 100.0,
+            h * dh / 100.0,
+        ),
+    };
+    let x0 = x.clamp(0.0, dw);
+    let y0 = y.clamp(0.0, dh);
+    let x1 = (x + w).clamp(0.0, dw);
+    let y1 = (y + h).clamp(0.0, dh);
+    Some((x0, y0, x1 - x0, y1 - y0))
 }
 
 pub(crate) fn intrinsic(svg: &Svg) -> Intrinsic {
     let Some(root) = svg.nodes.first() else {
         return Intrinsic::default();
     };
+    if let Some((_, _, w, h)) = crop_region(svg) {
+        return Intrinsic {
+            width: Some(w),
+            height: Some(h),
+            ratio: (w > 0.0 && h > 0.0).then(|| w / h),
+        };
+    }
     let width = absolute(root, "width");
     let height = absolute(root, "height");
-    let ratio = match (width, height, view_box(root)) {
+    let vb = svg
+        .view
+        .as_ref()
+        .and_then(|v| v.view_box)
+        .or_else(|| view_box(root));
+    let ratio = match (width, height, vb) {
         (Some(w), Some(h), _) if w > 0.0 && h > 0.0 => Some(w / h),
         (_, _, Some((_, _, vw, vh))) => Some(vw / vh),
         _ => None,
@@ -1241,6 +1592,29 @@ pub(crate) fn intrinsic(svg: &Svg) -> Intrinsic {
 }
 
 pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
+    if let Some((rx, ry, rw, rh)) = crop_region(svg)
+        && rw > 0.0
+        && rh > 0.0
+    {
+        let mut inner = svg.clone();
+        if let Some(v) = &mut inner.view {
+            v.crop = None;
+        }
+        let (dw, dh) = inner.default_size();
+        let full = tree(&inner, dw, dh);
+        let root = Group {
+            transform: Transform::scale(width / rw, height / rh)
+                .then(&Transform::translate(-rx, -ry)),
+            opacity: 1.0,
+            clip: None,
+            children: vec![Node::Group(full.root)],
+        };
+        return Tree {
+            width,
+            height,
+            root,
+        };
+    }
     let mut b = Builder {
         svg,
         stack: Vec::new(),
@@ -1255,7 +1629,9 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         && r.name == "svg"
         && !Builder::display_none(r)
     {
-        let vb = view_box(r);
+        let view = svg.view.as_ref();
+        let disabled = view_box_state(r).is_err() && view.and_then(|v| v.view_box).is_none();
+        let vb = view.and_then(|v| v.view_box).or_else(|| view_box(r));
         let vp = match vb {
             Some((_, _, w, h)) => Viewport { w, h },
             None => Viewport {
@@ -1270,12 +1646,19 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
             ..St::default()
         };
         let st = b.computed(r, &base, vp);
-        root.transform = vb.map_or(Transform::IDENTITY, |vb| {
-            view_box_transform(vb, r.attr("preserveAspectRatio").unwrap_or(""), (width, height))
-        });
+        let par = view
+            .and_then(|v| v.par.as_deref())
+            .or_else(|| r.attr("preserveAspectRatio"))
+            .unwrap_or("");
+        root.transform = vb.map_or(Transform::IDENTITY, |vb| view_box_transform(vb, par, (width, height)));
+        if let Some(t) = view.and_then(|v| v.transform) {
+            root.transform = root.transform.then(&t);
+        }
         root.opacity = Builder::opacity(r);
         b.stack.push(0);
-        root.children = b.children(0, &st, vp);
+        if !disabled {
+            root.children = b.children(0, &st, vp);
+        }
     }
     Tree {
         width,

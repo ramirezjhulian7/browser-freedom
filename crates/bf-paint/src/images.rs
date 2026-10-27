@@ -229,11 +229,20 @@ enum Loaded {
     Animated(Arc<Animation>),
 }
 
-/// Decodifica los bytes de una imagen (bitmap, animada o SVG).
-fn decode(bytes: &[u8], mime: Option<&str>) -> Result<Loaded, bf_image::ImageError> {
+/// Decodifica los bytes de una imagen (bitmap, animada o SVG). `fragment`: el de la URL, que
+/// en un SVG elige la vista (`#svgView(…)`, `#xywh=…`, el `id` de un `<view>`).
+fn decode(
+    bytes: &[u8],
+    mime: Option<&str>,
+    fragment: Option<&str>,
+) -> Result<Loaded, bf_image::ImageError> {
     if bf_image::kind(bytes, mime) == Some("image/svg+xml") {
-        let svg = bf_svg::Svg::parse_bytes(bytes)
+        let mut svg = bf_svg::Svg::parse_bytes(bytes)
             .map_err(|e| bf_image::ImageError::Decode(e.to_string()))?;
+        if let Some(f) = fragment.filter(|f| !f.is_empty()) {
+            let decoded = bf_url::percent::decode(f.as_bytes());
+            svg = svg.with_fragment(&String::from_utf8_lossy(&decoded));
+        }
         let (w, h) = svg.default_size();
         let pixmap = svg::rasterize(&svg.tree(w, h), w.ceil() as u32, h.ceil() as u32, None)
             .ok_or_else(|| bf_image::ImageError::Decode("SVG vacío".into()))?;
@@ -398,7 +407,8 @@ pub fn load_images(
                             stats.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
                             return Err("no se pudo cargar".to_owned());
                         };
-                        let decoded = decode(&res.bytes, res.content_type.as_deref());
+                        let fragment = href.split_once('#').map(|(_, f)| f);
+                        let decoded = decode(&res.bytes, res.content_type.as_deref(), fragment);
                         stats
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())

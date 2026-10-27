@@ -29,6 +29,28 @@ pub struct Svg {
     pub(crate) nodes: Vec<style::Node>,
     pub(crate) ids: HashMap<String, usize>,
     pub(crate) inherited: Inherited,
+    /// Elemento referenciado por un `use` → su clon con la cascada de un shadow tree (SVG 2
+    /// §5.6.4: los selectores no ven los ancestros del original).
+    pub(crate) shadows: HashMap<usize, usize>,
+    /// Vista pedida por el fragmento de la URL.
+    pub(crate) view: Option<View>,
+}
+
+/// Región `#xywh=` (Media Fragments URI 1.0 §4.2.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Crop {
+    Pixel(f32, f32, f32, f32),
+    Percent(f32, f32, f32, f32),
+}
+
+/// Vista de un fragmento de URL: `#svgView(...)` o el `id` de un `<view>` (SVG 2 §16.1.4) y
+/// `#xywh=`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct View {
+    pub view_box: Option<(f32, f32, f32, f32)>,
+    pub par: Option<String>,
+    pub transform: Option<Transform>,
+    pub crop: Option<Crop>,
 }
 
 /// Propiedades que un `<svg>` en línea hereda de sus ancestros HTML.
@@ -83,6 +105,92 @@ impl Svg {
         inherited: Inherited,
     ) -> Result<Svg, SvgError> {
         style::from_element(doc, root, css, inherited)
+    }
+
+    /// La misma imagen vista con el fragmento `fragment` de su URL (ya sin `#` y decodificado):
+    /// `svgView(viewBox(…);preserveAspectRatio(…);transform(…))`, el `id` de un `<view>` o
+    /// `xywh=[pixel:|percent:]x,y,w,h` (gana el último).
+    pub fn with_fragment(&self, fragment: &str) -> Svg {
+        let mut svg = self.clone();
+        let mut view = View::default();
+        let f = fragment.trim();
+        // `svgView(…)` solo admite detrás un segmento temporal: con `xywh` se ignora todo
+        // (§16.3.2).
+        if f.starts_with("svgView(") && f.contains("xywh=") {
+            return svg;
+        }
+        if let Some(spec) = f
+            .strip_prefix("svgView(")
+            .and_then(|s| s.trim_end().strip_suffix(')'))
+        {
+            for part in spec.split(';') {
+                let part = part.trim();
+                let Some((name, arg)) = part.split_once('(') else {
+                    continue;
+                };
+                let arg = arg.trim_end().trim_end_matches(')');
+                match name.trim() {
+                    "viewBox" => {
+                        if let Some(&[x, y, w, h]) = geom::parse_numbers(arg).as_deref()
+                            && w > 0.0
+                            && h > 0.0
+                        {
+                            view.view_box = Some((x, y, w, h));
+                        }
+                    }
+                    "preserveAspectRatio" => view.par = Some(arg.replace(',', " ")),
+                    "transform" => {
+                        view.transform = geom::parse_transform(&format!("{arg})"))
+                            .or_else(|| geom::parse_transform(arg))
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(&i) = self.ids.get(f)
+            && self.nodes[i].name == "view"
+        {
+            let n = &self.nodes[i];
+            view.view_box = n
+                .attr("viewBox")
+                .and_then(geom::parse_numbers)
+                .and_then(|v| match v.as_slice() {
+                    &[x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
+                    _ => None,
+                });
+            view.par = n.attr("preserveAspectRatio").map(str::to_owned);
+        }
+        for param in f.split('&') {
+            let Some(v) = param.trim().strip_prefix("xywh=") else {
+                continue;
+            };
+            let (unit, nums) = match v.split_once(':') {
+                Some((u, n)) => (u, n),
+                None => ("pixel", v),
+            };
+            // En píxeles solo enteros; en porcentaje, también decimales.
+            let n: Vec<f32> = nums
+                .split(',')
+                .map(str::trim)
+                .filter(|s| unit != "pixel" || s.bytes().all(|b| b.is_ascii_digit()))
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if let &[x, y, w, h] = n.as_slice()
+                && x >= 0.0
+                && y >= 0.0
+                && w > 0.0
+                && h > 0.0
+            {
+                view.crop = match unit {
+                    "pixel" => Some(Crop::Pixel(x, y, w, h)),
+                    "percent" => Some(Crop::Percent(x, y, w, h)),
+                    _ => view.crop,
+                };
+            }
+        }
+        if view != View::default() {
+            svg.view = Some(view);
+        }
+        svg
     }
 
     /// Parsea bytes (UTF-8, con o sin BOM).

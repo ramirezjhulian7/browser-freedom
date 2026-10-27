@@ -109,8 +109,52 @@ pub(crate) fn from_element(
         nodes: Vec::new(),
         ids: HashMap::new(),
         inherited,
+        shadows: HashMap::new(),
+        view: None,
     };
-    convert(doc, root, &sheet_refs, &media, &ctx, &mut svg);
+    let mut dom_ids = Vec::new();
+    convert(doc, root, &sheet_refs, &media, &ctx, &mut svg, &mut dom_ids);
+    // Shadow trees de `use` (SVG 2 §5.6.4): cada elemento referenciado se clona bajo un host
+    // propio fuera del árbol, y el clon se estila ahí (sin `:root` ni los ancestros del
+    // original).
+    let mut targets: Vec<usize> = svg
+        .nodes
+        .iter()
+        .filter(|n| n.name == "use")
+        .filter_map(|n| n.attr("href"))
+        .filter_map(|h| h.trim().rsplit_once('#').map(|(_, id)| id.to_owned()))
+        .filter_map(|id| svg.ids.get(&id).copied())
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    if !targets.is_empty() {
+        let mut shadow_doc = doc.clone();
+        let mut hosts = Vec::new();
+        for &t in &targets {
+            let host = shadow_doc.create(NodeData::Element(bf_dom::Element::new(
+                bf_infra::Namespace::Svg,
+                "bf-shadow-host",
+            )));
+            let clone = shadow_doc.clone_node(dom_ids[t], true);
+            shadow_doc.append(host, clone);
+            hosts.push((t, clone));
+        }
+        let ctx = MatchContext::for_document(&shadow_doc);
+        let mut ignored = Vec::new();
+        for (t, clone) in hosts {
+            if let Some(c) = convert(
+                &shadow_doc,
+                clone,
+                &sheet_refs,
+                &media,
+                &ctx,
+                &mut svg,
+                &mut ignored,
+            ) {
+                svg.shadows.insert(t, c);
+            }
+        }
+    }
     Ok(svg)
 }
 
@@ -133,6 +177,7 @@ fn convert(
     media: &MediaContext,
     ctx: &MatchContext,
     svg: &mut Svg,
+    dom_ids: &mut Vec<NodeId>,
 ) -> Option<usize> {
     let node = match &doc.get(n).data {
         NodeData::Text(t) | NodeData::CdataSection(t) => Node {
@@ -162,6 +207,7 @@ fn convert(
         _ => return None,
     };
     let index = svg.nodes.len();
+    dom_ids.push(n);
     if let Some(id) = node.attr("id") {
         svg.ids.entry(id.to_owned()).or_insert(index);
     }
@@ -170,7 +216,7 @@ fn convert(
     if is_element {
         let children: Vec<usize> = doc
             .children(n)
-            .filter_map(|c| convert(doc, c, sheets, media, ctx, svg))
+            .filter_map(|c| convert(doc, c, sheets, media, ctx, svg, dom_ids))
             .collect();
         svg.nodes[index].children = children;
     }
