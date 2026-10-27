@@ -374,7 +374,8 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     let g = rt.agent.realms[realm].global_object;
     bf_js::builtins::method(&mut rt.agent, g, "__freedom_report", 1, freedom_report);
     let origin = Url::parse(&format!("{ORIGIN}/"), None).expect("origen");
-    let loader = FileLoader::new().mount(&origin, root.to_path_buf());
+    let loader =
+        crate::net::wptserve::SubLoader(FileLoader::new().mount(&origin, root.to_path_buf()));
     let mut resources = PageResources::new(Arc::new(loader));
     resources.overrides.insert(
         format!("{ORIGIN}/resources/testharnessreport.js"),

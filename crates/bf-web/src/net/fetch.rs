@@ -1,9 +1,10 @@
 //! Fetch Standard §5.4–§5.6: `Request`, `Response` y `fetch()`; y `navigator.sendBeacon`
 //! (Beacon §3.1).
 //!
-//! CORS simplificado: mismo origen (respuesta "basic"), `no-cors` (respuesta opaca) y `cors`
-//! con `Access-Control-Allow-Origin` comprobado (sin preflight). `cache` se acepta pero no hay
-//! caché HTTP (todo es `no-store`).
+//! La petición pasa por "main fetch" con CORS ([`super::cors`]: tainting, preflight y su
+//! caché, redirecciones salto a salto) y la respuesta se filtra según el tainting. Con red
+//! real el cuerpo llega por partes. `cache` se acepta pero no hay caché HTTP (todo es
+//! `no-store`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +16,10 @@ use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId, Throw};
 
 use super::body::{self, Body, ConsumeKind};
+use super::cors::{self, FetchHead, FetchParams, FetchSink, Tainting};
 use super::headers::{self, Guard, HeaderList, HeadersData};
 use super::streams;
-use super::{NetRequest, NetResult, classes, state};
+use super::{NetRequest, NetResult, classes};
 use bf_js::builtins::promise::{Capability, Handler};
 
 // --- Request ---
@@ -1123,139 +1125,99 @@ fn on_abort(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// La petición de red de un `Request` (y si sus cookies van).
-pub fn net_request(agent: &mut Agent, r: &RequestData, list: &HeaderList) -> NetRequest {
-    let same = super::same_origin(agent, &r.url);
-    let credentials = match r.credentials.as_str() {
-        "omit" => false,
-        "include" => true,
-        _ => same,
-    };
-    let mut headers = bf_net::Headers::default();
-    for (n, v) in &list.0 {
-        headers.push(n, v);
-    }
-    // Fetch §3.1 ("append a request `Origin` header"): las peticiones CORS y las que no son
-    // GET ni HEAD.
-    if (!same && r.mode == "cors") || !matches!(r.method.as_str(), "GET" | "HEAD") {
-        headers.push("Origin", &super::document_origin(agent));
-    }
+/// Los parámetros de main fetch de un `Request` (Fetch §5.6 paso 1 y §2.2.5).
+/// `body_from_stream`: el cuerpo se leyó de un `ReadableStream`.
+pub fn fetch_params(
+    agent: &mut Agent,
+    r: &RequestData,
+    list: &HeaderList,
+    body_from_stream: bool,
+) -> FetchParams {
     let referrer = match r.referrer.as_str() {
         "" => None,
         "about:client" => Some(super::base_url(agent)),
         u => Url::parse(u, None).ok(),
     };
-    NetRequest {
+    FetchParams {
         url: r.url.clone(),
-        options: bf_net::RequestOptions {
-            method: r.method.clone(),
-            headers,
-            body: r.body.source.as_ref().map(|b| b.to_vec()),
-            redirect: match r.redirect.as_str() {
-                "error" => bf_net::RedirectMode::Error,
-                "manual" => bf_net::RedirectMode::Manual,
-                _ => bf_net::RedirectMode::Follow,
-            },
-            credentials,
-            referrer,
+        method: r.method.clone(),
+        headers: list.clone(),
+        body: r.body.source.as_ref().map(|b| b.to_vec()),
+        body_from_stream,
+        mode: r.mode.clone(),
+        credentials: r.credentials.clone(),
+        redirect: match r.redirect.as_str() {
+            "error" => bf_net::RedirectMode::Error,
+            "manual" => bf_net::RedirectMode::Manual,
+            _ => bf_net::RedirectMode::Follow,
         },
+        origin: super::request_origin(agent),
+        referrer,
+        referrer_policy: r.referrer_policy.clone(),
+        use_preflight: false,
     }
 }
 
-/// La respuesta de red de una cabecera recibida: el `Response` filtrado según el modo
-/// (Fetch §4.1 "main fetch" pasos 14–15 y §4.9 "CORS check"), sus cabeceras, y si el cuerpo
-/// es visible (no es opaco ni de estado "null body"). `Err` = error de red.
+/// El `Response` de la respuesta final de main fetch: la "filtered response" de su tainting
+/// (Fetch §2.2.6), sus cabeceras visibles, y si el cuerpo es visible (no es opaco ni de
+/// estado "null body").
 pub fn response_from_head(
-    agent: &mut Agent,
     r: &RequestData,
     url_list: &[Url],
     status: u16,
     status_text: String,
     headers: &HeaderList,
-) -> Result<(ResponseData, HeaderList, bool), String> {
+    tainting: Tainting,
+) -> (ResponseData, HeaderList, bool) {
     let final_url = url_list.last().cloned().unwrap_or_else(|| r.url.clone());
-    let same = super::same_origin(agent, &final_url) && super::same_origin(agent, &r.url);
-    let credentials = r.credentials == "include";
     let redirected = url_list.len() > 1;
     let null_body = matches!(status, 101 | 103 | 204 | 205 | 304);
-    if r.redirect == "manual" && matches!(status, 301 | 302 | 303 | 307 | 308) {
-        return Ok((
-            ResponseData {
-                type_: "opaqueredirect".into(),
-                url: Some(final_url),
-                redirected: false,
-                status: 0,
-                status_text: String::new(),
-                body: Body::default(),
-            },
-            HeaderList::default(),
-            false,
-        ));
-    }
-    if same {
-        return Ok((
-            ResponseData {
-                type_: "basic".into(),
-                url: Some(final_url),
-                redirected,
-                status,
-                status_text,
-                body: Body::default(),
-            },
+    let data = |type_: &str, url, redirected, status, status_text| ResponseData {
+        type_: type_.into(),
+        url,
+        redirected,
+        status,
+        status_text,
+        body: Body::default(),
+    };
+    match tainting {
+        Tainting::Basic => (
+            data("basic", Some(final_url), redirected, status, status_text),
             super::basic_filter(headers),
             !null_body,
-        ));
-    }
-    match r.mode.as_str() {
-        "same-origin" => Err("Failed to fetch: cross-origin request in same-origin mode".into()),
-        "no-cors" => Ok((
-            ResponseData {
-                type_: "opaque".into(),
-                url: None,
-                redirected: false,
-                status: 0,
-                status_text: String::new(),
-                body: Body::default(),
-            },
+        ),
+        Tainting::Cors => (
+            data("cors", Some(final_url), redirected, status, status_text),
+            super::cors_filter_with(headers, r.credentials == "include"),
+            !null_body,
+        ),
+        Tainting::Opaque => (
+            data("opaque", None, false, 0, String::new()),
             HeaderList::default(),
             false,
-        )),
-        _ => {
-            let origin = super::document_origin(agent);
-            if !super::cors_check(&origin, headers, credentials) {
-                return Err("Failed to fetch: CORS check failed".into());
-            }
-            Ok((
-                ResponseData {
-                    type_: "cors".into(),
-                    url: Some(final_url),
-                    redirected,
-                    status,
-                    status_text,
-                    body: Body::default(),
-                },
-                super::cors_filter(headers),
-                !null_body,
-            ))
-        }
+        ),
+        Tainting::OpaqueRedirect => (
+            data("opaqueredirect", Some(final_url), false, 0, String::new()),
+            HeaderList::default(),
+            false,
+        ),
     }
 }
 
-/// Convierte el resultado de la red en un `Response` según el modo (o un error de red).
+/// Convierte el resultado de main fetch en un `Response` (o un error de red).
 pub fn to_response(
-    agent: &mut Agent,
     r: &RequestData,
     result: NetResult,
 ) -> Result<(ResponseData, HeaderList), String> {
     let res = result?;
     let (mut d, list, body) = response_from_head(
-        agent,
         r,
         &res.url_list,
         res.status,
         res.status_text,
         &res.headers,
-    )?;
+        res.tainting,
+    );
     if body {
         d.body = Body::new(Some(res.body));
     }
@@ -1339,7 +1301,7 @@ fn fetch(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
         return Ok(Value::Object(p));
     }
-    start_network(agent, id, r, &hd.list);
+    start_network(agent, id, r, &hd.list, false);
     Ok(Value::Object(p))
 }
 
@@ -1368,7 +1330,7 @@ fn body_read(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         bf_js::builtins::web::encoding::buffer_source_bytes(agent, &a.arg(0)).unwrap_or_default();
     r.body = Body::new(Some(bytes));
     if CALLS.with(|c| c.borrow().contains_key(&id)) {
-        start_network(agent, id, r, &list);
+        start_network(agent, id, r, &list, true);
     }
     Ok(Value::Undefined)
 }
@@ -1383,26 +1345,24 @@ fn body_failed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// Manda la petición de un `fetch()` y resuelve su promesa con la respuesta.
-fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList) {
-    let req = net_request(agent, &r, list);
+/// Manda la petición de un `fetch()` (main fetch con CORS, [`cors::main_fetch`]) y resuelve
+/// su promesa con la respuesta. Con red real, la respuesta llega por partes.
+fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, from_stream: bool) {
+    let params = fetch_params(agent, &r, list, from_stream);
     let backend = super::current_backend(agent);
-    if backend.network()
-        && matches!(req.url.scheme.as_str(), "http" | "https")
-        && !super::is_bad_port(&req.url)
-    {
-        start_streaming(agent, id, r, req, backend);
+    if backend.network() && matches!(params.url.scheme.as_str(), "http" | "https") {
+        start_streaming(agent, id, r, params, backend);
         return;
     }
     let rd = r.clone();
-    let net = super::start(
+    let net = super::start_fetch(
         agent,
-        req,
+        params,
         Box::new(move |agent: &mut Agent, result: NetResult| {
             let Some(p) = finish_call(agent, id) else {
                 return;
             };
-            match to_response(agent, &rd, result) {
+            match to_response(&rd, result) {
                 Ok((d, list)) => {
                     match make_response(agent, None, d, list, Guard::Immutable, None) {
                         Ok(v) => {
@@ -1413,9 +1373,8 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList) 
                     }
                 }
                 Err(msg) => {
-                    if let Err(Throw::Value(e)) = agent.type_error::<Value>(&msg) {
-                        reject(agent, p, e);
-                    }
+                    let e = type_error_value(agent, &format!("Failed to fetch: {msg}"));
+                    reject(agent, p, e);
                 }
             }
         }),
@@ -1425,7 +1384,6 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList) 
             call.net = Some(net);
         }
     });
-    let _ = state(agent);
 }
 
 // --- Cuerpos por partes (Fetch §4.5 "fetch response handover", §4.6 "HTTP-network fetch") ---
@@ -1448,13 +1406,46 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Manda la respuesta de main fetch, parte a parte, a la conexión de un `fetch()`.
+struct StreamOut {
+    out: super::EventSink,
+    cancel: Arc<AtomicBool>,
+}
+
+impl FetchSink for StreamOut {
+    fn head(&mut self, h: FetchHead) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Some(url) = h.url_list.last().cloned() else {
+            return false;
+        };
+        self.out.push(super::NetEvent::Head {
+            url,
+            url_list: h.url_list,
+            status: h.status,
+            status_text: h.status_text,
+            headers: h.headers,
+            tainting: h.tainting,
+        });
+        true
+    }
+    fn chunk(&mut self, bytes: &[u8]) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.out.push(super::NetEvent::Chunk(bytes.to_vec()));
+        true
+    }
+}
+
 /// Lanza la petición en un hilo: la promesa se resuelve con la cabecera y el cuerpo se llena
 /// trozo a trozo según llega ("incrementally read", Fetch §4.6 paso 12).
 fn start_streaming(
     agent: &mut Agent,
     id: u64,
     r: RequestData,
-    req: NetRequest,
+    params: FetchParams,
     backend: Arc<dyn super::NetBackend>,
 ) {
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1474,11 +1465,11 @@ fn start_streaming(
         );
     });
     std::thread::spawn(move || {
-        let mut s = super::PartSink {
+        let mut s = StreamOut {
             out: sink.clone(),
             cancel: cancel.clone(),
         };
-        let r = backend.fetch_streaming(&req, &mut s);
+        let r = cors::main_fetch(&*backend, &params, &mut s);
         if !cancel.load(Ordering::Relaxed) {
             sink.push(super::NetEvent::End(r));
         }
@@ -1509,8 +1500,13 @@ fn on_part(agent: &mut Agent, id: u64, r: &RequestData, e: super::NetEvent) {
             status,
             status_text,
             headers,
+            tainting,
             ..
-        } => on_head(agent, id, r, &url_list, status, status_text, &headers),
+        } => {
+            let (d, list, visible) =
+                response_from_head(r, &url_list, status, status_text, &headers, tainting);
+            on_head(agent, id, d, list, visible);
+        }
         super::NetEvent::Chunk(bytes) => {
             let ops = STREAMING.with(|m| m.borrow().get(&id).and_then(|s| s.ops));
             if let Some(h) = ops
@@ -1547,15 +1543,7 @@ fn on_part(agent: &mut Agent, id: u64, r: &RequestData, e: super::NetEvent) {
 
 /// Llegó la cabecera: se resuelve la promesa con un `Response` cuyo cuerpo es un stream que
 /// se llena con los trozos siguientes.
-fn on_head(
-    agent: &mut Agent,
-    id: u64,
-    r: &RequestData,
-    url_list: &[Url],
-    status: u16,
-    status_text: String,
-    headers: &HeaderList,
-) {
+fn on_head(agent: &mut Agent, id: u64, mut d: ResponseData, list: HeaderList, visible: bool) {
     if STREAMING.with(|m| m.borrow().get(&id).is_none_or(|s| s.delivered)) {
         return;
     }
@@ -1563,16 +1551,6 @@ fn on_head(
         end_streaming(agent, id);
         return;
     };
-    let (mut d, list, visible) =
-        match response_from_head(agent, r, url_list, status, status_text, headers) {
-            Ok(x) => x,
-            Err(msg) => {
-                end_streaming(agent, id);
-                let e = type_error_value(agent, &msg);
-                reject(agent, p, e);
-                return;
-            }
-        };
     let mut stream = None;
     let mut ops = None;
     if visible {

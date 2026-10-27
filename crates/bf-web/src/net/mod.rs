@@ -21,6 +21,7 @@
 pub mod blob;
 pub mod body;
 pub mod channels;
+pub mod cors;
 pub mod eventsource;
 pub mod fetch;
 pub mod formdata;
@@ -61,6 +62,9 @@ pub struct NetResponse {
     pub status_text: String,
     pub headers: HeaderList,
     pub body: Vec<u8>,
+    /// El tainting con el que se filtra (lo pone [`cors::main_fetch`]; los backends dan
+    /// respuestas sin filtrar, `Basic`).
+    pub tainting: cors::Tainting,
 }
 
 /// `Err` es un "network error" (Fetch §2.2.6) con un mensaje para la consola.
@@ -139,6 +143,7 @@ fn from_bf_net(r: Result<(bf_net::Response, Vec<Url>), bf_net::FetchError>) -> N
         status_text: r.status_text,
         headers: HeaderList(r.headers.0),
         body: r.body,
+        tainting: cors::Tainting::Basic,
     })
 }
 
@@ -184,13 +189,15 @@ impl NetBackend for bf_net::NetLoader {
 #[derive(Debug, Clone)]
 pub enum NetEvent {
     Ws(bf_net::websocket::WsEvent),
-    /// La cabecera de una respuesta por partes (`url` es la última de `url_list`).
+    /// La cabecera de una respuesta por partes (`url` es la última de `url_list`), sin
+    /// filtrar, con su tainting (`Basic` si no pasó por [`cors::main_fetch`]).
     Head {
         url: Url,
         url_list: Vec<Url>,
         status: u16,
         status_text: String,
         headers: HeaderList,
+        tainting: cors::Tainting,
     },
     Chunk(Vec<u8>),
     /// Fin de la respuesta (`Err` = error de red).
@@ -269,6 +276,7 @@ impl StreamSink for PartSink {
             status: h.status,
             status_text: h.status_text.clone(),
             headers: HeaderList(h.headers.0.clone()),
+            tainting: cors::Tainting::Basic,
         });
         true
     }
@@ -371,6 +379,7 @@ impl NetBackend for LoaderBackend {
             status_text: "OK".into(),
             headers,
             body: r.bytes,
+            tainting: cors::Tainting::Basic,
         })
     }
 }
@@ -591,6 +600,36 @@ pub fn start(agent: &mut Agent, req: NetRequest, done: Done) -> u64 {
     id
 }
 
+/// Empieza "main fetch" con CORS ([`cors::main_fetch`], el cuerpo entero); `done` corre en
+/// una tarea *networking* con la respuesta sin filtrar y su tainting. Devuelve un id para
+/// [`cancel`].
+pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: Done) -> u64 {
+    let realm = WebContextHandle::current(agent).realm;
+    let b = backend(agent);
+    let s = state_of(agent, realm);
+    s.next_id += 1;
+    let id = s.next_id;
+    if s.threaded {
+        s.pending.insert(id, done);
+        let inbox = s.inbox.clone();
+        let waker = s.waker.clone();
+        std::thread::spawn(move || {
+            let r = cors::fetch_whole(&*b, &params);
+            inbox
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((id, r));
+            if let Some(w) = waker {
+                w();
+            }
+        });
+    } else {
+        let r = cors::fetch_whole(&*b, &params);
+        queue_result(agent, realm, done, r);
+    }
+    id
+}
+
 /// Olvida una petición en vuelo (su resultado se descarta).
 pub fn cancel(agent: &mut Agent, id: u64) {
     state(agent).pending.remove(&id);
@@ -613,6 +652,17 @@ pub fn document_origin(agent: &mut Agent) -> String {
         .url
         .origin()
         .to_string()
+}
+
+/// El origen del request de la ventana (Fetch §2.2.5 "origin"): el del documento, o
+/// `file://` para un documento `file:` (sus `file:` cuentan como del mismo origen, como hasta
+/// ahora; la cabecera `Origin` sigue siendo `null`).
+pub fn request_origin(agent: &mut Agent) -> String {
+    let url = WebContextHandle::current(agent).get(agent).url.clone();
+    if url.scheme == "file" {
+        return "file://".into();
+    }
+    url.origin().to_string()
 }
 
 /// La URL base de la ventana.
@@ -646,8 +696,14 @@ pub fn cors_check(origin: &str, headers: &HeaderList, credentials: bool) -> bool
     !credentials || headers.get("access-control-allow-credentials").as_deref() == Some("true")
 }
 
-/// "CORS-safelisted response-header names" más los de `Access-Control-Expose-Headers`.
+/// "CORS-safelisted response-header names" más los de `Access-Control-Expose-Headers`
+/// (`*` los expone todos si las credenciales no son `include`, Fetch §3.2.2).
 pub fn cors_filter(headers: &HeaderList) -> HeaderList {
+    cors_filter_with(headers, false)
+}
+
+/// [`cors_filter`] según el modo de credenciales.
+pub fn cors_filter_with(headers: &HeaderList, credentials_include: bool) -> HeaderList {
     const SAFE: &[&str] = &[
         "cache-control",
         "content-language",
@@ -665,7 +721,7 @@ pub fn cors_filter(headers: &HeaderList) -> HeaderList {
                 .collect()
         })
         .unwrap_or_default();
-    let star = exposed.iter().any(|e| e == "*");
+    let star = !credentials_include && exposed.iter().any(|e| e == "*");
     HeaderList(
         headers
             .0

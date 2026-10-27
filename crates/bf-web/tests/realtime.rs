@@ -17,7 +17,10 @@ use bf_web::{DocumentOwner, Runtime, Url, WebContext, WebContextHandle};
 fn read_head(r: &mut BufReader<TcpStream>) -> Option<(String, Vec<(String, String)>)> {
     let mut line = String::new();
     r.read_line(&mut line).ok()?;
-    let path = line.split_whitespace().nth(1)?.to_owned();
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_owned();
+    // El método va delante de la ruta (`PUT /cors?x`) para los handlers que lo miran.
+    let path = format!("{method} {}", parts.next()?);
     let mut headers = Vec::new();
     loop {
         let mut h = String::new();
@@ -223,15 +226,69 @@ fn chunks(r: BufReader<TcpStream>, path: &str) {
     let _ = s.write_all(b"0\r\n\r\n");
 }
 
+/// Los preflights recibidos por ficha (`/cors?<ficha>`).
+static PREFLIGHTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// CORS (Fetch §4.8, §4.9). La página es `http://127.0.0.1:<puerto>`; `localhost` es otro
+/// origen. `/cors?<ficha>[&deny|&noacao]`: el preflight permite `PUT` y `x-foo` (60 s de
+/// caché) salvo con `deny`; la respuesta expone `x-preflights` (los preflights de la ficha).
+fn cors(r: BufReader<TcpStream>, method: &str, path: &str, headers: &[(String, String)]) {
+    let mut s = r.into_inner();
+    let query = path.split_once('?').map_or("", |(_, q)| q);
+    let tok = query.split('&').next().unwrap_or("").to_owned();
+    let origin = header(headers, "origin").unwrap_or("").to_owned();
+    if method == "OPTIONS" {
+        PREFLIGHTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tok);
+        let deny = query.contains("deny");
+        let mut out = format!(
+            "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {origin}\r\nAccess-Control-Max-Age: 60\r\nContent-Length: 0\r\n"
+        );
+        if !deny {
+            out.push_str(
+                "Access-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: x-foo\r\n",
+            );
+        }
+        out.push_str("\r\n");
+        let _ = s.write_all(out.as_bytes());
+        return;
+    }
+    let n = PREFLIGHTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|t| **t == tok)
+        .count();
+    let acao = if query.contains("noacao") {
+        String::new()
+    } else {
+        format!("Access-Control-Allow-Origin: {origin}\r\n")
+    };
+    let body = format!("{method} {}", header(headers, "x-foo").unwrap_or("-"));
+    let _ = s.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\n{acao}Access-Control-Expose-Headers: x-preflights\r\nX-Preflights: {n}\r\nX-Secret: si\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    );
+}
+
 fn handle(stream: TcpStream) {
     let mut r = BufReader::new(stream);
-    let Some((path, headers)) = read_head(&mut r) else {
+    let Some((line, headers)) = read_head(&mut r) else {
         return;
     };
+    let (method, path) = line.split_once(' ').unwrap_or(("GET", &line));
+    let path = path.to_owned();
     if path.starts_with("/ws") {
         websocket(r, &path, &headers);
     } else if path.starts_with("/sse") {
         sse(r, &path, &headers);
+    } else if path.starts_with("/cors") {
+        cors(r, method, &path, &headers);
     } else if path.starts_with("/chunks") {
         chunks(r, &path);
     } else if let Some(tok) = path.strip_prefix("/release?") {
@@ -546,6 +603,39 @@ rt!(
     fetch_streamed_null_body_status,
     "fetch(BASE + '/release?p4').then(r => finish(r.status + ' ' + r.body)).catch(fail);",
     "204 null"
+);
+
+// --- CORS con preflight (Fetch §4.8, §4.9) ---
+
+rt!(
+    cors_preflight_and_cache,
+    "var u = 'http://localhost:' + PORT + '/cors?c1'; fetch(u, {method: 'PUT', headers: {'x-foo': 'a'}}).then(r => r.text().then(t => { log.push(r.type + ' ' + t + ' ' + r.headers.get('x-preflights') + ' ' + r.headers.get('x-secret')); return fetch(u, {method: 'PUT', headers: {'x-foo': 'b'}}); })).then(r => r.text().then(t => finish(log[0] + ' | ' + t + ' ' + r.headers.get('x-preflights')))).catch(fail);",
+    "cors PUT a 1 null | PUT b 1"
+);
+rt!(
+    cors_preflight_refused,
+    "fetch('http://localhost:' + PORT + '/cors?c2&deny', {method: 'PUT'}).then(() => finish('no'), e => finish(e.name));",
+    "TypeError"
+);
+rt!(
+    cors_simple_needs_acao,
+    "fetch('http://localhost:' + PORT + '/cors?c3&noacao').then(() => finish('no'), e => fetch('http://localhost:' + PORT + '/cors?c3').then(r => r.text()).then(t => finish(e.name + ' ' + t))).catch(fail);",
+    "TypeError GET -"
+);
+rt!(
+    cors_no_cors_is_opaque,
+    "fetch('http://localhost:' + PORT + '/cors?c4&noacao', {mode: 'no-cors'}).then(r => finish([r.type, r.status, r.body, r.headers.get('content-type')].join())).catch(fail);",
+    "opaque,0,,"
+);
+rt!(
+    cors_same_origin_mode,
+    "fetch('http://localhost:' + PORT + '/cors?c5', {mode: 'same-origin'}).then(() => finish('no'), e => finish(e.name));",
+    "TypeError"
+);
+rt!(
+    xhr_cors_preflight,
+    "var x = new XMLHttpRequest(); x.open('PUT', 'http://localhost:' + PORT + '/cors?c6'); x.setRequestHeader('x-foo', 'z'); x.onload = () => finish(x.status + ' ' + x.responseText + ' ' + x.getResponseHeader('x-preflights')); x.onerror = () => finish('error'); x.send();",
+    "200 PUT z 1"
 );
 
 // --- MessageChannel / MessagePort / BroadcastChannel ---
