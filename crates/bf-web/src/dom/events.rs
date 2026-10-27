@@ -1520,6 +1520,16 @@ fn err_colno(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- Event handlers (HTML §8.1.8) ---
 
+/// Los event handlers de `WorkerGlobalScope` (HTML §10.2.1) (E3).
+pub const GLOBAL_EVENT_HANDLERS_WORKER: &[&str] = &[
+    "error",
+    "languagechange",
+    "offline",
+    "online",
+    "rejectionhandled",
+    "unhandledrejection",
+];
+
 /// GlobalEventHandlers (HTML §8.1.8.2).
 pub const GLOBAL_EVENT_HANDLERS: &[&str] = &[
     "abort",
@@ -1971,6 +1981,10 @@ fn handler_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     entry.compiled = attr.map(|a| (a, None));
     if h.is_some() {
         ensure_handler_listener(agent, doc, target, &type_);
+        // E3: asignar `onmessage` a un `MessagePort` hace `start()` (HTML §9.4.4).
+        if type_ == "message" {
+            crate::net::channels::implicit_start(agent, &a.this);
+        }
     }
     Ok(Value::Undefined)
 }
