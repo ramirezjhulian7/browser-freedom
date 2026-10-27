@@ -856,11 +856,20 @@ impl<'a> Layout<'a> {
             .or(control_h);
         // Los porcentajes de los hijos se resuelven contra la altura usada (ya limitada por
         // min-height/max-height), no la especificada (§10.7).
+        // E5: el alto por `aspect-ratio` con mínimo automático puede crecer con el contenido:
+        // para los contenedores flex y grid no es un alto definido.
+        let ratio_min_auto = ratio_h.is_some()
+            && spec_h == ratio_h
+            && forced.is_none()
+            && style.min_height == Size::Auto
+            && matches!(style.overflow_y, Overflow::Visible | Overflow::Clip)
+            && (crate::flex::is_flex_container(b) || crate::grid::is_grid_container(b));
         let child_cb = Cb {
             x: content_x,
             y: content_top,
             width: content_w,
             height: spec_h
+                .filter(|_| !ratio_min_auto)
                 .map(|h| {
                     let (lo, hi) = height_limits(style, cb.height, edges_v);
                     h.min(hi).max(lo)
@@ -1378,10 +1387,14 @@ impl<'a> Layout<'a> {
             let eh = border_edges(st).horizontal() + padding_edges(st, 0.0).horizontal();
             let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
             let mut w = ratio_transfer(st, h, ev, eh, r);
+            if !matches!(st.overflow_x, Overflow::Visible | Overflow::Clip) {
+                // Un contenedor de scroll puede encogerse por debajo del tamaño transferido: su
+                // min-content es el de su contenido (como los navegadores).
+                let min = self.content_intrinsic_widths(b).0;
+                return (min.min(w), w);
+            }
             // Mínimo automático (CSS Sizing 4 §5.2): no por debajo del min-content.
-            if st.min_width == Size::Auto
-                && matches!(st.overflow_x, Overflow::Visible | Overflow::Clip)
-            {
+            if st.min_width == Size::Auto {
                 w = w.max(self.content_intrinsic_widths(b).0);
             }
             return (w, w);

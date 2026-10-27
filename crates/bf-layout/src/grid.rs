@@ -1402,6 +1402,15 @@ fn align_offset(a: ItemAlign, free: f32) -> f32 {
     }
 }
 
+/// E5: `left`/`right` no son válidos en `align-self`/`align-items` (CSS Box Alignment 3
+/// §6.1): cuentan como la declaración inválida, `auto`.
+fn block_axis(a: ItemAlign) -> ItemAlign {
+    match a {
+        ItemAlign::Left | ItemAlign::Right => ItemAlign::Auto,
+        a => a,
+    }
+}
+
 /// E5: en rtl el desplazamiento inline se refleja en el área; `left`/`right` son físicos y se
 /// intercambian antes para que el reflejo los deje en su sitio.
 fn physical(a: ItemAlign, rtl: bool) -> ItemAlign {
@@ -1514,7 +1523,11 @@ fn abs_align_offset(
         0.0
     };
     let dy = if auto(&s.top) && auto(&s.bottom) {
-        offset(s.align_self, container.align_items, area.height - m.height)
+        offset(
+            block_axis(s.align_self),
+            block_axis(container.align_items),
+            area.height - m.height,
+        )
     } else {
         0.0
     };
@@ -2166,8 +2179,11 @@ impl<'a> Layout<'a> {
         // `align-self: baseline` de una fila comparten baseline; su contribución incluye el
         // desplazamiento.
         let baseline_aligned = |it: &GridItem<'_>| {
-            self_align(it.b.style.align_self, cs.align_items, has_ratio(it.b))
-                == ItemAlign::Baseline
+            self_align(
+                block_axis(it.b.style.align_self),
+                block_axis(cs.align_items),
+                has_ratio(it.b),
+            ) == ItemAlign::Baseline
                 && it.row.1 - it.row.0 == 1
         };
         let mut shims = vec![0.0f32; row_items.len()];
@@ -2281,7 +2297,11 @@ impl<'a> Layout<'a> {
             let dx = if rtl && both { free_h - dx } else { dx };
             let mt = margin_value(&s.margin_top, aw);
             let mb = margin_value(&s.margin_bottom, aw);
-            let align = self_align(s.align_self, cs.align_items, has_ratio(b));
+            let align = self_align(
+                block_axis(s.align_self),
+                block_axis(cs.align_items),
+                has_ratio(b),
+            );
             let item_cb = Cb {
                 x: cb.x + x0,
                 y: cb.y + y0,
@@ -2628,7 +2648,10 @@ impl<'a> Layout<'a> {
         let (mt, mbt) = mbp_edges(s, basis, false);
         // Ancho del contenido del subgrid si sus columnas son propias (para el ancho de las
         // áreas de sus ítems al dimensionar las filas del padre).
-        let own_w = if !columns && !sc {
+        // También si sus columnas son subgrid de un subgrid con columnas propias (el ítem ya
+        // trae `area_w`): no están en pistas del contenedor que dimensiona.
+        let own_cols_needed = !columns && (!sc || it.area_w.is_some());
+        let own_w = if own_cols_needed {
             let aw = it.area_w.or_else(|| {
                 cols.map(|(st, en)| {
                     line_pos(st, en, it.col.1, false)
@@ -2691,7 +2714,7 @@ impl<'a> Layout<'a> {
                 area_w: None,
                 empty: false,
             };
-            if sc {
+            if sc && own_cols.is_none() {
                 e.col = (it.col.0 + d.col.0, it.col.0 + d.col.1);
                 e.extra[0] = if d.col.0 == 0 { it.extra[0] + ml } else { dc };
                 e.extra[1] = if d.col.1 == nc { it.extra[1] + mr } else { dc };

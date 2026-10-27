@@ -85,13 +85,20 @@ fn gap_px(g: &Gap, basis: f32) -> f32 {
 }
 
 fn resolved_align(item: &ComputedStyle, container: &ComputedStyle) -> ItemAlign {
-    let a = if item.align_self == ItemAlign::Auto {
-        container.align_items
+    // E5: `left`/`right` no son válidos en `align-*` (cuentan como `auto`); `last baseline`
+    // cae a `end` sin baselines compartidas (CSS Box Alignment 3 §9.3).
+    let fix = |a: ItemAlign| match a {
+        ItemAlign::Left | ItemAlign::Right => ItemAlign::Auto,
+        a => a,
+    };
+    let a = if fix(item.align_self) == ItemAlign::Auto {
+        fix(container.align_items)
     } else {
         item.align_self
     };
     match a {
         ItemAlign::Auto | ItemAlign::Normal => ItemAlign::Stretch,
+        ItemAlign::LastBaseline => ItemAlign::FlexEnd,
         a => a,
     }
 }
