@@ -683,6 +683,9 @@ impl<'a> Layout<'a> {
         let margins_h = margin_value(&style.margin_left, cb.width).unwrap_or(0.0)
             + margin_value(&style.margin_right, cb.width).unwrap_or(0.0);
         let table_w = self.table_fixed_width(b, (avail.width - margins_h).max(0.0), cb.width);
+        // E5: los porcentajes de altura se resuelven contra el containing block al calcular los
+        // tamaños intrínsecos (CSS Sizing 3 §5.2.1).
+        let saved_basis = std::mem::replace(&mut self.pct_height_basis, cb.height);
         // Ancho fijo: el de un reemplazado o el intrínseco de un control con `width: auto`.
         let fixed_w = table_w
             .or(match &b.kind {
@@ -718,6 +721,7 @@ impl<'a> Layout<'a> {
                 self.block_width_with(style, avail.width, edges_h, limits)
             }
         };
+        self.pct_height_basis = saved_basis;
         let margins = Edges {
             top: margin_value(&style.margin_top, cb.width).unwrap_or(0.0),
             right: mr,
@@ -1119,6 +1123,15 @@ impl<'a> Layout<'a> {
     /// Ancho de contenido de una caja que se dimensiona shrink-to-fit (floats, inline-blocks,
     /// absolutas con `width: auto`).
     pub(crate) fn fit_width(&mut self, b: &'a LayoutBox, cb: Cb, margins_h: f32) -> f32 {
+        // E5: los porcentajes de altura se resuelven contra el containing block al calcular los
+        // tamaños intrínsecos (CSS Sizing 3 §5.2.1).
+        let saved = std::mem::replace(&mut self.pct_height_basis, cb.height);
+        let w = self.fit_width_inner(b, cb, margins_h);
+        self.pct_height_basis = saved;
+        w
+    }
+
+    fn fit_width_inner(&mut self, b: &'a LayoutBox, cb: Cb, margins_h: f32) -> f32 {
         let style = &b.style;
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);

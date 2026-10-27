@@ -1913,6 +1913,20 @@ impl<'a> Layout<'a> {
         area_w: f32,
         area_h: Option<f32>,
     ) -> (f32, Option<f32>, Option<f32>) {
+        // E5: los porcentajes de altura se resuelven contra el área (CSS Sizing 3 §5.2.1).
+        let saved = std::mem::replace(&mut self.pct_height_basis, area_h);
+        let r = self.grid_item_width_inner(b, container, area_w, area_h);
+        self.pct_height_basis = saved;
+        r
+    }
+
+    fn grid_item_width_inner(
+        &mut self,
+        b: &'a LayoutBox,
+        container: &ComputedStyle,
+        area_w: f32,
+        area_h: Option<f32>,
+    ) -> (f32, Option<f32>, Option<f32>) {
         let s = &b.style;
         let bp = border_edges(s).horizontal() + padding_edges(s, area_w).horizontal();
         let mut ml = margin_value(&s.margin_left, area_w);
