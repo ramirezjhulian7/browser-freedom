@@ -49,27 +49,90 @@ fn attribute_name(a: &bf_dom::Attribute) -> DomString {
 /// contents). `scripting` decide si `noscript` serializa su texto sin escapar.
 pub fn serialize_children(doc: &Document, node: NodeId, scripting: bool) -> DomString {
     let mut out = DomString::new();
-    serialize_children_into(doc, node, scripting, &mut out);
+    serialize_children_into(doc, node, scripting, &ShadowRoots::NONE, &mut out);
     out
 }
 
-fn serialize_children_into(doc: &Document, node: NodeId, scripting: bool, out: &mut DomString) {
+/// E1: los shadow roots que serializa `getHTML` (HTML §13.3): los *serializable* si
+/// `serializable`, y los de `roots` siempre.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowRoots<'a> {
+    pub serializable: bool,
+    pub roots: &'a [NodeId],
+}
+
+impl ShadowRoots<'_> {
+    /// Sin shadow roots (`innerHTML`).
+    pub const NONE: ShadowRoots<'static> = ShadowRoots {
+        serializable: false,
+        roots: &[],
+    };
+}
+
+/// E1: la serialización de los hijos de `node` con los shadow roots de `shadow` (`getHTML`).
+pub fn serialize_children_with(
+    doc: &Document,
+    node: NodeId,
+    shadow: &ShadowRoots<'_>,
+) -> DomString {
+    let mut out = DomString::new();
+    serialize_children_into(doc, node, false, shadow, &mut out);
+    out
+}
+
+fn serialize_children_into(
+    doc: &Document,
+    node: NodeId,
+    scripting: bool,
+    shadow: &ShadowRoots<'_>,
+    out: &mut DomString,
+) {
     // 1.
     if doc.element(node).is_some_and(serializes_as_void) {
         return;
     }
-    // 3.
+    // E1: 3, el shadow root como `<template shadowrootmode>`.
+    if let Some(sr) = doc.shadow_root(node)
+        && let Some(data) = doc.shadow_root_data(sr)
+        && ((data.serializable && shadow.serializable) || shadow.roots.contains(&sr))
+    {
+        out.push_str("<template shadowrootmode=\"");
+        out.push_str(match data.mode {
+            bf_dom::shadow::ShadowRootMode::Open => "open",
+            bf_dom::shadow::ShadowRootMode::Closed => "closed",
+        });
+        out.push('"');
+        if data.delegates_focus {
+            out.push_str(" shadowrootdelegatesfocus=\"\"");
+        }
+        if data.serializable {
+            out.push_str(" shadowrootserializable=\"\"");
+        }
+        if data.clonable {
+            out.push_str(" shadowrootclonable=\"\"");
+        }
+        out.push('>');
+        serialize_children_into(doc, sr, scripting, shadow, out);
+        out.push_str("</template>");
+    }
+    // 4.
     let node = doc
         .element(node)
         .and_then(|e| e.template_contents)
         .filter(|_| doc.element(node).is_some_and(|e| e.is_html("template")))
         .unwrap_or(node);
     for child in doc.children(node) {
-        serialize_node(doc, child, scripting, out);
+        serialize_node(doc, child, scripting, shadow, out);
     }
 }
 
-fn serialize_node(doc: &Document, child: NodeId, scripting: bool, out: &mut DomString) {
+fn serialize_node(
+    doc: &Document,
+    child: NodeId,
+    scripting: bool,
+    shadow: &ShadowRoots<'_>,
+    out: &mut DomString,
+) {
     match &doc.get(child).data {
         NodeData::Element(e) => {
             let tagname = if matches!(e.ns, Namespace::Html | Namespace::Svg | Namespace::MathMl) {
@@ -90,7 +153,7 @@ fn serialize_node(doc: &Document, child: NodeId, scripting: bool, out: &mut DomS
             if serializes_as_void(e) {
                 return;
             }
-            serialize_children_into(doc, child, scripting, out);
+            serialize_children_into(doc, child, scripting, shadow, out);
             out.push_str("</");
             out.push_dom_str(&tagname);
             out.push('>');
@@ -149,13 +212,23 @@ pub fn inner_html(doc: &Document, node: NodeId) -> DomString {
 /// Getter de `outerHTML`: el elemento mismo serializado.
 pub fn outer_html(doc: &Document, el: NodeId) -> DomString {
     let mut out = DomString::new();
-    serialize_node(doc, el, false, &mut out);
+    serialize_node(doc, el, false, &ShadowRoots::NONE, &mut out);
     out
 }
 
 /// "Fragment parsing algorithm steps" (HTML) con `context`: un `DocumentFragment` de este
 /// documento con los nodos parseados.
 pub fn parse_fragment_into(doc: &mut Document, context: NodeId, markup: &DomString) -> NodeId {
+    parse_fragment_into_with(doc, context, markup, false)
+}
+
+/// E1: como [`parse_fragment_into`], con *allow declarative shadow roots* (`setHTMLUnsafe`).
+pub fn parse_fragment_into_with(
+    doc: &mut Document,
+    context: NodeId,
+    markup: &DomString,
+    allow_declarative_shadow_roots: bool,
+) -> NodeId {
     let (ns, name) = match doc.element(context) {
         Some(e) => (e.ns, e.name.to_string()),
         None => (Namespace::Html, "body".to_owned()),
@@ -170,7 +243,10 @@ pub fn parse_fragment_into(doc: &mut Document, context: NodeId, markup: &DomStri
             ns: ctx_ns,
             name: &name,
         },
-        &ParseOptions::default(),
+        &ParseOptions {
+            allow_declarative_shadow_roots,
+            ..ParseOptions::default()
+        },
     );
     let fragment = doc.create(NodeData::DocumentFragment);
     // El resultado del parser: un documento con un `html` raíz cuyos hijos son el fragmento.
@@ -189,6 +265,18 @@ pub fn parse_fragment_into(doc: &mut Document, context: NodeId, markup: &DomStri
 /// Setter de `innerHTML`.
 pub fn set_inner_html(doc: &mut Document, el: NodeId, markup: &DomString) {
     let fragment = parse_fragment_into(doc, el, markup);
+    let context = doc
+        .element(el)
+        .filter(|e| e.is_html("template"))
+        .and_then(|e| e.template_contents)
+        .unwrap_or(el);
+    doc.replace_all(Some(fragment), context);
+}
+
+/// E1: `setHTMLUnsafe(html)` (HTML §8.5): como el setter de `innerHTML`, con declarative
+/// shadow roots.
+pub fn set_html_unsafe(doc: &mut Document, el: NodeId, markup: &DomString) {
+    let fragment = parse_fragment_into_with(doc, el, markup, true);
     let context = doc
         .element(el)
         .filter(|e| e.is_html("template"))

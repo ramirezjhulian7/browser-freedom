@@ -1147,6 +1147,7 @@ fn document_response(agent: &mut Agent, s: &XhrState) -> JsResult<Value> {
         &bf_html::ParseOptions {
             scripting: false,
             iframe_srcdoc: false,
+            allow_declarative_shadow_roots: false, // E1
         },
     );
     if let Some(u) = &r.url {

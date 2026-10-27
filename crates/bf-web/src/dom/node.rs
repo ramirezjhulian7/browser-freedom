@@ -260,7 +260,9 @@ fn set_text_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn get_root_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let r = with_doc(agent, n.doc, |d| d.get_root_node(n.node));
+    // E1: `GetRootNodeOptions.composed`.
+    let composed = crate::dom::events::dict_bool(agent, &a.arg(0), "composed")?;
+    let r = with_doc(agent, n.doc, |d| d.get_root_node_composed(n.node, composed));
     Ok(wrap_node(agent, NodeRef::new(n.doc, r)))
 }
 

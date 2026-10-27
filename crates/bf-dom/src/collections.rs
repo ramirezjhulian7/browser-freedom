@@ -27,6 +27,9 @@ pub enum CollectionFilter {
     /// Una lista calculada por la interfaz que la expone (las de HTML: `rows`, `tBodies`,
     /// `cells`, `options`, `elements`…) (E1).
     Computed(ComputedList),
+    /// E1: los elementos HTML con ese `id` o, si son `embed`, `form`, `img` u `object`, ese
+    /// `name` (las propiedades con nombre de `Window`, HTML §7.2.2.3).
+    WindowNamed(DomString),
 }
 
 /// La función que calcula los elementos de una colección [`CollectionFilter::Computed`] a
@@ -72,6 +75,19 @@ impl HtmlCollection {
         match &self.filter {
             CollectionFilter::Children => doc.parent(n) == Some(self.root),
             CollectionFilter::Computed(f) => (f.0)(doc, self.root).contains(&n),
+            CollectionFilter::WindowNamed(name) => {
+                e.ns == Namespace::Html
+                    && !name.is_empty()
+                    && e.attrs.iter().any(|a| {
+                        a.ns.is_none()
+                            && a.value == *name
+                            && (a.name == "id"
+                                || (a.name == "name"
+                                    && ["embed", "form", "img", "object"]
+                                        .iter()
+                                        .any(|l| e.name == *l)))
+                    })
+            }
             CollectionFilter::QualifiedName(q) => {
                 if *q == "*" {
                     return true;

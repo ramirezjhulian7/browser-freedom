@@ -514,7 +514,9 @@ impl<'a> Builder<'a> {
 
     fn child_items(&mut self, node: NodeId, style: &Arc<ComputedStyle>, out: &mut Vec<Item>) {
         self.pseudo_items(node, PseudoElement::Before, out);
-        let children: Vec<NodeId> = self.doc.children(node).collect();
+        // E1: los hijos en el flat tree (el shadow tree de un host, los nodos asignados de
+        // un slot).
+        let children: Vec<NodeId> = self.doc.flat_tree_children(node);
         for child in children {
             match &self.doc.get(child).data {
                 NodeData::Text(t) | NodeData::CdataSection(t) => {

@@ -28,6 +28,31 @@ pub struct MatchContext {
     pub visited_links: HashSet<NodeId>,
     /// Scoping root de `:scope`; si es `None`, `:scope` equivale a `:root`.
     pub scope: Option<NodeId>,
+    /// E1: el árbol de la hoja que se aplica y cómo (CSS Scoping §3).
+    pub shadow: ShadowMatch,
+}
+
+/// E1: el contexto de árbol de las reglas que se comparan (CSS Scoping §3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShadowMatch {
+    /// El shadow root del árbol de la hoja (`None`: el documento). Dentro de él, su host es
+    /// *featureless*: solo `:host`, `:host()` y `:host-context()` lo eligen.
+    pub scope: Option<NodeId>,
+    pub mode: ShadowMode,
+}
+
+/// E1: a qué elementos se aplican las reglas de la hoja.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShadowMode {
+    /// A los elementos del mismo árbol (los selectores sin `::slotted()` ni `::part()`).
+    #[default]
+    Tree,
+    /// Al host del shadow root `scope` (los selectores de un solo compound `:host…`).
+    Host,
+    /// A un elemento asignado a ese `slot` del árbol (`::slotted()`).
+    Slotted(NodeId),
+    /// A un elemento con `part` dentro del shadow tree de ese host del árbol (`::part()`).
+    Part(NodeId),
 }
 
 impl MatchContext {
@@ -48,7 +73,15 @@ pub fn matches(
     node: NodeId,
     ctx: &MatchContext,
 ) -> bool {
-    selector.pseudo_element.is_none() && Matcher { doc, ctx }.complex(selector, node, None)
+    selector.pseudo_element.is_none()
+        && selector.slotted.is_none()
+        && selector.part.is_none()
+        && Matcher {
+            doc,
+            ctx,
+            scope: None,
+        }
+        .complex(selector, node, None)
 }
 
 /// ¿Algún selector de la lista coincide con `node`?
@@ -65,10 +98,27 @@ pub fn matching_specificity(
     pseudo: Option<PseudoElement>,
     ctx: &MatchContext,
 ) -> Option<Specificity> {
-    let matcher = Matcher { doc, ctx };
+    matching_specificity_in(list, doc, node, pseudo, ctx, ctx.shadow)
+}
+
+/// E1: como [`matching_specificity`], con el contexto de árbol `shadow` en lugar del de
+/// `ctx`.
+pub fn matching_specificity_in(
+    list: &SelectorList,
+    doc: &Document,
+    node: NodeId,
+    pseudo: Option<PseudoElement>,
+    ctx: &MatchContext,
+    shadow: ShadowMatch,
+) -> Option<Specificity> {
+    let matcher = Matcher {
+        doc,
+        ctx,
+        scope: shadow.scope,
+    };
     list.0
         .iter()
-        .filter(|s| s.pseudo_element == pseudo && matcher.complex(s, node, None))
+        .filter(|s| s.pseudo_element == pseudo && matcher.complex_in_mode(s, node, shadow.mode))
         .map(ComplexSelector::specificity)
         .max()
 }
@@ -76,6 +126,8 @@ pub fn matching_specificity(
 struct Matcher<'a> {
     doc: &'a Document,
     ctx: &'a MatchContext,
+    /// E1: el shadow root cuyo host es featureless (ver [`ShadowMatch::scope`]).
+    scope: Option<NodeId>,
 }
 
 /// Atributos HTML cuyos valores se comparan sin distinguir mayúsculas ASCII
@@ -139,10 +191,84 @@ impl Matcher<'_> {
     }
 
     fn parent_element(&self, node: NodeId) -> Option<NodeId> {
-        self.doc.parent(node).filter(|&p| self.element(p).is_some())
+        // E1: el host featureless no tiene padre; es el padre de los hijos de su shadow root.
+        if self.is_scope_host(node) {
+            return None;
+        }
+        let p = self.doc.parent(node)?;
+        if self.element(p).is_some() {
+            return Some(p);
+        }
+        if Some(p) == self.scope {
+            return self.doc.shadow_host(p);
+        }
+        None
+    }
+
+    /// E1: ¿Es `node` el host (featureless) del shadow root de la hoja?
+    fn is_scope_host(&self, node: NodeId) -> bool {
+        self.scope
+            .is_some_and(|s| self.doc.shadow_host(s) == Some(node))
+    }
+
+    /// E1: un matcher sin árbol de shadow (para los argumentos de `:host()`, `::slotted()`).
+    fn unscoped(&self) -> Matcher<'_> {
+        Matcher {
+            doc: self.doc,
+            ctx: self.ctx,
+            scope: None,
+        }
+    }
+
+    /// E1: ¿Algún compound de `list` (un argumento `<compound-selector>`) elige `node`?
+    fn compound_arg(&self, list: &SelectorList, node: NodeId) -> bool {
+        let m = self.unscoped();
+        list.0
+            .iter()
+            .any(|c| c.compounds.len() == 1 && m.compound(&c.compounds[0], node))
+    }
+
+    /// E1: el matching según el modo del contexto de árbol.
+    fn complex_in_mode(&self, sel: &ComplexSelector, node: NodeId, mode: ShadowMode) -> bool {
+        match mode {
+            ShadowMode::Tree => {
+                sel.slotted.is_none() && sel.part.is_none() && self.complex(sel, node, None)
+            }
+            ShadowMode::Host => {
+                sel.slotted.is_none()
+                    && sel.part.is_none()
+                    && sel.compounds.len() == 1
+                    && self.is_scope_host(node)
+                    && self.compound(&sel.compounds[0], node)
+            }
+            ShadowMode::Slotted(slot) => {
+                sel.part.is_none()
+                    && sel
+                        .slotted
+                        .as_ref()
+                        .is_some_and(|arg| self.compound_arg(arg, node))
+                    && self.complex(sel, slot, None)
+            }
+            ShadowMode::Part(host) => {
+                sel.slotted.is_none()
+                    && sel.part.as_ref().is_some_and(|names| {
+                        let parts = self
+                            .element(node)
+                            .and_then(|e| e.attr("part"))
+                            .unwrap_or("");
+                        names
+                            .iter()
+                            .all(|n| parts.split(is_document_whitespace).any(|p| p == n))
+                    })
+                    && self.complex(sel, host, None)
+            }
+        }
     }
 
     fn prev_element(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_scope_host(node) {
+            return None;
+        }
         let mut current = self.doc.get(node).prev_sibling();
         while let Some(n) = current {
             if self.element(n).is_some() {
@@ -154,6 +280,9 @@ impl Matcher<'_> {
     }
 
     fn next_element(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_scope_host(node) {
+            return None;
+        }
         let mut current = self.doc.get(node).next_sibling();
         while let Some(n) = current {
             if self.element(n).is_some() {
@@ -272,6 +401,16 @@ impl Matcher<'_> {
     }
 
     fn compound(&self, compound: &Compound, node: NodeId) -> bool {
+        // E1: el host featureless solo coincide con `:host`, `:host()` y `:host-context()`.
+        if self.is_scope_host(node) {
+            return !compound.is_empty()
+                && compound.iter().all(|simple| {
+                    matches!(
+                        simple,
+                        Simple::PseudoClass(PseudoClass::Host(_) | PseudoClass::HostContext(_))
+                    ) && self.simple(simple, node)
+                });
+        }
         compound.iter().all(|simple| self.simple(simple, node))
     }
 
@@ -508,9 +647,28 @@ impl Matcher<'_> {
             }
             PseudoClass::Dir(dir) => self.directionality(node) == *dir,
             PseudoClass::Scope => self.scope(node),
-            // Sin custom element registry: los custom elements (nombre con '-') no están
-            // definidos; el resto de los elementos sí.
-            PseudoClass::Defined => !(html && el.name.contains('-')),
+            // E1: solo el host featureless, en el contexto de su shadow tree.
+            PseudoClass::Host(arg) => {
+                self.is_scope_host(node) && arg.as_ref().is_none_or(|l| self.compound_arg(l, node))
+            }
+            PseudoClass::HostContext(arg) => {
+                if !self.is_scope_host(node) {
+                    return false;
+                }
+                let mut current = Some(node);
+                while let Some(n) = current {
+                    if self.element(n).is_some() && self.compound_arg(arg, n) {
+                        return true;
+                    }
+                    current = match self.doc.parent(n) {
+                        Some(p) => Some(p),
+                        None => self.doc.shadow_host(n),
+                    };
+                }
+                false
+            }
+            // E1: el *custom element state* "uncustomized" o "custom".
+            PseudoClass::Defined => self.doc.is_defined_element(node),
             PseudoClass::Heading(levels) => {
                 let level = match el.name.as_lossy_str() {
                     "h1" => 1,

@@ -197,8 +197,10 @@ fn default_view(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// raíz).
 fn active_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let e = with_doc(agent, doc, |d| d.body().or_else(|| d.document_element()));
-    Ok(wrap_opt(agent, doc, e))
+    // E1: el elemento enfocado, retargeteado (DocumentOrShadowRoot).
+    let root = with_doc(agent, doc, |d| d.root());
+    let e = crate::dom::shadow::active_element_for(agent, crate::NodeRef::new(doc, root));
+    Ok(wrap_opt(agent, doc, e.map(|e| e.node)))
 }
 
 /// `dir` refleja el atributo `dir` del elemento raíz (`ltr`/`rtl`/`auto` o vacío).

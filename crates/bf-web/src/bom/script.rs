@@ -40,6 +40,8 @@ fn parse_options() -> ParseOptions {
     ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        // E1: los documentos de navegación permiten declarative shadow roots.
+        allow_declarative_shadow_roots: true,
     }
 }
 
@@ -238,6 +240,7 @@ pub fn begin_parse_with(agent: &mut Agent, realm: RealmId, url: &Url, scripting:
     let mut parser = Parser::new(&ParseOptions {
         scripting,
         iframe_srcdoc: url.href() == "about:srcdoc",
+        allow_declarative_shadow_roots: true,
     });
     parser.delay_load_event();
     parser.document_mut().url = url.clone();

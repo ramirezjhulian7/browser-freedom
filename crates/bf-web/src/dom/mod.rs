@@ -19,6 +19,7 @@ pub mod node;
 pub mod observer;
 pub mod parser;
 pub mod range;
+pub mod shadow; // E1
 pub mod state;
 pub mod traversal;
 pub mod window;
@@ -274,6 +275,10 @@ fn class_for(agent: &Agent, n: NodeRef) -> HostClassId {
                 c.xml_document
             }
         }
+        // E1: los shadow roots.
+        NodeData::DocumentFragment if ctx.doc(n.doc).is_shadow_root(n.node) => {
+            shadow::shadow_root_class_id(agent).unwrap_or(c.document_fragment)
+        }
         NodeData::DocumentFragment => c.document_fragment,
         NodeData::Doctype { .. } => c.document_type,
         NodeData::Element(e) => match c.element_classes.get(&(e.ns, e.name.clone())) {
@@ -376,6 +381,7 @@ pub fn mutated(agent: &mut Agent) {
         // E1: el `toggle` de los `details` cuyo `open` cambió.
         crate::html::activation::queue_details_toggles(agent, doc);
     }
+    crate::dom::shadow::sync_adopted(agent); // E1
 }
 
 /// Después de que un algoritmo de `bf-dom` corrió con script (dispatch, abort): agenda la

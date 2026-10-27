@@ -1026,6 +1026,26 @@ fn srcdoc_frame_has_its_own_window_and_document() {
     assert_eq!(p.show("loads"), "1");
 }
 
+// E1: los atributos `on…` de un `<iframe>` (HTML §8.1.8.1) corren con el `load` del marco
+// (HTML §4.8.5 "iframe load event steps") y `document.activeElement` sigue al foco (§6.6.3).
+#[test]
+fn iframe_onload_attribute_and_active_element() {
+    let mut p = framed(
+        "<script>var cargas = [];</script>         <iframe id=f onload=\"cargas.push('attr:' + (event.target === this))\" srcdoc=\"<p>x</p>\"></iframe>         <input id=i>",
+        &[],
+    );
+    assert_eq!(p.show("cargas.join()"), "attr:true");
+    // Un `<iframe src>` y uno insertado desde script con el atributo puesto por `setAttribute`.
+    let mut q = framed(
+        "<script>var cargas = [];</script>         <iframe id=f onload=\"cargas.push('src')\" src=/marco.html></iframe>         <script>var g = document.createElement('iframe');          g.setAttribute('onload', \"cargas.push('dinamico')\"); g.srcdoc = 'y';          document.body.appendChild(g);</script>",
+        &[("https://example.test/marco.html", "<p>marco</p>")],
+    );
+    assert_eq!(q.show("cargas.join()"), "src,dinamico");
+    assert!(p.truthy(
+        "var i = document.getElementById('i'); var antes = document.activeElement === document.body;          i.focus(); antes && document.activeElement === i"
+    ));
+}
+
 #[test]
 fn src_frame_loads_through_the_loader() {
     let mut p = framed(

@@ -6,9 +6,8 @@
 //! [`modes`] e [`in_body`]; las de contenido foráneo en [`foreign`].
 //!
 //! Partes del spec que no aplican todavía y se omiten a propósito: el *parser sanitizer
-//! configuration* (siempre null), declarative shadow roots y content patching (`allow
-//! declarative shadow roots` es false, así que `<template shadowrootmode>` y `<template for>`
-//! se insertan como templates normales), custom elements, form owners, el parser
+//! configuration* (siempre null), content patching (`<template for>` se inserta como un
+//! template normal), custom elements, form owners, el parser
 //! especulativo y los scripts SVG. El procesamiento de los `script` HTML (pausa en
 //! `</script>`, `document.write()`, "the end") está en [`script`].
 
@@ -32,6 +31,9 @@ pub struct ParseOptions {
     pub scripting: bool,
     /// El documento es un iframe srcdoc document (nunca entra en quirks mode).
     pub iframe_srcdoc: bool,
+    /// E1: *allow declarative shadow roots* del documento: `<template shadowrootmode>` crea un
+    /// shadow root (los documentos de navegación y `setHTMLUnsafe`; no `innerHTML`).
+    pub allow_declarative_shadow_roots: bool,
 }
 
 /// Elemento de contexto para [`parse_fragment`].
@@ -192,6 +194,7 @@ struct TreeBuilder {
     foster_parenting: bool,
     scripting: bool,
     iframe_srcdoc: bool,
+    allow_declarative_shadow_roots: bool,
     context: Option<NodeId>,
     pending_table_chars: String,
     /// "If the next token is a U+000A LINE FEED (LF) character token, then ignore that token".
@@ -230,6 +233,7 @@ impl TreeBuilder {
             foster_parenting: false,
             scripting: opts.scripting,
             iframe_srcdoc: opts.iframe_srcdoc,
+            allow_declarative_shadow_roots: opts.allow_declarative_shadow_roots,
             context: None,
             pending_table_chars: String::new(),
             skip_next_lf: false,
@@ -792,6 +796,60 @@ impl TreeBuilder {
     /// Insert an HTML element.
     fn insert_html(&mut self, tag: &TagToken) -> NodeId {
         self.insert_foreign(tag, Namespace::Html)
+    }
+
+    /// E1: pasos 8-9 del start tag `template` en "in head" (13.2.6.4.4): con
+    /// `shadowrootmode` y *allow declarative shadow roots*, el template (ya en la stack, sin
+    /// insertar) recibe como template contents el shadow root del *adjusted current node*.
+    /// Devuelve `false` si el template se inserta como uno normal.
+    fn attach_declarative_shadow(&mut self, tag: &TagToken, template: NodeId) -> bool {
+        use bf_dom::shadow::{ShadowRootInit, ShadowRootMode, SlotAssignmentMode};
+        let mode = match tag
+            .attr("shadowrootmode")
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("open") => ShadowRootMode::Open,
+            Some("closed") => ShadowRootMode::Closed,
+            _ => return false,
+        };
+        if !self.allow_declarative_shadow_roots {
+            return false;
+        }
+        // El nodo actual antes de apilar el template; como los navegadores, el elemento de
+        // contexto de un fragmento y el elemento raíz no reciben shadow roots declarativos.
+        let n = self.open.len();
+        if n < 2 {
+            return false;
+        }
+        let host = self.open[n - 2];
+        if host == self.open[0] {
+            return false;
+        }
+        // 9.7.
+        if self.doc.shadow_root(host).is_some() {
+            return false;
+        }
+        let init = ShadowRootInit {
+            mode,
+            delegates_focus: tag.attr("shadowrootdelegatesfocus").is_some(),
+            slot_assignment: SlotAssignmentMode::Named,
+            clonable: tag.attr("shadowrootclonable").is_some(),
+            serializable: tag.attr("shadowrootserializable").is_some(),
+        };
+        // 9.8.2: si falla, el template se inserta normal.
+        let Ok(shadow) = self.doc.attach_shadow(host, init) else {
+            return false;
+        };
+        if let Some(d) = self.doc.shadow_root_data_mut(shadow) {
+            d.declarative = true;
+            d.available_to_element_internals = true;
+        }
+        if let Some(e) = self.doc.element_mut(template) {
+            e.template_contents = Some(shadow);
+        }
+        self.template_hosts.insert(shadow, template);
+        true
     }
 
     /// Insert a character (acepta varios caracteres a la vez).
