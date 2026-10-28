@@ -239,6 +239,9 @@ pub struct HostState {
     /// HTML "notify about rejected promises" (§8.1.7.3): recibe las promesas que siguen
     /// rechazadas sin handler al vaciar la cola de microtasks.
     pub rejection_notifier: Option<RejectionNotifier>,
+    /// E3: HTML "report an exception" (§8.1.4.6) del embebedor: el `ErrorEvent` en el global
+    /// antes de la consola. Sin él, las excepciones de las tareas van directo a los hooks.
+    pub exception_reporter: Option<fn(&mut crate::vm::Agent, &Value)>,
     /// Los getters/setters de los atributos `[LegacyUnforgeable]` por realm, clase y nombre:
     /// todas las instancias comparten las mismas funciones (WebIDL §3.7.6).
     unforgeable_fns: UnforgeableFns,
@@ -262,6 +265,7 @@ impl Default for HostState {
             embedder: HashMap::new(),
             realm_data: HashMap::new(),
             rejection_notifier: None,
+            exception_reporter: None,
             unforgeable_fns: HashMap::new(),
         }
     }

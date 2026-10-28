@@ -1047,18 +1047,23 @@ pub fn post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Value> {
     // La ventana que llama (el "incumbent settings object"): la del script que corre.
     let incumbent = agent.frames.last().map_or(agent.current_realm, |f| f.realm);
+    // `postMessage(message, targetOrigin, transfer)` o `postMessage(message, options)`.
     let (target_origin, transfer) = match a.arg(1) {
-        Value::Object(o) => {
+        Value::Object(o) if a.len() < 3 => {
             let t = agent.get(o, &PropertyKey::from("targetOrigin"), Value::Object(o))?;
             let t = match t {
                 Value::Undefined => "/".to_owned(),
                 v => super::to_rust_string(agent, &v)?,
             };
-            let tr = agent.get(o, &PropertyKey::from("transfer"), Value::Object(o))?;
+            let tr = crate::workers::ports::transfer_argument(agent, &Value::Object(o))?;
             (t, tr)
         }
-        Value::Undefined if a.len() < 2 => ("/".to_owned(), Value::Undefined),
-        v => (super::to_rust_string(agent, &v)?, a.arg(2)),
+        Value::Undefined if a.len() < 2 => ("/".to_owned(), Vec::new()),
+        v => {
+            let t = super::to_rust_string(agent, &v)?;
+            let tr = crate::workers::ports::transfer_argument(agent, &a.arg(2))?;
+            (t, tr)
+        }
     };
     // Pasos 3–4: "/" es el origen de quien llama, "*" cualquiera; si no, una URL.
     let wanted = match target_origin.as_str() {
@@ -1075,27 +1080,13 @@ fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Val
             }
         },
     };
-    // Paso 5: StructuredSerializeWithTransfer (el clon se crea en el realm de destino).
-    let g = agent.realms[target].global_object;
-    let sc = agent.get(g, &PropertyKey::from("structuredClone"), Value::Object(g))?;
-    let opts = agent.new_plain_object();
-    if !matches!(transfer, Value::Undefined | Value::Null) {
-        agent.put_data(
-            opts,
-            PropertyKey::from("transfer"),
-            transfer,
-            true,
-            true,
-            true,
-        );
-    }
-    let data = agent.call(&sc, Value::Undefined, &[a.arg(0), Value::Object(opts)])?;
+    // Paso 5: StructuredSerializeWithTransfer (los `MessagePort` se transfieren).
+    let isolated = crate::workers::dedicated::cross_origin_isolated(agent);
+    let serialized = crate::workers::ports::serialize(agent, &a.arg(0), &transfer, isolated)?;
     let origin = origin_string(agent, incumbent);
-    let data = agent.host_pin(data);
     agent.queue_task(
         TaskSource::PostedMessage,
         Box::new(move |agent: &mut Agent| {
-            let data = agent.host_unpin(data).unwrap_or_default();
             if agent.realm_data::<WebContext>(target).is_none() {
                 return;
             }
@@ -1109,7 +1100,28 @@ fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Val
             let saved = agent.current_realm;
             agent.current_realm = target;
             let source = window_proxy(agent, target, incumbent);
-            let ports = match agent.create_array_from_list(&[]) {
+            // Paso 7.4: StructuredDeserializeWithTransfer; si falla, `messageerror`.
+            let Ok((data, transferred)) =
+                bf_js::builtins::web::serialize::deserialize_with_transfer(agent, serialized)
+            else {
+                let t = crate::dom::events::TargetRef {
+                    doc: 0,
+                    target: EventTarget::Window,
+                };
+                crate::net::channels::fire_message(
+                    agent,
+                    t,
+                    "messageerror",
+                    Value::Null,
+                    &origin,
+                    "",
+                    Vec::new(),
+                );
+                agent.current_realm = saved;
+                return;
+            };
+            let ports = crate::workers::ports::ports_of(agent, &transferred);
+            let ports = match agent.create_array_from_list(&ports) {
                 Ok(arr) => {
                     let _ = agent.set_integrity_level(arr, true);
                     Value::Object(arr)

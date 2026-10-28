@@ -73,7 +73,15 @@ pub fn install(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     );
     agent.heap[wp].proto = Some(props);
     agent.current_realm = saved;
-    // Los rechazos sin manejar van a `unhandledrejection` en la ventana.
+    track_rejections(agent, realm);
+}
+
+/// Los rechazos sin manejar van a `unhandledrejection` en el global de `realm` (una ventana
+/// o el de un worker).
+pub(crate) fn track_rejections(agent: &mut Agent, realm: RealmId) {
+    // E3: las excepciones de las tareas y los jobs también pasan por el `ErrorEvent` del
+    // global ("report an exception").
+    agent.host.exception_reporter = Some(crate::dom::events::report_exception);
     if agent.embedder_data::<WindowRealms>().is_none() {
         agent.set_embedder_data(WindowRealms::default());
     }
