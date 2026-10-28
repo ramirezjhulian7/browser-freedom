@@ -400,7 +400,10 @@ impl<'a> Layout<'a> {
             && border_edges(&b.style).bottom == 0.0
             && b.style.padding_bottom.0.resolve(0.0) == 0.0
             && !b.style.padding_bottom.0.has_percentage()
-            && matches!(b.style.height, Size::Auto)
+            // E5: las keywords intrínsecas y `stretch` (indefinido) se comportan como `auto`
+            // (CSS Sizing 3 §3.2 y CSS Sizing 4 §6.1).
+            && (matches!(b.style.height, Size::Auto | Size::Stretch)
+                || b.style.height.is_intrinsic())
             && min_height_is_zero(&b.style)
     }
 
