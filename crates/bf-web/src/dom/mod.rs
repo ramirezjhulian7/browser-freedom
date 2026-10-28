@@ -123,6 +123,13 @@ pub fn set_html_default_class(agent: &mut Agent, class: HostClassId) {
 
 /// Registra las clases del DOM (la primera vez) y convierte el global de `realm` en `Window`.
 pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
+    register_classes(agent, realm, ctx);
+    window::install(agent, realm, ctx);
+}
+
+/// Las clases del DOM en `realm`, sin convertir el global en el `Window` (el global de un
+/// worker es otro; ver `crate::workers::scope`).
+pub fn register_classes(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     if agent.embedder_data::<DomClasses>().is_none() {
         let event_target = agent.register_host_class(events::event_target_class());
         let dom_exception = agent.register_host_class(exception::dom_exception_class());
@@ -253,7 +260,6 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     exception::finish_realm(agent, realm);
     collections::finish_realm(agent, realm);
     mixins::finish_realm(agent, realm);
-    window::install(agent, realm, ctx);
 }
 
 // --- El patrón de los wrappers ---

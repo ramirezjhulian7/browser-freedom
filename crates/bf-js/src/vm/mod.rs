@@ -227,6 +227,9 @@ pub struct Agent {
     pub signal: std::sync::Arc<crate::host::agents::AgentSignal>,
     /// E3: los agentes de `$262.agent.start`.
     pub(crate) agent_group: Option<crate::host::agents::AgentGroup>,
+    /// E3: si otro hilo la pone en `true`, el agente termina en el próximo safepoint
+    /// (`Worker.terminate()`).
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Los objetos host, los hooks del embebedor y el bucle de eventos (`crate::host`).
     pub host: crate::host::HostState,
 }
@@ -284,6 +287,7 @@ impl Agent {
             timers: Vec::new(),
             signal: std::sync::Arc::default(),
             agent_group: None,
+            interrupt: None,
             host: crate::host::HostState::default(),
         };
         let realm = agent.create_realm();
@@ -492,6 +496,15 @@ impl Agent {
             return Err(Throw::Terminate(
                 "presupuesto de instrucciones agotado".into(),
             ));
+        }
+        // E3: la interrupción desde otro hilo.
+        if self.instructions & 0x3FF == 0
+            && self
+                .interrupt
+                .as_ref()
+                .is_some_and(|i| i.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(Throw::Terminate("agente interrumpido".into()));
         }
         if self.instructions & 0x3FF == 0
             && let Some(d) = self.options.deadline

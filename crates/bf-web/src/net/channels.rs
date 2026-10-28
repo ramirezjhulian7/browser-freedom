@@ -143,7 +143,7 @@ pub fn message_channel_class() -> HostClass {
 }
 
 /// Un `MessagePort` nuevo (sin entrelazar).
-fn new_port(agent: &mut Agent) -> JsResult<(u64, Obj)> {
+pub(crate) fn new_port(agent: &mut Agent) -> JsResult<(u64, Obj)> {
     let class = classes(agent).message_port;
     let (t, o) = new_target(agent, class, None)?;
     let id = target_id(t);
@@ -250,22 +250,21 @@ fn clone_message(
             }
         }
     }
-    let realm = agent.current_realm;
-    let g = agent.realms[realm].global_object;
-    let sc = agent.get(g, &PropertyKey::from("structuredClone"), Value::Object(g))?;
-    let opts = agent.new_plain_object();
-    let arr = agent.create_array_from_list(&others)?;
-    agent.create_data_property_or_throw(opts, PropertyKey::from("transfer"), Value::Object(arr))?;
-    let data = agent.call(
-        &sc,
-        Value::Undefined,
-        &[message.clone(), Value::Object(opts)],
-    )?;
+    // E3: StructuredSerializeWithTransfer + deserialize con los objetos de la plataforma
+    // (`Blob`, `File`) y el `DataCloneError` de la plataforma.
+    let others: Vec<Obj> = others
+        .into_iter()
+        .filter_map(|v| match v {
+            Value::Object(o) => Some(o),
+            _ => None,
+        })
+        .collect();
+    let data = crate::workers::ports::clone_within_agent(agent, message, &others)?;
     Ok((data, ports))
 }
 
 /// Entrega (o encola) un mensaje en el puerto `to`.
-fn enqueue_port_message(agent: &mut Agent, to: u64, data: Value, ports: Vec<Value>) {
+pub(crate) fn enqueue_port_message(agent: &mut Agent, to: u64, data: Value, ports: Vec<Value>) {
     let data = agent.host_pin(data);
     let ports: Vec<HostHandle> = ports.into_iter().map(|p| agent.host_pin(p)).collect();
     let Some(p) = state(agent).ports.ports.get_mut(&to) else {
@@ -316,6 +315,10 @@ fn flush_port(agent: &mut Agent, id: u64) {
 /// `postMessage(message, transfer)` (HTML §9.4.4).
 fn port_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (_, id) = this_port(agent, a)?;
+    // E3: el compañero está en otro agente (un worker).
+    if crate::workers::ports::post_if_remote(agent, id, &a.arg(0), &a.arg(1))? {
+        return Ok(Value::Undefined);
+    }
     let (data, ports) = clone_message(agent, &a.arg(0), &a.arg(1))?;
     for p in &ports {
         if agent.host_unwrap::<TargetRef>(p).map(|t| target_id(*t)) == Some(id) {
@@ -350,6 +353,7 @@ fn port_start(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `close()`: desentrelaza los dos puertos.
 fn port_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (_, id) = this_port(agent, a)?;
+    crate::workers::ports::close_if_remote(agent, id); // E3
     let other = state(agent).ports.ports.get_mut(&id).and_then(|p| {
         p.closed = true;
         p.entangled.take()
@@ -372,6 +376,79 @@ fn port_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         agent.host_unpin(p);
     }
     Ok(Value::Undefined)
+}
+
+// --- E3: MessagePort entre agentes (ver `crate::workers::ports`) ---
+
+/// Asignar `onmessage` a un `MessagePort` lo empieza (HTML §9.4.4, "the first time a
+/// MessagePort object's onmessage IDL attribute is set").
+pub(crate) fn implicit_start(agent: &mut Agent, this: &Value) {
+    let class = classes(agent).message_port;
+    if !agent.host_is_instance(this, class) {
+        return;
+    }
+    let Some(t) = agent.host_unwrap::<TargetRef>(this).copied() else {
+        return;
+    };
+    let id = target_id(t);
+    if let Some(p) = state(agent).ports.ports.get_mut(&id) {
+        p.started = true;
+    }
+    flush_port(agent, id);
+}
+
+/// ¿El puerto ya no se puede usar (transferido o inexistente)?
+pub(crate) fn is_detached(agent: &Agent, id: u64) -> bool {
+    let realm = crate::WebContextHandle::current(agent).realm;
+    agent
+        .realm_data::<super::NetState>(realm)
+        .is_none_or(|s| !s.ports.ports.contains_key(&id))
+}
+
+/// Saca el puerto de este agente (se transfiere a otro): su compañero local y los mensajes
+/// que esperaban a `start()`.
+pub(crate) fn neuter_port(agent: &mut Agent, id: u64) -> (Option<u64>, Vec<(Value, Vec<Value>)>) {
+    let Some(p) = state(agent).ports.ports.remove(&id) else {
+        return (None, Vec::new());
+    };
+    if let Some(pin) = p.pin {
+        agent.host_unpin(pin);
+    }
+    let queue = p
+        .queue
+        .into_iter()
+        .map(|(d, ports)| {
+            let d = agent.host_unpin(d).unwrap_or(Value::Undefined);
+            let ports = ports
+                .into_iter()
+                .filter_map(|h| agent.host_unpin(h))
+                .collect();
+            (d, ports)
+        })
+        .collect();
+    (p.entangled, queue)
+}
+
+/// El puerto deja de estar entrelazado con un puerto de este agente (su compañero se fue a
+/// otro agente).
+pub(crate) fn disentangle(agent: &mut Agent, id: u64) {
+    if let Some(p) = state(agent).ports.ports.get_mut(&id) {
+        p.entangled = None;
+    }
+}
+
+/// Un `messageerror` en el puerto `id` (un mensaje de otro agente que no se pudo
+/// deserializar).
+pub(crate) fn port_message_error(agent: &mut Agent, id: u64) {
+    fire_message(
+        agent,
+        target_of(id),
+        "messageerror",
+        Value::Null,
+        "",
+        "",
+        Vec::new(),
+    );
 }
 
 // --- BroadcastChannel (HTML §9.5) ---
