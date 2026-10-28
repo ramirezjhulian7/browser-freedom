@@ -304,6 +304,8 @@ struct St {
     visible: bool,
     clip_rule: FillRule,
     letter_spacing: f32,
+    /// `marker-start`, `marker-mid` y `marker-end` (URLs).
+    markers: [Option<String>; 3],
 }
 
 impl Default for St {
@@ -329,6 +331,7 @@ impl Default for St {
             visible: true,
             clip_rule: FillRule::NonZero,
             letter_spacing: 0.0,
+            markers: [None, None, None],
         }
     }
 }
@@ -550,6 +553,22 @@ impl<'a> Builder<'a> {
                         Some("hidden" | "collapse") => false,
                         _ => continue,
                     };
+                }
+                "marker-start" | "marker-mid" | "marker-end" | "marker" => {
+                    let url = if id.as_deref() == Some("none") {
+                        None
+                    } else {
+                        match one(v).and_then(url_of) {
+                            Some(u) => Some(u),
+                            None => continue,
+                        }
+                    };
+                    match name.as_str() {
+                        "marker-start" => st.markers[0] = url,
+                        "marker-mid" => st.markers[1] = url,
+                        "marker-end" => st.markers[2] = url,
+                        _ => st.markers = [url.clone(), url.clone(), url],
+                    }
                 }
                 "letter-spacing" => {
                     st.letter_spacing = match id.as_deref() {
@@ -836,11 +855,139 @@ impl<'a> Builder<'a> {
             return None;
         }
         let bbox = geom::bbox(&segs);
-        Some(Node::Path(Path {
+        let markers = if st.markers.iter().any(Option::is_some)
+            && matches!(n.name.as_str(), "path" | "line" | "polyline" | "polygon")
+        {
+            self.markers(&segs, st, vp)
+        } else {
+            Vec::new()
+        };
+        let path = Node::Path(Path {
             fill: self.fill(st, bbox, vp),
             stroke: self.stroke(st, bbox, vp),
             segs,
             transform: Transform::IDENTITY,
+        });
+        if markers.is_empty() {
+            return Some(path);
+        }
+        let mut children = vec![path];
+        children.extend(markers);
+        Some(Node::Group(Group {
+            opacity: 1.0,
+            children,
+            ..Group::default()
+        }))
+    }
+
+    /// Los marcadores de un trazado (§13.7): uno por vértice, orientados según `orient`.
+    fn markers(&mut self, segs: &[Seg], st: &St, vp: Viewport) -> Vec<Node> {
+        let verts = vertices(segs);
+        let mut out = Vec::new();
+        let last = verts.len().saturating_sub(1);
+        for (k, v) in verts.iter().enumerate() {
+            let kind = if k == 0 {
+                0
+            } else if k == last {
+                2
+            } else {
+                1
+            };
+            let Some(url) = &st.markers[kind] else {
+                continue;
+            };
+            let Some(m) = self.by_id(url).filter(|&m| self.node(m).name == "marker") else {
+                continue;
+            };
+            if let Some(node) = self.marker(m, v, kind == 0, st, vp) {
+                out.push(node);
+            }
+        }
+        out
+    }
+
+    fn marker(&mut self, m: usize, v: &Vertex, start: bool, st: &St, vp: Viewport) -> Option<Node> {
+        if self.stack.contains(&m) {
+            return None;
+        }
+        let mn = self.node(m);
+        let base = St {
+            color: self.svg.inherited.color,
+            size: self.svg.inherited.font_size,
+            family: self.svg.inherited.font_family.clone(),
+            ..St::default()
+        };
+        let mst = self.computed(mn, &base, vp);
+        let mw = self
+            .len(mn, "markerWidth", Axis::X, vp, &mst)
+            .unwrap_or(3.0);
+        let mh = self
+            .len(mn, "markerHeight", Axis::Y, vp, &mst)
+            .unwrap_or(3.0);
+        if mw <= 0.0 || mh <= 0.0 {
+            return None;
+        }
+        let angle = match mn.attr("orient").map(str::trim) {
+            Some("auto") => v.angle(),
+            Some("auto-start-reverse") => v.angle() + if start { 180.0 } else { 0.0 },
+            Some(a) => {
+                let a = a.trim_end_matches("deg");
+                a.parse::<f32>().unwrap_or(0.0)
+            }
+            None => 0.0,
+        };
+        let scale = if mn
+            .attr("markerUnits")
+            .is_some_and(|u| u.trim() == "userSpaceOnUse")
+        {
+            1.0
+        } else {
+            st.stroke_width
+        };
+        let vb = view_box_state(mn).ok()?;
+        let par = mn.attr("preserveAspectRatio").unwrap_or("");
+        let vb_t = vb.map_or(Transform::IDENTITY, |vb| {
+            view_box_transform(vb, par, (mw, mh))
+        });
+        // `refX`/`refY` están en el sistema del contenido (el del `viewBox`).
+        let rx = self.len(mn, "refX", Axis::X, vp, &mst).unwrap_or(0.0);
+        let ry = self.len(mn, "refY", Axis::Y, vp, &mst).unwrap_or(0.0);
+        let (rx, ry) = vb_t.apply(rx, ry);
+        let inner_vp = match vb {
+            Some((_, _, w, h)) => Viewport { w, h },
+            None => Viewport { w: mw, h: mh },
+        };
+        self.stack.push(m);
+        let children = self.children(m, &mst, inner_vp);
+        self.stack.pop();
+        let overflow_visible = mn
+            .props
+            .get("overflow")
+            .and_then(|v| ident(v))
+            .is_some_and(|o| o == "visible" || o == "auto");
+        let clip = (!overflow_visible).then(|| ClipPath {
+            transform: Transform::IDENTITY,
+            shapes: vec![(
+                geom::rect(0.0, 0.0, mw, mh, 0.0, 0.0),
+                FillRule::NonZero,
+                Transform::IDENTITY,
+            )],
+            texts: Vec::new(),
+        });
+        let transform = Transform::translate(v.x, v.y)
+            .then(&Transform::rotate(angle))
+            .then(&Transform::scale(scale, scale))
+            .then(&Transform::translate(-rx, -ry));
+        Some(Node::Group(Group {
+            transform,
+            opacity: Self::opacity(mn),
+            clip,
+            children: vec![Node::Group(Group {
+                transform: vb_t,
+                opacity: 1.0,
+                clip: None,
+                children,
+            })],
         }))
     }
 
@@ -1365,6 +1512,115 @@ impl<'a> Builder<'a> {
 }
 
 type Bbox = (f32, f32, f32, f32);
+
+/// Un vértice de un trazado con las direcciones (en grados) de los segmentos que llegan y
+/// salen (§13.7.4).
+#[derive(Debug, Clone, Copy)]
+struct Vertex {
+    x: f32,
+    y: f32,
+    din: Option<f32>,
+    dout: Option<f32>,
+}
+
+impl Vertex {
+    /// Orientación de `orient="auto"`: la bisectriz de las dos direcciones, o la que haya.
+    fn angle(&self) -> f32 {
+        match (self.din, self.dout) {
+            (Some(a), Some(b)) => {
+                let mut d = b - a;
+                while d > 180.0 {
+                    d -= 360.0;
+                }
+                while d < -180.0 {
+                    d += 360.0;
+                }
+                a + d / 2.0
+            }
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => 0.0,
+        }
+    }
+}
+
+fn dir((x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Option<f32> {
+    ((x0, y0) != (x1, y1)).then(|| (y1 - y0).atan2(x1 - x0).to_degrees())
+}
+
+/// Los vértices de un trazado, con las tangentes de los segmentos en sus extremos.
+fn vertices(segs: &[Seg]) -> Vec<Vertex> {
+    let mut out: Vec<Vertex> = Vec::new();
+    let mut cur = (0.0, 0.0);
+    let mut start = (0.0, 0.0);
+    let mut start_index = 0;
+    let push = |out: &mut Vec<Vertex>, p: (f32, f32), din: Option<f32>, dout: Option<f32>| {
+        if let Some(last) = out.last_mut()
+            && last.dout.is_none()
+        {
+            last.dout = dout;
+        }
+        out.push(Vertex {
+            x: p.0,
+            y: p.1,
+            din,
+            dout: None,
+        });
+    };
+    for s in segs {
+        match *s {
+            Seg::MoveTo(x, y) => {
+                out.push(Vertex {
+                    x,
+                    y,
+                    din: None,
+                    dout: None,
+                });
+                cur = (x, y);
+                start = cur;
+                start_index = out.len() - 1;
+            }
+            Seg::LineTo(x, y) => {
+                let d = dir(cur, (x, y));
+                push(&mut out, (x, y), d, d);
+                cur = (x, y);
+            }
+            Seg::QuadTo(x1, y1, x, y) => {
+                let d0 = dir(cur, (x1, y1)).or_else(|| dir(cur, (x, y)));
+                let d1 = dir((x1, y1), (x, y)).or_else(|| dir(cur, (x, y)));
+                push(&mut out, (x, y), d1, d0);
+                cur = (x, y);
+            }
+            Seg::CubicTo(x1, y1, x2, y2, x, y) => {
+                let d0 = dir(cur, (x1, y1))
+                    .or_else(|| dir(cur, (x2, y2)))
+                    .or_else(|| dir(cur, (x, y)));
+                let d1 = dir((x2, y2), (x, y))
+                    .or_else(|| dir((x1, y1), (x, y)))
+                    .or_else(|| dir(cur, (x, y)));
+                push(&mut out, (x, y), d1, d0);
+                cur = (x, y);
+            }
+            Seg::Close => {
+                let d = dir(cur, start);
+                if d.is_some() {
+                    push(&mut out, start, d, d);
+                }
+                // El vértice que cierra apunta como el principio del subtrazado, y este recibe
+                // la dirección del cierre.
+                let first_out = out.get(start_index).and_then(|v| v.dout);
+                let close_in = out.last().and_then(|v| v.din);
+                if let Some(last) = out.last_mut() {
+                    last.dout = first_out;
+                }
+                if let Some(first) = out.get_mut(start_index) {
+                    first.din = close_in;
+                }
+                cur = start;
+            }
+        }
+    }
+    out
+}
 
 /// Caja de un nodo en el sistema de `t` (aproximada con las esquinas transformadas).
 fn node_bbox(node: &Node, t: &Transform) -> Option<Bbox> {
