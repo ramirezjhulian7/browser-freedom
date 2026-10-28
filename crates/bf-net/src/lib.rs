@@ -1,8 +1,9 @@
-//! Red: HTTP/1.1 sobre TCP y TLS (rustls), pool de conexiones keep-alive, redirecciones según
-//! Fetch, descompresión, cookies (RFC 6265bis), `data:`/`file:`, detección de encoding de
-//! documentos y un `ResourceLoader` para el resto del motor. Síncrono por ahora.
+//! Red: HTTP/1.1 y HTTP/2 (negociado por ALPN) sobre TCP y TLS (rustls), pool de conexiones
+//! keep-alive, redirecciones según Fetch, descompresión, cookies (RFC 6265bis),
+//! `data:`/`file:`, detección de encoding de documentos y un `ResourceLoader` para el resto
+//! del motor. Síncrono por ahora.
 //!
-//! TODO(roadmap): HTTP/2, caché HTTP, CORS y políticas de seguridad de Fetch.
+//! TODO(roadmap): CORS y políticas de seguridad de Fetch.
 
 #![forbid(unsafe_code)]
 
@@ -10,11 +11,12 @@ pub mod blob; // E2: el almacén de URLs blob:
 pub mod cookies;
 pub mod hpack;
 pub mod http;
+pub mod http2;
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
 pub mod websocket; // E2: cliente WebSocket (RFC 6455)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -124,15 +126,38 @@ impl FetchOptions {
     }
 }
 
+/// Por dónde llegó una respuesta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Protocol {
+    Http11,
+    H2,
+    /// `data:`, `file:`, `blob:`.
+    #[default]
+    Local,
+}
+
+impl Protocol {
+    /// El identificador ALPN (`http/1.1`, `h2`) o `local`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::Http11 => "http/1.1",
+            Protocol::H2 => "h2",
+            Protocol::Local => "local",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Response {
     /// URL final, después de las redirecciones.
     pub url: Url,
     pub status: u16,
+    /// Vacío en HTTP/2 (Fetch: no hay *reason phrase*).
     pub status_text: String,
     pub headers: Headers,
     pub body: Vec<u8>,
     pub redirects: usize,
+    pub protocol: Protocol,
 }
 
 impl Response {
@@ -178,27 +203,60 @@ impl Write for Stream {
 
 type PoolKey = (String, u16, bool);
 
+/// Una configuración de cliente TLS con `roots` y la lista ALPN `alpn`.
+fn make_tls_config(roots: rustls::RootCertStore, alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versiones de TLS por defecto")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Arc::new(config)
+}
+
+fn web_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    }
+}
+
+/// Solo HTTP/1.1 (WebSocket y las respuestas por partes van por HTTP/1.1).
 fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
-        .get_or_init(|| {
-            let roots = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let mut config = rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("versiones de TLS por defecto")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            // HTTP/2 queda para el roadmap.
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Arc::new(config)
-        })
+        .get_or_init(|| make_tls_config(web_roots(), &[b"http/1.1"]))
         .clone()
 }
 
-fn connect(host: &str, port: u16, tls: bool) -> Result<Stream, FetchError> {
+/// RFC 9113 §3.2: `h2` primero y `http/1.1` como repliegue.
+fn tls_config_h2() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| make_tls_config(web_roots(), &[b"h2", b"http/1.1"]))
+        .clone()
+}
+
+/// Un error de E/S del handshake: si viene de rustls, es un error de TLS.
+fn tls_error(e: io::Error) -> FetchError {
+    if e.get_ref()
+        .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
+    {
+        return FetchError::Tls(e.to_string());
+    }
+    FetchError::from(e)
+}
+
+fn server_name(host: &str) -> Result<rustls_pki_types::ServerName<'static>, FetchError> {
+    rustls_pki_types::ServerName::try_from(
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned(),
+    )
+    .map_err(|e| FetchError::Tls(e.to_string()))
+}
+
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, FetchError> {
     let addrs: Vec<_> = (host.trim_start_matches('[').trim_end_matches(']'), port)
         .to_socket_addrs()
         .map_err(FetchError::Dns)?
@@ -218,18 +276,24 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Stream, FetchError> {
     tcp.set_read_timeout(Some(READ_TIMEOUT))?;
     tcp.set_write_timeout(Some(READ_TIMEOUT))?;
     let _ = tcp.set_nodelay(true);
+    Ok(tcp)
+}
+
+/// Una conexión HTTP/1.1 (sin ALPN `h2`).
+fn connect(host: &str, port: u16, tls: bool) -> Result<Stream, FetchError> {
+    let tcp = connect_tcp(host, port)?;
     if !tls {
         return Ok(Stream::Plain(tcp));
     }
-    let name = rustls_pki_types::ServerName::try_from(
-        host.trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_owned(),
-    )
-    .map_err(|e| FetchError::Tls(e.to_string()))?;
-    let conn = rustls::ClientConnection::new(tls_config(), name)
+    let conn = rustls::ClientConnection::new(tls_config(), server_name(host)?)
         .map_err(|e| FetchError::Tls(e.to_string()))?;
     Ok(Stream::Tls(Box::new(rustls::StreamOwned::new(conn, tcp))))
+}
+
+/// Una conexión nueva del [`Fetcher`]: HTTP/1.1 o HTTP/2, según lo negociado.
+enum Opened {
+    H1(Stream),
+    H2(http2::Connection),
 }
 
 /// Los idiomas del `Accept-Language`, en orden (`navigator.languages`).
@@ -267,14 +331,149 @@ pub fn accept_language() -> String {
 #[derive(Default)]
 pub struct Fetcher {
     pool: Mutex<HashMap<PoolKey, Vec<BufReader<Stream>>>>,
+    /// HTTP/2: una conexión por origen, compartida por todas las peticiones (RFC 9113 §9.1).
+    h2: Mutex<HashMap<PoolKey, Arc<http2::Connection>>>,
+    /// Orígenes que pidieron HTTP/1.1 (`HTTP_1_1_REQUIRED`).
+    h1_only: Mutex<HashSet<PoolKey>>,
+    /// Orígenes que negociaron HTTP/1.1: sus conexiones se abren en paralelo.
+    h1_known: Mutex<HashSet<PoolKey>>,
+    /// Turno para abrir la primera conexión con un origen que puede hablar h2.
+    connecting: Mutex<HashMap<PoolKey, Arc<Mutex<()>>>>,
     pub cookies: CookieJar,
     /// Conexiones abiertas (para los tests de keep-alive).
     pub connections_opened: Mutex<usize>,
+    /// HTTP/2 sobre TCP sin TLS con conocimiento previo (RFC 9113 §3.3), para `http:`.
+    pub h2_prior_knowledge: bool,
+    /// Raíces de confianza propias (en vez de las de webpki-roots): configuraciones TLS
+    /// con y sin `h2`.
+    tls: Option<(Arc<rustls::ClientConfig>, Arc<rustls::ClientConfig>)>,
+    /// Registro de las peticiones hechas a la red (para el panel del motor).
+    log: Mutex<Vec<LogEntry>>,
+}
+
+/// Una petición del registro de red de un [`Fetcher`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    pub protocol: Protocol,
 }
 
 impl Fetcher {
     pub fn new() -> Fetcher {
         Fetcher::default()
+    }
+
+    /// Un `Fetcher` que confía solo en los certificados raíz `roots` (DER), para servidores
+    /// de prueba.
+    pub fn with_root_certificates(roots: &[Vec<u8>]) -> Fetcher {
+        let mut store = rustls::RootCertStore::empty();
+        for der in roots {
+            let _ = store.add(rustls_pki_types::CertificateDer::from(der.clone()));
+        }
+        Fetcher {
+            tls: Some((
+                make_tls_config(store.clone(), &[b"h2", b"http/1.1"]),
+                make_tls_config(store, &[b"http/1.1"]),
+            )),
+            ..Fetcher::default()
+        }
+    }
+
+    /// Abre una conexión: TLS negocia `h2` por ALPN (RFC 9113 §3.2) salvo que el origen
+    /// pidiera HTTP/1.1; `http:` usa HTTP/2 solo con conocimiento previo (§3.3).
+    fn open(&self, host: &str, port: u16, tls: bool, key: &PoolKey) -> Result<Opened, FetchError> {
+        let allow_h2 = !self
+            .h1_only
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(key);
+        let mut tcp = connect_tcp(host, port)?;
+        if !tls {
+            if allow_h2 && self.h2_prior_knowledge {
+                return Ok(Opened::H2(http2::start(http2::Transport::Plain(tcp))?));
+            }
+            return Ok(Opened::H1(Stream::Plain(tcp)));
+        }
+        let config = match (&self.tls, allow_h2) {
+            (Some((h2, _)), true) => h2.clone(),
+            (Some((_, h1)), false) => h1.clone(),
+            (None, true) => tls_config_h2(),
+            (None, false) => tls_config(),
+        };
+        let mut conn = rustls::ClientConnection::new(config, server_name(host)?)
+            .map_err(|e| FetchError::Tls(e.to_string()))?;
+        while conn.is_handshaking() {
+            conn.complete_io(&mut tcp).map_err(tls_error)?;
+        }
+        if conn.alpn_protocol() == Some(b"h2") {
+            let transport = http2::Transport::Tls(Box::new(conn), tcp);
+            return Ok(Opened::H2(http2::start(transport)?));
+        }
+        let stream = rustls::StreamOwned::new(conn, tcp);
+        Ok(Opened::H1(Stream::Tls(Box::new(stream))))
+    }
+
+    /// La conexión HTTP/2 viva con `key`, si hay.
+    fn h2_connection(&self, key: &PoolKey) -> Option<Arc<http2::Connection>> {
+        let mut map = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(key) {
+            Some(c) if c.is_alive() => Some(c.clone()),
+            Some(_) => {
+                map.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn forget_h2(&self, key: &PoolKey, conn: &Arc<http2::Connection>) {
+        let mut map = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(key).is_some_and(|c| Arc::ptr_eq(c, conn)) {
+            map.remove(key);
+        }
+    }
+
+    /// Lo común a HTTP/1.1 y HTTP/2 tras recibir la respuesta: cookies y descompresión.
+    fn finish(
+        &self,
+        url: &Url,
+        extra: &HttpExtra<'_>,
+        status: (u16, String),
+        headers: Headers,
+        raw: Vec<u8>,
+        protocol: Protocol,
+    ) -> Result<Response, FetchError> {
+        if extra.credentials {
+            for c in headers.get_all("set-cookie") {
+                self.cookies.set_cookie(url, c);
+            }
+        }
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(LogEntry {
+                method: extra.method.to_ascii_uppercase(),
+                url: url.href(),
+                status: status.0,
+                protocol,
+            });
+        let body = http::decode_content(raw, &headers.list("content-encoding"))?;
+        Ok(Response {
+            url: url.clone(),
+            status: status.0,
+            status_text: status.1,
+            headers,
+            body,
+            redirects: 0,
+            protocol,
+        })
+    }
+
+    /// Las peticiones que fueron a la red, en orden.
+    pub fn requests(&self) -> Vec<LogEntry> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Fetch de `url`: `http(s)`, `data:` y `file:`.
@@ -306,6 +505,7 @@ impl Fetcher {
                     headers,
                     body: res.bytes,
                     redirects,
+                    protocol: Protocol::Local,
                 });
             }
             let no_headers = Headers::default();
@@ -421,9 +621,44 @@ impl Fetcher {
             }
             t
         };
+        // RFC 9110 §9.2.2: solo los métodos idempotentes se repiten si la conexión se cae
+        // a medias.
+        let idempotent = ["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"]
+            .iter()
+            .any(|m| method.eq_ignore_ascii_case(m));
         // Una conexión reutilizada puede estar cerrada: un reintento con una nueva.
-        for attempt in 0..2 {
-            let pooled = if attempt == 0 {
+        let mut fresh = false;
+        for _ in 0..5 {
+            if let Some(conn) = self.h2_connection(&key) {
+                let req = http2::Request::from_http1(
+                    method,
+                    &url.scheme,
+                    &target,
+                    &headers,
+                    body.map(|(b, _)| b),
+                );
+                match conn.request(req) {
+                    Ok(r) => {
+                        let status = (r.status, String::new());
+                        return self.finish(url, extra, status, r.headers, r.body, Protocol::H2);
+                    }
+                    // REFUSED_STREAM con la conexión viva: se repite en ella.
+                    Err(http2::Error::Refused) if conn.is_alive() => continue,
+                    Err(http2::Error::Refused) => {}
+                    Err(http2::Error::Lost) if idempotent => {}
+                    Err(http2::Error::Http11Required) => {
+                        self.h1_only
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key.clone());
+                    }
+                    Err(http2::Error::Timeout) => return Err(FetchError::Timeout),
+                    Err(e) => return Err(FetchError::Io(io::Error::other(e.to_string()))),
+                }
+                self.forget_h2(&key, &conn);
+                continue;
+            }
+            let pooled = if !fresh {
                 self.pool
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -436,11 +671,49 @@ impl Fetcher {
             let mut conn = match pooled {
                 Some(c) => c,
                 None => {
+                    // Primer contacto con un origen que puede hablar h2: una conexión a la
+                    // vez, para que las peticiones simultáneas compartan la que se abra.
+                    let may_h2 = (tls || self.h2_prior_knowledge)
+                        && !self
+                            .h1_known
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .contains(&key);
+                    let gate = may_h2.then(|| {
+                        self.connecting
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .entry(key.clone())
+                            .or_default()
+                            .clone()
+                    });
+                    let _turn = gate
+                        .as_ref()
+                        .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()));
+                    if may_h2 && self.h2_connection(&key).is_some() {
+                        continue;
+                    }
                     *self
                         .connections_opened
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) += 1;
-                    BufReader::new(connect(&host, port, tls)?)
+                    match self.open(&host, port, tls, &key)? {
+                        Opened::H1(s) => {
+                            self.h1_known
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(key.clone());
+                            BufReader::new(s)
+                        }
+                        Opened::H2(c) => {
+                            // Si otro hilo abrió una a la vez, se queda la primera.
+                            let mut map = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+                            if !map.get(&key).is_some_and(|c| c.is_alive()) {
+                                map.insert(key.clone(), Arc::new(c));
+                            }
+                            continue;
+                        }
+                    }
                 }
             };
             let result = (|| -> Result<(http::Head, Vec<u8>, bool), FetchError> {
@@ -470,7 +743,10 @@ impl Fetcher {
             })();
             let (head, raw, keep) = match result {
                 Ok(r) => r,
-                Err(_) if reused => continue,
+                Err(_) if reused => {
+                    fresh = true;
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             if keep {
@@ -481,20 +757,8 @@ impl Fetcher {
                     .or_default()
                     .push(conn);
             }
-            if extra.credentials {
-                for c in head.headers.get_all("set-cookie") {
-                    self.cookies.set_cookie(url, c);
-                }
-            }
-            let body = http::decode_content(raw, &head.headers.list("content-encoding"))?;
-            return Ok(Response {
-                url: url.clone(),
-                status: head.status,
-                status_text: head.reason,
-                headers: head.headers,
-                body,
-                redirects: 0,
-            });
+            let status = (head.status, head.reason);
+            return self.finish(url, extra, status, head.headers, raw, Protocol::Http11);
         }
         Err(FetchError::Io(io::Error::new(
             io::ErrorKind::ConnectionReset,
@@ -601,6 +865,7 @@ fn blob_response_range(
             headers,
             body: entry.bytes.to_vec(),
             redirects,
+            protocol: Protocol::Local,
         });
     };
     let len = entry.bytes.len() as u64;
@@ -630,6 +895,7 @@ fn blob_response_range(
         headers,
         body,
         redirects,
+        protocol: Protocol::Local,
     })
 }
 
@@ -668,6 +934,7 @@ impl Fetcher {
                     headers: h,
                     body: res.bytes,
                     redirects,
+                    protocol: Protocol::Local,
                 };
                 return Ok((r, list));
             }

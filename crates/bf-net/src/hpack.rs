@@ -195,7 +195,10 @@ pub fn huffman_encode(data: &[u8]) -> Vec<u8> {
 /// Bytes que ocupa `data` codificado con Huffman.
 pub fn huffman_len(data: &[u8]) -> usize {
     let codes = huffman_codes();
-    let bits: usize = data.iter().map(|&b| usize::from(codes[usize::from(b)].1)).sum();
+    let bits: usize = data
+        .iter()
+        .map(|&b| usize::from(codes[usize::from(b)].1))
+        .sum();
     bits.div_ceil(8)
 }
 
@@ -533,7 +536,10 @@ impl Encoder {
 
     /// Codifica un bloque. Los campos sensibles (`authorization`, `cookie` cortas) van como
     /// nunca indexados (§7.1.3); el resto con indexado incremental.
-    pub fn encode<'a>(&mut self, fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>) -> Vec<u8> {
+    pub fn encode<'a>(
+        &mut self,
+        fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         if let Some((min, last)) = self.pending_resize.take() {
             if min < last {
@@ -694,7 +700,10 @@ mod tests {
         // C.2.2: literal sin indexado.
         let mut d = Decoder::default();
         let block = hex("040c 2f73 616d 706c 652f 7061 7468");
-        assert_eq!(d.decode(&block).unwrap(), fields(&[(":path", "/sample/path")]));
+        assert_eq!(
+            d.decode(&block).unwrap(),
+            fields(&[(":path", "/sample/path")])
+        );
         assert!(d.table.is_empty());
         let mut out = Vec::new();
         e.encode_field(&mut out, b":path", b"/sample/path", Indexing::Without);
@@ -712,13 +721,18 @@ mod tests {
         assert_eq!(d.decode(&[0x82]).unwrap(), fields(&[(":method", "GET")]));
     }
 
+    /// Un bloque del apéndice C: hex, la lista que codifica, la tabla dinámica resultante y
+    /// su tamaño.
+    type Step<'a> = (
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        &'a [(&'a str, &'a str)],
+        usize,
+    );
+
     /// Decodifica y codifica una secuencia de bloques con la misma pareja de contextos,
     /// comprobando la tabla tras cada uno.
-    fn sequence(
-        max_table: usize,
-        huffman: bool,
-        steps: &[(&str, &[(&str, &str)], &[(&str, &str)], usize)],
-    ) {
+    fn sequence(max_table: usize, huffman: bool, steps: &[Step<'_>]) {
         let mut d = Decoder::new(max_table);
         let mut e = Encoder::new(max_table);
         e.huffman = huffman;
@@ -796,7 +810,12 @@ mod tests {
             4096,
             true,
             &[
-                ("8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff", REQ1, REQ_T1, 57),
+                (
+                    "8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff",
+                    REQ1,
+                    REQ_T1,
+                    57,
+                ),
                 ("8286 84be 5886 a8eb 1064 9cbf", REQ2, REQ_T2, 110),
                 (
                     "8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf",
