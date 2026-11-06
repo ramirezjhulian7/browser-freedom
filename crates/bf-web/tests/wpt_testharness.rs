@@ -92,14 +92,22 @@ fn any_js_wrapper_and_meta() {
         "// META: global=dedicatedworker\ntest(function () {}, 'x');\n",
     )
     .unwrap();
-    assert!(test_docs(&root, "t/w.any.js").is_empty(), "solo worker");
+    // E3: solo la variante en worker dedicado (`.any.worker.html`), sin la de ventana.
+    let w: Vec<String> = test_docs(&root, "t/w.any.js")
+        .into_iter()
+        .map(|d| d.path)
+        .collect();
+    assert_eq!(w, ["t/w.any.worker.html"], "solo worker");
+    // Sin `META: global`: ventana y worker dedicado; aquí se mira la de ventana.
     let docs: Vec<TestDoc> = test_docs(&root, "t/b.any.js");
-    assert_eq!(docs[0].path, "t/b.any.html");
-    assert!(docs[0].html.contains("<title>Un título</title>"));
+    let paths: Vec<&str> = docs.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, ["t/b.any.worker.html", "t/b.any.html"]);
+    let i = 1;
+    assert!(docs[i].html.contains("<title>Un título</title>"));
     let r = run(&root, "t/b.any.js");
-    assert_eq!(r[0].harness, Harness::Ok, "{:?}", r[0]);
-    assert!(r[0].subtests.iter().all(|(_, s, _)| *s == SubStatus::Pass));
-    assert_eq!(r[0].subtests.len(), 2);
+    assert_eq!(r[i].harness, Harness::Ok, "{:?}", r[i]);
+    assert!(r[i].subtests.iter().all(|(_, s, _)| *s == SubStatus::Pass));
+    assert_eq!(r[i].subtests.len(), 2);
 }
 
 #[test]
