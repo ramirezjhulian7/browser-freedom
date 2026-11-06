@@ -19,7 +19,7 @@ use super::body::{self, Body, ConsumeKind};
 use super::cors::{self, FetchHead, FetchParams, FetchSink, Tainting};
 use super::headers::{self, Guard, HeaderList, HeadersData};
 use super::streams;
-use super::{NetRequest, NetResult, classes};
+use super::{NetRequest, NetResponse, classes};
 use bf_js::builtins::promise::{Capability, Handler};
 
 // --- Request ---
@@ -1207,16 +1207,16 @@ pub fn response_from_head(
 /// Convierte el resultado de main fetch en un `Response` (o un error de red).
 pub fn to_response(
     r: &RequestData,
-    result: NetResult,
+    result: Result<(NetResponse, Tainting), String>,
 ) -> Result<(ResponseData, HeaderList), String> {
-    let res = result?;
+    let (res, tainting) = result?;
     let (mut d, list, body) = response_from_head(
         r,
         &res.url_list,
         res.status,
         res.status_text,
         &res.headers,
-        res.tainting,
+        tainting,
     );
     if body {
         d.body = Body::new(Some(res.body));
@@ -1358,7 +1358,7 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, 
     let net = super::start_fetch(
         agent,
         params,
-        Box::new(move |agent: &mut Agent, result: NetResult| {
+        Box::new(move |agent: &mut Agent, result| {
             let Some(p) = finish_call(agent, id) else {
                 return;
             };

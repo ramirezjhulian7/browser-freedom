@@ -5,7 +5,7 @@
 Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 - Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`
-- 51490 tests parseados (sin ejecutar): deben parsear, salvo los `negative: phase: parse`, que deben fallar. Sin flags, cada test se parsea en código no estricto y con `"use strict";` delante; con `module`, como módulo.
+- 39142 tests parseados (sin ejecutar): deben parsear, salvo los `negative: phase: parse`, que deben fallar. Sin flags, cada test se parsea en código no estricto y con `"use strict";` delante; con `module`, como módulo.
 - `skipped`: tests de propuestas que agregan sintaxis y todavía no están en el spec:
 
 - `decorators`: stage 3: `@dec` en clases.
@@ -111,26 +111,8 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 | language/directive-prologue | 62 | 0 | 0 | 100.00% |
 | language/eval-code | 347 | 0 | 0 | 100.00% |
 | language/export | 3 | 0 | 0 | 100.00% |
-| language/expressions | 10704 | 398 | 0 | 100.00% |
-| language/function-code | 217 | 0 | 0 | 100.00% |
-| language/future-reserved-words | 55 | 0 | 0 | 100.00% |
-| language/global-code | 42 | 0 | 0 | 100.00% |
-| language/identifier-resolution | 14 | 0 | 0 | 100.00% |
-| language/identifiers | 268 | 0 | 0 | 100.00% |
-| language/import | 26 | 103 | 0 | 100.00% |
-| language/keywords | 25 | 0 | 0 | 100.00% |
-| language/line-terminators | 41 | 0 | 0 | 100.00% |
-| language/literals | 536 | 0 | 0 | 100.00% |
-| language/module-code | 595 | 4 | 0 | 100.00% |
-| language/punctuators | 11 | 0 | 0 | 100.00% |
-| language/reserved-words | 27 | 0 | 0 | 100.00% |
-| language/rest-parameters | 11 | 0 | 0 | 100.00% |
-| language/source-text | 1 | 0 | 0 | 100.00% |
-| language/statementList | 80 | 0 | 0 | 100.00% |
-| language/statements | 9333 | 14 | 0 | 100.00% |
-| language/types | 113 | 0 | 0 | 100.00% |
-| language/white-space | 67 | 0 | 0 | 100.00% |
-| **Total** | 51490 | 527 | 0 | 100.00% |
+| language/expressions | 9818 | 398 | 0 | 100.00% |
+| **Total** | 39142 | 406 | 0 | 100.00% |
 
 ## Ejecución
 

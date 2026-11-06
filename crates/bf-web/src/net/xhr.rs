@@ -14,7 +14,7 @@ use bf_js::vm::{Agent, JsResult, Throw};
 
 use super::body::{self, decode_with, mime_charset, mime_essence};
 use super::headers::{self, HeaderList};
-use super::{NetResult, classes, dom_error, state};
+use super::{classes, dom_error, state};
 use crate::dom::events::{
     EventData, EventIface, TargetRef, dispatch_js_event, object_key, with_event_handlers,
 };
@@ -700,7 +700,7 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let net = super::start_fetch(
         agent,
         params,
-        Box::new(move |agent: &mut Agent, result: NetResult| {
+        Box::new(move |agent: &mut Agent, result| {
             if st(agent, t).generation != generation {
                 return;
             }
@@ -736,10 +736,14 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// La respuesta filtrada según su tainting (basic o CORS; el CORS check ya lo hizo main
 /// fetch); `Err` si es un error de red.
-fn filter(url: &Url, with_credentials: bool, r: NetResult) -> Result<XhrResponse, String> {
-    let res = r?;
+fn filter(
+    url: &Url,
+    with_credentials: bool,
+    r: Result<(super::NetResponse, super::cors::Tainting), String>,
+) -> Result<XhrResponse, String> {
+    let (res, tainting) = r?;
     let final_url = res.url_list.last().cloned().unwrap_or_else(|| url.clone());
-    let headers = match res.tainting {
+    let headers = match tainting {
         super::cors::Tainting::Basic => super::basic_filter(&res.headers),
         _ => super::cors_filter_with(&res.headers, with_credentials),
     };

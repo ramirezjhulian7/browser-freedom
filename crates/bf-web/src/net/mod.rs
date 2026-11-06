@@ -62,9 +62,6 @@ pub struct NetResponse {
     pub status_text: String,
     pub headers: HeaderList,
     pub body: Vec<u8>,
-    /// El tainting con el que se filtra (lo pone [`cors::main_fetch`]; los backends dan
-    /// respuestas sin filtrar, `Basic`).
-    pub tainting: cors::Tainting,
 }
 
 /// `Err` es un "network error" (Fetch §2.2.6) con un mensaje para la consola.
@@ -143,7 +140,6 @@ fn from_bf_net(r: Result<(bf_net::Response, Vec<Url>), bf_net::FetchError>) -> N
         status_text: r.status_text,
         headers: HeaderList(r.headers.0),
         body: r.body,
-        tainting: cors::Tainting::Basic,
     })
 }
 
@@ -379,7 +375,6 @@ impl NetBackend for LoaderBackend {
             status_text: "OK".into(),
             headers,
             body: r.bytes,
-            tainting: cors::Tainting::Basic,
         })
     }
 }
@@ -607,21 +602,37 @@ pub fn start(agent: &mut Agent, req: NetRequest, done: Done) -> u64 {
     id
 }
 
+/// Lo que recibe quien llamó a [`start_fetch`]: la respuesta sin filtrar y su tainting.
+pub type FetchDone = Box<dyn FnOnce(&mut Agent, Result<(NetResponse, cors::Tainting), String>)>;
+
 /// Empieza "main fetch" con CORS ([`cors::main_fetch`], el cuerpo entero); `done` corre en
 /// una tarea *networking* con la respuesta sin filtrar y su tainting. Devuelve un id para
 /// [`cancel`].
-pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: Done) -> u64 {
+pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: FetchDone) -> u64 {
     let realm = WebContextHandle::current(agent).realm;
     let b = backend(agent);
     let s = state_of(agent, realm);
     s.next_id += 1;
     let id = s.next_id;
+    // La bandeja lleva `NetResult`: el tainting viaja aparte.
+    let tainting = Arc::new(Mutex::new(cors::Tainting::Basic));
+    let t2 = tainting.clone();
+    let done: Done = Box::new(move |agent: &mut Agent, r: NetResult| {
+        let t = *t2.lock().unwrap_or_else(|e| e.into_inner());
+        done(agent, r.map(|res| (res, t)));
+    });
+    let job = move || {
+        cors::fetch_whole(&*b, &params).map(|(res, t)| {
+            *tainting.lock().unwrap_or_else(|e| e.into_inner()) = t;
+            res
+        })
+    };
     if s.threaded {
         s.pending.insert(id, done);
         let inbox = s.inbox.clone();
         let waker = s.waker.clone();
         std::thread::spawn(move || {
-            let r = cors::fetch_whole(&*b, &params);
+            let r = job();
             inbox
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -631,7 +642,7 @@ pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: Done) -> 
             }
         });
     } else {
-        let r = cors::fetch_whole(&*b, &params);
+        let r = job();
         queue_result(agent, realm, done, r);
     }
     id

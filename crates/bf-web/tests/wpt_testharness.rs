@@ -92,7 +92,13 @@ fn any_js_wrapper_and_meta() {
         "// META: global=dedicatedworker\ntest(function () {}, 'x');\n",
     )
     .unwrap();
-    assert!(test_docs(&root, "t/w.any.js").is_empty(), "solo worker");
+    // Solo en workers: ninguna página `window` (sí la variante `.any.worker.html` de E3).
+    assert!(
+        test_docs(&root, "t/w.any.js")
+            .iter()
+            .all(|d| d.path.contains(".worker.")),
+        "solo worker"
+    );
     let docs: Vec<TestDoc> = test_docs(&root, "t/b.any.js");
     assert_eq!(docs[0].path, "t/b.any.html");
     assert!(docs[0].html.contains("<title>Un título</title>"));

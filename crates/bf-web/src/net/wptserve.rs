@@ -72,7 +72,6 @@ fn resp<N: AsRef<str>>(
         status_text: text.to_owned(),
         headers: h,
         body,
-        tainting: super::cors::Tainting::Basic,
     }
 }
 

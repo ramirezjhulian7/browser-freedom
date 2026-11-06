@@ -12,7 +12,7 @@ use bf_infra::Url;
 use bf_net::streaming::{StreamHead, StreamSink};
 
 use super::headers::{self, HeaderList};
-use super::{NetBackend, NetRequest, NetResponse, NetResult};
+use super::{NetBackend, NetRequest, NetResponse};
 
 /// "Response tainting" (Fetch §2.2.5) y el tipo de la respuesta filtrada que da.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -631,8 +631,11 @@ pub fn main_fetch(
     }
 }
 
-/// Main fetch con el cuerpo entero.
-pub fn fetch_whole(backend: &dyn NetBackend, p: &FetchParams) -> NetResult {
+/// Main fetch con el cuerpo entero: la respuesta sin filtrar y su tainting.
+pub fn fetch_whole(
+    backend: &dyn NetBackend,
+    p: &FetchParams,
+) -> Result<(NetResponse, Tainting), String> {
     struct Collect {
         head: Option<FetchHead>,
         body: Vec<u8>,
@@ -653,12 +656,14 @@ pub fn fetch_whole(backend: &dyn NetBackend, p: &FetchParams) -> NetResult {
     };
     main_fetch(backend, p, &mut c)?;
     let h = c.head.ok_or("empty response")?;
-    Ok(NetResponse {
-        url_list: h.url_list,
-        status: h.status,
-        status_text: h.status_text,
-        headers: h.headers,
-        body: c.body,
-        tainting: h.tainting,
-    })
+    Ok((
+        NetResponse {
+            url_list: h.url_list,
+            status: h.status,
+            status_text: h.status_text,
+            headers: h.headers,
+            body: c.body,
+        },
+        h.tainting,
+    ))
 }
