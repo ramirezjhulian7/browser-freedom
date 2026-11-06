@@ -300,6 +300,25 @@ impl<'a> Layout<'a> {
             // Tamaño de contenido en el eje principal (max-content en filas). E5: con
             // `aspect-ratio` y alto definido, el ancho transferido (CSS Flexbox 1 §9.2.3 B).
             let ratio_main = if row { self.ratio_width(b, cb) } else { None };
+            // Con relación de aspecto y un tamaño cruzado definido por estiramiento (fila con
+            // alto definido), la base sale de ese alto (§9.2.3 B).
+            let item_ratio = match &b.kind {
+                BoxKind::Replaced { ratio, .. } => ratio.or(s.aspect_ratio.preferred()),
+                _ => s.aspect_ratio.preferred(),
+            };
+            let ratio_main = ratio_main.or_else(|| {
+                let r = item_ratio?;
+                let stretched = row
+                    && align == ItemAlign::Stretch
+                    && !auto_cross_margin
+                    && s.height == Size::Auto
+                    && !wrap;
+                let h = cb.height.filter(|_| stretched)?;
+                let inner =
+                    (h - margins[2].unwrap_or(0.0) - margins[3].unwrap_or(0.0) - bp_v).max(0.0);
+                let (lo, hi) = height_limits(s, cb.height, bp_v);
+                Some(inner.min(hi).max(lo) * r)
+            });
             let content_main = |this: &mut Self| -> f32 {
                 if let Some(w) = ratio_main {
                     return w;
@@ -834,6 +853,89 @@ impl<'a> Layout<'a> {
         (out, content_h)
     }
 
+    /// E5: anchos intrínsecos de un contenedor flex en columnas con wrap y alto definido
+    /// (§9.9.1): las líneas se cortan con el tamaño principal hipotético de los ítems y cada
+    /// una mide lo que su ítem más ancho; `None` si el alto no es definido.
+    fn column_wrap_widths(&mut self, b: &'a LayoutBox) -> Option<(f32, f32)> {
+        let cs = &b.style;
+        let ev = border_edges(cs).vertical() + padding_edges(cs, 0.0).vertical();
+        let (lo, hi) = height_limits(cs, self.pct_height_basis, ev);
+        let avail = specified_height(cs, self.pct_height_basis, ev)
+            .map(|h| h.min(hi).max(lo))
+            .or(hi.is_finite().then_some(hi))?;
+        let main_gap = gap_px(&cs.row_gap, avail);
+        let cross_gap = gap_px(&cs.column_gap, 0.0);
+        let mut items: Vec<(f32, f32, f32)> = Vec::new();
+        let mut children: Vec<&'a LayoutBox> = b
+            .children
+            .iter()
+            .filter(|c| !c.is_absolutely_positioned() && !matches!(c.kind, BoxKind::Marker { .. }))
+            .collect();
+        children.sort_by_key(|c| c.style.order.0);
+        for c in children {
+            let (cmin, cmax) = self.outer_intrinsic_widths(c);
+            let s = &c.style;
+            let bp_v = border_edges(s).vertical() + padding_edges(s, 0.0).vertical();
+            let mv = margin_value(&s.margin_top, 0.0).unwrap_or(0.0)
+                + margin_value(&s.margin_bottom, 0.0).unwrap_or(0.0);
+            let spec = specified_height(s, Some(avail), bp_v);
+            let base = match &s.flex_basis {
+                FlexBasis::Size(Size::LengthPercentage(lp)) => {
+                    let v = lp.resolve(avail);
+                    if s.box_sizing == bf_style::properties::types::BoxSizing::BorderBox {
+                        (v - bp_v).max(0.0)
+                    } else {
+                        v
+                    }
+                }
+                FlexBasis::Size(Size::Auto) if spec.is_some() => spec.unwrap_or(0.0),
+                _ => {
+                    let bp_h = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
+                    let mh = margin_value(&s.margin_left, 0.0).unwrap_or(0.0)
+                        + margin_value(&s.margin_right, 0.0).unwrap_or(0.0);
+                    let w = (cmax - bp_h - mh).max(0.0);
+                    let cb = Cb {
+                        x: 0.0,
+                        y: 0.0,
+                        width: w,
+                        height: Some(avail),
+                    };
+                    self.item_content_height(c, cb, w, bp_v)
+                }
+            };
+            let (hmin, hmax) = height_limits(s, Some(avail), bp_v);
+            let hyp = base.min(hmax).max(hmin);
+            items.push((hyp + bp_v + mv, cmin, cmax));
+        }
+        if items.is_empty() {
+            return None;
+        }
+        let (mut min, mut max) = (0.0f32, 0.0f32);
+        let (mut used, mut lmin, mut lmax, mut lines) = (0.0f32, 0.0f32, 0.0f32, 0usize);
+        let mut first = true;
+        for (outer, cmin, cmax) in items {
+            let extra = if first { outer } else { outer + main_gap };
+            if !first && used + extra > avail + 0.01 {
+                min += lmin;
+                max += lmax;
+                lines += 1;
+                used = outer;
+                lmin = cmin;
+                lmax = cmax;
+                continue;
+            }
+            first = false;
+            used += extra;
+            lmin = lmin.max(cmin);
+            lmax = lmax.max(cmax);
+        }
+        min += lmin;
+        max += lmax;
+        lines += 1;
+        let gaps = cross_gap * (lines - 1) as f32;
+        Some((min + gaps, max + gaps))
+    }
+
     /// Anchos intrínsecos (min-content, max-content) de un contenedor flex (§9.9.1).
     pub(crate) fn flex_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         let cs = &b.style;
@@ -842,6 +944,14 @@ impl<'a> Layout<'a> {
             FlexDirection::Row | FlexDirection::RowReverse
         );
         let gap = gap_px(&cs.column_gap, 0.0);
+        // E5: columnas con wrap y alto definido: las líneas se forman con los tamaños
+        // principales y el ancho es la suma de sus anchos (§9.9.1).
+        if !row
+            && cs.flex_wrap != FlexWrap::Nowrap
+            && let Some(r) = self.column_wrap_widths(b)
+        {
+            return r;
+        }
         let (mut min, mut max) = (0.0f32, 0.0f32);
         let mut n = 0;
         for c in b.children.iter().filter(|c| !c.is_absolutely_positioned()) {

@@ -893,7 +893,25 @@ impl<'a> Layout<'a> {
         let (mut children, auto_h) = match &b.kind {
             BoxKind::Replaced { natural, ratio } => {
                 let size = self.replaced_size(b, *natural, *ratio, cb);
-                (Vec::new(), size.height)
+                // E5: con un ancho usado distinto (ítem flexionado o estirado) y alto `auto`, el
+                // alto sale de la relación de aspecto (CSS Sizing 4 §5.1).
+                let r = style
+                    .aspect_ratio
+                    .preferred()
+                    .filter(|_| !style.aspect_ratio.auto || ratio.is_none())
+                    .or(*ratio);
+                let h = match r {
+                    Some(r)
+                        if r > 0.0
+                            && (content_w - size.width).abs() > 0.01
+                            && specified_height(style, cb.height, edges_v).is_none() =>
+                    {
+                        let (lo, hi) = height_limits(style, cb.height, edges_v);
+                        (content_w / r).min(hi).max(lo)
+                    }
+                    _ => size.height,
+                };
+                (Vec::new(), h)
             }
             _ if crate::flex::is_flex_container(b) => self.flex_layout(b, child_cb),
             // E4: grid y tablas.

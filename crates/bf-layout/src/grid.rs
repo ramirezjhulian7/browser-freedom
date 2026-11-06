@@ -2668,10 +2668,7 @@ impl<'a> Layout<'a> {
         let gc = axis_gap(&s.column_gap, own_w, sg.sub.cols.as_ref());
         let gr = axis_gap(&s.row_gap, None, sg.sub.rows.as_ref());
         self.register_subgrids(&sg, gc, gr);
-        let own_cols = match own_w {
-            Some(w) => Some(self.size_grid_columns(sb, &mut sg, w, gc)),
-            None => None,
-        };
+        let own_cols = own_w.map(|w| self.size_grid_columns(sb, &mut sg, w, gc));
         let dc = sg.sub.cols.as_ref().map_or(0.0, |p| (gc - p.gap) / 2.0);
         let dr = sg.sub.rows.as_ref().map_or(0.0, |p| (gr - p.gap) / 2.0);
         let (nc, nr) = (sg.cols.len(), sg.rows.len());
