@@ -3,15 +3,20 @@
 //! `data:`/`file:`, detección de encoding de documentos y un `ResourceLoader` para el resto
 //! del motor. Síncrono por ahora.
 //!
+//! La caché HTTP (RFC 9111, [`cache`]) se activa por `Fetcher`: [`NetLoader::new`] la trae en
+//! memoria y [`NetLoader::with_disk_cache`] también en disco.
+//!
 //! TODO(roadmap): CORS y políticas de seguridad de Fetch.
 
 #![forbid(unsafe_code)]
 
 pub mod blob; // E2: el almacén de URLs blob:
+pub mod cache;
 pub mod cookies;
 pub mod hpack;
 pub mod http;
 pub mod http2;
+pub mod psl;
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
 pub mod websocket; // E2: cliente WebSocket (RFC 6455)
@@ -26,6 +31,7 @@ use bf_infra::resource::load_local;
 use bf_infra::{Resource, ResourceLoader};
 use bf_url::{Host, Url};
 
+pub use cache::{CacheMode, CacheUse, HttpCache};
 pub use cookies::CookieJar;
 pub use http::Headers;
 pub use sniff::{EncodingSource, MimeType, html_encoding, html_encoding_with_source};
@@ -103,6 +109,8 @@ pub struct FetchOptions {
     pub body: Option<(Vec<u8>, String)>,
     pub referrer: Option<Url>,
     pub accept: String,
+    /// El *cache mode* de Fetch (si el `Fetcher` tiene caché).
+    pub cache: CacheMode,
 }
 
 impl Default for FetchOptions {
@@ -112,6 +120,7 @@ impl Default for FetchOptions {
             body: None,
             referrer: None,
             accept: "*/*".into(),
+            cache: CacheMode::Default,
         }
     }
 }
@@ -158,6 +167,8 @@ pub struct Response {
     pub body: Vec<u8>,
     pub redirects: usize,
     pub protocol: Protocol,
+    /// Qué hizo la caché HTTP con el último salto.
+    pub cache: CacheUse,
 }
 
 impl Response {
@@ -347,8 +358,10 @@ pub struct Fetcher {
     /// Raíces de confianza propias (en vez de las de webpki-roots): configuraciones TLS
     /// con y sin `h2`.
     tls: Option<(Arc<rustls::ClientConfig>, Arc<rustls::ClientConfig>)>,
-    /// Registro de las peticiones hechas a la red (para el panel del motor).
+    /// Registro de las peticiones (para el panel del motor).
     log: Mutex<Vec<LogEntry>>,
+    /// La caché HTTP (RFC 9111); `None`: sin caché.
+    pub cache: Option<HttpCache>,
 }
 
 /// Una petición del registro de red de un [`Fetcher`].
@@ -357,7 +370,22 @@ pub struct LogEntry {
     pub method: String,
     pub url: String,
     pub status: u16,
+    /// `Protocol::Local` si se sirvió de la caché sin red.
     pub protocol: Protocol,
+    pub cache: CacheUse,
+}
+
+impl LogEntry {
+    /// ¿Hubo una petición a la red? (Todo salvo lo servido de la caché sin validar.)
+    pub fn network(&self) -> bool {
+        !matches!(self.cache, CacheUse::Hit | CacheUse::Unavailable)
+    }
+}
+
+/// `FREEDOM_NET_LOG=1`: cada petición se escribe en stderr.
+fn net_log_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEDOM_NET_LOG").is_some_and(|v| v != "0"))
 }
 
 impl Fetcher {
@@ -450,15 +478,6 @@ impl Fetcher {
                 self.cookies.set_cookie(url, c);
             }
         }
-        self.log
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(LogEntry {
-                method: extra.method.to_ascii_uppercase(),
-                url: url.href(),
-                status: status.0,
-                protocol,
-            });
         let body = http::decode_content(raw, &headers.list("content-encoding"))?;
         Ok(Response {
             url: url.clone(),
@@ -468,7 +487,37 @@ impl Fetcher {
             body,
             redirects: 0,
             protocol,
+            cache: CacheUse::Network,
         })
+    }
+
+    fn record(&self, method: &str, url: &Url, r: &Response) {
+        let entry = LogEntry {
+            method: method.to_ascii_uppercase(),
+            url: url.href(),
+            status: r.status,
+            protocol: r.protocol,
+            cache: r.cache,
+        };
+        if net_log_enabled() {
+            let how = match entry.cache {
+                CacheUse::Network => "red",
+                CacheUse::Hit => "caché",
+                CacheUse::Revalidated => "caché validada (304)",
+                CacheUse::Unavailable => "caché vacía (504)",
+            };
+            eprintln!(
+                "red: {} {} {} {} [{how}]",
+                entry.method,
+                entry.url,
+                entry.status,
+                entry.protocol.name()
+            );
+        }
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(entry);
     }
 
     /// Las peticiones que fueron a la red, en orden.
@@ -506,6 +555,7 @@ impl Fetcher {
                     body: res.bytes,
                     redirects,
                     protocol: Protocol::Local,
+                    cache: CacheUse::Network,
                 });
             }
             let no_headers = Headers::default();
@@ -516,6 +566,7 @@ impl Fetcher {
                     .map(|(b, ct)| (b.as_slice(), Some(ct.as_str()))),
                 headers: &no_headers,
                 credentials: true,
+                cache: opts.cache,
             };
             let mut response = self.http(&url, &extra, referrer.as_ref(), &opts.accept)?;
             response.redirects = redirects;
@@ -555,12 +606,9 @@ impl Fetcher {
         let method = extra.method;
         let body = extra.body;
         let tls = url.scheme == "https";
-        let host = match &url.host {
-            Some(Host::Empty) | None => return Err(FetchError::InvalidUrl),
-            Some(h) => h.to_string(),
-        };
-        let port = url.port.unwrap_or(if tls { 443 } else { 80 });
-        let key: PoolKey = (host.clone(), port, tls);
+        if matches!(url.host, Some(Host::Empty) | None) {
+            return Err(FetchError::InvalidUrl);
+        }
         let mut headers = Headers::default();
         headers.push("Host", &url.host_string());
         // E2: las cabeceras del script reemplazan a las por defecto del mismo nombre.
@@ -621,6 +669,71 @@ impl Fetcher {
             }
             t
         };
+        let response = match &self.cache {
+            None => self.send(url, extra, &headers, &target)?,
+            Some(cache) => {
+                let req = cache::CacheRequest {
+                    method,
+                    url,
+                    headers: &headers,
+                    mode: extra.cache,
+                    credentials: extra.credentials,
+                };
+                let mut protocol = Protocol::Local;
+                let (r, used) = cache.fetch(&req, |h| {
+                    let r = self.send(url, extra, h, &target)?;
+                    protocol = r.protocol;
+                    Ok::<_, FetchError>(cache::CacheResponse {
+                        status: r.status,
+                        status_text: r.status_text,
+                        headers: r.headers,
+                        body: r.body,
+                    })
+                })?;
+                // Fetch §4.5: `only-if-cached` sin nada guardado es un error de red.
+                if used == CacheUse::Unavailable && extra.cache == CacheMode::OnlyIfCached {
+                    return Err(FetchError::Io(io::Error::other(
+                        "only-if-cached: no está en la caché",
+                    )));
+                }
+                Response {
+                    url: url.clone(),
+                    status: r.status,
+                    status_text: r.status_text,
+                    headers: r.headers,
+                    body: r.body,
+                    redirects: 0,
+                    protocol: if used == CacheUse::Network {
+                        protocol
+                    } else {
+                        Protocol::Local
+                    },
+                    cache: used,
+                }
+            }
+        };
+        self.record(method, url, &response);
+        Ok(response)
+    }
+
+    /// Un salto por la red (HTTP/2 si hay conexión o se negocia, si no HTTP/1.1) con
+    /// `headers` ya completas.
+    fn send(
+        &self,
+        url: &Url,
+        extra: &HttpExtra<'_>,
+        headers: &Headers,
+        target: &str,
+    ) -> Result<Response, FetchError> {
+        let method = extra.method;
+        let body = extra.body;
+        let tls = url.scheme == "https";
+        let host = match &url.host {
+            Some(Host::Empty) | None => return Err(FetchError::InvalidUrl),
+            Some(h) => h.to_string(),
+        };
+        let port = url.port.unwrap_or(if tls { 443 } else { 80 });
+        let key: PoolKey = (host.clone(), port, tls);
         // RFC 9110 §9.2.2: solo los métodos idempotentes se repiten si la conexión se cae
         // a medias.
         let idempotent = ["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"]
@@ -776,6 +889,7 @@ struct HttpExtra<'a> {
     body: Option<(&'a [u8], Option<&'a str>)>,
     headers: &'a Headers,
     credentials: bool,
+    cache: CacheMode,
 }
 
 /// El modo de redirección de una petición (Fetch §2.2.5, "redirect mode").
@@ -866,6 +980,7 @@ fn blob_response_range(
             body: entry.bytes.to_vec(),
             redirects,
             protocol: Protocol::Local,
+            cache: CacheUse::Network,
         });
     };
     let len = entry.bytes.len() as u64;
@@ -896,6 +1011,7 @@ fn blob_response_range(
         body,
         redirects,
         protocol: Protocol::Local,
+        cache: CacheUse::Network,
     })
 }
 
@@ -906,6 +1022,16 @@ impl Fetcher {
         &self,
         url: &Url,
         req: &RequestOptions,
+    ) -> Result<(Response, Vec<Url>), FetchError> {
+        self.fetch_request_with_cache(url, req, CacheMode::Default)
+    }
+
+    /// Como [`Fetcher::fetch_request`], con el *cache mode* de la petición (`RequestInit.cache`).
+    pub fn fetch_request_with_cache(
+        &self,
+        url: &Url,
+        req: &RequestOptions,
+        cache: CacheMode,
     ) -> Result<(Response, Vec<Url>), FetchError> {
         let mut url = url.clone();
         let mut method = req.method.clone();
@@ -935,6 +1061,7 @@ impl Fetcher {
                     body: res.bytes,
                     redirects,
                     protocol: Protocol::Local,
+                    cache: CacheUse::Network,
                 };
                 return Ok((r, list));
             }
@@ -943,6 +1070,7 @@ impl Fetcher {
                 body: body.as_deref().map(|b| (b, None)),
                 headers: &headers,
                 credentials: req.credentials,
+                cache,
             };
             let mut response = self.http(&url, &extra, referrer.as_ref(), "*/*")?;
             response.redirects = redirects;
@@ -1002,8 +1130,24 @@ pub struct NetLoader {
 }
 
 impl NetLoader {
+    /// Con la caché HTTP en memoria.
     pub fn new() -> NetLoader {
-        NetLoader::default()
+        NetLoader::with_cache(HttpCache::in_memory())
+    }
+
+    /// Con la caché HTTP en memoria y en disco, en [`cache::default_dir`]
+    /// (`%LOCALAPPDATA%\Freedom\cache` en Windows).
+    pub fn with_disk_cache() -> NetLoader {
+        match cache::default_dir() {
+            Some(dir) => NetLoader::with_cache(HttpCache::on_disk(dir)),
+            None => NetLoader::new(),
+        }
+    }
+
+    pub fn with_cache(cache: HttpCache) -> NetLoader {
+        let mut net = NetLoader::default();
+        net.fetcher.cache = Some(cache);
+        net
     }
 }
 
