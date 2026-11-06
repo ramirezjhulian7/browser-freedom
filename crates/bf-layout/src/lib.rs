@@ -14,6 +14,7 @@ pub mod fragment;
 mod grid; // E4
 mod inline;
 mod positioned;
+pub mod scroll; // E12
 mod table; // E4
 
 use bf_dom::Document;
@@ -49,11 +50,14 @@ pub fn layout_document_with_images(
         let mut layout = block::Layout::new(fonts, viewport);
         block::layout_root(&mut layout, root)
     });
-    FragmentTree {
+    let mut tree = FragmentTree {
         root: fragment,
         viewport,
         report,
-    }
+        scroll: scroll::ScrollState::default(),
+    };
+    scroll::init(&mut tree, doc); // E12
+    tree
 }
 
 /// Volcado del árbol de fragmentos: una línea por fragmento, indentada dos espacios por nivel.
