@@ -20,6 +20,7 @@ mod chrome;
 mod dialog;
 mod edit;
 mod events;
+mod findbar;
 mod hit;
 mod icons;
 mod menu;
@@ -177,6 +178,8 @@ struct App {
     last_click: Option<(Instant, (f32, f32), u8)>,
     /// Menú contextual abierto.
     menu: Option<Menu>,
+    /// La barra de buscar en la página (`Ctrl+F`, E11).
+    find: Option<findbar::FindBar>,
     fonts: Arc<FontDb>,
     /// Los hilos de documento (uno por pestaña).
     worker: Documents,
@@ -263,7 +266,7 @@ fn url_from_input(input: &str) -> Option<Url> {
     let has_scheme = s.split_once(':').is_some_and(|(scheme, rest)| {
         matches!(
             scheme.to_ascii_lowercase().as_str(),
-            "http" | "https" | "file" | "data" | "about"
+            "http" | "https" | "file" | "data" | "about" | "freedom"
         ) || rest.starts_with("//")
     });
     if has_scheme && let Ok(u) = Url::parse(s, None) {
@@ -605,7 +608,7 @@ fn short_name(url: &Url) -> String {
         bf_url::Path::List(segments) if url.scheme == "file" => {
             segments.last().cloned().unwrap_or_default()
         }
-        _ if url.scheme == "about" => url.href(),
+        _ if internal::is_internal(url) => url.href(),
         _ => url.host_string(),
     }
 }
@@ -633,6 +636,7 @@ impl App {
             drag: None,
             last_click: None,
             menu: None,
+            find: None,
             fonts: fonts.clone(),
             worker,
             tab_key: 1,
@@ -840,7 +844,7 @@ impl App {
             .as_ref()
             .map(|l| &l.url)
             .or_else(|| current.as_ref().map(|l| &l.url))
-            .is_some_and(|u| u.scheme == "about")
+            .is_some_and(internal::is_internal)
     }
 
     fn any_loading(&self) -> bool {
@@ -1357,6 +1361,12 @@ impl App {
         c.can_back = self.index > 0 && !self.history.is_empty();
         c.can_forward = self.index + 1 < self.history.len();
         c.loading = self.loading.is_some();
+        c.bookmarked = self
+            .current
+            .as_ref()
+            .filter(|_| self.loading.is_none())
+            .and_then(|l| crate::bookmarks::global().find_url(&l.url.href()).map(|_| ()))
+            .is_some();
         c.engine_alert = self
             .page
             .as_ref()
@@ -1423,6 +1433,17 @@ impl App {
         self.redraw_later();
     }
 
+    /// `Ctrl+D` o la estrella: guarda la página actual en los marcadores, o la quita si ya
+    /// estaba (E11).
+    fn toggle_bookmark(&mut self) {
+        let Some(c) = self.current.clone().filter(|c| c.meta.error.is_none()) else {
+            return;
+        };
+        let title = c.title().unwrap_or_else(|| short_name(&c.url));
+        let message = crate::bookmarks::toggle_page(&c.url.href(), &title);
+        self.set_notice(message);
+    }
+
     fn set_notice(&mut self, message: String) {
         self.notice = Some((message, Instant::now()));
         self.refresh_chrome();
@@ -1445,7 +1466,7 @@ impl App {
         let mut recent: Vec<(String, String)> = Vec::new();
         for e in self.history.iter().rev() {
             let href = e.url.href();
-            if e.url.scheme != "about" && !recent.iter().any(|(_, h)| *h == href) {
+            if !internal::is_internal(&e.url) && !recent.iter().any(|(_, h)| *h == href) {
                 recent.push((e.title.clone(), href));
             }
         }
@@ -1501,6 +1522,21 @@ impl App {
     /// Navega a `url` (un enlace o lo escrito en la barra).
     fn navigate(&mut self, url: Url) {
         if url.scheme == "bf" {
+            // Las acciones del perfil (borrar historial, marcadores…) solo desde una página
+            // interna: una página de la web no puede dispararlas con un enlace.
+            if self.current.as_ref().is_some_and(|c| c.meta.internal)
+                && let Some(outcome) = internal::profile_action(&url)
+            {
+                if let Some(message) = outcome.notice {
+                    self.set_notice(message);
+                }
+                if let Some(go) = outcome.go {
+                    self.start_load(go, Navigation::Replace);
+                } else if outcome.reload {
+                    self.reload();
+                }
+                return;
+            }
             return self.action(&url.path_string());
         }
         // `about:engine` desde una página: el reporte de esa página.
@@ -2073,6 +2109,11 @@ impl App {
         self.load_time = Some(started.elapsed());
         let url = loaded.url.clone();
         let title = loaded.title().unwrap_or_else(|| url.href());
+        // El historial global (E11): las navegaciones, no las recargas ni las páginas de error.
+        if !matches!(nav, Navigation::Reload) && loaded.meta.error.is_none() {
+            let shown = loaded.title().unwrap_or_default();
+            crate::history::global().record(&url.href(), &shown, crate::profile::now());
+        }
         self.current = Some(loaded);
         self.page = Some(page);
         self.page_generation += 1;
@@ -2292,6 +2333,16 @@ impl App {
                 );
                 blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
+            if let Some(list) = self.find_highlights() {
+                let layer = render_scrolled(
+                    &list,
+                    viewport,
+                    dpi * self.zoom,
+                    Rgba::TRANSPARENT,
+                    self.scroll,
+                );
+                blit(&mut frame, &layer, 0.0, area.y * dpi);
+            }
             if let Some(sel) = self.selection.filter(|s| !s.is_empty())
                 && let Some(index) = self.text_index()
             {
@@ -2366,6 +2417,14 @@ impl App {
             let bar = render(&list, self.chrome.bar_size(), dpi, theme.chrome);
             blit(&mut frame, &bar, 0.0, 0.0);
         }
+        if let Some((list, (x, y), size)) = self.find_layer() {
+            let layer = render(&list, size, dpi, Rgba::TRANSPARENT);
+            blit(&mut frame, &layer, x * dpi, y * dpi);
+        }
+        if let Some((list, (x, y), size)) = self.chrome.suggestions_layer() {
+            let layer = render(&list, size, dpi, Rgba::TRANSPARENT);
+            blit(&mut frame, &layer, x * dpi, y * dpi);
+        }
         if let Some(status) = self.chrome.status() {
             let layer = render(
                 status.display_list(),
@@ -2389,6 +2448,7 @@ impl App {
     fn redraw(&mut self) {
         trace("redraw");
         self.sync_view();
+        self.sync_find();
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -2460,6 +2520,19 @@ impl App {
             self.set_cursor(CursorIcon::Default);
             return;
         }
+        if self.find_hover(x, y) {
+            return;
+        }
+        if self.chrome.suggestions_open() {
+            let hover = self.chrome.suggestion_at(x, y);
+            if self.chrome.set_suggest_hover(hover) {
+                self.refresh_chrome();
+            }
+            if hover.is_some() {
+                self.set_cursor(CursorIcon::Pointer);
+                return;
+            }
+        }
         let mut cursor = CursorIcon::Default;
         let mut link = None;
         let mut bar_hover = None;
@@ -2529,6 +2602,22 @@ impl App {
             }
             return;
         }
+        if self.find_click(x, y) {
+            return;
+        }
+        if self.chrome.suggestions_open() {
+            let url = self
+                .chrome
+                .suggestion_at(x, y)
+                .and_then(|i| self.chrome.suggestion_url(i))
+                .and_then(|u| Url::parse(u, None).ok());
+            if let Some(url) = url {
+                self.chrome.field.focused = false;
+                self.chrome.clear_suggestions();
+                self.navigate(url);
+                return;
+            }
+        }
         if let Some(menu) = &self.menu {
             let action = menu
                 .item_at(x, y)
@@ -2547,6 +2636,7 @@ impl App {
                 Some(Region::Reload) if self.loading.is_some() => self.stop(),
                 Some(Region::Reload) => self.reload(),
                 Some(Region::Engine) => self.toggle_panel(),
+                Some(Region::Star) => self.toggle_bookmark(),
                 Some(Region::Field) if !self.chrome.field.focused => self.focus_bar(),
                 Some(Region::Tab(i)) => self.activate_tab(i),
                 Some(Region::CloseTab(i)) => self.close_tab(i),
@@ -2792,9 +2882,14 @@ impl App {
     }
 
     fn focus_bar(&mut self) {
+        if let Some(f) = &mut self.find {
+            f.focused = false;
+            self.layout_find();
+        }
         self.chrome.field.focused = true;
         self.chrome.field.set_text(self.chrome.url.clone());
         self.chrome.field.select_all();
+        self.chrome.clear_suggestions();
         self.refresh_chrome();
     }
 
@@ -2802,6 +2897,26 @@ impl App {
     fn field_key(&mut self, key: &Key, text: Option<&str>) -> bool {
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
+        let before = self.chrome.field.text.clone();
+        // Las sugerencias del historial (E11): las flechas recorren la lista; Esc la cierra
+        // antes de soltar el campo.
+        match key {
+            Key::Named(NamedKey::ArrowDown) if self.chrome.move_suggestion(true) => {
+                self.refresh_chrome();
+                return true;
+            }
+            Key::Named(NamedKey::ArrowUp) if self.chrome.move_suggestion(false) => {
+                self.refresh_chrome();
+                return true;
+            }
+            Key::Named(NamedKey::Escape) if self.chrome.suggestions_open() => {
+                self.chrome.clear_suggestions();
+                self.refresh_chrome();
+                return true;
+            }
+            Key::Named(NamedKey::Enter) => self.chrome.clear_suggestions(),
+            _ => {}
+        }
         let field = &mut self.chrome.field;
         match key {
             Key::Named(NamedKey::Escape) => {
@@ -2845,6 +2960,9 @@ impl App {
                 _ => return false,
             },
         }
+        if self.chrome.field.text != before {
+            self.chrome.update_suggestions();
+        }
         self.refresh_chrome();
         true
     }
@@ -2856,8 +2974,9 @@ impl App {
             }
             return;
         }
-        // Las teclas sobre la página (no en el campo de URL ni en un menú) van al documento.
-        if !self.chrome.field.focused && self.menu.is_none() {
+        // Las teclas sobre la página (no en el campo de URL, la barra de búsqueda ni un menú)
+        // van al documento.
+        if !self.chrome.field.focused && self.menu.is_none() && !self.find_focused() {
             let key = match &event.logical_key {
                 Key::Character(c) => c.to_string(),
                 Key::Named(n) => format!("{n:?}"),
@@ -2916,6 +3035,9 @@ impl App {
             Key::Character(c) if ctrl && is(c, "r") => return self.reload(),
             Key::Named(NamedKey::F5) => return self.reload(),
             Key::Character(c) if ctrl && shift && is(c, "d") => return self.dump(true),
+            Key::Character(c) if ctrl && is(c, "d") => return self.toggle_bookmark(),
+            Key::Character(c) if ctrl && is(c, "f") => return self.open_find(),
+            Key::Named(NamedKey::F3) if self.find.is_none() => return self.open_find(),
             Key::Character(c) if ctrl && is(c, "s") => return self.save_png(),
             Key::Character(c) if ctrl && is(c, "h") => return self.home(),
             Key::Named(NamedKey::Escape) if self.loading.is_some() => return self.stop(),
@@ -2929,6 +3051,9 @@ impl App {
             _ => {}
         }
         if self.chrome.field.focused && self.field_key(key, text) {
+            return;
+        }
+        if self.find.is_some() && self.find_key(key, text) {
             return;
         }
         if self.focus.is_some() && self.edit_key(key, text) {
@@ -2964,6 +3089,7 @@ impl App {
             self.chrome.field.focused = true;
             self.chrome.field.set_text(String::new());
             self.chrome.field.insert(t);
+            self.chrome.update_suggestions();
             self.refresh_chrome();
             return;
         }
@@ -3163,6 +3289,7 @@ impl App {
     /// Espera a que el hilo de trabajo termine lo pendiente (sesiones sin ventana).
     fn settle(&mut self) {
         self.sync_view();
+        self.sync_find();
         while self.any_loading() || self.relayout.is_some() {
             let Ok(msg) = self
                 .worker
@@ -3269,7 +3396,7 @@ impl App {
             self.chrome.status_left,
             self.chrome.panel_open,
             self.overlay,
-        )
+        ) + &self.find_line()
     }
 
     /// Un paso de una sesión sin ventana.
@@ -3418,6 +3545,7 @@ impl App {
                     "pageup" => Some(NamedKey::PageUp),
                     "pagedown" => Some(NamedKey::PageDown),
                     "space" => Some(NamedKey::Space),
+                    "f3" => Some(NamedKey::F3),
                     "f5" => Some(NamedKey::F5),
                     "f6" => Some(NamedKey::F6),
                     "f12" => Some(NamedKey::F12),
@@ -3449,6 +3577,8 @@ impl App {
 /// `key:[ctrl+|alt+|shift+]tecla`, `resize:W,H` y `wait`.
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
+    // Sin `FREEDOM_PROFILE`, una sesión de prueba no toca el historial ni los marcadores.
+    crate::profile::set_ephemeral();
     let fonts = FontDb::system();
     let worker = Documents::new(fonts.clone(), || {});
     let mut app = App::new(worker, fonts, None, Theme::for_system(None));

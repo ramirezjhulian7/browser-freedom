@@ -7,8 +7,12 @@
 
 use std::process::ExitCode;
 
+mod bookmarks;
+mod find;
+mod history;
 mod internal;
 mod load;
+mod profile;
 mod script;
 mod theme;
 mod window;

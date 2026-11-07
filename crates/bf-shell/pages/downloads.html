@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Descargas</title>
+<style>
+{{theme}}
+{{style}}
+.top { display: flex; align-items: baseline; }
+.top h1 { flex: 1; }
+.top a { font-size: 13px; }
+.row { display: flex; align-items: center; padding: 10px 12px 10px 16px; border-top: 1px solid var(--border); }
+.row:first-child { border-top: 0; }
+.row .main { flex: 1; min-width: 0; }
+.row .n { display: block; overflow: hidden; white-space: nowrap; color: var(--text); font-weight: 600; }
+.row .u { display: block; overflow: hidden; white-space: nowrap; color: var(--text2); font-size: 12px; }
+.row .s { display: block; font-size: 13px; color: var(--text2); }
+.row .s.bad { color: var(--danger); }
+.row .track { margin-top: 6px; }
+.row .acts { flex: none; display: flex; margin-left: 12px; font-size: 13px; }
+.row .acts a { margin-left: 12px; }
+.empty { padding: 9px 16px; margin: 0; color: var(--text2); }
+.note { margin-top: 28px; font-size: 13px; }
+</style>
+<main>
+  <div class="top"><h1>Descargas</h1><a href="bf:download-clear">Limpiar la lista</a></div>
+  <p class="muted">{{summary}}</p>
+  <div class="card">{{rows}}</div>
+  <p class="note muted">Se guardan en {{dir}} · <a href="freedom://downloads">Actualizar</a> · <a href="freedom://history">Historial</a> · <a href="freedom://bookmarks">Marcadores</a></p>
+</main>
+</html>
