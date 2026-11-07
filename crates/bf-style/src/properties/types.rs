@@ -451,6 +451,16 @@ keyword_enum!(Hyphens {
 });
 keyword_prop!(Hyphens);
 
+// E9: CSS Text 3 §5.3 (`line-break`).
+keyword_enum!(TextLineBreak {
+    Auto = "auto",
+    Loose = "loose",
+    Normal = "normal",
+    Strict = "strict",
+    Anywhere = "anywhere",
+});
+keyword_prop!(TextLineBreak);
+
 // E9: CSS Text 3 §7.4 (`distribute` es un alias heredado de `inter-character`).
 keyword_enum!(TextJustify {
     Auto = "auto",

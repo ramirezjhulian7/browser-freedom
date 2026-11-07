@@ -15,7 +15,8 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify, TextTransform,
+    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify, TextLineBreak,
+    TextTransform,
     UnicodeBidi, VerticalAlign, VerticalAlignKeyword, WhiteSpace, WordBreak,
 };
 
@@ -130,8 +131,10 @@ struct Ifc<'a> {
     oof: Vec<&'a LayoutBox>,
     pieces: Vec<Piece>,
     segs: Vec<Seg>,
-    /// Nivel bidi del párrafo (el del primero, con `unicode-bidi: plaintext`).
+    /// Nivel bidi del párrafo de la línea en curso.
     para_level: u8,
+    /// Nivel de cada párrafo bidi (separados por los saltos forzados), en orden.
+    para_levels: Vec<u8>,
 }
 
 fn transform(text: &str, t: TextTransform) -> String {
@@ -227,8 +230,43 @@ fn bidi_controls(style: &ComputedStyle) -> Controls {
 /// Clase de corte de un carácter con `word-break` (CSS Text 3 §5.2): `break-all` trata las
 /// letras y números como ideogramas; `keep-all` suprime las oportunidades entre ideogramas
 /// (los trata como letras).
-fn adapted_class(c: char, word_break: WordBreak) -> LineBreak {
-    let k = linebreak::resolve_class(c);
+fn adapted_class(c: char, word_break: WordBreak, line_break: TextLineBreak) -> LineBreak {
+    let k = match (linebreak::resolve_class(c), line_break) {
+        // CSS Text 3 §5.3: con `strict` no se corta antes de las kana pequeñas (CJ como NS);
+        // con `normal` y `loose`, sí (CJ como ID).
+        (_, TextLineBreak::Strict) if linebreak::line_break_class(c) == LineBreak::CJ => {
+            LineBreak::NS
+        }
+        _ if linebreak::line_break_class(c) == LineBreak::CJ => LineBreak::ID,
+        // `loose`: se puede cortar antes de los guiones CJK 〜 y ゠, de las marcas de
+        // iteración, de la puntuación centrada y entre los caracteres inseparables. (Antes de
+        // ‐ y – solo tras un ID: ver `break_opportunities`.)
+        (_, TextLineBreak::Loose)
+            if matches!(
+                c,
+                '\u{301C}'
+                    | '\u{30A0}'
+                    | '\u{3005}'
+                    | '\u{303B}'
+                    | '\u{309D}'
+                    | '\u{309E}'
+                    | '\u{30FD}'
+                    | '\u{30FE}'
+                    | '\u{30FB}'
+                    | '\u{FF1A}'
+                    | '\u{FF1B}'
+                    | '\u{FF65}'
+                    | '\u{2024}'
+                    | '\u{2025}'
+                    | '\u{2026}'
+                    | '\u{22EF}'
+                    | '\u{FE19}'
+            ) =>
+        {
+            LineBreak::ID
+        }
+        (k, _) => k,
+    };
     match word_break {
         WordBreak::BreakAll if matches!(k, LineBreak::AL | LineBreak::HL | LineBreak::NU) => {
             LineBreak::ID
@@ -480,12 +518,12 @@ impl<'a> Layout<'a> {
                 },
             }
         }
-        let levels = bidi::text_levels(&chars, base);
-        ifc.para_level = base.unwrap_or_else(|| {
-            let classes: Vec<bidi::BidiClass> =
-                chars.iter().map(|&c| bidi::bidi_class(c)).collect();
-            bidi::paragraph_level(&classes)
-        });
+        // Un nivel por párrafo (los separa cada salto forzado); con `plaintext`, el de P2–P3
+        // o, sin caracteres fuertes, el de `direction` (CSS Writing Modes 3 §2.4.2).
+        let (levels, paragraphs) =
+            bidi::text_levels_with_fallback(&chars, base, u8::from(root_rtl));
+        ifc.para_level = paragraphs.first().copied().unwrap_or(u8::from(root_rtl));
+        ifc.para_levels = paragraphs;
         for (k, o) in origin.iter().enumerate() {
             match *o {
                 Origin::Text(it, i) => {
@@ -577,7 +615,10 @@ impl<'a> Layout<'a> {
         }
         let texts = &ifc.texts;
         let breaks = linebreak::line_breaks_with(&chars, |k, c| match origin[k] {
-            Origin::Text(it, ..) => adapted_class(c, texts[it].b.style.word_break),
+            Origin::Text(it, ..) => {
+                let s = &texts[it].b.style;
+                adapted_class(c, s.word_break, s.line_break)
+            }
             _ => linebreak::resolve_class(c),
         });
         // Dueño de cada posición: (texto, caja padre), para la regla del ancestro común.
@@ -612,33 +653,32 @@ impl<'a> Layout<'a> {
             // cada atómica, aunque el carácter vecino la suprima (U+00A0, `:`…). Los caracteres
             // de pegado (GL salvo U+00A0, WJ, ZWJ y las marcas combinantes) la siguen
             // suprimiendo, como en los demás navegadores (WPT line-breaking-atomic-*).
-            // Los espacios y saltos siguen sus reglas (LB4–LB7: no se corta antes de ellos).
-            let glue = |c: char| {
+            // Después de una atómica, los espacios y saltos siguen sus reglas (LB4–LB7: no se
+            // corta antes de ellos); antes de una atómica, un espacio sí deja cortar (aunque lo
+            // preceda `(`, LB14).
+            let glue = |c: char, after_atomic: bool| {
+                let class = linebreak::resolve_class(c);
                 c != '\u{A0}'
-                    && matches!(
-                        linebreak::resolve_class(c),
-                        LineBreak::GL
-                            | LineBreak::WJ
-                            | LineBreak::ZWJ
-                            | LineBreak::CM
-                            | LineBreak::SP
-                            | LineBreak::BK
-                            | LineBreak::CR
-                            | LineBreak::LF
-                            | LineBreak::NL
-                    )
+                    && (matches!(
+                        class,
+                        LineBreak::GL | LineBreak::WJ | LineBreak::ZWJ | LineBreak::CM
+                    ) || after_atomic
+                        && matches!(
+                            class,
+                            LineBreak::SP
+                                | LineBreak::BK
+                                | LineBreak::CR
+                                | LineBreak::LF
+                                | LineBreak::NL
+                        ))
             };
             let atomic_edge = match (before, origin[k]) {
                 (Origin::Atomic(_), Origin::Atomic(_)) => true,
-                (Origin::Atomic(_), _) | (_, Origin::Atomic(_)) => {
-                    !glue(chars[k - 1]) && !glue(chars[k])
-                }
+                (Origin::Atomic(_), _) => !glue(chars[k], true),
+                (_, Origin::Atomic(_)) => !glue(chars[k - 1], false),
                 _ => false,
             };
-            if breaks[k] == Break::Prohibited && !preserved_space && !atomic_edge {
-                continue;
-            }
-            // ¿Qué `white-space` controla la posición?
+            // ¿Qué `white-space` y `line-break` controlan la posición?
             let style: &ComputedStyle = match (owner(before), owner(origin[k])) {
                 (Some((Some(a), _)), Some((Some(b), _))) if a == b => &ifc.texts[a].b.style,
                 (Some((_, pa)), Some((_, pb))) => {
@@ -650,6 +690,33 @@ impl<'a> Layout<'a> {
                 (Some((None, pa)), None) => box_style(pa),
                 _ => continue,
             };
+            // `line-break: anywhere` (CSS Text 3 §5.3): oportunidad alrededor de cada unidad
+            // tipográfica, también junto a la puntuación y los espacios; no dentro de un
+            // grafema (marcas combinantes, ZWJ).
+            let anywhere = style.line_break == TextLineBreak::Anywhere
+                && !matches!(
+                    linebreak::resolve_class(chars[k]),
+                    LineBreak::CM | LineBreak::ZWJ
+                )
+                && linebreak::resolve_class(chars[k - 1]) != LineBreak::ZWJ;
+            // `loose`: antes de ‐ y – si los precede un carácter de clase ID (CSS Text 3 §5.3).
+            let loose_hyphen = style.line_break == TextLineBreak::Loose
+                && matches!(chars[k], '\u{2010}' | '\u{2013}')
+                && match origin[k - 1] {
+                    Origin::Text(it, ..) => {
+                        let s = &ifc.texts[it].b.style;
+                        adapted_class(chars[k - 1], s.word_break, s.line_break) == LineBreak::ID
+                    }
+                    _ => false,
+                };
+            if breaks[k] == Break::Prohibited
+                && !preserved_space
+                && !atomic_edge
+                && !anywhere
+                && !loose_hyphen
+            {
+                continue;
+            }
             if !style.white_space.wraps() {
                 continue;
             }
@@ -847,6 +914,7 @@ impl<'a> Layout<'a> {
             pieces: Vec::new(),
             segs: Vec::new(),
             para_level: 0,
+            para_levels: Vec::new(),
         };
         let root = &b.style;
         self.collect(&mut ifc, &b.children, None, cb);
@@ -861,8 +929,17 @@ impl<'a> Layout<'a> {
         let mut i = 0;
         let mut open: Vec<usize> = Vec::new();
         let mut first = true;
+        // Párrafo bidi de la línea: cada salto forzado empieza uno.
+        let mut paragraph = 0;
         while i < ifc.segs.len() {
             let line_start = i;
+            if let Some(&level) = ifc
+                .para_levels
+                .get(paragraph)
+                .or(ifc.para_levels.last())
+            {
+                ifc.para_level = level;
+            }
             let open_at_start = open.clone();
             let mut guess = root_lh;
             let mut attempts = 0;
@@ -1111,6 +1188,9 @@ impl<'a> Layout<'a> {
                         attempts += 1;
                         continue 'attempt;
                     }
+                }
+                if forced {
+                    paragraph += 1;
                 }
                 self.offset_relative_inlines(&mut fragment, cb);
                 self.place_line_abs(&ifc, &abs_here, cb, y, height);
@@ -1914,6 +1994,10 @@ impl<'a> Layout<'a> {
             /// la línea (fase 2 del procesamiento de espacios).
             pending: f32,
             has_content: bool,
+            /// E9: lo último fue una atómica (hay oportunidad después, CSS Text 3 §5.1).
+            after_atomic: bool,
+            /// E9: lo último fue un carácter de pegado (GL salvo U+00A0, WJ, ZWJ, CM).
+            glue: bool,
         }
         impl Acc {
             fn content(&mut self) {
@@ -1948,13 +2032,24 @@ impl<'a> Layout<'a> {
                         let chars: Vec<char> = text.chars().collect();
                         let breaks = if wraps {
                             linebreak::line_breaks_with(&chars, |_, ch| {
-                                adapted_class(ch, s.word_break)
+                                adapted_class(ch, s.word_break, s.line_break)
                             })
                         } else {
                             Vec::new()
                         };
                         for (k, (i, ch)) in text.char_indices().enumerate() {
                             let w = glyph_width(&glyphs, i, i + ch.len_utf8());
+                            let class = linebreak::resolve_class(ch);
+                            let glue = ch != '\u{A0}'
+                                && matches!(
+                                    class,
+                                    LineBreak::GL | LineBreak::WJ | LineBreak::ZWJ | LineBreak::CM
+                                );
+                            if std::mem::take(&mut acc.after_atomic) && wraps && !glue {
+                                acc.min = acc.min.max(acc.word);
+                                acc.word = 0.0;
+                            }
+                            acc.glue = glue;
                             match ch {
                                 '\n' => acc.end_line(),
                                 ' ' | '\t' if s.white_space.collapses_spaces() => {
@@ -1972,9 +2067,21 @@ impl<'a> Layout<'a> {
                                     acc.content();
                                     acc.line += w;
                                     acc.word += w;
+                                    // Al final del texto solo se sabe de ZW (LB8); lo que
+                                    // sigue decide el resto.
+                                    let anywhere = s.line_break == TextLineBreak::Anywhere
+                                        && chars.get(k + 1).is_some_and(|&n| {
+                                            !matches!(
+                                                linebreak::resolve_class(n),
+                                                LineBreak::CM | LineBreak::ZWJ
+                                            )
+                                        });
                                     let opportunity = wraps
-                                        && k + 1 < chars.len()
-                                        && breaks[k + 1] != Break::Prohibited
+                                        && if k + 1 < chars.len() {
+                                            breaks[k + 1] != Break::Prohibited || anywhere
+                                        } else {
+                                            class == LineBreak::ZW
+                                        }
                                         && !(ch == SHY && s.hyphens == Hyphens::None);
                                     if opportunity {
                                         acc.min = acc.min.max(acc.word);
@@ -2012,7 +2119,16 @@ impl<'a> Layout<'a> {
                         // palabra en curso.
                         let (amin, amax) = this.outer_intrinsic_widths(c);
                         if !c.is_float() {
+                            // E9: oportunidad antes y después de la atómica (CSS Text 3 §5.1),
+                            // salvo junto a un carácter de pegado.
+                            let wraps = c.style.white_space.wraps();
+                            if wraps && acc.has_content && !acc.glue {
+                                acc.min = acc.min.max(acc.word);
+                                acc.word = 0.0;
+                            }
                             acc.content();
+                            acc.after_atomic = wraps;
+                            acc.glue = false;
                         }
                         acc.word += amin;
                         acc.line += amax;

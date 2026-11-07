@@ -643,7 +643,20 @@ pub fn reorder(levels: &[u8]) -> Vec<usize> {
 /// uno (`unicode-bidi: plaintext`). Los caracteres que quita X9 toman el nivel del carácter
 /// anterior (o el del párrafo). No aplica L1.
 pub fn text_levels(text: &[char], base: Option<u8>) -> Vec<u8> {
+    text_levels_with_fallback(text, base, 0).0
+}
+
+/// Como [`text_levels`], pero con `base: None` un párrafo sin caracteres fuertes toma el nivel
+/// del párrafo anterior, y el primero `fallback`, en lugar de 0 (UAX #9 HL1; CSS Writing Modes 3
+/// §2.4.2, `unicode-bidi: plaintext`: `fallback` es el de `direction`, como en los navegadores,
+/// WPT css-text/bidi/bidi-lines-002). Devuelve también el nivel de cada párrafo, en orden.
+pub fn text_levels_with_fallback(
+    text: &[char],
+    base: Option<u8>,
+    fallback: u8,
+) -> (Vec<u8>, Vec<u8>) {
     let mut out = Vec::with_capacity(text.len());
+    let mut paragraphs = Vec::new();
     let classes: Vec<BidiClass> = text.iter().map(|&c| bidi_class(c)).collect();
     let cps: Vec<u32> = text.iter().map(|&c| c as u32).collect();
     let mut start = 0;
@@ -652,7 +665,12 @@ pub fn text_levels(text: &[char], base: Option<u8>) -> Vec<u8> {
             .iter()
             .position(|&c| c == B)
             .map_or(text.len(), |p| start + p + 1);
-        let r = resolve_paragraph(&classes[start..end], Some(&cps[start..end]), base);
+        let level = base.unwrap_or_else(|| {
+            first_strong(&classes[start..end], false)
+                .unwrap_or_else(|| paragraphs.last().copied().unwrap_or(fallback))
+        });
+        let r = resolve_paragraph(&classes[start..end], Some(&cps[start..end]), Some(level));
+        paragraphs.push(r.para_level);
         let mut prev = r.para_level;
         for l in r.levels {
             let l = l.unwrap_or(prev);
@@ -661,7 +679,7 @@ pub fn text_levels(text: &[char], base: Option<u8>) -> Vec<u8> {
         }
         start = end;
     }
-    out
+    (out, paragraphs)
 }
 
 #[cfg(test)]
