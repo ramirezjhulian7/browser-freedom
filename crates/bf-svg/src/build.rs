@@ -1005,6 +1005,32 @@ impl<'a> Builder<'a> {
                 segs
             }
             "path" => geom::parse_path(n.attr("d").unwrap_or("")),
+            "foreignObject" => {
+                // SVG 2 §23.2: el contenido es de otro namespace (HTML) y lo maqueta quien
+                // tiene el documento; aquí queda como una imagen del tamaño del elemento,
+                // recortada a él (`overflow: hidden` en la hoja UA). Sin DOM de origen (un SVG
+                // cargado como imagen) no se pinta.
+                if !st.visible {
+                    return None;
+                }
+                let dom = n.dom?;
+                let x = self.len(n, "x", Axis::X, vp, st).unwrap_or(0.0);
+                let y = self.len(n, "y", Axis::Y, vp, st).unwrap_or(0.0);
+                let w = self.len(n, "width", Axis::X, vp, st)?;
+                let h = self.len(n, "height", Axis::Y, vp, st)?;
+                if w <= 0.0 || h <= 0.0 {
+                    return None;
+                }
+                return Some(Node::Image(crate::Image {
+                    href: format!("{FOREIGN_OBJECT_SCHEME}{dom}"),
+                    x,
+                    y,
+                    width: Some(w),
+                    height: Some(h),
+                    par: "none".into(),
+                    transform: Transform::IDENTITY,
+                }));
+            }
             "image" => {
                 if !st.visible {
                     return None;
@@ -2084,6 +2110,9 @@ fn flatten_clip(node: &Node, t: &Transform, rule: crate::FillRule, out: &mut Cli
         Node::Image(_) => {}
     }
 }
+
+/// Prefijo del recurso con el contenido pintado de un `foreignObject`.
+pub(crate) const FOREIGN_OBJECT_SCHEME: &str = "foreign-object:";
 
 fn view_box(n: &DocNode) -> Option<Bbox> {
     view_box_state(n).ok().flatten()

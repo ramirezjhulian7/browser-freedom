@@ -16,7 +16,10 @@
 //! lo decodifica quien pinta (`bf-paint`), con [`Svg::image_hrefs`] para saber cuáles hacen
 //! falta.
 //!
-//! TODO(svg): `filter`, `foreignObject`, animación SMIL, `textPath` y el layout de texto
+//! `foreignObject` en línea queda como una [`Image`] con `href`
+//! [`FOREIGN_OBJECT_SCHEME`]`<nodo>`: su HTML lo maqueta `bf-paint`.
+//!
+//! TODO(svg): `filter`, animación SMIL, `textPath` y el layout de texto
 //! completo (§11).
 
 #![forbid(unsafe_code)]
@@ -265,6 +268,10 @@ impl Svg {
         svg
     }
 }
+
+/// `href` con el que un `foreignObject` en línea queda en el árbol: este prefijo y el índice
+/// del nodo del DOM (`NodeId::index`). Su contenido lo pinta quien tiene el documento.
+pub const FOREIGN_OBJECT_SCHEME: &str = build::FOREIGN_OBJECT_SCHEME;
 
 /// La transformación de `preserveAspectRatio` (SVG 2 §8.6) que lleva el rectángulo
 /// `view_box` (x, y, ancho, alto) a un viewport de `size` con origen en (0, 0).

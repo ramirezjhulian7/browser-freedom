@@ -49,6 +49,10 @@ impl SvgResources {
         self.map.is_empty()
     }
 
+    pub fn insert(&mut self, href: String, image: SvgImage) {
+        self.map.insert(href, image);
+    }
+
     /// Carga los `image` de `svg` y los de los SVG que estos usen. `base`: la URL del
     /// documento SVG. Sin `loader` es el modo seguro de un SVG usado como imagen (`<img>`,
     /// fondos: SVG Integration §4, *secure static mode*): solo se cargan URLs `data:`.
@@ -563,4 +567,89 @@ pub fn load_images(
         images.sizes.insert(node, state);
     }
     images
+}
+
+/// Hoja para el documento de un `foreignObject`: el `body` es la caja del elemento, sin
+/// márgenes ni fondo propio (lo de debajo es el SVG).
+const FOREIGN_OBJECT_CSS: &str = "html, body { margin: 0 !important; padding: 0 !important; \
+     border: 0 !important; background: none !important; transform: none !important; \
+     width: auto !important; height: auto !important; }";
+
+/// Longitud en px de un atributo de geometría (`10`, `10px`); los porcentajes y las unidades
+/// relativas no se resuelven aquí.
+fn px_attr(el: &bf_dom::Element, name: &str) -> Option<f32> {
+    let v = el.attr(name)?.trim();
+    let v = v.strip_suffix("px").unwrap_or(v).trim();
+    v.parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
+/// Pinta el contenido HTML de los `foreignObject` de los SVG en línea de `doc` (SVG 2 §23.2,
+/// básico): cada uno es un documento aparte (el mismo, con el `body` reducido a una copia de
+/// los hijos del elemento) maquetado a `width`×`height` con fondo transparente, y queda en
+/// `res` como `foreign-object:<nodo>`. Solo `width`/`height` en px.
+pub(crate) fn foreign_objects(
+    doc: &Document,
+    ctx: &crate::PageContext<'_>,
+    res: &mut SvgResources,
+) {
+    let targets: Vec<(NodeId, f32, f32)> = doc
+        .inclusive_descendants(doc.root())
+        .into_iter()
+        .filter_map(|n| {
+            let el = doc.element(n)?;
+            if el.ns != bf_infra::Namespace::Svg || el.name != "foreignObject" {
+                return None;
+            }
+            let (w, h) = (px_attr(el, "width")?, px_attr(el, "height")?);
+            (w > 0.0 && h > 0.0).then_some((n, w, h))
+        })
+        .collect();
+    if targets.is_empty() || doc.body().is_none() {
+        return;
+    }
+    let sheet = bf_css::stylesheet::Stylesheet::parse(
+        FOREIGN_OBJECT_CSS,
+        bf_css::stylesheet::Origin::Author,
+    );
+    let mut extra: Vec<&bf_css::stylesheet::Stylesheet> = ctx.extra.to_vec();
+    extra.push(&sheet);
+    for (node, w, h) in targets {
+        let mut child = doc.clone();
+        let Some(body) = child.body() else {
+            continue;
+        };
+        let copies: Vec<NodeId> = child
+            .child_nodes(node)
+            .into_iter()
+            .map(|c| child.clone_node(c, true))
+            .collect();
+        for c in child.child_nodes(body) {
+            let _ = child.remove_child(body, c);
+        }
+        for c in copies {
+            let _ = child.append_child(body, c);
+        }
+        let size = Size {
+            width: w,
+            height: h,
+        };
+        let child_ctx = crate::PageContext {
+            base: ctx.base,
+            encoding: ctx.encoding,
+            loader: ctx.loader.clone(),
+            fonts: ctx.fonts.clone(),
+            extra: &extra,
+        };
+        let page = crate::prepare_page(&child, &child_ctx, size);
+        let pixmap = crate::render(
+            &page.display_list,
+            size,
+            SVG_OVERSAMPLE,
+            bf_style::values::color::Rgba::TRANSPARENT,
+        );
+        res.insert(
+            format!("{}{}", bf_svg::FOREIGN_OBJECT_SCHEME, node.index()),
+            SvgImage::Bitmap(Arc::new(pixmap)),
+        );
+    }
 }

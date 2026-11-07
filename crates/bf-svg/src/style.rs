@@ -58,6 +58,9 @@ pub(crate) struct Node {
     pub props: HashMap<String, Vec<ComponentValue>>,
     pub children: Vec<usize>,
     pub text: String,
+    /// Índice del nodo del DOM de origen de un `foreignObject` en línea (su contenido HTML lo
+    /// pinta `bf-paint` como el recurso `foreign-object:<índice>`).
+    pub dom: Option<usize>,
 }
 
 impl Node {
@@ -204,10 +207,13 @@ fn convert(
                 attrs.insert(name, value);
             }
             let props = cascade(doc, n, &attrs, sheets, media, ctx);
+            let name = el.name.to_string_lossy().into_owned();
+            let dom = (name == "foreignObject").then(|| n.index());
             Node {
-                name: el.name.to_string_lossy().into_owned(),
+                name,
                 attrs,
                 props,
+                dom,
                 ..Node::default()
             }
         }

@@ -267,3 +267,34 @@ fn image_element_with_data_urls() {
     let empty = rasterize_svg(&svg.tree(60.0, 20.0), 60, 20, None).expect("bitmap");
     assert_eq!(px(&empty, 2, 5).3, 0);
 }
+
+/// `foreignObject` en un SVG en línea (SVG 2 §23.2): su HTML se maqueta en la caja del
+/// elemento (aquí un `div` de 10×10 en (20, 10)), recortado a ella; fuera queda el SVG.
+#[test]
+fn foreign_object_html_content() {
+    let (doc, _) = parse_document(
+        "<!DOCTYPE html><style>.box { width: 10px; height: 30px; background: rgb(0, 0, 255) }</style>\
+         <body style='margin:0'><svg width=40 height=40 style='display:block'>\
+         <rect width=40 height=40 fill=lime />\
+         <foreignObject x=20 y=10 width=10 height=10><div class=box></div></foreignObject>\
+         </svg>",
+        &ParseOptions::default(),
+    );
+    let base = Url::parse("about:blank", None).unwrap();
+    let ctx = bf_paint::PageContext {
+        base: &base,
+        encoding: bf_infra::encoding::Encoding::Utf8,
+        loader: std::sync::Arc::new(FileLoader::new()),
+        fonts: std::sync::Arc::new(bf_font::FontDb::from_faces(Vec::new())),
+        extra: &[],
+    };
+    let viewport = Size {
+        width: 40.0,
+        height: 40.0,
+    };
+    let p = bf_paint::render_document(&doc, &ctx, viewport, 1.0);
+    assert_eq!(px(&p, 25, 15), (0, 0, 255, 255));
+    // Recortado al alto del elemento (el `div` mide 30).
+    assert_eq!(px(&p, 25, 25), (0, 255, 0, 255));
+    assert_eq!(px(&p, 15, 15), (0, 255, 0, 255));
+}
