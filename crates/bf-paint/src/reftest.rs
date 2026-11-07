@@ -180,7 +180,10 @@ pub fn parse_text(path: &Path, text: &str) -> Document {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("xht") || e.eq_ignore_ascii_case("xhtml"));
     if xml {
-        bf_html::parse_xml_document(text)
+        // E10, cambio mínimo: el content type de un `.xht` (sus `createElement` son XHTML).
+        let mut doc = bf_html::parse_xml_document(text);
+        doc.content_type = "application/xhtml+xml".into();
+        doc
     } else {
         bf_html::parse_document(text, &bf_html::ParseOptions::default()).0
     }

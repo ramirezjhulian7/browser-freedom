@@ -220,7 +220,10 @@ fn set_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.set_attribute_ns(n.node, ns.as_deref(), &qn, value)
     });
     let v = done(agent, r)?;
-    crate::dom::events::content_attribute_changed(agent, n, &qn);
+    // Los handlers `on…` solo miran atributos sin namespace (HTML §8.1.8.1).
+    if ns.is_none() {
+        crate::dom::events::content_attribute_changed(agent, n, &qn);
+    }
     Ok(v)
 }
 
@@ -241,6 +244,9 @@ fn remove_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.remove_attribute_ns(n.node, ns.as_deref(), &local)
     });
     mutated(agent);
+    if ns.is_none() {
+        crate::dom::events::content_attribute_changed(agent, n, &local);
+    }
     Ok(Value::Undefined)
 }
 

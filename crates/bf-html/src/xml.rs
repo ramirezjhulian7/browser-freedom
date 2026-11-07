@@ -17,10 +17,10 @@ use bf_infra::Namespace;
 
 use crate::tokenizer::named_entities::NAMED_ENTITIES;
 
-/// El namespace de un URI; los desconocidos son `Namespace::Other`. El namespace ausente se
-/// trata como XHTML (los elementos sin namespace todavía no tienen representación propia).
+/// El namespace de un elemento: los URI desconocidos son `Namespace::Other`; el namespace
+/// ausente (sin `xmlns` o `xmlns=""`, Namespaces in XML §6.2) es `Namespace::Null`.
 fn namespace_of(uri: &str) -> Namespace {
-    Namespace::from_uri(uri).unwrap_or(Namespace::Html)
+    Namespace::from_uri(uri).unwrap_or(Namespace::Null)
 }
 
 fn entity(name: &str) -> Option<String> {
@@ -261,7 +261,9 @@ impl<'a> Parser<'a> {
                     Some((p, l)) => (
                         Some(p.to_owned()),
                         l.to_owned(),
-                        self.lookup(p).map(namespace_of),
+                        // Un atributo con prefijo toma el namespace del prefijo; sin
+                        // prefijo no tiene namespace (Namespaces in XML §6.2).
+                        self.lookup(p).and_then(Namespace::from_uri),
                     ),
                     None if n == "xmlns" => (None, n, Some(Namespace::XmlNs)),
                     None => (None, n, None),
@@ -353,7 +355,8 @@ impl<'a> Parser<'a> {
 /// Parsea un documento XHTML.
 pub fn parse_xml_document(input: &str) -> Document {
     let input = input.replace("\r\n", "\n").replace('\r', "\n");
-    let mut doc = Document::new();
+    // Un documento XML: sin las reglas de HTML para mayúsculas ni `document.write`.
+    let mut doc = Document::new_xml();
     doc.mode = QuirksMode::NoQuirks;
     let parser = Parser {
         input: &input,

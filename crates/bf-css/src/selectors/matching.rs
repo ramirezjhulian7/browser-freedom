@@ -292,7 +292,7 @@ impl Matcher<'_> {
         match simple {
             Simple::Type { ns, name, lower } => {
                 Self::ns_matches(ns, el)
-                    && if el.ns == Namespace::Html {
+                    && if self.html_in_html_document(el) {
                         el.name == *lower
                     } else {
                         el.name == *name
@@ -321,8 +321,15 @@ impl Matcher<'_> {
         }
     }
 
+    /// ¿Elemento HTML en un documento HTML? Solo ahí los nombres de tipo y de atributo (y los
+    /// valores de algunos atributos) se comparan sin distinguir mayúsculas (HTML §4.16.2); en
+    /// XHTML y XML la comparación es exacta.
+    fn html_in_html_document(&self, el: &Element) -> bool {
+        el.ns == Namespace::Html && self.doc.is_html
+    }
+
     fn attribute(&self, sel: &AttrSelector, el: &Element) -> bool {
-        let html = el.ns == Namespace::Html;
+        let html = self.html_in_html_document(el);
         let name = if html {
             sel.name.to_ascii_lowercase()
         } else {
