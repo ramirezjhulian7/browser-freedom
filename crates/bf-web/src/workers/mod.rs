@@ -29,6 +29,7 @@
 //! - **El propio worker**: su bucle (en [`scope`]) vacía su bandeja antes de cada tarea.
 
 pub mod dedicated;
+pub mod isolation;
 pub mod ports;
 pub mod scope;
 pub mod shared;

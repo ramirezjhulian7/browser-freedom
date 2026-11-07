@@ -35,6 +35,14 @@ impl NetBackend for Files {
             "text/plain"
         };
         headers.append("Content-Type", ct);
+        // Como los `.headers` de WPT: `<ruta>.headers` con líneas `Nombre: valor`.
+        if let Some(extra) = self.0.get(&format!("{path}.headers")) {
+            for line in extra.lines() {
+                if let Some((n, v)) = line.split_once(':') {
+                    headers.append(n.trim(), v.trim());
+                }
+            }
+        }
         Ok(NetResponse {
             url_list: vec![req.url.clone()],
             status: 200,
@@ -73,26 +81,52 @@ impl Page {
     }
 
     fn with_isolation(files: &[(&str, &str)], isolated: bool) -> Page {
+        Page::build(
+            files,
+            "http://workers.test/dir/page.html",
+            |agent, realm, _| {
+                if isolated {
+                    agent.set_realm_data(realm, bf_web::workers::Isolation(true));
+                }
+            },
+        )
+    }
+
+    /// Una página en `url` cargada con esas cabeceras COOP y COEP
+    /// (`workers::isolation::set_document_policies`, como hace el embebedor).
+    fn with_policies(
+        files: &[(&str, &str)],
+        url: &str,
+        coop: Option<&str>,
+        coep: Option<&str>,
+    ) -> Page {
+        Page::build(files, url, |agent, realm, url| {
+            bf_web::workers::isolation::set_document_policies(agent, realm, url, coop, coep);
+        })
+    }
+
+    fn build(
+        files: &[(&str, &str)],
+        url: &str,
+        setup: impl FnOnce(&mut bf_js::vm::Agent, bf_js::vm::RealmId, &Url),
+    ) -> Page {
         let console = Arc::new(Mutex::new(Vec::new()));
         let mut rt = Runtime::new(Box::new(Hooks(console.clone())));
         let (doc, _) =
             bf_html::parse_document("<!DOCTYPE html><p>x", &bf_html::ParseOptions::default());
         let realm = rt.main_realm();
-        let url = Url::parse("http://workers.test/dir/page.html", None).expect("url");
+        let url = Url::parse(url, None).expect("url");
         let ctx = bf_web::install(
             &mut rt.agent,
             realm,
-            WebContext::new(DocumentOwner::Document(Box::new(doc)), url),
+            WebContext::new(DocumentOwner::Document(Box::new(doc)), url.clone()),
         );
         let map = files
             .iter()
             .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
             .collect();
         bf_web::net::set_backend(&mut rt.agent, realm, Arc::new(Files(map)), false);
-        if isolated {
-            rt.agent
-                .set_realm_data(realm, bf_web::workers::Isolation(true));
-        }
+        setup(&mut rt.agent, realm, &url);
         // Los tests corren en paralelo con el mismo origen: cada página, su partición.
         bf_web::workers::set_partition(&mut rt.agent, bf_web::workers::new_partition());
         let mut p = Page { rt, ctx, console };
@@ -771,4 +805,102 @@ fn terminate_interrupts_atomics_wait() {
          w.postMessage(ia.buffer);",
     );
     assert_eq!(r, "despiertos 0");
+}
+
+// --- crossOriginIsolated desde COOP/COEP (HTML §7.1.3, §7.1.4, §10.2.4) ---
+
+const COEP: &str = "Cross-Origin-Embedder-Policy: require-corp";
+const HTTPS: &str = "https://workers.test/dir/page.html";
+const ISO_WORKER: &str = "onmessage = e => postMessage([self.crossOriginIsolated, \
+     e.data instanceof SharedArrayBuffer].join());";
+
+/// COOP `same-origin` + COEP `require-corp` en un contexto seguro: la ventana y sus workers
+/// dedicados (con un script `require-corp`) están aislados y comparten memoria.
+#[test]
+fn cross_origin_isolated_from_headers() {
+    let mut p = Page::with_policies(
+        &[("/dir/iso.js", ISO_WORKER), ("/dir/iso.js.headers", COEP)],
+        HTTPS,
+        Some("same-origin"),
+        Some("require-corp"),
+    );
+    let r = p.run(
+        "var w = new Worker('iso.js'); w.onmessage = e => finish(self.crossOriginIsolated + ' ' + e.data); \
+         w.postMessage(new SharedArrayBuffer(8));",
+    );
+    assert_eq!(r, "true true,true");
+}
+
+/// Sin COOP, o fuera de un contexto seguro, no hay aislamiento: los `SharedArrayBuffer` no
+/// cruzan (`DataCloneError`).
+#[test]
+fn no_isolation_without_coop_or_secure_context() {
+    for (url, coop) in [
+        (HTTPS, None),
+        ("http://workers.test/dir/page.html", Some("same-origin")),
+    ] {
+        let mut p = Page::with_policies(
+            &[("/dir/iso.js", ISO_WORKER), ("/dir/iso.js.headers", COEP)],
+            url,
+            coop,
+            Some("require-corp"),
+        );
+        let r = p.run(
+            "var w = new Worker('iso.js'); \
+             try { w.postMessage(new SharedArrayBuffer(8)); finish('cruzó'); } \
+             catch (e) { finish(self.crossOriginIsolated + ' ' + e.name); }",
+        );
+        assert_eq!(r, "false DataCloneError", "{url} {coop:?}");
+    }
+}
+
+/// HTML §7.1.4.6: con un dueño `require-corp`, el script de un worker dedicado sin COEP
+/// compatible es un error de red (`error` en el objeto `Worker`).
+#[test]
+fn dedicated_worker_without_coep_is_blocked() {
+    let mut p = Page::with_policies(
+        &[("/dir/sin.js", "postMessage('cargó');")],
+        HTTPS,
+        Some("same-origin"),
+        Some("require-corp"),
+    );
+    let r = p.run(
+        "var w = new Worker('sin.js'); w.onmessage = e => finish(e.data); \
+         w.onerror = e => finish('error ' + (e instanceof ErrorEvent ? 'ErrorEvent' : e.type));",
+    );
+    assert_eq!(r, "error error");
+}
+
+/// Un worker `data:` nunca está aislado (§10.2.4 paso 10); uno `blob:` hereda del dueño.
+#[test]
+fn data_worker_is_not_isolated_blob_is() {
+    let mut p = Page::with_policies(&[], HTTPS, Some("same-origin"), Some("require-corp"));
+    let r = p.run(
+        "var src = 'postMessage(self.crossOriginIsolated);'; var got = []; \
+         function f(tag) { return e => { got.push(tag + ':' + e.data); if (got.length == 2) finish(got.sort().join()); }; } \
+         new Worker('data:text/javascript,' + encodeURIComponent(src)).onmessage = f('data'); \
+         new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'}))).onmessage = f('blob');",
+    );
+    assert_eq!(r, "blob:true,data:false");
+}
+
+/// Un `SharedWorker` se aísla por su propia respuesta, no por la del documento.
+#[test]
+fn shared_worker_isolation_from_its_own_coep() {
+    let src = "onconnect = e => e.ports[0].postMessage(self.crossOriginIsolated);";
+    let mut p = Page::with_policies(
+        &[
+            ("/dir/si.js", src),
+            ("/dir/si.js.headers", COEP),
+            ("/dir/sn.js", src),
+        ],
+        HTTPS,
+        None,
+        None,
+    );
+    let r = p.run(
+        "var got = []; function f(tag) { return e => { got.push(tag + ':' + e.data); if (got.length == 2) finish(got.sort().join()); }; } \
+         new SharedWorker('si.js').port.onmessage = f('con'); new SharedWorker('sn.js').port.onmessage = f('sin');",
+    );
+    assert_eq!(r, "con:true,sin:false");
 }

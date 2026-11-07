@@ -185,6 +185,7 @@ fn shared_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                     inbox: e.inbox.clone(),
                     control: e.control.clone(),
                     cross_origin_isolated: cross_origin_isolated(agent),
+                    owner_coep: super::dedicated::embedder_policy(agent),
                     user_agent: agent.host.hooks.user_agent(),
                     partition,
                 };
