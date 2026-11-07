@@ -1,5 +1,5 @@
 //! Tipos de las propiedades de CSS Grid Layout 2 (§7 y §8): listas de pistas, áreas con nombre,
-//! `grid-auto-flow` y las líneas de colocación. `subgrid` y `masonry` no se admiten (roadmap).
+//! `grid-auto-flow` y las líneas de colocación. E5: `subgrid` (§9); `masonry` no se admite.
 
 use bf_css::syntax::{ComponentValue, TokenKind};
 
@@ -300,11 +300,79 @@ fn items_css(items: &[TrackListItem]) -> String {
         .join(" ")
 }
 
-/// `grid-template-columns` / `grid-template-rows`: `none | <track-list> | <auto-track-list>`.
+/// `grid-template-columns` / `grid-template-rows`: `none | <track-list> | <auto-track-list> |
+/// subgrid <line-name-list>?`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GridTemplate {
     None,
     List(Vec<TrackListItem>),
+    /// E5: `subgrid` con su `<line-name-list>` (§9).
+    Subgrid(SubgridNames),
+}
+
+/// E5: `<line-name-list> = [ <line-names> | <name-repeat> ]+` de `subgrid` (§7.2.1), con las
+/// repeticiones con número ya expandidas. `auto_fill` es el `repeat(auto-fill, ...)` (como
+/// mucho uno): su posición en `names` y los nombres que repite.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SubgridNames {
+    pub names: Vec<Vec<String>>,
+    pub auto_fill: Option<(usize, Vec<Vec<String>>)>,
+}
+
+/// `subgrid <line-name-list>?`.
+fn parse_subgrid(input: &[ComponentValue]) -> Option<SubgridNames> {
+    let items = components(input);
+    let (first, rest) = items.split_first()?;
+    if !is_ident(first, "subgrid") {
+        return None;
+    }
+    let mut out = SubgridNames::default();
+    for v in rest {
+        if let Some(n) = parse_line_names(v) {
+            out.names.push(n);
+            continue;
+        }
+        let ComponentValue::Function(f) = v else {
+            return None;
+        };
+        if !f.name.eq_ignore_ascii_case("repeat") {
+            return None;
+        }
+        let args = bf_css::syntax::split_comma_separated(&f.value);
+        let [count, list] = args.as_slice() else {
+            return None;
+        };
+        let names: Vec<Vec<String>> = components(list)
+            .into_iter()
+            .map(parse_line_names)
+            .collect::<Option<_>>()?;
+        if names.is_empty() {
+            return None;
+        }
+        match components(count).as_slice() {
+            [c] if is_ident(c, "auto-fill") => {
+                if out.auto_fill.is_some() {
+                    return None;
+                }
+                out.auto_fill = Some((out.names.len(), names));
+            }
+            [c] => {
+                let n = u32::try_from(integer(c)?).ok().filter(|&n| n >= 1)?;
+                for _ in 0..n.min(10_000) {
+                    out.names.extend(names.iter().cloned());
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn names_css(n: &[Vec<String>]) -> String {
+    n.iter()
+        .map(|n| format!("[{}]", n.join(" ")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl PropValue for GridTemplate {
@@ -314,18 +382,38 @@ impl PropValue for GridTemplate {
         {
             return Some(GridTemplate::None);
         }
+        if let Some(n) = parse_subgrid(input) {
+            return Some(GridTemplate::Subgrid(n));
+        }
         parse_track_list(input).map(GridTemplate::List)
     }
     fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
         match self {
-            GridTemplate::None => GridTemplate::None,
             GridTemplate::List(items) => GridTemplate::List(items_compute(items, ctx)),
+            other => other.clone(),
         }
     }
     fn to_css(&self) -> String {
         match self {
             GridTemplate::None => "none".into(),
             GridTemplate::List(items) => items_css(items),
+            GridTemplate::Subgrid(n) => {
+                let mut parts = vec!["subgrid".to_owned()];
+                let (before, after) = match &n.auto_fill {
+                    Some((i, _)) => n.names.split_at(*i),
+                    None => (n.names.as_slice(), &[][..]),
+                };
+                if !before.is_empty() {
+                    parts.push(names_css(before));
+                }
+                if let Some((_, r)) = &n.auto_fill {
+                    parts.push(format!("repeat(auto-fill, {})", names_css(r)));
+                }
+                if !after.is_empty() {
+                    parts.push(names_css(after));
+                }
+                parts.join(" ")
+            }
         }
     }
 }

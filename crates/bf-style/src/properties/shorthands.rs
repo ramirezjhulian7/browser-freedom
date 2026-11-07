@@ -594,6 +594,31 @@ fn gap(input: &[ComponentValue]) -> Option<Vec<Value>> {
     pair([L::RowGap, L::ColumnGap], input)
 }
 
+/// E5: `contain-intrinsic-size: [ auto? [ none | <length> ] ]{1,2}` (CSS Sizing 4 §7.1).
+fn contain_intrinsic_size(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let items: Vec<&ComponentValue> = components(input);
+    let mut parts: Vec<&[&ComponentValue]> = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        let n = if is_ident(items[i], "auto") { 2 } else { 1 };
+        parts.push(items.get(i..i + n)?);
+        i += n;
+    }
+    let parse = |p: &[&ComponentValue]| {
+        let owned: Vec<ComponentValue> = p.iter().map(|v| (*v).clone()).collect();
+        ContainIntrinsicSize::parse(&owned)
+    };
+    let (w, h) = match parts.as_slice() {
+        [a] => (parse(a)?, parse(a)?),
+        [a, b] => (parse(a)?, parse(b)?),
+        _ => return None,
+    };
+    Some(vec![
+        Value::ContainIntrinsicWidth(w),
+        Value::ContainIntrinsicHeight(h),
+    ])
+}
+
 fn place(ids: [L; 2], input: &[ComponentValue]) -> Option<Vec<Value>> {
     pair(ids, input)
 }
@@ -1064,6 +1089,11 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
         name: "grid-gap",
         longhands: &[L::RowGap, L::ColumnGap],
         expand: gap,
+    },
+    ShorthandDef {
+        name: "contain-intrinsic-size",
+        longhands: &[L::ContainIntrinsicWidth, L::ContainIntrinsicHeight],
+        expand: contain_intrinsic_size,
     },
     ShorthandDef {
         name: "place-content",
