@@ -582,6 +582,21 @@ pub fn fire_event(
     })
 }
 
+thread_local! {
+    /// E2: con un despacho de IndexedDB en curso, los microtasks corren después de cada
+    /// listener (lo que pasa en un navegador al vaciarse la pila tras cada callback, HTML
+    /// §8.1.4.4 "clean up after running script"), aunque `idb.js` esté en la pila.
+    static CHECKPOINT_EACH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Corre `f` con un microtask checkpoint después de cada listener (ver `CHECKPOINT_EACH`).
+pub fn with_checkpoint_each<R>(f: impl FnOnce() -> R) -> R {
+    let saved = CHECKPOINT_EACH.with(|c| c.replace(true));
+    let r = f();
+    CHECKPOINT_EACH.with(|c| c.set(saved));
+    r
+}
+
 /// Llama a un listener de script; `true` si lanzó.
 fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc<Object>) -> bool {
     let Some(rec) = state(agent).listeners.get(&handle).cloned() else {
@@ -633,14 +648,18 @@ fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc
     if let Some(p) = state(agent).current_event.pop() {
         agent.host_unpin(p);
     }
-    match r {
+    let threw = match r {
         Ok(_) => false,
         Err(Throw::Value(e)) => {
             report_exception(agent, &e);
             true
         }
-        Err(Throw::Terminate(_)) => true,
+        Err(Throw::Terminate(_)) => return true,
+    };
+    if CHECKPOINT_EACH.with(std::cell::Cell::get) {
+        let _ = agent.perform_microtask_checkpoint();
     }
+    threw
 }
 
 /// HTML "report an exception" (§8.1.4.6): un `ErrorEvent` `error` en la ventana; si nadie lo

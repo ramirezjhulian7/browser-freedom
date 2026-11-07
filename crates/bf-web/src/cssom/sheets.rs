@@ -522,14 +522,31 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         out
     });
     let base = WebContextHandle::current(agent).get(agent).base.clone();
+    let resolve =
+        |h: String| bf_infra::Url::parse(&h, Some(&base)).map_or(h, |u| u.serialize(false));
+    // Las hojas de `<link>` nuevas o con otro `href`: su texto (HTML §4.6.7.1 "fetch and
+    // process the linked resource", con el loader de la página).
+    let mut loaded: HashMap<NodeRef, String> = HashMap::new();
+    for f in &found {
+        let Some(h) = &f.href else { continue };
+        let href = resolve(h.clone());
+        let reusable = {
+            let st = &state(agent).sheets;
+            st.by_owner
+                .get(&f.owner)
+                .and_then(|id| st.sheets.get(id))
+                .is_some_and(|s| s.source.is_none() && s.href.as_deref() == Some(href.as_str()))
+        };
+        if !reusable && let Some(text) = load_linked_sheet(agent, &href) {
+            loaded.insert(f.owner, text);
+        }
+    }
     let st = &mut state(agent).sheets;
     let mut ids = Vec::new();
     let mut live = std::collections::HashSet::new();
     for f in found {
         live.insert(f.owner);
-        let href = f
-            .href
-            .map(|h| bf_infra::Url::parse(&h, Some(&base)).map_or(h, |u| u.serialize(false)));
+        let href = f.href.map(resolve);
         let reuse = st.by_owner.get(&f.owner).copied().filter(|id| {
             st.sheets
                 .get(id)
@@ -541,6 +558,7 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                 let rules = f
                     .source
                     .as_deref()
+                    .or_else(|| loaded.get(&f.owner).map(String::as_str))
                     .map_or_else(Vec::new, |t| st.parse_rules(t));
                 let id = st.new_sheet(Sheet {
                     owner: Some(f.owner),
@@ -595,6 +613,23 @@ pub fn constructed_sheet(agent: &mut Agent, id: SheetId) -> Option<(bool, String
         sheet_text(s)
     };
     Some((s.constructed, text))
+}
+
+/// El texto de la hoja de un `<link rel=stylesheet>` (decodificada como UTF-8, CSS Syntax
+/// §3.2 sin `@charset`), o `None` si no se pudo cargar.
+fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {
+    let url = bf_infra::Url::parse(href, None).ok()?;
+    let realm = WebContextHandle::current(agent).realm;
+    let loader = agent
+        .realm_data::<crate::html::scripting::PageResources>(realm)?
+        .loader
+        .clone();
+    let r = loader.load(&url)?;
+    let bytes = r
+        .bytes
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(&r.bytes);
+    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).

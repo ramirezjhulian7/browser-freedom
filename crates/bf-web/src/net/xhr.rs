@@ -14,7 +14,7 @@ use bf_js::vm::{Agent, JsResult, Throw};
 
 use super::body::{self, decode_with, mime_charset, mime_essence};
 use super::headers::{self, HeaderList};
-use super::{NetRequest, NetResult, classes, dom_error, state};
+use super::{classes, dom_error, state};
 use crate::dom::events::{
     EventData, EventIface, TargetRef, dispatch_js_event, object_key, with_event_handlers,
 };
@@ -633,25 +633,25 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             "The object's state must be OPENED.",
         );
     };
-    let same = super::same_origin(agent, &url);
-    let credentials = s.with_credentials || same;
-    let mut net_headers = bf_net::Headers::default();
-    for (n, v) in &headers_list.0 {
-        net_headers.push(n, v);
-    }
-    if !same || !matches!(s.method.as_str(), "GET" | "HEAD") {
-        net_headers.push("Origin", &super::document_origin(agent));
-    }
-    let req = NetRequest {
+    // XHR §3.5.6 paso 6: un request `cors` con "unsafe-request flag" que pasa por main fetch
+    // (preflight incluido); `withCredentials` da credenciales `include`.
+    let params = super::cors::FetchParams {
         url: url.clone(),
-        options: bf_net::RequestOptions {
-            method: s.method.clone(),
-            headers: net_headers,
-            body,
-            redirect: bf_net::RedirectMode::Follow,
-            credentials,
-            referrer: Some(super::base_url(agent)),
+        method: s.method.clone(),
+        headers: headers_list.clone(),
+        body,
+        body_from_stream: false,
+        mode: "cors".into(),
+        credentials: if s.with_credentials {
+            "include".into()
+        } else {
+            "same-origin".into()
         },
+        redirect: bf_net::RedirectMode::Follow,
+        origin: super::request_origin(agent),
+        referrer: Some(super::base_url(agent)),
+        referrer_policy: String::new(),
+        use_preflight: false,
     };
     let generation = with_st(agent, t, |x| {
         x.upload_complete = !has_body;
@@ -662,9 +662,10 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         x.generation
     });
     if s.sync {
-        let r = super::fetch_blocking(agent, &req);
+        let backend = super::current_backend(agent);
+        let r = super::cors::fetch_whole(&*backend, &params);
         with_st(agent, t, |x| x.send_flag = true);
-        let r = filter(agent, &url, s.with_credentials, r);
+        let r = filter(&url, s.with_credentials, r);
         match r {
             Ok(res) => {
                 with_st(agent, t, |x| {
@@ -696,15 +697,15 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Undefined);
     }
     let with_credentials = s.with_credentials;
-    let net = super::start(
+    let net = super::start_fetch(
         agent,
-        req,
-        Box::new(move |agent: &mut Agent, result: NetResult| {
+        params,
+        Box::new(move |agent: &mut Agent, result| {
             if st(agent, t).generation != generation {
                 return;
             }
             with_st(agent, t, |x| x.net = None);
-            let r = filter(agent, &url, with_credentials, result);
+            let r = filter(&url, with_credentials, result);
             process_response(agent, t, o, generation, r);
         }),
     );
@@ -733,24 +734,18 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// La respuesta filtrada (basic o CORS); `Err` si es un error de red o falla CORS.
+/// La respuesta filtrada según su tainting (basic o CORS; el CORS check ya lo hizo main
+/// fetch); `Err` si es un error de red.
 fn filter(
-    agent: &mut Agent,
     url: &Url,
     with_credentials: bool,
-    r: NetResult,
+    r: Result<(super::NetResponse, super::cors::Tainting), String>,
 ) -> Result<XhrResponse, String> {
-    let res = r?;
+    let (res, tainting) = r?;
     let final_url = res.url_list.last().cloned().unwrap_or_else(|| url.clone());
-    let same = super::same_origin(agent, url) && super::same_origin(agent, &final_url);
-    let headers = if same {
-        super::basic_filter(&res.headers)
-    } else {
-        let origin = super::document_origin(agent);
-        if !super::cors_check(&origin, &res.headers, with_credentials) {
-            return Err("CORS".into());
-        }
-        super::cors_filter(&res.headers)
+    let headers = match tainting {
+        super::cors::Tainting::Basic => super::basic_filter(&res.headers),
+        _ => super::cors_filter_with(&res.headers, with_credentials),
     };
     Ok(XhrResponse {
         url: Some(final_url),
