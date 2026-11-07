@@ -651,6 +651,7 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             redirect: bf_net::RedirectMode::Follow,
             credentials,
             referrer: Some(super::base_url(agent)),
+            cache: bf_net::CacheMode::Default,
         },
     };
     let generation = with_st(agent, t, |x| {

@@ -624,7 +624,7 @@ fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
 impl App {
     fn new(worker: Documents, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
         App {
-            net: Arc::new(NetLoader::new()),
+            net: Arc::new(NetLoader::with_disk_cache()),
             tabs: vec![None],
             active: 0,
             focus: None,

@@ -913,6 +913,8 @@ pub struct RequestOptions {
     /// ¿Se mandan y guardan cookies? (credentials mode `include`/`same-origin`).
     pub credentials: bool,
     pub referrer: Option<Url>,
+    /// El *cache mode* (Fetch §2.2.5, `RequestInit.cache`).
+    pub cache: CacheMode,
 }
 
 impl Default for RequestOptions {
@@ -924,6 +926,7 @@ impl Default for RequestOptions {
             redirect: RedirectMode::Follow,
             credentials: true,
             referrer: None,
+            cache: CacheMode::Default,
         }
     }
 }
@@ -1018,21 +1021,13 @@ fn blob_response_range(
 impl Fetcher {
     /// Una petición de script: la respuesta y la lista de URLs visitadas (Fetch §2.2.5, "URL
     /// list"). Con `RedirectMode::Manual` devuelve la respuesta 3xx; con `Error`, un error.
+    /// La caché HTTP se consulta según `req.cache` (Fetch §4.5).
     pub fn fetch_request(
         &self,
         url: &Url,
         req: &RequestOptions,
     ) -> Result<(Response, Vec<Url>), FetchError> {
-        self.fetch_request_with_cache(url, req, CacheMode::Default)
-    }
-
-    /// Como [`Fetcher::fetch_request`], con el *cache mode* de la petición (`RequestInit.cache`).
-    pub fn fetch_request_with_cache(
-        &self,
-        url: &Url,
-        req: &RequestOptions,
-        cache: CacheMode,
-    ) -> Result<(Response, Vec<Url>), FetchError> {
+        let cache = req.cache;
         let mut url = url.clone();
         let mut method = req.method.clone();
         let mut body = req.body.clone();

@@ -2,8 +2,8 @@
 //! (Beacon §3.1).
 //!
 //! CORS simplificado: mismo origen (respuesta "basic"), `no-cors` (respuesta opaca) y `cors`
-//! con `Access-Control-Allow-Origin` comprobado (sin preflight). `cache` se acepta pero no hay
-//! caché HTTP (todo es `no-store`).
+//! con `Access-Control-Allow-Origin` comprobado (sin preflight). `cache` llega a la caché HTTP
+//! de `bf-net` (RFC 9111) como *cache mode* (Fetch §4.5).
 
 use bf_infra::Url;
 use bf_js::host::{HostClass, HostHandle};
@@ -1145,6 +1145,8 @@ pub fn net_request(agent: &mut Agent, r: &RequestData, list: &HeaderList) -> Net
             },
             credentials,
             referrer,
+            // Fetch §4.5: el *cache mode* de la petición.
+            cache: bf_net::CacheMode::parse(&r.cache).unwrap_or_default(),
         },
     }
 }
@@ -1436,6 +1438,7 @@ fn send_beacon(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             redirect: bf_net::RedirectMode::Follow,
             credentials: true,
             referrer: Some(base),
+            cache: bf_net::CacheMode::Default,
         },
     };
     super::start(agent, req, Box::new(|_, _| {}));
