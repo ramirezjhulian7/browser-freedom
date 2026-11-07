@@ -594,6 +594,20 @@ pub enum Op {
         done: u32,
     },
 
+    // --- E8: superinstrucciones de la mirilla ---
+    /// `GetArg(arg)` + `InitLocal(slot)`.
+    ArgToLocal(u32, u32),
+    /// `GetLocal(slot)` + `Int(k)` + `Add`.
+    LocalAddInt(u32, i32),
+    /// `GetLocal(slot)` + `Int(k)` + `Sub`.
+    LocalSubInt(u32, i32),
+    /// `GetLocal(slot)` + `Int(k)` + `Lt` + `JumpIfFalse(target)`.
+    JumpIfNotLocalLtInt {
+        slot: u32,
+        k: i32,
+        target: u32,
+    },
+
     // --- E8: Explicit Resource Management ---
     /// NewDisposeCapability en el slot (un scope con `using`).
     DisposeInit(u32),

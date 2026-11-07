@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-21; 52017 archivos en 153 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-28; 52017 archivos en 307 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -152,7 +152,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
   - `import-text`: stage 3: módulos de texto (`with { type: "text" }`).
   - `import-bytes`: stage 2.7: módulos de bytes (`with { type: "bytes" }`, sobre immutable ArrayBuffer).
 - Detalle por test: `target/test262/results.tsv`.
-- `language/` (referencia de regresión de `tests/test262_run.rs`): 99.35%
+- `language/` (referencia de regresión de `tests/test262_run.rs`): 99.82%
 
 | Directorio | passed | failed | skipped | timeout | % |
 |---|---:|---:|---:|---:|---:|
@@ -163,18 +163,18 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/Array | 2988 | 95 | 0 | 0 | 96.9% |
 | built-ins/ArrayBuffer | 192 | 0 | 29 | 0 | 100.0% |
 | built-ins/ArrayIteratorPrototype | 27 | 0 | 0 | 0 | 100.0% |
-| built-ins/AsyncDisposableStack | 0 | 104 | 0 | 0 | 0.0% |
+| built-ins/AsyncDisposableStack | 104 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncFromSyncIteratorPrototype | 38 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncFunction | 18 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncGeneratorFunction | 23 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncGeneratorPrototype | 48 | 0 | 0 | 0 | 100.0% |
-| built-ins/AsyncIteratorPrototype | 4 | 9 | 0 | 0 | 30.8% |
-| built-ins/Atomics | 268 | 112 | 9 | 0 | 70.5% |
+| built-ins/AsyncIteratorPrototype | 12 | 1 | 0 | 0 | 92.3% |
+| built-ins/Atomics | 380 | 0 | 9 | 0 | 100.0% |
 | built-ins/BigInt | 77 | 0 | 0 | 0 | 100.0% |
 | built-ins/Boolean | 51 | 0 | 0 | 0 | 100.0% |
 | built-ins/DataView | 550 | 0 | 11 | 0 | 100.0% |
-| built-ins/Date | 586 | 8 | 0 | 0 | 98.7% |
-| built-ins/DisposableStack | 0 | 93 | 0 | 0 | 0.0% |
+| built-ins/Date | 594 | 0 | 0 | 0 | 100.0% |
+| built-ins/DisposableStack | 93 | 0 | 0 | 0 | 100.0% |
 | built-ins/Error | 58 | 0 | 35 | 0 | 100.0% |
 | built-ins/FinalizationRegistry | 47 | 0 | 0 | 0 | 100.0% |
 | built-ins/Function | 508 | 1 | 0 | 0 | 99.8% |
@@ -201,9 +201,9 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/SharedArrayBuffer | 104 | 0 | 0 | 0 | 100.0% |
 | built-ins/String | 1223 | 0 | 0 | 0 | 100.0% |
 | built-ins/StringIteratorPrototype | 7 | 0 | 0 | 0 | 100.0% |
-| built-ins/SuppressedError | 0 | 22 | 0 | 0 | 0.0% |
+| built-ins/SuppressedError | 22 | 0 | 0 | 0 | 100.0% |
 | built-ins/Symbol | 98 | 0 | 0 | 0 | 100.0% |
-| built-ins/Temporal | 0 | 4605 | 0 | 0 | 0.0% |
+| built-ins/Temporal | 4605 | 0 | 0 | 0 | 100.0% |
 | built-ins/ThrowTypeError | 14 | 0 | 0 | 0 | 100.0% |
 | built-ins/TypedArray | 1444 | 1 | 8 | 0 | 99.9% |
 | built-ins/TypedArrayConstructors | 736 | 0 | 2 | 0 | 100.0% |
@@ -211,8 +211,8 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/WeakMap | 102 | 0 | 39 | 0 | 100.0% |
 | built-ins/WeakRef | 29 | 0 | 0 | 0 | 100.0% |
 | built-ins/WeakSet | 85 | 0 | 0 | 0 | 100.0% |
-| built-ins/decodeURI | 54 | 0 | 0 | 1 | 98.2% |
-| built-ins/decodeURIComponent | 55 | 0 | 0 | 1 | 98.2% |
+| built-ins/decodeURI | 55 | 0 | 0 | 0 | 100.0% |
+| built-ins/decodeURIComponent | 56 | 0 | 0 | 0 | 100.0% |
 | built-ins/encodeURI | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/encodeURIComponent | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/eval | 10 | 0 | 0 | 0 | 100.0% |
@@ -227,7 +227,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | intl402/BigInt | 10 | 1 | 0 | 0 | 90.9% |
 | intl402/Collator | 62 | 3 | 0 | 0 | 95.4% |
 | intl402/Date | 12 | 0 | 0 | 0 | 100.0% |
-| intl402/DateTimeFormat | 156 | 89 | 0 | 0 | 63.7% |
+| intl402/DateTimeFormat | 159 | 86 | 0 | 0 | 64.9% |
 | intl402/DisplayNames | 4 | 53 | 0 | 0 | 7.0% |
 | intl402/DurationFormat | 0 | 110 | 0 | 0 | 0.0% |
 | intl402/FallbackSymbol | 2 | 0 | 0 | 0 | 100.0% |
@@ -240,7 +240,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | intl402/RelativeTimeFormat | 0 | 80 | 0 | 0 | 0.0% |
 | intl402/Segmenter | 2 | 77 | 0 | 0 | 2.5% |
 | intl402/String | 15 | 4 | 0 | 0 | 78.9% |
-| intl402/Temporal | 0 | 2029 | 0 | 0 | 0.0% |
+| intl402/Temporal | 72 | 1957 | 0 | 0 | 3.5% |
 | intl402/TypedArray | 1 | 0 | 0 | 0 | 100.0% |
 | language/arguments-object | 261 | 2 | 0 | 0 | 99.2% |
 | language/asi | 102 | 0 | 0 | 0 | 100.0% |
@@ -267,43 +267,43 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/rest-parameters | 11 | 0 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 0 | 100.0% |
 | language/statementList | 80 | 0 | 0 | 0 | 100.0% |
-| language/statements | 9203 | 128 | 16 | 0 | 98.6% |
+| language/statements | 9313 | 18 | 16 | 0 | 99.8% |
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
 | language/white-space | 67 | 0 | 0 | 0 | 100.0% |
-| **language/ (total)** | 23043 | 151 | 532 | 0 | 99.3% |
-| **Total** | 43121 | 8097 | 797 | 2 | 84.2% |
+| **language/ (total)** | 23153 | 41 | 532 | 0 | 99.8% |
+| **Total** | 48260 | 2960 | 797 | 0 | 94.2% |
 
 ### Los 30 errores más frecuentes
 
 | # | tests | error |
 |---:|---:|---|
-| 1 | 6183 | `ReferenceError: Temporal is not defined` |
-| 2 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
-| 3 | 119 | `TestNError: Calling as constructor Expected a TypeError but got a ReferenceError` |
-| 4 | 112 | `harness atomicsHelper.js: TypeError: Cannot read properties of undefined (reading 'bind')` |
-| 5 | 110 | `InternalError: no implementado: using (explicit-resource-management)` |
-| 6 | 90 | `TypeError: Intl.Locale is not a constructor` |
-| 7 | 89 | `ReferenceError: DisposableStack is not defined` |
-| 8 | 72 | `ReferenceError: AsyncDisposableStack is not defined` |
-| 9 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
-| 10 | 64 | `TypeError: Intl.DurationFormat is not a constructor` |
-| 11 | 61 | `ReferenceError: ShadowRealm is not defined` |
-| 12 | 58 | `TestNError: Expected SameValue(«…», «…») to be true` |
-| 13 | 58 | `TestNError: Expected a RangeError but got a ReferenceError` |
-| 14 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
-| 15 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
-| 16 | 40 | `TypeError: Cannot convert undefined to object` |
-| 17 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
-| 18 | 34 | `RangeError: Maximum call stack size exceeded` |
-| 19 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
-| 20 | 28 | `TestN:AsyncTestFailure:ReferenceError: AsyncDisposableStack is not defined` |
-| 21 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
-| 22 | 20 | `TestNError: Expected a TypeError but got a ReferenceError` |
-| 23 | 19 | `ReferenceError: SuppressedError is not defined` |
-| 24 | 18 | `TestNError: reject minus zero as extended year Expected a RangeError but got a ReferenceError` |
-| 25 | 15 | `TestNError: empty string is not a valid calendar ID Expected a RangeError but got a ReferenceError` |
-| 26 | 10 | `TestNError: Expected a TestNError but got a ReferenceError` |
-| 27 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
-| 28 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a ReferenceError` |
-| 29 | 8 | `TestNError: isConstructor invoked with a non-function value` |
-| 30 | 8 | `TestNError: no argument Expected a TypeError but got a ReferenceError` |
+| 1 | 263 | `RangeError: Unsupported calendar: gregory` |
+| 2 | 139 | `RangeError: Unsupported calendar: buddhist` |
+| 3 | 138 | `RangeError: Unsupported calendar: chinese` |
+| 4 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
+| 5 | 135 | `RangeError: Unsupported calendar: japanese` |
+| 6 | 131 | `RangeError: Unsupported calendar: hebrew` |
+| 7 | 120 | `RangeError: Unsupported calendar: dangi` |
+| 8 | 114 | `RangeError: Unsupported calendar: roc` |
+| 9 | 106 | `RangeError: Unsupported calendar: islamic-civil` |
+| 10 | 104 | `RangeError: Unsupported calendar: ethiopic` |
+| 11 | 93 | `RangeError: Unsupported calendar: islamic-tbla` |
+| 12 | 90 | `TypeError: Intl.Locale is not a constructor` |
+| 13 | 84 | `RangeError: Unsupported calendar: coptic` |
+| 14 | 84 | `RangeError: Unsupported calendar: ethioaa` |
+| 15 | 83 | `RangeError: Unsupported calendar: persian` |
+| 16 | 82 | `RangeError: Unsupported calendar: islamic-umalqura` |
+| 17 | 73 | `RangeError: Unsupported calendar: indian` |
+| 18 | 69 | `TypeError: Intl.DurationFormat is not a constructor` |
+| 19 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
+| 20 | 63 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 21 | 61 | `ReferenceError: ShadowRealm is not defined` |
+| 22 | 59 | `TypeError: Temporal objects cannot be converted to primitives; use compare() or equals()` |
+| 23 | 49 | `RangeError: Unknown time zone: America/Vancouver` |
+| 24 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
+| 25 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
+| 26 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
+| 27 | 36 | `TypeError: Cannot convert undefined to object` |
+| 28 | 34 | `RangeError: Maximum call stack size exceeded` |
+| 29 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
+| 30 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |

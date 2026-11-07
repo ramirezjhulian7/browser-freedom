@@ -266,6 +266,16 @@ fn replace_aliases(tag: &mut LanguageTag) {
                 break;
             }
         }
+        // E8: las reglas `und-variante` valen para cualquier idioma (Annex C: `und` en el
+        // tipo empareja cualquier idioma; un `und` en el reemplazo conserva el del tag).
+        if matched.is_none() {
+            for v in &tag.variants {
+                if let Some(r) = lookup(cldr::LANGUAGE_ALIASES, &format!("und-{v}")) {
+                    matched = Some((0, Some(v.clone()), r));
+                    break;
+                }
+            }
+        }
         if matched.is_none()
             && let Some(region) = &tag.region
             && let Some(r) = lookup(
@@ -295,7 +305,9 @@ fn replace_aliases(tag: &mut LanguageTag) {
             if let Some(v) = variant {
                 tag.variants.retain(|x| *x != v);
             }
-            tag.language = rep.language;
+            if rep.language != "und" {
+                tag.language = rep.language;
+            }
             if how == 2 || tag.script.is_none() {
                 tag.script = rep
                     .script
@@ -540,9 +552,9 @@ pub fn canonicalize_locale_list(agent: &mut Agent, locales: &Value) -> JsResult<
     Ok(seen)
 }
 
-/// La etiqueta de un objeto con `[[InitializedLocale]]` (Intl.Locale; sin implementar aún).
-fn locale_object_tag(_: &Agent, _: Gc<Object>) -> Option<String> {
-    None
+/// La etiqueta de un objeto con `[[InitializedLocale]]` (Intl.Locale).
+fn locale_object_tag(agent: &Agent, o: Gc<Object>) -> Option<String> {
+    crate::builtins::intl::locale_object::locale_tag(agent, o)
 }
 
 /// La etiqueta sin la extensión `-u-` (RemoveUnicodeExtensions).

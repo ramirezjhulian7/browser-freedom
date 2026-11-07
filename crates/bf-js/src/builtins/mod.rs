@@ -36,8 +36,10 @@ pub mod promise;
 pub mod typed_array;
 pub mod weak;
 // E8
+pub mod array_from_async;
 pub mod disposable;
 pub mod temporal;
+pub mod uint8_base64;
 
 use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, Prop, PropValue};
@@ -251,4 +253,5 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     disposable::init(agent, realm);
     // E8: Temporal (después de Date: agrega Date.prototype.toTemporalInstant).
     temporal::init(agent, realm);
+    uint8_base64::init(agent, realm);
 }

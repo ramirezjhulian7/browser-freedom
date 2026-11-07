@@ -289,7 +289,7 @@ pub fn date_within_limits_i64(y: i64, m: i64, d: i64) -> bool {
 
 /// ISOYearMonthWithinLimits.
 pub fn year_month_within_limits(y: i64, m: i64) -> bool {
-    !(y < -271_821 || y > 275_760 || (y == -271_821 && m < 4) || (y == 275_760 && m > 9))
+    (-271_821..=275_760).contains(&y) && !((y == -271_821 && m < 4) || (y == 275_760 && m > 9))
 }
 
 /// IsValidEpochNanoseconds.
