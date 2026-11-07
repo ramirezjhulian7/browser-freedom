@@ -310,7 +310,7 @@ pub fn fetch_document_with(
         Some(ct) => ct.is_xml() && !ct.is_html(),
         None => path.ends_with(".xht") || path.ends_with(".xhtml") || path.ends_with(".svg"),
     };
-    let (doc, encoding, source) = if xml {
+    let (mut doc, encoding, source) = if xml {
         // XML: BOM o UTF-8 (sin prescan de <meta>).
         let (text, enc) = encoding::decode(&response.body, Encoding::Utf8);
         let source = if bf_infra::encoding::sniff_bom(&response.body).is_some() {
@@ -326,12 +326,6 @@ pub fn fetch_document_with(
             .cloned()
             .or_else(|| MimeType::parse("text/html"));
         let (enc, source) = html_encoding_with_source(&response.body, ct.as_ref());
-        if !enc.is_supported() {
-            eprintln!(
-                "aviso: el encoding {} todavía no tiene decodificador; se usa windows-1252",
-                enc.name()
-            );
-        }
         let (text, enc) = encoding::decode(&response.body, enc);
         let doc = match engine {
             Some((engine, env)) => {
@@ -341,6 +335,8 @@ pub fn fetch_document_with(
         };
         (doc, enc, source)
     };
+    // E10: `document.characterSet` (y el encoding de las URLs del documento).
+    doc.character_set = encoding.name().into();
     let base = document_base_url(&doc, &response.url);
     let http = matches!(response.url.scheme.as_str(), "http" | "https");
     let meta = Meta {

@@ -866,6 +866,119 @@ impl Engine {
             .is_some_and(WebContext::take_dirty) // E3: también los cambios sin `mutated()`.
     }
 
+    // --- E4: los marcos (`<iframe>`) ---
+
+    /// ¿Cambió el DOM de algún marco desde la última vez? (Y se limpian las marcas.)
+    pub fn take_frames_dirty(&mut self) -> bool {
+        let realms: Vec<_> = bf_web::bom::frames::frame_views(&self.rt.agent, self.realm)
+            .into_iter()
+            .flat_map(|v| flatten(&v))
+            .collect();
+        let mut any = false;
+        for r in realms {
+            any |= self
+                .rt
+                .agent
+                .realm_data_mut::<WebContext>(r)
+                .is_some_and(WebContext::take_dirty);
+        }
+        any
+    }
+
+    /// Los documentos de los marcos para pintarlos dentro de sus `<iframe>`; `scroll` da el
+    /// desplazamiento de cada marco por su camino de `<iframe>`.
+    pub fn frame_docs(
+        &self,
+        scroll: &std::collections::HashMap<Vec<bf_dom::NodeId>, (f32, f32)>,
+    ) -> Vec<bf_paint::FrameDoc> {
+        fn convert(
+            views: Vec<bf_web::bom::frames::FrameView>,
+            path: &[bf_dom::NodeId],
+            scroll: &std::collections::HashMap<Vec<bf_dom::NodeId>, (f32, f32)>,
+        ) -> Vec<bf_paint::FrameDoc> {
+            views
+                .into_iter()
+                .map(|v| {
+                    let mut p = path.to_vec();
+                    p.push(v.element);
+                    bf_paint::FrameDoc {
+                        node: v.element,
+                        doc: v.doc,
+                        base: v.base,
+                        encoding: bf_infra::encoding::Encoding::Utf8,
+                        scroll: scroll.get(&p).copied().unwrap_or_default(),
+                        frames: convert(v.children, &p, scroll),
+                    }
+                })
+                .collect()
+        }
+        if !self.has_window() {
+            return Vec::new();
+        }
+        convert(
+            bf_web::bom::frames::frame_views(&self.rt.agent, self.realm),
+            &[],
+            scroll,
+        )
+    }
+
+    /// La ventana del marco al que lleva `path` (sus `<iframe>`, de afuera hacia adentro);
+    /// la de la pestaña con un camino vacío.
+    pub fn frame_realm(&self, path: &[bf_dom::NodeId]) -> Option<RealmId> {
+        bf_web::bom::frames::frame_at_path(&self.rt.agent, self.realm, path)
+    }
+
+    /// El documento de la ventana `realm` (la de la pestaña o la de un marco).
+    pub fn document_in(&self, realm: RealmId) -> Option<&Document> {
+        self.rt
+            .agent
+            .realm_data::<WebContext>(realm)
+            .map(WebContext::document)
+    }
+
+    pub fn document_mut_in(&mut self, realm: RealmId) -> Option<&mut Document> {
+        self.rt
+            .agent
+            .realm_data_mut::<WebContext>(realm)
+            .map(WebContext::document_mut)
+    }
+
+    /// [`Engine::dispatch`] en la ventana `realm`.
+    pub fn dispatch_in(
+        &mut self,
+        realm: RealmId,
+        target: bf_dom::events::EventTarget,
+        event: &mut bf_dom::events::Event,
+    ) -> bool {
+        let r = bf_web::bom::script::dispatch_trusted(&mut self.rt.agent, realm, target, event);
+        if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
+            ctx.pending_dirty = true;
+        }
+        self.flush_rejections();
+        r
+    }
+
+    /// Un `WheelEvent` de confianza (UI Events §5.4) con sus deltas en px; `false` si se
+    /// canceló.
+    pub fn dispatch_wheel(
+        &mut self,
+        realm: RealmId,
+        target: bf_dom::events::EventTarget,
+        event: bf_dom::events::Event,
+        delta: (f32, f32),
+    ) -> bool {
+        let r =
+            bf_web::bom::script::dispatch_wheel(&mut self.rt.agent, realm, target, event, delta);
+        self.flush_rejections();
+        r
+    }
+
+    /// Navega el marco `realm` (un enlace dentro del marco).
+    pub fn navigate_frame(&mut self, realm: RealmId, url: Url) {
+        bf_web::bom::frames::navigate_frame(&mut self.rt.agent, realm, url);
+        self.flush_rejections();
+    }
+
     /// Scripts ejecutados y con error.
     pub fn counts(&self) -> (usize, usize) {
         bf_web::bom::script::script_env(&self.rt.agent, self.realm)
@@ -909,6 +1022,15 @@ impl Engine {
         let now = self.rt.agent.host.hooks.now();
         Some(Duration::from_secs_f64(((at - now) / 1000.0).max(0.0)))
     }
+}
+
+/// Las ventanas de un marco y de los suyos.
+fn flatten(v: &bf_web::bom::frames::FrameView) -> Vec<RealmId> {
+    let mut out = vec![v.realm];
+    for c in &v.children {
+        out.extend(flatten(c));
+    }
+    out
 }
 
 /// Parsea `text` con scripts, con un motor nuevo y los hooks de la línea de comandos.
