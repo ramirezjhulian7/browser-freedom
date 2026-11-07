@@ -11,13 +11,23 @@ fn data(name: &str) -> String {
 
 fn parse_levels(s: &str) -> Vec<Option<u8>> {
     s.split_whitespace()
-        .map(|t| if t == "x" { None } else { Some(t.parse().unwrap()) })
+        .map(|t| {
+            if t == "x" {
+                None
+            } else {
+                Some(t.parse().unwrap())
+            }
+        })
         .collect()
 }
 
 /// Niveles después de L1 (toda la entrada como una línea) y orden visual de L2 sin los
 /// caracteres que quita X9.
-fn run(classes: &[BidiClass], chars: Option<&[u32]>, base: Option<u8>) -> (u8, Vec<Option<u8>>, Vec<usize>) {
+fn run(
+    classes: &[BidiClass],
+    chars: Option<&[u32]>,
+    base: Option<u8>,
+) -> (u8, Vec<Option<u8>>, Vec<usize>) {
     let r = resolve_paragraph(classes, chars, base);
     let mut levels = r.levels.clone();
     apply_l1(classes, &mut levels, r.para_level);
@@ -87,7 +97,10 @@ fn bidi_character_test() {
             continue;
         }
         let f: Vec<&str> = line.split(';').collect();
-        let cps: Vec<u32> = f[0].split_whitespace().map(|t| u32::from_str_radix(t, 16).unwrap()).collect();
+        let cps: Vec<u32> = f[0]
+            .split_whitespace()
+            .map(|t| u32::from_str_radix(t, 16).unwrap())
+            .collect();
         let classes: Vec<BidiClass> = cps
             .iter()
             .map(|&c| bf_layout::bidi::bidi_class(char::from_u32(c).unwrap()))
@@ -99,7 +112,10 @@ fn bidi_character_test() {
         };
         let para: u8 = f[2].trim().parse().unwrap();
         let levels = parse_levels(f[3]);
-        let order: Vec<usize> = f[4].split_whitespace().map(|t| t.parse().unwrap()).collect();
+        let order: Vec<usize> = f[4]
+            .split_whitespace()
+            .map(|t| t.parse().unwrap())
+            .collect();
         let (got_para, got_levels, got_order) = run(&classes, Some(&cps), base);
         if got_para == para && got_levels == levels && got_order == order {
             pass += 1;
@@ -136,14 +152,19 @@ fn line_break_test() {
                 hex => chars.push(char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap()),
             }
         }
-        let got: Vec<bool> = line_breaks(&chars).iter().map(|b| *b != Break::Prohibited).collect();
+        let got: Vec<bool> = line_breaks(&chars)
+            .iter()
+            .map(|b| *b != Break::Prohibited)
+            .collect();
         // La posición 0 (sot) del test es siempre ×.
         if got == expected {
             pass += 1;
         } else {
             fail += 1;
             if first_failures.len() < 15 {
-                first_failures.push(format!("{body}\n  obtenido: {got:?}\n  esperado: {expected:?}"));
+                first_failures.push(format!(
+                    "{body}\n  obtenido: {got:?}\n  esperado: {expected:?}"
+                ));
             }
         }
     }

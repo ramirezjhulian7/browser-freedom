@@ -243,7 +243,13 @@ fn shape_dir_rtl_runs() {
     let fonts = Fonts::new(db);
     let family = generic("sans-serif");
     let req = request(&family, 400.0, false);
-    for text in ["שלום עולם", "مرحبا بالعالم", "ab\u{85}cd", "אב\u{9d}גד", "مرحبا שלום"] {
+    for text in [
+        "שלום עולם",
+        "مرحبا بالعالم",
+        "ab\u{85}cd",
+        "אב\u{9d}גד",
+        "مرحبا שלום",
+    ] {
         for rtl in [false, true] {
             let glyphs = fonts.shape_dir(text, &req, rtl);
             assert!(!glyphs.is_empty(), "{text:?}");
@@ -266,5 +272,8 @@ fn shape_dir_rtl_runs() {
     let ltr = fonts.shape_dir("שלום", &req, false);
     let rtl = fonts.shape_dir("שלום", &req, true);
     assert!((width(&ltr) - width(&rtl)).abs() < 0.01);
-    assert_ne!(ltr.first().map(|g| g.cluster), rtl.first().map(|g| g.cluster));
+    assert_ne!(
+        ltr.first().map(|g| g.cluster),
+        rtl.first().map(|g| g.cluster)
+    );
 }

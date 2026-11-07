@@ -20,7 +20,8 @@ fn wpt_reftests_groups() {
     let out = workspace.join("target/reftests-groups");
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::create_dir_all(&out);
-    let mut harness = bf_paint::reftest::Harness::new(workspace.join("tests/wpt"), Some(out.clone()));
+    let mut harness =
+        bf_paint::reftest::Harness::new(workspace.join("tests/wpt"), Some(out.clone()));
     let results = harness.run(&groups, filter.as_deref(), &|done, total| {
         eprintln!("reftests: {done}/{total}");
     });

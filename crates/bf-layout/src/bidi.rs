@@ -176,7 +176,11 @@ pub struct Resolved {
 /// contener B salvo, como mucho, el último carácter. `chars` (opcional, del mismo largo) da los
 /// code points para los pares de corchetes de N0; sin él, N0 no encuentra pares.
 /// `base`: el nivel del párrafo (0 o 1) o `None` para P2–P3.
-pub fn resolve_paragraph(classes: &[BidiClass], chars: Option<&[u32]>, base: Option<u8>) -> Resolved {
+pub fn resolve_paragraph(
+    classes: &[BidiClass],
+    chars: Option<&[u32]>,
+    base: Option<u8>,
+) -> Resolved {
     let n = classes.len();
     let para_level = base.unwrap_or_else(|| paragraph_level(classes));
     let mut types: Vec<BidiClass> = classes.to_vec();
@@ -467,7 +471,8 @@ fn resolve_sequence(
             while k < len && t(types, k) == ET {
                 k += 1;
             }
-            let touches = (start > 0 && t(types, start - 1) == EN) || (k < len && t(types, k) == EN);
+            let touches =
+                (start > 0 && t(types, start - 1) == EN) || (k < len && t(types, k) == EN);
             if touches {
                 for j in start..k {
                     types[seq[j]] = EN;
@@ -694,7 +699,10 @@ mod tests {
     #[test]
     fn hebrew_in_latin() {
         // "ab אב cd": las letras hebreas a nivel 1 en un párrafo LTR.
-        assert_eq!(levels_of("ab \u{5D0}\u{5D1} cd", Some(0)), [0, 0, 0, 1, 1, 0, 0, 0]);
+        assert_eq!(
+            levels_of("ab \u{5D0}\u{5D1} cd", Some(0)),
+            [0, 0, 0, 1, 1, 0, 0, 0]
+        );
     }
 
     #[test]

@@ -438,8 +438,7 @@ pub fn line_breaks_with(chars: &[char], class: impl Fn(usize, char) -> LineBreak
             }
             // LB30b.
             if b == EM
-                && (a == EB
-                    || (info[j - 1].flags & EXT_PICT != 0 && info[j - 1].flags & CN != 0))
+                && (a == EB || (info[j - 1].flags & EXT_PICT != 0 && info[j - 1].flags & CN != 0))
             {
                 break 'rules Break::Prohibited;
             }

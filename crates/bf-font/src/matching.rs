@@ -266,20 +266,16 @@ pub fn script_fallback(script: &str) -> &'static [&'static str] {
             "Noto Sans KR",
             "Apple SD Gothic Neo",
         ],
-        "Deva" | "Beng" | "Guru" | "Gujr" | "Orya" | "Taml" | "Telu" | "Knda" | "Mlym"
-        | "Sinh" => &[
-            "Nirmala UI",
-            "Mangal",
-            "Noto Sans Devanagari",
-            "Kohinoor Devanagari",
-            "Lohit Devanagari",
-        ],
-        "Thai" | "Laoo" | "Khmr" => &[
-            "Leelawadee UI",
-            "Tahoma",
-            "Noto Sans Thai",
-            "Thonburi",
-        ],
+        "Deva" | "Beng" | "Guru" | "Gujr" | "Orya" | "Taml" | "Telu" | "Knda" | "Mlym" | "Sinh" => {
+            &[
+                "Nirmala UI",
+                "Mangal",
+                "Noto Sans Devanagari",
+                "Kohinoor Devanagari",
+                "Lohit Devanagari",
+            ]
+        }
+        "Thai" | "Laoo" | "Khmr" => &["Leelawadee UI", "Tahoma", "Noto Sans Thai", "Thonburi"],
         _ => &[],
     }
 }

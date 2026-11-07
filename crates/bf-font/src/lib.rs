@@ -341,7 +341,9 @@ impl Fonts {
                     last.1 = end;
                     continue;
                 }
-                let k = self.font_for(&families, c, script.tag()).unwrap_or(fallback);
+                let k = self
+                    .font_for(&families, c, script.tag())
+                    .unwrap_or(fallback);
                 match runs.last_mut() {
                     Some(last) if last.2 == k && last.3 == script => last.1 = end,
                     _ => runs.push((i, end, k, script)),

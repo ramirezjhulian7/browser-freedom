@@ -15,9 +15,9 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify, TextLineBreak,
-    TextTransform,
-    UnicodeBidi, VerticalAlign, VerticalAlignKeyword, WhiteSpace, WordBreak,
+    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify,
+    TextLineBreak, TextTransform, UnicodeBidi, VerticalAlign, VerticalAlignKeyword, WhiteSpace,
+    WordBreak,
 };
 
 use crate::bidi;
@@ -461,7 +461,11 @@ impl<'a> Layout<'a> {
             root.unicode_bidi,
             UnicodeBidi::BidiOverride | UnicodeBidi::IsolateOverride
         ) {
-            let o: &'static [char] = if root_rtl { &['\u{202E}'] } else { &['\u{202D}'] };
+            let o: &'static [char] = if root_rtl {
+                &['\u{202E}']
+            } else {
+                &['\u{202D}']
+            };
             push_other(&mut chars, &mut origin, o);
             open.push((o, &['\u{202C}']));
         }
@@ -495,7 +499,11 @@ impl<'a> Layout<'a> {
                             } else {
                                 parent + 1
                             };
-                            if next <= bidi::MAX_DEPTH { next } else { parent }
+                            if next <= bidi::MAX_DEPTH {
+                                next
+                            } else {
+                                parent
+                            }
                         };
                         level_stack.push(level);
                         ifc.boxes[b].level = level;
@@ -836,7 +844,6 @@ impl<'a> Layout<'a> {
         ifc.segs = segs;
     }
 
-
     /// Dimensiona una inline-level atómica con su margin box en el origen.
     fn atomic(&mut self, b: &'a LayoutBox, cb: Cb, parent: Option<usize>) -> Atomic {
         let margins = margin_edges(&b.style, cb.width);
@@ -897,7 +904,6 @@ impl<'a> Layout<'a> {
         }
     }
 
-
     /// Layout del contenido inline de `b`: devuelve las line boxes (y los floats que contiene) y
     /// la altura total.
     pub(crate) fn inline_content(
@@ -933,11 +939,7 @@ impl<'a> Layout<'a> {
         let mut paragraph = 0;
         while i < ifc.segs.len() {
             let line_start = i;
-            if let Some(&level) = ifc
-                .para_levels
-                .get(paragraph)
-                .or(ifc.para_levels.last())
-            {
+            if let Some(&level) = ifc.para_levels.get(paragraph).or(ifc.para_levels.last()) {
                 ifc.para_level = level;
             }
             let open_at_start = open.clone();
@@ -1203,7 +1205,6 @@ impl<'a> Layout<'a> {
         (out, y - cb.y)
     }
 
-
     /// Posición estática de las cajas absolutas de una línea (CSS Position 3 §4.3): si su
     /// `display` original era inline-level, donde estaba la pluma; si no, como un bloque: al
     /// inicio del containing block, debajo de la línea si antes había contenido.
@@ -1270,7 +1271,6 @@ impl<'a> Layout<'a> {
         }
     }
 
-
     /// Construye la line box: orden visual (UAX #9 L1–L2), posiciones, alineación y fragmentos.
     #[allow(clippy::too_many_arguments)]
     fn build_line(
@@ -1297,7 +1297,10 @@ impl<'a> Layout<'a> {
             },
             Atomic(usize),
             /// Borde start o end de una caja inline, con el margen de ese lado.
-            Edge { b: usize, margin: f32 },
+            Edge {
+                b: usize,
+                margin: f32,
+            },
         }
         #[derive(Clone, Copy)]
         struct Leaf {
@@ -1553,9 +1556,8 @@ impl<'a> Layout<'a> {
         } else {
             root.text_align
         };
-        let justify = align == TextAlign::Justify
-            && root.text_justify != TextJustify::None
-            && free > 0.0;
+        let justify =
+            align == TextAlign::Justify && root.text_justify != TextJustify::None && free > 0.0;
         let mut last_text_char: Option<(usize, usize)> = None;
         if justify {
             for l in &mut leaves {
@@ -1824,7 +1826,12 @@ impl<'a> Layout<'a> {
             }
             let mut f = Fragment::new(
                 FragmentKind::Text,
-                Rect::new(p.x, baseline + off - m.ascent, p.width, m.ascent + m.descent),
+                Rect::new(
+                    p.x,
+                    baseline + off - m.ascent,
+                    p.width,
+                    m.ascent + m.descent,
+                ),
                 s.clone(),
             );
             f.node = text.b.node;
@@ -1839,13 +1846,22 @@ impl<'a> Layout<'a> {
             let leaf = leaves[k];
             // ¿Se une al texto pendiente? (mismo texto y bytes contiguos)
             let merges = match (&pending, leaf.kind) {
-                (Some(p), LeafKind::Text {
-                    item, start, end, ..
-                }) => p.item == item && (start == p.end || end == p.start),
+                (
+                    Some(p),
+                    LeafKind::Text {
+                        item, start, end, ..
+                    },
+                ) => p.item == item && (start == p.end || end == p.start),
                 _ => false,
             };
             if !merges {
-                flush(self, pending.take(), &mut stack, &mut line_frag, &mut box_offset);
+                flush(
+                    self,
+                    pending.take(),
+                    &mut stack,
+                    &mut line_frag,
+                    &mut box_offset,
+                );
             }
             // Cajas abiertas: el prefijo común con la cadena de la hoja.
             let chain = chain_of(leaf.owner);
@@ -1895,10 +1911,8 @@ impl<'a> Layout<'a> {
                         if space {
                             g.advance = (leaf.width - extra * leaf.slots as f32) / n_chars as f32;
                         }
-                        let last_of_cluster = t
-                            .glyphs
-                            .get(gi + 1)
-                            .is_none_or(|n| n.cluster != g.cluster);
+                        let last_of_cluster =
+                            t.glyphs.get(gi + 1).is_none_or(|n| n.cluster != g.cluster);
                         if extra > 0.0
                             && last_of_cluster
                             && last_text_char != Some((item, g.cluster))
@@ -1961,7 +1975,13 @@ impl<'a> Layout<'a> {
                 LeafKind::Edge { .. } => {}
             }
         }
-        flush(self, pending.take(), &mut stack, &mut line_frag, &mut box_offset);
+        flush(
+            self,
+            pending.take(),
+            &mut stack,
+            &mut line_frag,
+            &mut box_offset,
+        );
         while !stack.is_empty() {
             close(&mut stack, &mut line_frag);
         }
@@ -1980,7 +2000,6 @@ impl<'a> Layout<'a> {
         }
         (line_frag, height)
     }
-
 
     /// Anchos intrínsecos del contenido inline de `b` (CSS Sizing 3 §5).
     pub(crate) fn inline_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
