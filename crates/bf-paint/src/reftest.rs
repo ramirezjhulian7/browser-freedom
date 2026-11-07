@@ -521,6 +521,11 @@ impl Harness {
         install_panic_hook();
         let mut tests: Vec<(PathBuf, String)> = Vec::new();
         for g in groups {
+            // E12: con un filtro de ruta solo se recorren los grupos que pueden contenerlo
+            // (recorrer todos tarda minutos con el disco cargado).
+            if filter.is_some_and(|flt| !group_may_match(g, flt)) {
+                continue;
+            }
             let mut files = Vec::new();
             collect_files(&self.wpt.join(g), &mut files);
             files.sort();
@@ -604,6 +609,14 @@ pub const GROUPS: &[&str] = &[
     "css/css-position",
     "css/css-images",
 ];
+
+/// ¿Puede haber tests del grupo `g` (`css/css-position`) cuya ruta contenga `flt`? Un filtro
+/// sin `/` puede estar en cualquier grupo; uno con `/` tiene que contener el grupo, estar
+/// dentro de él o empezar por su último segmento (`css-position/sticky`).
+fn group_may_match(g: &str, flt: &str) -> bool {
+    let last = g.rsplit('/').next().unwrap_or(g);
+    !flt.contains('/') || flt.contains(g) || g.contains(flt) || flt.starts_with(last)
+}
 
 /// Tabla Markdown por directorio.
 pub fn summary_table(results: &[Outcome], groups: &[&str]) -> String {
@@ -745,6 +758,16 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn group_filter() {
+        assert!(group_may_match("css/css-position", "sticky"));
+        assert!(group_may_match("css/css-position", "css/css-position/sticky"));
+        assert!(group_may_match("css/css-position", "css-position/sticky"));
+        assert!(group_may_match("css/CSS2/positioning", "css/CSS2"));
+        assert!(!group_may_match("css/CSS2/positioning", "css/css-position"));
+        assert!(!group_may_match("css/css-grid", "css/css-overflow/x.html"));
+    }
     use super::*;
 
     #[test]

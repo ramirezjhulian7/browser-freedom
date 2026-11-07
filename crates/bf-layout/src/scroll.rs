@@ -411,8 +411,16 @@ fn inset(v: &LengthPercentageAuto, basis: f32) -> Option<f32> {
 /// El desplazamiento `sticky` de una caja con border box `r` (sin desplazar) y márgenes `m`,
 /// contra el rectángulo de vista `svr` y la content box `cb` de su containing block (CSS
 /// Position 3 §3.4). Si chocan, ganan `top` y `left` (ltr).
-fn sticky_shift(style: &ComputedStyle, f: &Fragment, r: Rect, svr: Rect, cb: Rect) -> (f32, f32) {
-    let m = f.margin;
+fn sticky_shift(style: &ComputedStyle, r: Rect, svr: Rect, cb: Rect) -> (f32, f32) {
+    // Los márgenes `auto` cuentan como 0 para el límite (Blink y Gecko; Gecko 1488080: una
+    // caja sticky alineada con `margin-top: auto` en un flex sigue pegándose).
+    let margin = |v: &LengthPercentageAuto| crate::block::margin_value(v, cb.width).unwrap_or(0.0);
+    let m = crate::fragment::Edges {
+        top: margin(&style.margin_top),
+        right: margin(&style.margin_right),
+        bottom: margin(&style.margin_bottom),
+        left: margin(&style.margin_left),
+    };
     let axis = |start: Option<f32>,
                 end: Option<f32>,
                 (r0, r1): (f32, f32),
@@ -499,7 +507,7 @@ pub fn update_sticky(tree: &mut FragmentTree, page_scroll: (f32, f32)) {
             let mut r = f.rect;
             r.translate(-old.0, -old.1);
             let style = f.style.clone();
-            let new = sticky_shift(&style, f, r, svr.0, cb);
+            let new = sticky_shift(&style, r, svr.0, cb);
             if new != old {
                 f.translate(new.0 - old.0, new.1 - old.1);
             }
