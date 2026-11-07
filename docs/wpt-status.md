@@ -110,6 +110,11 @@ Las causas más frecuentes de los archivos sin estado OK:
 - `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
   casi completo); dominan el total de subtests.
 - Los tests que usan `test_driver` (WebDriver) terminan en `TIMEOUT`.
+- `webmessaging/broadcastchannel` (corrida aparte, 2026-11-07, mismo commit de WPT, con
+  `service-workers/service-worker/resources` en el sparse): 12 documentos, 52 / 66 subtests
+  (78.8%). Los 14 restantes (`cross-origin`, `detached-iframe`, `opaque-origin`, `ordering`,
+  `origin.window`, `sandbox`) crean `<iframe>` y esperan su `load`: el runner no carga
+  marcos (`TIMEOUT`).
 - `html/semantics/forms`: la *activation behavior* (envío con `submit`/`formdata`/`invalid`,
   reset, `label`) está; la mayoría de `form-submission-0` y `form-submission-target` leen el
   resultado del envío en un `<iframe>` con `target` (sin navegación de iframes: `notrun`).
