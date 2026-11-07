@@ -12,7 +12,7 @@ use crate::vm::{Agent, JsResult};
 
 /// Los locales con datos (`en` y `es`, y las variantes regionales que los usan).
 pub const AVAILABLE_LOCALES: &[&str] = &[
-    "en", "en-GB", "en-US", "es", "es-419", "es-ES", "es-MX", "es-US",
+    "de", "de-DE", "en", "en-GB", "en-US", "es", "es-419", "es-ES", "es-MX", "es-US", "pl", "pl-PL",
 ];
 
 /// El valor `null` de una opción en ResolveLocale (p. ej. `hc` cuando hay `hour12`).

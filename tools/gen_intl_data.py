@@ -8,7 +8,7 @@ Desde el subconjunto de cldr-json 48.0.0 en crates/bf-js/data/cldr-48.0.0/:
   Unicode (`-u-ca-gregorian` → `gregory`…), los time zones IANA con su nombre canónico, la
   tabla de zonas de Windows, los dígitos de cada moneda, los sistemas de numeración
   numéricos, el ciclo horario preferido por región y las reglas de plurales;
-- datos de locale solo para `en` y `es`: símbolos y patrones numéricos (decimal, porcentaje,
+- datos de locale solo para `en`, `es`, `de` y `pl`: símbolos y patrones numéricos (decimal, porcentaje,
   moneda, contable, científico y compacto), monedas, unidades y el calendario gregoriano.
 
 Uso: python -I tools/gen_intl_data.py
@@ -20,7 +20,7 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "crates", "bf-js", "data", "cldr-48.0.0")
 OUT = os.path.join(ROOT, "crates", "bf-js", "src", "builtins", "intl", "cldr.rs")
-LOCALES = ["en", "es"]
+LOCALES = ["en", "es", "de", "pl"]
 
 # ECMA-402 §6.6.2, tabla "Simple units sanctioned for use in ECMAScript".
 SANCTIONED_UNITS = [
