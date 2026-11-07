@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use bf_html::{ParseOptions, Parser};
 use bf_infra::Url;
+use bf_infra::encoding::Encoding;
 use bf_infra::resource::FileLoader;
 use bf_js::host::{ConsoleLevel, HostHooks, Runtime};
 use bf_js::value::Value;
@@ -36,6 +37,9 @@ pub struct TestDoc {
     /// `<meta name=timeout content=long>` o `META: timeout=long`: el límite es 6 veces
     /// mayor (como en WPT: 60 s en vez de 10 s).
     pub long: bool,
+    /// El encoding del documento (E10): el de BOM, `Content-Type` del `.headers` o
+    /// `<meta charset>`; UTF-8 si no declara ninguno.
+    pub encoding: Encoding,
 }
 
 /// El límite de un documento: `limit`, o 6 veces `limit` si pide el timeout largo.
@@ -219,17 +223,25 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
             long: meta_lines(&src)
                 .iter()
                 .any(|(k, v)| k == "timeout" && v == "long"),
+            encoding: Encoding::Utf8,
         }];
     }
     if !(is_any || rel.ends_with(".window.js")) {
         if !uses_testharness(&src) {
             return Vec::new();
         }
+        // E10: el encoding como lo vería un navegador servido por wptserve (BOM, cabecera
+        // `Content-Type` del `.headers`, prescan de `<meta>`); sin declaración, UTF-8.
+        let (encoding, src) = match document_encoding(root, rel, &bytes) {
+            Some(e) => (e, bf_infra::encoding::decode(&bytes, e).0),
+            None => (Encoding::Utf8, src),
+        };
         return vec![TestDoc {
             path: rel.to_owned(),
             url: format!("{ORIGIN}/{rel}"),
             long: has_long_timeout(&src),
             html: src,
+            encoding,
         }];
     }
     let metas = meta_lines(&src);
@@ -261,6 +273,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
                     url: format!("{ORIGIN}/{base}.{page}.html{v}"),
                     html: worker_page(&format!("new {ctor}({:?})", format!("{worker_js}{v}"))),
                     long,
+                    encoding: Encoding::Utf8,
                 });
             }
         }
@@ -296,8 +309,28 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         url: format!("{ORIGIN}/{base}.html{v}"),
         html: html.clone(),
         long,
+        encoding: Encoding::Utf8,
     }));
     docs
+}
+
+/// E10: el encoding declarado de un `.html` de WPT (HTML §13.2.3.1 sin el default del
+/// locale): BOM, `charset` del `Content-Type` de `<archivo>.headers` o `<meta>` (prescan).
+fn document_encoding(root: &Path, rel: &str, bytes: &[u8]) -> Option<Encoding> {
+    let headers = std::fs::read_to_string(root.join(format!("{rel}.headers"))).ok();
+    let content_type = headers.as_deref().and_then(|h| {
+        h.lines().find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-type")
+                .then(|| bf_net::MimeType::parse(value.trim()))
+                .flatten()
+        })
+    });
+    match bf_net::html_encoding_with_source(bytes, content_type.as_ref()) {
+        (_, bf_net::EncodingSource::Default) => None,
+        (e, _) => Some(e),
+    }
 }
 
 /// E3: ¿Las globals de `META: global=` incluyen `global` (`dedicatedworker` o
@@ -447,6 +480,7 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         allow_declarative_shadow_roots: true,
     });
     parser.document_mut().url = url.clone();
+    parser.document_mut().character_set = doc.encoding.name().into();
     crate::install(
         &mut rt.agent,
         realm,

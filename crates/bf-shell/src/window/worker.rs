@@ -17,7 +17,7 @@ use bf_infra::Url;
 use bf_js::host::ConsoleLevel;
 use bf_layout::Size;
 use bf_net::NetLoader;
-use bf_paint::{Page, PageContext, prepare_page_with_canvases};
+use bf_paint::{Page, PageContext, prepare_page_with_frames};
 
 use crate::internal;
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
@@ -231,6 +231,8 @@ struct State {
     /// El viewport y el scroll del último `resize`/`scroll` despachado.
     last_viewport: Option<Size>,
     last_scroll: (f32, f32),
+    /// E4: el desplazamiento de cada marco (por su camino de `<iframe>`).
+    frame_scroll: HashMap<Vec<bf_dom::NodeId>, (f32, f32)>,
 }
 
 impl DocumentThread {
@@ -261,6 +263,7 @@ impl DocumentThread {
                     input: super::events::InputState::default(),
                     last_viewport: None,
                     last_scroll: (0.0, 0.0),
+                    frame_scroll: HashMap::new(),
                 };
                 state.run(rx);
             })
@@ -353,6 +356,14 @@ impl State {
         let Some(current) = &mut self.current else {
             return;
         };
+        // E4: la rueda sobre un marco que puede desplazarse lo desplaza a él.
+        if let super::events::UserInput::FrameScroll { frame, scroll } = &input {
+            if self.frame_scroll.get(frame) != Some(scroll) {
+                self.frame_scroll.insert(frame.clone(), *scroll);
+                self.layout(0, None);
+            }
+            return;
+        }
         let requests = super::events::handle(
             current.engine.as_mut(),
             &mut current.loaded,
@@ -387,13 +398,15 @@ impl State {
         }
         // E1: un `<canvas>` dibujado pide un cuadro nuevo aunque el documento no cambie.
         let mut canvas_changed = false;
-        if let Some(engine) = &current.engine {
+        if let Some(engine) = &mut current.engine {
             let v = engine.canvas_version();
             if v != current.canvas_version {
                 current.canvas_version = v;
                 current.canvases = engine.canvases();
                 canvas_changed = true;
             }
+            // E4: lo mismo si cambió el documento de un marco.
+            canvas_changed |= engine.take_frames_dirty();
         }
         if canvas_changed || current.loaded.doc.version() != current.version {
             let wait = FRAME.saturating_sub(self.last_frame.elapsed());
@@ -566,6 +579,10 @@ impl State {
         self.current = None;
         self.input.reset();
         self.last_viewport = None;
+        self.frame_scroll.clear();
+        // E4: el "site for cookies" de lo que pida este hilo es el del documento de la
+        // pestaña (RFC 6265bis §5.2).
+        set_cookie_site(&url);
         let mut engine = Engine::new(self.console_sink());
         let loaded = catch_unwind(AssertUnwindSafe(|| {
             load_with(&url, &ctx, Some((&mut engine, &env)))
@@ -574,6 +591,7 @@ impl State {
             let err = engine_error(panic_message(&*e));
             internal::error_page(&url, &err, &ctx)
         });
+        set_cookie_site(&loaded.url);
         let version = loaded.doc.version();
         self.current = Some(Current {
             loaded: Arc::new(loaded),
@@ -605,6 +623,12 @@ impl State {
         let viewport = self.viewport();
         let fonts = self.fonts.clone();
         let canvases = current.canvases.clone();
+        // E4: los documentos de los `<iframe>`, que se pintan dentro de su caja.
+        let frames = current
+            .engine
+            .as_ref()
+            .map(|e| e.frame_docs(&self.frame_scroll))
+            .unwrap_or_default();
         let page = |loaded: &Loaded| {
             let pctx = PageContext {
                 base: &loaded.base,
@@ -614,7 +638,7 @@ impl State {
                 extra: &[],
             };
             catch_unwind(AssertUnwindSafe(|| {
-                prepare_page_with_canvases(&loaded.doc, &pctx, viewport, &canvases)
+                prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames)
             }))
         };
         let loaded = current.loaded.clone();
@@ -702,6 +726,15 @@ impl State {
         }
         self.refresh();
     }
+}
+
+/// E4: declara `url` como el documento de nivel superior de este hilo para las cookies
+/// `SameSite` (RFC 6265bis §5.2, "site for cookies").
+pub fn set_cookie_site(url: &Url) {
+    bf_net::cookies::set_thread_context(Some(bf_net::cookies::CookieContext {
+        site_for_cookies: bf_net::cookies::site_of(url),
+        top_level_navigation: false,
+    }));
 }
 
 #[cfg(test)]

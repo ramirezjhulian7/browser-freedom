@@ -143,100 +143,10 @@ fn current_event(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(h.and_then(|h| agent.host_pinned(h)).unwrap_or_default())
 }
 
-/// `postMessage(message, targetOrigin)` (HTML §9.3.3) a la propia ventana: una tarea de
-/// *posted message* que dispara `message` (como `Event` con `data` en la propiedad `data`).
+/// `postMessage(message, targetOrigin, transfer)` (HTML §9.3.3): un `MessageEvent` con
+/// `origin` y `source` en la ventana de destino (`crate::bom::frames`, E4).
 fn post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    // "Window post message steps" (HTML §9.3.3), con un solo WindowProxy (la propia
-    // ventana): `postMessage(message, targetOrigin, transfer)` o
-    // `postMessage(message, { targetOrigin, transfer })`.
-    let (target_origin, transfer) = match &a.arg(1) {
-        Value::Object(o) if a.args.len() < 3 => {
-            let o = *o;
-            let t = agent.get(o, &PropertyKey::from("targetOrigin"), Value::Object(o))?;
-            let target = if t.is_undefined() {
-                "/".to_owned()
-            } else {
-                agent.to_string(&t)?.to_string_lossy()
-            };
-            let transfer = crate::workers::ports::transfer_argument(agent, &Value::Object(o))?;
-            (target, transfer)
-        }
-        v => {
-            let target = agent.to_string(v)?.to_string_lossy();
-            let transfer = crate::workers::ports::transfer_argument(agent, &a.arg(2))?;
-            (target, transfer)
-        }
-    };
-    let origin = crate::net::document_origin(agent);
-    let target_origin = match target_origin.as_str() {
-        "*" => None,
-        "/" => Some(origin.clone()),
-        t => match bf_infra::Url::parse(t, None) {
-            Ok(u) => Some(u.origin().to_string()),
-            Err(_) => {
-                return crate::net::dom_error(
-                    agent,
-                    "SyntaxError",
-                    &format!(
-                        "Failed to execute 'postMessage' on 'Window': Invalid target origin '{t}' in a call to 'postMessage'."
-                    ),
-                );
-            }
-        },
-    };
-    let isolated = crate::workers::dedicated::cross_origin_isolated(agent);
-    let serialized = crate::workers::ports::serialize(agent, &a.arg(0), &transfer, isolated)?;
-    let realm = WebContextHandle::current(agent).realm;
-    agent.queue_task(
-        TaskSource::PostedMessage,
-        Box::new(move |agent: &mut Agent| {
-            let saved = agent.current_realm;
-            agent.current_realm = realm;
-            let here = crate::net::document_origin(agent);
-            if target_origin.is_none_or(|t| t == here) {
-                let t = crate::dom::events::TargetRef {
-                    doc: 0,
-                    target: EventTarget::Window,
-                };
-                let source = Value::Object(agent.realms[realm].global_object);
-                match bf_js::builtins::web::serialize::deserialize_with_transfer(agent, serialized)
-                {
-                    Ok((data, transferred)) => {
-                        let ports = crate::workers::ports::ports_of(agent, &transferred);
-                        let ports = match agent.create_array_from_list(&ports) {
-                            Ok(a) => {
-                                let _ = agent.set_integrity_level(a, true);
-                                Value::Object(a)
-                            }
-                            Err(_) => Value::Null,
-                        };
-                        let ev = crate::net::channels::create_message_event(
-                            agent, "message", data, &origin, "", ports,
-                        );
-                        if let Some(s) = agent.host_slots_mut(ev)
-                            && let Some(slot) = s.get_mut(6)
-                        {
-                            *slot = source;
-                        }
-                        crate::net::channels::dispatch(agent, t, ev);
-                    }
-                    Err(_) => {
-                        crate::net::channels::fire_message(
-                            agent,
-                            t,
-                            "messageerror",
-                            Value::Null,
-                            &origin,
-                            "",
-                            Vec::new(),
-                        );
-                    }
-                }
-            }
-            agent.current_realm = saved;
-        }),
-    );
-    Ok(Value::Undefined)
+    crate::bom::frames::post_message(agent, a)
 }
 
 /// HTML "notify about rejected promises" (§8.1.7.3): una tarea que dispara

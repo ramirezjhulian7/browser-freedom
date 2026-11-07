@@ -555,6 +555,50 @@ pub fn dispatch_trusted(
     r
 }
 
+/// Despacha un `WheelEvent` de confianza (UI Events §5.4.3: `deltaMode` `DOM_DELTA_PIXEL` y
+/// los deltas en px) en `target` del documento de `realm`; `false` si se canceló. `event`
+/// trae los datos de `MouseEvent`.
+pub fn dispatch_wheel(
+    agent: &mut Agent,
+    realm: RealmId,
+    target: bf_dom::events::EventTarget,
+    mut event: bf_dom::events::Event,
+    delta: (f32, f32),
+) -> bool {
+    event.is_trusted = true;
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let class = crate::dom::classes(agent).wheel_event;
+    let cell = Rc::new(RefCell::new(event));
+    let o = crate::dom::events::create_event_object(
+        agent,
+        crate::dom::events::EventIface::Class(class),
+        cell,
+        0,
+    );
+    let view = Value::Object(agent.realms[realm].global_object);
+    if let Some(s) = agent.host_slots_mut(o) {
+        *s = vec![
+            view,
+            Value::Undefined,
+            Value::Number(0.0),
+            Value::Number(f64::from(delta.0)),
+            Value::Number(f64::from(delta.1)),
+            Value::Number(0.0),
+        ];
+    }
+    let pin = agent.host_pin(Value::Object(o));
+    let r = crate::dom::events::dispatch_js_event(agent, 0, target, o, false);
+    agent.host_unpin(pin);
+    if agent.frames.is_empty()
+        && let Err(Throw::Value(e)) = agent.perform_microtask_checkpoint()
+    {
+        agent.report_exception(&e);
+    }
+    agent.current_realm = saved;
+    matches!(r, Ok(Ok(true)))
+}
+
 impl bf_html::ScriptHost for WebScripts<'_> {
     fn prepare(&mut self, doc: &mut Parser, script: NodeId) -> ScriptDisposition {
         let Some(info) = doc.document().script_info(script).cloned() else {

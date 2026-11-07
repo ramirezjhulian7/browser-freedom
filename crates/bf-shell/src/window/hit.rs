@@ -170,3 +170,93 @@ pub fn node_rect(tree: &FragmentTree, node: NodeId) -> Option<Rect> {
     }
     walk(tree.root.as_ref()?, node)
 }
+
+/// Lo que hay bajo el puntero, a través de los `<iframe>` (E4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FrameHit {
+    /// El camino de `<iframe>` hasta el documento bajo el puntero (vacío: la página).
+    pub frame: Vec<NodeId>,
+    /// El punto en el viewport de ese documento.
+    pub client: (f32, f32),
+    /// El nodo bajo el puntero en ese documento.
+    pub node: Option<NodeId>,
+}
+
+/// El documento y el nodo bajo `(x, y)` del viewport de `page` (desplazada `scroll`): si el
+/// punto cae en el content box de un `<iframe>` maquetado, se sigue en el documento del marco
+/// (HTML §4.8.5: el contenido del marco es su viewport).
+pub fn frame_hit(page: &bf_paint::Page, x: f32, y: f32, scroll: (f32, f32)) -> FrameHit {
+    let mut hit = FrameHit {
+        client: (x, y),
+        ..FrameHit::default()
+    };
+    let (mut page, mut scroll) = (page, scroll);
+    loop {
+        hit.node = hit_test(&page.tree, hit.client.0, hit.client.1, scroll).and_then(|f| f.node);
+        let Some(n) = hit.node else {
+            return hit;
+        };
+        let at = (hit.client.0 + scroll.0, hit.client.1 + scroll.1);
+        let Some((fp, local)) = bf_paint::FramePage::locate(&page.frames, at) else {
+            return hit;
+        };
+        if fp.node != n {
+            return hit;
+        }
+        hit.frame.push(n);
+        hit.client = local;
+        page = &fp.page;
+        scroll = fp.scroll;
+    }
+}
+
+/// E4: el marco más interior bajo `(x, y)` que puede desplazarse `delta`, y su nuevo
+/// desplazamiento (limitado a su documento).
+pub fn scrollable_frame(
+    page: &bf_paint::Page,
+    x: f32,
+    y: f32,
+    scroll: (f32, f32),
+    delta: (f32, f32),
+) -> Option<(Vec<NodeId>, (f32, f32))> {
+    let hit = frame_hit(page, x, y, scroll);
+    // Los marcos del camino, del más interior al exterior.
+    let mut chain = Vec::new();
+    let mut p = page;
+    for n in &hit.frame {
+        let fp = p.frames.iter().find(|f| f.node == *n)?;
+        chain.push(fp);
+        p = &fp.page;
+    }
+    for depth in (0..chain.len()).rev() {
+        let fp = chain[depth];
+        let extent = bf_paint::document_extent(&fp.page.tree);
+        let max = (
+            (extent.right() - fp.rect.width).max(0.0),
+            (extent.bottom() - fp.rect.height).max(0.0),
+        );
+        let next = (
+            (fp.scroll.0 + delta.0).clamp(0.0, max.0),
+            (fp.scroll.1 + delta.1).clamp(0.0, max.1),
+        );
+        if next != fp.scroll {
+            return Some((hit.frame[..=depth].to_vec(), next));
+        }
+    }
+    None
+}
+
+/// Anota en `page` el desplazamiento del marco `path` (hasta que llegue el cuadro nuevo).
+pub fn set_frame_scroll(page: &mut bf_paint::Page, path: &[NodeId], scroll: (f32, f32)) {
+    let mut p = page;
+    for (i, n) in path.iter().enumerate() {
+        let Some(fp) = p.frames.iter_mut().find(|f| f.node == *n) else {
+            return;
+        };
+        if i + 1 == path.len() {
+            fp.scroll = scroll;
+            return;
+        }
+        p = &mut fp.page;
+    }
+}
