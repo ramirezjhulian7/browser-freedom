@@ -1,6 +1,6 @@
 //! Los miembros de `Document` que son del BOM y de la carga (HTML §3.1.3, §3.1.5, §8.4):
 //! `cookie`, `referrer`, `lastModified`, `readyState`, `currentScript`, `visibilityState`,
-//! `hidden`, `hasFocus()` y `write()`/`writeln()`/`open()`/`close()`. Se agregan al prototipo
+//! `hidden`, `location`, `hasFocus()` y `write()`/`writeln()`/`open()`/`close()`. Se agregan al prototipo
 //! de `Document` (la clase es de [`crate::dom`]).
 
 use bf_js::value::Value;
@@ -22,6 +22,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     accessor(agent, proto, "currentScript", current_script, None);
     accessor(agent, proto, "visibilityState", visibility_state, None);
     accessor(agent, proto, "hidden", hidden, None);
+    accessor(agent, proto, "location", location, Some(set_location));
     method(agent, proto, "hasFocus", 0, has_focus);
     method(agent, proto, "write", 0, super::script::document_write);
     method(agent, proto, "writeln", 0, super::script::document_writeln);
@@ -106,6 +107,27 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// `document.location` (HTML §3.1.3): el `Location` de la ventana si el documento es el suyo
+/// (fully active); `null` para los documentos sin browsing context (`DOMParser`,
+/// `createDocument`, …). E10, cambio mínimo.
+fn location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_document(agent, a)?;
+    if !is_window_document(n) {
+        return Ok(Value::Null);
+    }
+    Ok(super::pinned_value(agent, state(agent).objects.location))
+}
+
+/// `document.location = url` (`[PutForwards=href]`): navega la ventana; sin `Location` no
+/// hace nada.
+fn set_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_document(agent, a)?;
+    if !is_window_document(n) {
+        return Ok(Value::Undefined);
+    }
+    super::set_location(agent, a)
 }
 
 fn ready_state(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

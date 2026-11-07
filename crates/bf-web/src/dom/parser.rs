@@ -61,7 +61,12 @@ fn parse_from_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     // La URL es la del documento asociado a la ventana (paso 3).
     let ctx = WebContextHandle::current(agent);
     doc.url = ctx.get(agent).document().url.clone();
+    let xml = !doc.is_html;
     let i = ctx.get_mut(agent).add_document(doc);
+    // Con un tipo XML la interfaz es `Document`, no `XMLDocument` (paso 1: "a new Document").
+    if xml {
+        crate::dom::state::state(agent).plain_documents.insert(i);
+    }
     let root = ctx.get(agent).doc(i).root();
     Ok(wrap_node(agent, NodeRef::new(i, root)))
 }
