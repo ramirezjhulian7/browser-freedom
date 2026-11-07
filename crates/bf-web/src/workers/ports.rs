@@ -401,14 +401,21 @@ impl HostCloner for WebCloner {
         None
     }
 
-    fn is_transferable(&self, agent: &Agent, o: Gc<Object>) -> bool {
-        port_id(agent, &Value::Object(o))
-            .is_some_and(|id| !crate::net::channels::is_detached(agent, id))
+    fn is_transferable(&mut self, agent: &mut Agent, o: Gc<Object>) -> bool {
+        let v = Value::Object(o);
+        match port_id(agent, &v) {
+            Some(id) => !crate::net::channels::is_detached(agent, id),
+            // Los streams (Streams §8, E2): el bloqueo se mira en sus pasos de transferencia.
+            None => crate::net::streams::is_transferable(agent, &v),
+        }
     }
 
     fn transfer(&mut self, agent: &mut Agent, o: Gc<Object>) -> JsResult<Box<dyn HostRecord>> {
-        let local = port_id(agent, &Value::Object(o)).expect("MessagePort");
-        Ok(Box::new(transfer_port(agent, local)?))
+        let v = Value::Object(o);
+        match port_id(agent, &v) {
+            Some(local) => Ok(Box::new(transfer_port(agent, local)?)),
+            None => Ok(Box::new(crate::net::streams::transfer(agent, &v)?)),
+        }
     }
 }
 

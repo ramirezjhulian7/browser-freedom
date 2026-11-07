@@ -76,6 +76,8 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
                 });
                 if stylesheet {
                     resource(agent, doc, el, "href", ResourceKind::Stylesheet);
+                    // E2: la hoja se carga en una tarea y dispara `load`/`error`.
+                    crate::cssom::sheets::schedule_link_load(agent, crate::NodeRef::new(doc, el));
                 }
             }
             _ => {}

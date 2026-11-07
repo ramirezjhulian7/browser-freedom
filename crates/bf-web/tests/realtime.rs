@@ -715,3 +715,49 @@ fn broadcast_message_is_delivered() {
         "hola"
     );
 }
+
+// --- Streams transferibles (Streams §8) ---
+
+rt!(
+    transfer_readable_stream,
+    "var rs = new ReadableStream({start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); }}); var t = structuredClone(rs, {transfer: [rs]}); var locked = rs.locked; var r = t.getReader(); r.read().then(a => r.read().then(b => r.read().then(c => finish([locked, t instanceof ReadableStream, t !== rs, a.value, b.value, c.done].join()))));",
+    "true,true,true,a,b,true"
+);
+rt!(
+    transfer_writable_stream_by_port,
+    "var got = []; var ws = new WritableStream({write(c) { got.push(c); }, close() { finish(got.join()); }}); var ch = new MessageChannel(); ch.port2.onmessage = e => { var w = e.data.getWriter(); w.write('x'); w.write('y'); w.close(); }; ch.port1.postMessage(ws, [ws]);",
+    "x,y"
+);
+rt!(
+    transfer_transform_stream,
+    "var ts = new TransformStream({transform(c, ctl) { ctl.enqueue(c.toUpperCase()); }}); var t = structuredClone(ts, {transfer: [ts]}); var w = t.writable.getWriter(); w.write('hola'); t.readable.getReader().read().then(r => finish(r.value + ' ' + (t instanceof TransformStream)));",
+    "HOLA true"
+);
+rt!(
+    transfer_readable_error_crosses,
+    "var rs = new ReadableStream({start(c) { c.error(new TypeError('mal')); }}); var t = structuredClone(rs, {transfer: [rs]}); t.getReader().read().then(() => finish('no'), e => finish(e.name + ' ' + e.message));",
+    "TypeError mal"
+);
+rt!(
+    transfer_locked_stream_fails,
+    "var rs = new ReadableStream(); rs.getReader(); var t = new TransformStream(); var out = []; try { structuredClone(rs, {transfer: [rs]}); } catch (e) { out.push(e.name); } try { structuredClone([t, t.readable], {transfer: [t, t.readable]}); } catch (e) { out.push(e.name); } finish(out.join());",
+    "DataCloneError,DataCloneError"
+);
+
+// --- `<link rel=stylesheet>`: eventos y `disabled` (HTML §4.2.4, §4.6.7) ---
+
+rt!(
+    link_error_event_without_loader,
+    "var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = BASE + '/x.css'; l.onload = () => finish('load'); l.onerror = () => finish('error ' + document.styleSheets.length); document.head.appendChild(l);",
+    "error 1"
+);
+rt!(
+    link_disabled_then_enabled,
+    "var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = BASE + '/x.css'; l.setAttribute('disabled', ''); var n0; l.onerror = () => finish(n0 + ' ' + document.styleSheets.length); document.head.appendChild(l); n0 = document.styleSheets.length; l.disabled = false;",
+    "0 1"
+);
+rt!(
+    link_superseded_load_fires_once,
+    "var n = 0; var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = BASE + '/a.css'; l.onerror = () => n++; document.head.appendChild(l); l.href = BASE + '/b.css'; var m = document.createElement('link'); m.rel = 'stylesheet'; m.href = BASE + '/c.css'; m.onerror = () => setTimeout(() => finish(n), 0); document.head.appendChild(m);",
+    "1"
+);

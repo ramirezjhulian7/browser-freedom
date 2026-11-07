@@ -39,8 +39,8 @@ pub trait HostCloner {
         agent: &mut Agent,
         o: Gc<Object>,
     ) -> Option<JsResult<Box<dyn HostRecord>>>;
-    /// ¿Es un objeto host transferible (`MessagePort`…)?
-    fn is_transferable(&self, agent: &Agent, o: Gc<Object>) -> bool;
+    /// ¿Es un objeto host transferible (`MessagePort`, streams…)? Puede llamar a JS.
+    fn is_transferable(&mut self, agent: &mut Agent, o: Gc<Object>) -> bool;
     /// Lo transfiere: el registro, y el original queda inutilizado (pasos de transferencia).
     fn transfer(&mut self, agent: &mut Agent, o: Gc<Object>) -> JsResult<Box<dyn HostRecord>>;
 }
@@ -52,7 +52,7 @@ impl HostCloner for NoHostObjects {
     fn serialize(&mut self, _: &mut Agent, _: Gc<Object>) -> Option<JsResult<Box<dyn HostRecord>>> {
         None
     }
-    fn is_transferable(&self, _: &Agent, _: Gc<Object>) -> bool {
+    fn is_transferable(&mut self, _: &mut Agent, _: Gc<Object>) -> bool {
         false
     }
     fn transfer(&mut self, agent: &mut Agent, _: Gc<Object>) -> JsResult<Box<dyn HostRecord>> {

@@ -7,7 +7,7 @@
 //! hechos desde el CSSOM (`insertRule`, `style.setProperty` de una regla…) marcan la hoja
 //! como modificada y la cascada usa entonces su serialización.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bf_css::media::{MediaContext, parse_media_query_list};
 use bf_css::selectors::parse_selector_list;
@@ -134,6 +134,8 @@ pub struct Sheet {
     pub rules: Vec<CssRule>,
     pub modified: bool,
     pub constructed: bool,
+    /// La hoja de un `<link>` que no se pudo cargar (su evento es `error`).
+    pub failed: bool,
 }
 
 /// Las hojas de una ventana.
@@ -145,6 +147,11 @@ pub struct SheetStore {
     next_rule: RuleId,
     /// Las reglas quitadas de su hoja (sus wrappers siguen vivos).
     detached: HashMap<RuleId, CssRule>,
+    /// Los `<link>` "explicitly enabled" (HTML §4.6.7: se les quitó el atributo `disabled`).
+    explicitly_enabled: HashSet<NodeRef>,
+    /// La última carga pedida de cada `<link>` (las anteriores ya no disparan eventos).
+    link_loads: HashMap<NodeRef, u64>,
+    next_load: u64,
 }
 
 impl SheetStore {
@@ -503,7 +510,11 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                     rel.split_ascii_whitespace()
                         .any(|x| x.eq_ignore_ascii_case(t))
                 };
-                if !has("stylesheet") || !is_css_type(el.attr("type")) {
+                // Con `disabled` no hay hoja (HTML §4.6.7, "attr-link-disabled").
+                if !has("stylesheet")
+                    || !is_css_type(el.attr("type"))
+                    || el.attr("disabled").is_some()
+                {
                     continue;
                 }
                 let Some(href) = el.attr("href") else {
@@ -526,7 +537,7 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         |h: String| bf_infra::Url::parse(&h, Some(&base)).map_or(h, |u| u.serialize(false));
     // Las hojas de `<link>` nuevas o con otro `href`: su texto (HTML §4.6.7.1 "fetch and
     // process the linked resource", con el loader de la página).
-    let mut loaded: HashMap<NodeRef, String> = HashMap::new();
+    let mut loaded: HashMap<NodeRef, Option<String>> = HashMap::new();
     for f in &found {
         let Some(h) = &f.href else { continue };
         let href = resolve(h.clone());
@@ -537,8 +548,8 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                 .and_then(|id| st.sheets.get(id))
                 .is_some_and(|s| s.source.is_none() && s.href.as_deref() == Some(href.as_str()))
         };
-        if !reusable && let Some(text) = load_linked_sheet(agent, &href) {
-            loaded.insert(f.owner, text);
+        if !reusable {
+            loaded.insert(f.owner, load_linked_sheet(agent, &href));
         }
     }
     let st = &mut state(agent).sheets;
@@ -555,17 +566,21 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         let id = match reuse {
             Some(id) => id,
             None => {
+                let fetched = loaded.get(&f.owner).and_then(Option::as_deref);
+                let failed = f.source.is_none() && fetched.is_none();
                 let rules = f
                     .source
                     .as_deref()
-                    .or_else(|| loaded.get(&f.owner).map(String::as_str))
+                    .or(fetched)
                     .map_or_else(Vec::new, |t| st.parse_rules(t));
+                let disabled = f.alternate && !st.explicitly_enabled.contains(&f.owner);
                 let id = st.new_sheet(Sheet {
                     owner: Some(f.owner),
                     source: f.source,
                     href,
                     rules,
-                    disabled: f.alternate,
+                    disabled,
+                    failed,
                     ..Sheet::default()
                 });
                 if let Some(old) = st.by_owner.insert(f.owner, id)
@@ -597,6 +612,78 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         }
     }
     ids
+}
+
+/// "Fetch and process the linked resource" de un `<link rel=stylesheet>` (HTML §4.2.4,
+/// §4.6.7.1): en una tarea se carga la hoja y se dispara `load` (o `error`) en el elemento.
+/// Solo vale la última carga pedida: si cambió el `href` o el elemento salió del documento,
+/// la anterior no dispara nada.
+pub fn schedule_link_load(agent: &mut Agent, n: NodeRef) {
+    if n.doc != 0 {
+        return;
+    }
+    let st = &mut state(agent).sheets;
+    st.next_load += 1;
+    let id = st.next_load;
+    st.link_loads.insert(n, id);
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        bf_js::host::TaskSource::Networking,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            link_loaded(agent, n, id);
+            agent.current_realm = saved;
+        }),
+    );
+}
+
+fn link_loaded(agent: &mut Agent, n: NodeRef, id: u64) {
+    let st = &mut state(agent).sheets;
+    if st.link_loads.get(&n) != Some(&id) {
+        return;
+    }
+    st.link_loads.remove(&n);
+    // `sync` crea (o reutiliza) la hoja del elemento si sigue siendo una hoja activa.
+    sync(agent);
+    let st = &state(agent).sheets;
+    let Some(failed) = st
+        .by_owner
+        .get(&n)
+        .and_then(|id| st.sheets.get(id))
+        .map(|s| s.failed)
+    else {
+        return;
+    };
+    crate::dom::events::fire_event(
+        agent,
+        n.doc,
+        bf_dom::events::EventTarget::Node(n.node),
+        if failed { "error" } else { "load" },
+        bf_dom::events::EventInit::default(),
+        bf_dom::events::EventKind::Event,
+    );
+}
+
+/// Los cambios de atributos de un `<link>` que vuelven a buscar su hoja (`href`, `rel`,
+/// `type`, quitar `disabled`; HTML §4.2.4). `removed`: el atributo estaba y se quitó.
+pub fn link_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str, removed: bool) {
+    let name = name.to_ascii_lowercase();
+    if !matches!(name.as_str(), "href" | "rel" | "type" | "disabled") {
+        return;
+    }
+    let connected_link = with_doc(agent, n.doc, |d| {
+        d.element(n.node).is_some_and(|e| e.is_html("link")) && d.is_connected(n.node)
+    });
+    if name == "disabled" {
+        if !removed {
+            return;
+        }
+        state(agent).sheets.explicitly_enabled.insert(n);
+    }
+    if connected_link {
+        schedule_link_load(agent, n);
+    }
 }
 
 /// El texto de la hoja de un `<link rel=stylesheet>` (decodificada como UTF-8, CSS Syntax

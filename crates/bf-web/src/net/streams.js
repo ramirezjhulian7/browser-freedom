@@ -2580,8 +2580,218 @@
     define(global, name, cls);
   }
 
+  // --- Streams transferibles (§8.2, §4.2.6, §5.2.6, §6.2.6) ---
+  // El stream viaja como un MessagePort entrelazado con uno de aquí: un pipe local lo une al
+  // stream original, y del otro lado un stream "cross-realm" habla por el puerto con mensajes
+  // { type, value } ("chunk", "pull", "close", "error"). ports.rs (WebCloner) transfiere el
+  // puerto y llama a `transferStream`/`receiveStream`.
+  const isTransform = (v) => (typeof v === "object" || typeof v === "function") && v !== null && T.has(v);
+  const isWritable = (v) => (typeof v === "object" || typeof v === "function") && v !== null && W.has(v);
+  const isReadable = (v) => (typeof v === "object" || typeof v === "function") && v !== null && S.has(v);
+  const dataCloneError = (msg) => new global.DOMException(msg, "DataCloneError");
+
+  // PackAndPostMessage (§8.1): un objeto sin prototipo con `type` y `value`.
+  function packAndPost(port, type, value) {
+    const message = Object.create(null);
+    message.type = type;
+    message.value = value;
+    port.postMessage(message);
+  }
+  // CrossRealmTransformSendError: el resultado se descarta.
+  function crossRealmSendError(port, error) {
+    try {
+      packAndPost(port, "error", error);
+    } catch (e) {}
+  }
+  // PackAndPostMessageHandlingError: si no se pudo mandar, manda el error y lo relanza.
+  function packAndPostHandlingError(port, type, value) {
+    try {
+      packAndPost(port, type, value);
+    } catch (e) {
+      crossRealmSendError(port, e);
+      throw e;
+    }
+  }
+
+  // SetUpCrossRealmTransformReadable (§8.2).
+  function setUpCrossRealmReadable(stream, port) {
+    initStream(stream);
+    let cst;
+    setUpController(
+      stream,
+      (c) => {
+        cst = C.get(c);
+      },
+      () => {
+        packAndPost(port, "pull", undefined);
+        return resolved(undefined);
+      },
+      (reason) => {
+        try {
+          packAndPostHandlingError(port, "error", reason);
+        } catch (e) {
+          port.close();
+          return rejected(e);
+        }
+        port.close();
+        return resolved(undefined);
+      },
+      0,
+      () => 1,
+    );
+    port.addEventListener("message", (ev) => {
+      const data = ev.data;
+      const type = data.type, value = data.value;
+      if (type === "chunk") {
+        controllerEnqueue(cst, value);
+      } else if (type === "close") {
+        controllerClose(cst);
+        port.close();
+      } else if (type === "error") {
+        controllerError(cst, value);
+        port.close();
+      }
+    });
+    port.addEventListener("messageerror", () => {
+      const error = dataCloneError("The message could not be deserialized");
+      crossRealmSendError(port, error);
+      controllerError(cst, error);
+      port.close();
+    });
+    port.start();
+  }
+
+  // SetUpCrossRealmTransformWritable (§8.2).
+  function setUpCrossRealmWritable(stream, port) {
+    initWritable(stream);
+    let cst;
+    let backpressure = deferred();
+    const relieve = () => {
+      if (backpressure !== undefined) {
+        backpressure.resolve(undefined);
+        backpressure = undefined;
+      }
+    };
+    setUpWritableController(
+      stream,
+      (c) => {
+        cst = WC.get(c);
+      },
+      (chunk) => {
+        if (backpressure === undefined) {
+          backpressure = deferred();
+          backpressure.resolve(undefined);
+        }
+        return new P((resolve, reject) => {
+          upon(backpressure.promise, () => {
+            backpressure = deferred();
+            try {
+              packAndPostHandlingError(port, "chunk", chunk);
+            } catch (e) {
+              port.close();
+              reject(e);
+              return;
+            }
+            resolve(undefined);
+          });
+        });
+      },
+      () => {
+        packAndPost(port, "close", undefined);
+        port.close();
+        return resolved(undefined);
+      },
+      (reason) => {
+        try {
+          packAndPostHandlingError(port, "error", reason);
+        } catch (e) {
+          port.close();
+          return rejected(e);
+        }
+        port.close();
+        return resolved(undefined);
+      },
+      1,
+      () => 1,
+    );
+    port.addEventListener("message", (ev) => {
+      const data = ev.data;
+      const type = data.type, value = data.value;
+      if (type === "pull") {
+        relieve();
+      } else if (type === "error") {
+        writableControllerErrorIfNeeded(cst, value);
+        relieve();
+      }
+    });
+    port.addEventListener("messageerror", () => {
+      const error = dataCloneError("The message could not be deserialized");
+      crossRealmSendError(port, error);
+      writableControllerErrorIfNeeded(cst, error);
+      port.close();
+    });
+    port.start();
+  }
+
+  // Los pasos de transferencia de ReadableStream (§4.2.6) y WritableStream (§5.2.6): el
+  // puerto que viaja (el otro queda aquí, unido al stream por un pipe).
+  function transferReadable(value) {
+    if (S.get(value).reader !== undefined) throw dataCloneError("A ReadableStream could not be cloned because it was locked");
+    const { port1, port2 } = new global.MessageChannel();
+    creatingW = true;
+    let writable;
+    try { writable = new WritableStream(); } finally { creatingW = false; }
+    setUpCrossRealmWritable(writable, port1);
+    markHandled(pipeTo(value, writable, false, false, false, undefined));
+    return port2;
+  }
+  function transferWritable(value) {
+    if (W.get(value).writer !== undefined) throw dataCloneError("A WritableStream could not be cloned because it was locked");
+    const { port1, port2 } = new global.MessageChannel();
+    creating = true;
+    let readable;
+    try { readable = new ReadableStream(); } finally { creating = false; }
+    setUpCrossRealmReadable(readable, port1);
+    markHandled(pipeTo(readable, value, false, false, false, undefined));
+    return port2;
+  }
+
   // --- Helpers del body mixin (Fetch §5.1) ---
   return {
+    // ¿Es un objeto transferible de Streams (§8)?
+    isTransferable: (v) => isReadable(v) || isWritable(v) || isTransform(v),
+    // Los pasos de transferencia: [tipo, puertos...]. TransformStream (§6.2.6) transfiere su
+    // `readable` y su `writable` (DataCloneError si alguno está bloqueado).
+    transferStream: (v) => {
+      if (isReadable(v)) return ["readable", transferReadable(v)];
+      if (isWritable(v)) return ["writable", transferWritable(v)];
+      const t = T.get(v);
+      if (S.get(t.readable).reader !== undefined) throw dataCloneError("A TransformStream could not be cloned because its readable was locked");
+      if (W.get(t.writable).writer !== undefined) throw dataCloneError("A TransformStream could not be cloned because its writable was locked");
+      return ["transform", transferReadable(t.readable), transferWritable(t.writable)];
+    },
+    // Los pasos de transfer-receiving: el stream nuevo de este realm sobre los puertos.
+    receiveStream: (kind, p1, p2) => {
+      const readable = () => {
+        creating = true;
+        let s;
+        try { s = new ReadableStream(); } finally { creating = false; }
+        setUpCrossRealmReadable(s, p1);
+        return s;
+      };
+      const writable = (port) => {
+        creatingW = true;
+        let s;
+        try { s = new WritableStream(); } finally { creatingW = false; }
+        setUpCrossRealmWritable(s, port);
+        return s;
+      };
+      if (kind === "readable") return readable();
+      if (kind === "writable") return writable(p1);
+      const t = Object.create(TransformStream.prototype);
+      T.set(t, { readable: readable(), writable: writable(p2), backpressure: undefined, backpressureChange: undefined, controller: undefined });
+      return t;
+    },
     isStream: (v) => (typeof v === "object" || typeof v === "function") && v !== null && S.has(v),
     isLocked: (s) => S.get(s).reader !== undefined,
     isDisturbed: (s) => S.get(s).disturbed,
