@@ -595,6 +595,34 @@ w!(
     "DataCloneError"
 );
 
+// --- ImageData (HTML §4.12.5.1.15: `[Serializable]`, `[Exposed=(Window,Worker)]`) ---
+
+w!(
+    image_data_in_worker,
+    ["/dir/id.js" => "var d = new ImageData(2, 1); d.data[0] = 7; \
+      postMessage([typeof ImageData, typeof CanvasGradient, typeof TextMetrics, typeof CanvasRenderingContext2D, d.width, d.data.length, d.data[0]].join());"],
+    "new Worker('id.js').onmessage = e => finish(e.data);",
+    "function,function,function,undefined,2,8,7"
+);
+
+w!(
+    image_data_clones_to_and_from_worker,
+    ["/dir/id2.js" => "onmessage = e => { var d = e.data; d.data[1] = 99; \
+      postMessage({ok: d instanceof ImageData, back: d}); };"],
+    "var d = new ImageData(new Uint8ClampedArray([1, 2, 3, 4, 5, 6, 7, 8]), 1); var w = new Worker('id2.js'); \
+     w.onmessage = e => { var b = e.data.back; finish([e.data.ok, b instanceof ImageData, b.width, b.height, b.colorSpace, Array.from(b.data).join(' '), d.data[1]].join()); }; \
+     w.postMessage(d);",
+    "true,true,1,2,srgb,1 99 3 4 5 6 7 8,2"
+);
+
+w!(
+    structured_clone_image_data,
+    [],
+    "var d = new ImageData(1, 1); d.data[3] = 255; var c = structuredClone(d); \
+     finish([c !== d, c instanceof ImageData, c.data !== d.data, c.data[3]].join());",
+    "true,true,true,255"
+);
+
 // --- SharedWorker ---
 
 w!(
@@ -624,6 +652,26 @@ w!(
     "var s = new SharedWorker('sw4.js'); s.port.onmessage = e => finish(e.data); s.port.postMessage('hola');",
     "HOLA"
 );
+
+/// La partición forma parte de la clave del `SharedWorker` (hace de *storage key*, HTML
+/// §10.2.6.4 paso 11.2): en otra partición se crea un worker nuevo; en la misma, se comparte.
+#[test]
+fn shared_worker_partitions() {
+    let files = [(
+        "/dir/swp.js",
+        "var n = 0; onconnect = e => { n++; e.ports[0].postMessage(n); };",
+    )];
+    let mut a = Page::new(&files);
+    let mut b = Page::new(&files);
+    let mut c = Page::new(&files);
+    let shared = bf_web::workers::new_partition();
+    bf_web::workers::set_partition(&mut a.rt.agent, shared);
+    bf_web::workers::set_partition(&mut c.rt.agent, shared);
+    let src = "var s = new SharedWorker('swp.js'); s.port.onmessage = e => finish(e.data);";
+    assert_eq!(a.run(src), "1");
+    assert_eq!(b.run(src), "1", "otra partición: worker nuevo");
+    assert_eq!(c.run(src), "2", "misma partición: el worker de `a`");
+}
 
 // --- BroadcastChannel entre agentes (HTML §9.5) ---
 

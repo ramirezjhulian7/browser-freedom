@@ -23,9 +23,14 @@ use super::{AgentInbox, Envelope, WorkerControl, host};
 use crate::WebContextHandle;
 use crate::dom::events::{TargetRef, with_event_handlers};
 
+/// La clave de un `SharedWorker` en el registro: partición (`workers::set_partition`), origen,
+/// URL del script y nombre. La partición hace de *storage key* (HTML §10.2.6.4 paso 11.2): dos
+/// documentos de particiones distintas no comparten worker aunque coincidan en lo demás.
+type SharedKey = (u64, String, String, String);
+
 /// Un `SharedWorker` del proceso.
 pub struct SharedEntry {
-    key: (String, String, String),
+    key: SharedKey,
     script_type: ScriptType,
     credentials: String,
     pub(crate) inbox: Arc<AgentInbox>,
@@ -88,7 +93,7 @@ impl SharedEntry {
     }
 }
 
-type Registry = Mutex<HashMap<(String, String, String), Arc<SharedEntry>>>;
+type Registry = Mutex<HashMap<SharedKey, Arc<SharedEntry>>>;
 
 fn registry() -> &'static Registry {
     static R: OnceLock<Registry> = OnceLock::new();
@@ -129,7 +134,8 @@ fn shared_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         *s = vec![outside];
     }
     let origin = crate::net::document_origin(agent);
-    let key = (origin, url.serialize(false), options.name.clone());
+    let partition = super::partition(agent);
+    let key = (partition, origin, url.serialize(false), options.name.clone());
     let entry = {
         let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
         let alive = r.get(&key).filter(|e| {
@@ -175,7 +181,7 @@ fn shared_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                     control: e.control.clone(),
                     cross_origin_isolated: cross_origin_isolated(agent),
                     user_agent: agent.host.hooks.user_agent(),
-                    partition: super::partition(agent),
+                    partition,
                 };
                 if super::scope::spawn(spec).is_err() {
                     e.load_failed();

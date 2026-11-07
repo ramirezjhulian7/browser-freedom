@@ -509,6 +509,9 @@ const WINDOW_ONLY: &[&str] = &[
     "TreeWalker",
     "DOMImplementation",
     "SharedWorker",
+    // Del canvas, en el worker solo `ImageData`, `CanvasGradient`, `CanvasPattern` y
+    // `TextMetrics` (`[Exposed=(Window,Worker)]`, HTML §4.12.5).
+    "CanvasRenderingContext2D",
 ];
 
 /// Instala el global del worker en `realm`.
@@ -542,6 +545,8 @@ fn install(
     crate::dom::window::track_rejections(agent, realm);
     // IndexedDB (E2) también está expuesto en los workers.
     crate::storage::register(agent, realm, &h);
+    // `ImageData` (y lo demás del canvas expuesto en Worker), también para deserializarlo.
+    crate::html::canvas::register(agent);
     let saved = agent.current_realm;
     agent.current_realm = realm;
     for name in WINDOW_ONLY {

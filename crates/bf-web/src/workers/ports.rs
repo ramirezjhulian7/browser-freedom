@@ -332,6 +332,16 @@ impl HostRecord for BlobRecord {
     }
 }
 
+/// Un `ImageData` serializado (HTML §4.12.5.1.15): ancho, alto y los bytes RGBA.
+struct ImageDataRecord(u32, u32, Vec<u8>);
+
+impl HostRecord for ImageDataRecord {
+    fn deserialize(self: Box<Self>, agent: &mut Agent) -> JsResult<Value> {
+        crate::html::canvas::register(agent);
+        crate::html::canvas::image_data_from_parts(agent, self.0, self.1, self.2)
+    }
+}
+
 /// Un `MessagePort` transferido.
 pub struct PortRecord {
     gid: u64,
@@ -390,6 +400,9 @@ impl HostCloner for WebCloner {
         let v = Value::Object(o);
         if let Some(d) = crate::net::blob::data(agent, &v) {
             return Some(Ok(Box::new(BlobRecord(d))));
+        }
+        if let Some((w, h, bytes)) = crate::html::canvas::image_data_parts(agent, &v) {
+            return Some(Ok(Box::new(ImageDataRecord(w, h, bytes))));
         }
         if port_id(agent, &v).is_some() {
             return Some(crate::net::dom_error(
