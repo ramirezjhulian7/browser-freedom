@@ -449,7 +449,12 @@ fn settings_page(ctx: &LoadContext) -> String {
         &[
             (
                 "cookies_on",
-                if s.block_third_party_cookies { " on" } else { "" }.to_owned(),
+                if s.block_third_party_cookies {
+                    " on"
+                } else {
+                    ""
+                }
+                .to_owned(),
             ),
             (
                 "cookies_state",
@@ -460,10 +465,7 @@ fn settings_page(ctx: &LoadContext) -> String {
                 }
                 .to_owned(),
             ),
-            (
-                "text_zoom",
-                format!("{} %", (s.text_zoom * 100.0).round()),
-            ),
+            ("text_zoom", format!("{} %", (s.text_zoom * 100.0).round())),
             (
                 "downloads_dir",
                 escape(&crate::downloads::downloads_dir().display().to_string()),

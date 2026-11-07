@@ -141,7 +141,10 @@ fn parse_bool(s: &str) -> Option<bool> {
 
 /// El zoom de texto dentro de los niveles ofrecidos.
 pub fn clamp_text_zoom(z: f32) -> f32 {
-    z.clamp(TEXT_ZOOM_LEVELS[0], TEXT_ZOOM_LEVELS[TEXT_ZOOM_LEVELS.len() - 1])
+    z.clamp(
+        TEXT_ZOOM_LEVELS[0],
+        TEXT_ZOOM_LEVELS[TEXT_ZOOM_LEVELS.len() - 1],
+    )
 }
 
 /// Las opciones del navegador (del perfil, o en memoria sin él).

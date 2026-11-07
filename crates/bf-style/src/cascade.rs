@@ -708,11 +708,7 @@ impl<'a> Styler<'a> {
         // `em`/`rem`/`%` del root parten de él.
         let zoom = self.media.text_zoom as f32;
         let medium = crate::properties::types::MEDIUM_FONT_SIZE * zoom;
-        let root_font_size = if is_root {
-            medium
-        } else {
-            self.root_font_size
-        };
+        let root_font_size = if is_root { medium } else { self.root_font_size };
         let parent_font = parent.map_or(medium, ComputedStyle::font_size_px);
         let ratios = |s: &ComputedStyle| {
             let fs = s.font_size_px();
