@@ -310,11 +310,16 @@ fn handle(stream: TcpStream) {
 fn server() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = l.local_addr().expect("addr").port();
-    std::thread::spawn(move || {
-        for s in l.incoming().flatten() {
-            std::thread::spawn(move || handle(s));
-        }
-    });
+    // `localhost` resuelve primero a `::1`: sin nadie ahí, cada conexión espera el rechazo
+    // (unos 2 s en Windows) antes de probar `127.0.0.1`. Se escucha en los dos.
+    let listeners = std::iter::once(l).chain(TcpListener::bind(("::1", port)).ok());
+    for l in listeners {
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                std::thread::spawn(move || handle(s));
+            }
+        });
+    }
     port
 }
 
