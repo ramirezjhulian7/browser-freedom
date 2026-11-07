@@ -76,6 +76,36 @@ fn html_test_with_scripts() {
     assert!(r[0].subtests[1].2.contains("mal formado"));
 }
 
+/// E4: el runner corre los callbacks de `requestAnimationFrame` ("update the rendering", HTML
+/// §8.1.7.3) avanzando el reloj virtual de cuadro en cuadro.
+#[test]
+fn animation_frames_run_on_the_virtual_clock() {
+    let root = fake_root("raf");
+    std::fs::write(
+        root.join("t/raf.html"),
+        "<!doctype html><script src=/resources/testharness.js></script>\
+         <script src=/resources/testharnessreport.js></script>\
+         <script>\
+           var times = [];\
+           function frame(t) {\
+             times.push(t);\
+             if (times.length < 3) { requestAnimationFrame(frame); return; }\
+             test(function () {\
+               if (!(times[0] > 0 && times[1] > times[0] && times[2] > times[1]))\
+                 throw new Error(times.join());\
+             }, 'raf');\
+             done();\
+           }\
+           requestAnimationFrame(frame);\
+         </script>",
+    )
+    .unwrap();
+    let r = run(&root, "t/raf.html");
+    assert_eq!(r[0].harness, Harness::Ok);
+    assert_eq!(r[0].subtests.len(), 1);
+    assert_eq!(r[0].subtests[0].1, SubStatus::Pass, "{}", r[0].subtests[0].2);
+}
+
 #[test]
 fn any_js_wrapper_and_meta() {
     let root = fake_root("any");

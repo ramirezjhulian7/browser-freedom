@@ -590,6 +590,8 @@ pub const GROUPS: &[&str] = &[
     "css/css-tables",
     "css/css-grid",
     "css/css-ui",
+    // E4: transformaciones.
+    "css/css-transforms",
 ];
 
 /// Tabla Markdown por directorio.

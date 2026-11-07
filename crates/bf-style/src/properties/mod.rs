@@ -2,9 +2,11 @@
 //! inicial, parseo, cómputo y acceso al campo tipado de [`ComputedStyle`] de cada longhand.
 //! Los shorthands están en [`shorthands`].
 
+pub mod animations; // E4
 pub mod gradient; // E4
 pub mod grid; // E4
 pub mod shorthands;
+pub mod transform; // E4
 pub mod types;
 
 use std::collections::HashMap;
@@ -236,6 +238,26 @@ longhands! {
     GridRowEnd "grid-row-end" grid_row_end: GridLine = "auto", inherited: false, animatable: false;
     GridColumnStart "grid-column-start" grid_column_start: GridLine = "auto", inherited: false, animatable: false;
     GridColumnEnd "grid-column-end" grid_column_end: GridLine = "auto", inherited: false, animatable: false;
+    // E4: transformaciones (CSS Transforms 1 y 2).
+    Transform "transform" transform: transform::Transform = "none", inherited: false, animatable: true;
+    TransformOrigin "transform-origin" transform_origin: transform::TransformOrigin = "50% 50%", inherited: false, animatable: true;
+    Translate "translate" translate: transform::Translate = "none", inherited: false, animatable: true;
+    Rotate "rotate" rotate: transform::Rotate = "none", inherited: false, animatable: true;
+    Scale "scale" scale: transform::Scale = "none", inherited: false, animatable: true;
+    // E4: animaciones y transiciones (CSS Animations 1, CSS Transitions 1).
+    AnimationName "animation-name" animation_name: animations::AnimationNames = "none", inherited: false, animatable: false;
+    AnimationDuration "animation-duration" animation_duration: animations::Durations = "0s", inherited: false, animatable: false;
+    AnimationTimingFunction "animation-timing-function" animation_timing_function: animations::TimingFunctions = "ease", inherited: false, animatable: false;
+    AnimationDelay "animation-delay" animation_delay: animations::Times = "0s", inherited: false, animatable: false;
+    AnimationIterationCount "animation-iteration-count" animation_iteration_count: animations::IterationCounts = "1", inherited: false, animatable: false;
+    AnimationDirection "animation-direction" animation_direction: animations::AnimationDirections = "normal", inherited: false, animatable: false;
+    AnimationFillMode "animation-fill-mode" animation_fill_mode: animations::FillModes = "none", inherited: false, animatable: false;
+    AnimationPlayState "animation-play-state" animation_play_state: animations::PlayStates = "running", inherited: false, animatable: false;
+    TransitionProperty "transition-property" transition_property: animations::TransitionProperties = "all", inherited: false, animatable: false;
+    TransitionDuration "transition-duration" transition_duration: animations::Durations = "0s", inherited: false, animatable: false;
+    TransitionTimingFunction "transition-timing-function" transition_timing_function: animations::TimingFunctions = "ease", inherited: false, animatable: false;
+    TransitionDelay "transition-delay" transition_delay: animations::Times = "0s", inherited: false, animatable: false;
+    TransitionBehavior "transition-behavior" transition_behavior: animations::TransitionBehaviors = "normal", inherited: false, animatable: false;
 }
 
 impl LonghandId {

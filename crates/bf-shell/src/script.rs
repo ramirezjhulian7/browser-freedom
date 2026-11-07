@@ -1016,6 +1016,24 @@ impl Engine {
         n
     }
 
+    /// E4: ¿hay callbacks de `requestAnimationFrame` esperando un cuadro?
+    pub fn wants_frame(&self) -> bool {
+        self.rt.agent.has_animation_frame_callbacks()
+    }
+
+    /// E4: el paso de "update the rendering" (HTML §8.1.7.3, paso 16) que corre los callbacks
+    /// de animation frame (§8.11.1) con la hora del cuadro.
+    pub fn run_animation_frames(&mut self) {
+        let now = self.rt.agent.host.hooks.now();
+        self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);
+        let r = self.rt.run_animation_frames(now);
+        self.rt.agent.options.deadline = None;
+        if let Err(e) = r {
+            self.report_error(&e);
+        }
+        self.flush_rejections();
+    }
+
     /// Cuánto falta para el próximo temporizador: `None` si no hay ninguno.
     pub fn next_wake(&mut self) -> Option<Duration> {
         let at = self.rt.next_wake()?;

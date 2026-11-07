@@ -34,6 +34,7 @@ use bf_style::values::color::Rgba;
 
 use crate::display_list::{DisplayItem, DisplayList, GlyphInstance, Radii};
 use crate::effects::resolve_gradient; // E4
+use bf_style::properties::transform::{box_matrix, to_affine}; // E4
 
 #[derive(Debug, Clone, PartialEq)]
 struct Clip {
@@ -106,7 +107,31 @@ fn real_sc(f: &Fragment) -> bool {
     is_box(f)
         && ((positioned(f) && f.z_index.is_some())
             || f.style.opacity.0 < 1.0
-            || f.style.position == Position::Fixed)
+            || f.style.position == Position::Fixed
+            || transformed(f))
+}
+
+/// E4: ¿Es `f` una caja transformable (CSS Transforms 1 §3: no las cajas inline no
+/// reemplazadas) con alguna transformación? Un valor distinto de `none` crea un stacking
+/// context (CSS Transforms 1 §6).
+pub(crate) fn transformed(f: &Fragment) -> bool {
+    is_box(f)
+        && f.kind != FragmentKind::Inline
+        && (!f.style.transform.is_none()
+            || f.style.translate.0.is_some()
+            || f.style.rotate.0.is_some()
+            || f.style.scale.0.is_some())
+}
+
+/// E4: la matriz afín `[a, b, c, d, e, f]` de una caja transformada, en coordenadas de página
+/// (la caja de referencia es la border box, `transform-box: view-box` por defecto, CSS
+/// Transforms 1 §7). Las 3D se aplanan (CSS Transforms 2 §4, sin perspectiva real).
+pub fn fragment_matrix(f: &Fragment) -> Option<[f32; 6]> {
+    if !transformed(f) {
+        return None;
+    }
+    let r = &f.rect;
+    box_matrix(&f.style, (r.x, r.y, r.width, r.height)).map(|m| to_affine(&m))
 }
 
 fn is_float(f: &Fragment) -> bool {
@@ -222,6 +247,20 @@ impl<'a> Builder<'a> {
             self.set_clip(clip);
             self.list.push(DisplayItem::PushOpacity(opacity.max(0.0)));
         }
+        // E4: `transform`. Los recortes de los ancestros quedan aplicados antes de la matriz
+        // (en coordenadas de afuera); adentro, la cadena de recortes empieza vacía y lo que se
+        // recorte está en las coordenadas locales de la caja.
+        let matrix = fragment_matrix(f);
+        let local = Vec::new();
+        let outer_emitted = if let Some(m) = matrix {
+            self.set_clip(clip);
+            self.list.push(DisplayItem::PushMatrix(m));
+            Some(std::mem::take(&mut self.emitted))
+        } else {
+            None
+        };
+        let outer_clip = clip;
+        let clip = if matrix.is_some() { &local } else { clip };
         let outer_outlines = std::mem::take(&mut self.outlines); // E4
         let mut layers = Layers::default();
         self.collect(f, clip, &mut layers);
@@ -251,8 +290,13 @@ impl<'a> Builder<'a> {
             self.child_context(e);
         }
         self.flush_outlines(outer_outlines); // E4
+        if let Some(outer) = outer_emitted {
+            self.set_clip(&local);
+            self.list.push(DisplayItem::PopTransform);
+            self.emitted = outer;
+        }
         if opacity < 1.0 {
-            self.set_clip(clip);
+            self.set_clip(outer_clip);
             self.list.push(DisplayItem::PopOpacity);
         }
     }

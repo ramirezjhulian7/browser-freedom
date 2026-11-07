@@ -1490,7 +1490,7 @@ fn values_interpolate(a: &Value, b: &Value) -> bool {
 /// (la última que los nombra gana, CSS Transitions 1 §2.1).
 fn transition_properties(style: &ComputedStyle) -> Vec<(LonghandId, usize)> {
     let mut out: Vec<(LonghandId, usize)> = Vec::new();
-    let mut add = |id: LonghandId, i: usize, out: &mut Vec<(LonghandId, usize)>| {
+    let add = |id: LonghandId, i: usize, out: &mut Vec<(LonghandId, usize)>| {
         if is_animation_property(id) {
             return;
         }

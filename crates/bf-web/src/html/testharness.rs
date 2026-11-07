@@ -415,6 +415,9 @@ pub fn run_doc(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     }
 }
 
+/// E4: duración de un cuadro del reloj virtual, en ms.
+const FRAME_MS: f64 = 16.0;
+
 fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     let deadline = Instant::now() + limit;
     let clock = Rc::new(Cell::new(0.0));
@@ -512,6 +515,19 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             let next = rt.agent.next_wake().unwrap_or(f64::INFINITY);
             clock.set((clock.get() + elapsed).min(next.max(clock.get())));
             continue;
+        }
+        // E4: "update the rendering" (HTML §8.1.7.3): con callbacks de `requestAnimationFrame`,
+        // el reloj virtual salta al próximo cuadro (cada 16 ms) si llega antes que el próximo
+        // temporizador, y se corren con esa hora.
+        if rt.agent.has_animation_frame_callbacks() {
+            let frame = (clock.get() / FRAME_MS).floor() * FRAME_MS + FRAME_MS;
+            if rt.agent.next_wake().is_none_or(|t| frame <= t) {
+                clock.set(frame);
+                if let Err(Throw::Terminate(_)) = rt.agent.run_animation_frames(frame) {
+                    return result(Harness::NoResult("tiempo agotado".into()), vec![]);
+                }
+                continue;
+            }
         }
         match rt.agent.next_wake() {
             Some(t) if t > clock.get() => clock.set(t),

@@ -244,6 +244,13 @@ impl TransformFunction {
         let ComponentValue::Function(f) = v else {
             return None;
         };
+        // Una coma al final deja un argumento vacío (`translate(1px,)` es inválido), pero
+        // `split_comma_separated` no lo devuelve.
+        if trim(&f.value).last().is_some_and(|v| {
+            matches!(v.token(), Some(bf_css::syntax::TokenKind::Comma))
+        }) {
+            return None;
+        }
         let args: Vec<Vec<ComponentValue>> = split_comma_separated(&f.value);
         let args: Vec<&[ComponentValue]> = args.iter().map(|a| trim(a)).collect();
         // Cada argumento es un único component value.
