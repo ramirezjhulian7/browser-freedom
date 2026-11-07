@@ -7,6 +7,7 @@ pub mod cldr;
 pub mod collator;
 pub mod date_time_format;
 pub mod decimal;
+pub mod display_names;
 pub mod duration_format;
 pub mod locale;
 // E8
@@ -41,6 +42,7 @@ pub enum IntlData {
     Segments(Box<segmenter::Segments>),
     SegmentIterator(Box<segmenter::SegmentIterator>),
     DurationFormat(Box<duration_format::DurationFormat>),
+    DisplayNames(Box<display_names::DisplayNames>),
 }
 
 impl Trace for IntlData {
@@ -60,7 +62,8 @@ impl Trace for IntlData {
             | IntlData::Segmenter(_)
             | IntlData::Segments(_)
             | IntlData::SegmentIterator(_)
-            | IntlData::DurationFormat(_) => {}
+            | IntlData::DurationFormat(_)
+            | IntlData::DisplayNames(_) => {}
         }
     }
 }
@@ -82,6 +85,7 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     relative_time_format::init(agent, realm, intl);
     segmenter::init(agent, realm, intl);
     duration_format::init(agent, realm, intl);
+    display_names::init(agent, realm, intl);
 }
 
 /// Los slots de Intl de `v`.

@@ -295,6 +295,36 @@ def main():
                 out.append(f"    ({rs(loc)}, {rs(u + suffix)}, &[{rel_s}], &[{fut}], &[{past}]),")
     out.append("];")
     out.append("")
+    # E8: nombres para Intl.DisplayNames: (locale, tipo, código, nombre). Tipos: `language`,
+    # `region`, `script` (y sus variantes `-short`), `calendar`, `field` (campo-estilo de
+    # dateFields) y `pattern` (localePattern, localeSeparator).
+    out.append("/// Nombres de Intl.DisplayNames: (locale, tipo, código, nombre).")
+    out.append("pub static DISPLAY_NAMES: &[(&str, &str, &str, &str)] = &[")
+    rows = []
+    for loc in LOCALES:
+        ldn = load(loc, "localeDisplayNames.json")["main"][loc]["localeDisplayNames"]
+        for kind, fname in (("language", "languages"), ("region", "territories"), ("script", "scripts")):
+            names = load(loc, fname + ".json")["main"][loc]["localeDisplayNames"][fname]
+            for k, v in names.items():
+                if "-alt-" in k:
+                    code, alt = k.split("-alt-", 1)
+                    if alt == "short":
+                        rows.append((loc, kind + "-short", code, v))
+                else:
+                    rows.append((loc, kind, k, v))
+        for k, v in ldn["types"].get("calendar", {}).items():
+            rows.append((loc, "calendar", k, v))
+        pat = ldn["localeDisplayPattern"]
+        rows.append((loc, "pattern", "localePattern", pat["localePattern"]))
+        rows.append((loc, "pattern", "localeSeparator", pat["localeSeparator"]))
+        fields = load(loc, "dateFields.json")["main"][loc]["dates"]["fields"]
+        for k, v in fields.items():
+            if "displayName" in v:
+                rows.append((loc, "field", k, v["displayName"]))
+    for row in sorted(rows):
+        out.append("    (" + ", ".join(rs(x) for x in row) + "),")
+    out.append("];")
+    out.append("")
     out.append("pub static LOCALE_DATA: &[(&str, &LocaleData)] = &[")
     for loc in LOCALES:
         out.append(f"    ({rs(loc)}, &{loc.upper()}),")
