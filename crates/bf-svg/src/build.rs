@@ -1697,9 +1697,9 @@ fn view_box_state(n: &DocNode) -> Result<Option<Bbox>, ()> {
     let Some(v) = n.attr("viewBox").and_then(geom::parse_numbers) else {
         return Ok(None);
     };
-    match v.as_slice() {
-        &[x, y, w, h] if w > 0.0 && h > 0.0 => Ok(Some((x, y, w, h))),
-        &[_, _, _, _] => Err(()),
+    match *v.as_slice() {
+        [x, y, w, h] if w > 0.0 && h > 0.0 => Ok(Some((x, y, w, h))),
+        [_, _, _, _] => Err(()),
         _ => Ok(None),
     }
 }
@@ -1829,7 +1829,7 @@ fn absolute(n: &DocNode, name: &str) -> Option<f32> {
         Len::Px(v) => Some(v),
         Len::Em(v) => Some(v * 16.0),
         Len::Ex(v) => Some(v * 8.0),
-        Len::Calc(px, pct, em) if pct == 0.0 => Some(px + em * 16.0),
+        Len::Calc(px, 0.0, em) => Some(px + em * 16.0),
         Len::Pct(_) | Len::Calc(..) => None,
     }
     .filter(|v| *v >= 0.0)
