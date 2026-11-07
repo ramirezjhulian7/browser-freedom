@@ -88,6 +88,12 @@ pub enum UserInput {
     ImplicitSubmit { field: NodeId },
     /// El foco pasó a `node` (o a ninguno).
     Focus(Option<NodeId>),
+    /// E12: la rueda desplazó el scroll container `node` a `offset` (la ventana ya lo aplicó
+    /// a su página; el documento lo guarda y dispara `scroll`).
+    ScrollElement {
+        node: NodeId,
+        offset: (f32, f32),
+    },
 }
 
 /// El estado de los eventos de una pestaña.
@@ -355,6 +361,11 @@ pub fn handle(
             }
         }
         UserInput::Focus(node) => focus(&mut t, state, node),
+        UserInput::ScrollElement { node, offset } => {
+            if let Some(engine) = t.engine.as_mut() {
+                engine.user_scrolled_element(node, offset);
+            }
+        }
     }
     out
 }

@@ -365,6 +365,31 @@ pub fn scroll_parent(tree: &FragmentTree, node: NodeId) -> Option<NodeId> {
         .find(|n| tree.scroll.boxes.contains_key(n))
 }
 
+/// La suma de los desplazamientos de los scroll containers que contienen a `node` (sin contar
+/// el propio `node`), hasta `upto` incluido (o hasta el raíz): lo que hay que sumar a la
+/// posición de su caja para obtener la de layout, sin scroll (`offsetTop`, CSSOM View §7).
+pub fn scroll_offset_between(
+    tree: &FragmentTree,
+    node: NodeId,
+    upto: Option<NodeId>,
+) -> (f32, f32) {
+    let mut path = Vec::new();
+    if let Some(root) = tree.root.as_ref() {
+        ancestor_chain(root, node, &mut path);
+    }
+    let mut sum = (0.0, 0.0);
+    for n in path.into_iter().skip(1) {
+        if let Some(sb) = tree.scroll.boxes.get(&n) {
+            sum.0 += sb.offset.0;
+            sum.1 += sb.offset.1;
+        }
+        if Some(n) == upto {
+            break;
+        }
+    }
+    sum
+}
+
 fn inset(v: &LengthPercentageAuto, basis: f32) -> Option<f32> {
     match v {
         LengthPercentageAuto::Auto => None,

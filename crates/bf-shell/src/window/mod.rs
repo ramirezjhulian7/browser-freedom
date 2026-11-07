@@ -1928,6 +1928,9 @@ impl App {
                 app.clamp_scroll();
                 app.redraw_later();
             }),
+            PageRequest::ScrollElements(changes) => self.with_tab(i, |app| {
+                app.apply_page_scroll(&changes);
+            }),
             PageRequest::Dialog {
                 kind,
                 message,
@@ -2273,6 +2276,8 @@ impl App {
             if let Some((_, page)) = cache.as_ref() {
                 blit(&mut frame, page, 0.0, area.y * dpi);
             }
+            drop(cache);
+            self.paint_scrollbars(&mut frame, p, area.y * dpi);
             if self.overlay {
                 let view = Rect::new(
                     self.scroll.0,
@@ -2389,6 +2394,7 @@ impl App {
     fn redraw(&mut self) {
         trace("redraw");
         self.sync_view();
+        self.apply_page_scroll(&[]); // E12: `sticky` del viewport
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -2767,6 +2773,94 @@ impl App {
         }
     }
 
+    /// E12: las barras de desplazamiento de los scroll containers y del viewport, encima de la
+    /// página (en px de dispositivo, la página empieza en `top`).
+    fn paint_scrollbars(&self, frame: &mut Pixmap, p: &bf_paint::Page, top: f32) {
+        use bf_paint::scrollbars::{THICKNESS, scrollbars, viewport_scrollbars};
+        let theme = self.chrome.theme;
+        let color = Rgba {
+            a: 0.55,
+            ..theme.text_secondary
+        };
+        let viewport = self.viewport();
+        let scale = self.dpi() * self.zoom;
+        let list = scrollbars(&p.tree, color);
+        if !list.items.is_empty() {
+            let layer = render_scrolled(&list, viewport, scale, Rgba::TRANSPARENT, self.scroll);
+            blit(frame, &layer, 0.0, top);
+        }
+        // El viewport: solo las franjas de los bordes derecho e inferior.
+        let extent = document_extent(&p.tree);
+        let list = viewport_scrollbars(
+            viewport,
+            bf_layout::Size {
+                width: extent.width,
+                height: extent.height,
+            },
+            self.scroll,
+            color,
+        );
+        if list.items.is_empty() {
+            return;
+        }
+        let strip = THICKNESS + 4.0;
+        let vertical = bf_layout::Size {
+            width: strip,
+            height: viewport.height,
+        };
+        let layer = render_scrolled(
+            &list,
+            vertical,
+            scale,
+            Rgba::TRANSPARENT,
+            (viewport.width - strip, 0.0),
+        );
+        blit(frame, &layer, (viewport.width - strip) * scale, top);
+        let horizontal = bf_layout::Size {
+            width: viewport.width - strip,
+            height: strip,
+        };
+        let layer = render_scrolled(
+            &list,
+            horizontal,
+            scale,
+            Rgba::TRANSPARENT,
+            (0.0, viewport.height - strip),
+        );
+        blit(frame, &layer, 0.0, top + (viewport.height - strip) * scale);
+    }
+
+    /// E12: aplica a la página mostrada posiciones de scroll de elementos y el scroll de la
+    /// página (las cajas `sticky` del viewport); si cambió algo, se repinta.
+    fn apply_page_scroll(&mut self, changes: &[(NodeId, (f32, f32))]) {
+        let (Some(page), Some(current)) = (self.page.as_mut(), self.current.as_ref()) else {
+            return;
+        };
+        if page.apply_scroll(&current.doc, changes, self.scroll) {
+            self.page_generation += 1;
+            self.redraw_later();
+        }
+    }
+
+    /// E12: la rueda sobre un scroll container de la página (`scroll_at`): lo desplaza y avisa
+    /// al documento. Devuelve si lo consumió (si no, se desplaza la página).
+    fn wheel_element(&mut self, target: Option<NodeId>, delta: (f32, f32)) -> bool {
+        let (Some(target), Some(page), Some(current)) =
+            (target, self.page.as_mut(), self.current.as_ref())
+        else {
+            return false;
+        };
+        let Some((node, offset)) = bf_layout::scroll::scroll_at(&mut page.tree, target, delta)
+        else {
+            return false;
+        };
+        page.repaint(&current.doc);
+        self.page_generation += 1;
+        self.send_input(events::UserInput::ScrollElement { node, offset });
+        self.redraw_later();
+        true
+    }
+
     fn wheel(&mut self, dx: f32, dy: f32) {
         let (x, y) = self.mouse;
         if self.dialog.is_some() {
@@ -2779,13 +2873,18 @@ impl App {
             return;
         }
         if self.area_at(x, y) == Area::Page {
+            let target = self.node_under_mouse();
             let input = events::UserInput::Wheel {
                 client: self.page_point(x, y),
                 delta: (dx, dy),
                 mods: self.mods(),
-                target: self.node_under_mouse(),
+                target,
             };
             self.send_input(input);
+            if self.wheel_element(target, (dx, dy)) {
+                self.mouse_moved();
+                return;
+            }
         }
         self.scroll_by(dx, dy);
         self.mouse_moved();

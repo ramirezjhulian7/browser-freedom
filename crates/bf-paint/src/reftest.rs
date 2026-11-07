@@ -590,6 +590,10 @@ pub const GROUPS: &[&str] = &[
     "css/css-tables",
     "css/css-grid",
     "css/css-ui",
+    // E12: scroll, sticky y object-fit.
+    "css/css-overflow",
+    "css/css-position",
+    "css/css-images",
 ];
 
 /// Tabla Markdown por directorio.
