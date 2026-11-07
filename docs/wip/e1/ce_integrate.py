@@ -1,6 +1,6 @@
 import sys
 
-sys.path.insert(0, "D:/Personales/Repos/browser-freedom-duo-e1/target/scratch")
+sys.path.insert(0, "D:/Personales/Repos/browser-freedom-army-e1/docs/wip/e1")
 from patchlib import patch
 
 W = "crates/bf-web/src/"

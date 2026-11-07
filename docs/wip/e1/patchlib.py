@@ -1,6 +1,6 @@
 """Parches exactos sobre archivos de la worktree, con soporte de CRLF e idempotencia."""
 
-ROOT = "D:/Personales/Repos/browser-freedom-duo-e1/"
+ROOT = "D:/Personales/Repos/browser-freedom-army-e1/"
 
 
 def patch(name, pairs):
