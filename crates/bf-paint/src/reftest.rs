@@ -357,7 +357,7 @@ impl Harness {
 
     fn render_doc(&self, doc: &Document, path: &Path) -> Pixmap {
         if path.extension().is_some_and(is_svg_ext) {
-            return self.render_svg(doc);
+            return self.render_svg(doc, path);
         }
         let base = self.base(path);
         let ctx = crate::PageContext {
@@ -372,7 +372,7 @@ impl Harness {
 
     /// Un documento SVG suelto (E7): su raíz es el viewport, del tamaño de sus `width` y
     /// `height` absolutos o del viewport de la ventana, sobre fondo blanco.
-    fn render_svg(&self, doc: &Document) -> Pixmap {
+    fn render_svg(&self, doc: &Document, path: &Path) -> Pixmap {
         let (w, h) = (VIEWPORT.width as u32, VIEWPORT.height as u32);
         let mut out = Pixmap::new(w, h).expect("tamaño válido");
         out.fill(tiny_skia::Color::WHITE);
@@ -387,11 +387,15 @@ impl Harness {
         let sw = i.width.unwrap_or(VIEWPORT.width);
         let sh = i.height.unwrap_or(VIEWPORT.height);
         let fonts = bf_font::Fonts::new(self.db.clone());
-        if let Some(p) = crate::images::rasterize_svg(
+        // Documento de primer nivel: sus `image` se cargan con el loader del harness.
+        let mut res = crate::images::SvgResources::default();
+        res.load(&svg, Some(&self.base(path)), Some(self.loader.as_ref()));
+        if let Some(p) = crate::images::rasterize_svg_with(
             &svg.tree(sw, sh),
             sw.ceil() as u32,
             sh.ceil() as u32,
             Some(&fonts),
+            &res,
         ) {
             out.draw_pixmap(
                 0,

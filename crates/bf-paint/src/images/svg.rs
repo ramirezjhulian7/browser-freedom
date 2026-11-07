@@ -3,6 +3,7 @@
 //! opacidad y su máscara (`clipPath` y `mask`); los `pattern` se pintan en una tesela que se
 //! repite; el texto usa las fuentes de `bf-font` (vía [`FontProvider`]).
 
+use super::{SVG_IMAGE_DEPTH, SvgImage, SvgResources};
 use bf_layout::{FontProvider, FontRequest, PathCommand};
 use bf_style::properties::types::{FamilyName, FontFamily};
 use bf_svg::{
@@ -21,12 +22,24 @@ const MAX_TILE: f32 = 2048.0;
 /// Tope de lado del bitmap (protege la memoria con tamaños absurdos).
 const MAX_SIDE: u32 = 4096;
 
-/// Pinta `tree` en un bitmap de `width`×`height` píxeles (el viewport del árbol escalado).
+/// Pinta `tree` en un bitmap de `width`×`height` píxeles (el viewport del árbol escalado),
+/// sin recursos para sus elementos `image`.
 pub fn rasterize(
     tree: &Tree,
     width: u32,
     height: u32,
     fonts: Option<&dyn FontProvider>,
+) -> Option<Pixmap> {
+    rasterize_with(tree, width, height, fonts, &SvgResources::default())
+}
+
+/// [`rasterize`] con los recursos `res` para los elementos `image`.
+pub fn rasterize_with(
+    tree: &Tree,
+    width: u32,
+    height: u32,
+    fonts: Option<&dyn FontProvider>,
+    res: &SvgResources,
 ) -> Option<Pixmap> {
     let (width, height) = (width.clamp(1, MAX_SIDE), height.clamp(1, MAX_SIDE));
     let mut pixmap = Pixmap::new(width, height)?;
@@ -39,6 +52,8 @@ pub fn rasterize(
     let mut r = Raster {
         fonts,
         host_scale: (kx * ky).sqrt(),
+        res,
+        depth: 0,
     };
     r.group(&tree.root, &mut pixmap, base);
     Some(pixmap)
@@ -160,11 +175,22 @@ struct Raster<'f> {
     fonts: Option<&'f dyn FontProvider>,
     /// Píxeles por px de CSS del viewport raíz.
     host_scale: f32,
+    res: &'f SvgResources,
+    /// Niveles de `image` con SVG dentro de los que se está pintando.
+    depth: u32,
 }
 
 impl Raster<'_> {
     fn group(&mut self, g: &Group, canvas: &mut Pixmap, ts: Transform) {
-        let ts = ts.pre_concat(sk(&g.transform));
+        let mut ts = ts.pre_concat(sk(&g.transform));
+        if g.host_units {
+            let (sx, sy) = axis_scales(&ts);
+            let s = (sx * sy).sqrt();
+            if s > 0.0 && s.is_finite() {
+                let k = self.host_scale / s;
+                ts = ts.pre_scale(k, k);
+            }
+        }
         if g.opacity <= 0.0 {
             return;
         }
@@ -300,6 +326,7 @@ impl Raster<'_> {
                 let ts = ts.pre_concat(sk(&p.transform));
                 self.paint(&sk_path, p.fill.as_ref(), p.stroke.as_ref(), canvas, ts);
             }
+            Node::Image(im) => self.image(im, canvas, ts.pre_concat(sk(&im.transform))),
             Node::Text(t) => {
                 let ts = ts.pre_concat(sk(&t.transform));
                 for (p, fill, stroke, stroke_first) in self.text_paths(t) {
@@ -310,6 +337,102 @@ impl Raster<'_> {
                         self.paint(&p, fill.as_ref(), stroke.as_ref(), canvas, ts);
                     }
                 }
+            }
+        }
+    }
+
+    /// Elemento `image` (SVG 2 §12.3): un bitmap colocado con `preserveAspectRatio` y
+    /// recortado a su viewport, o un SVG con su viewport en el rectángulo del elemento.
+    fn image(&mut self, im: &bf_svg::Image, canvas: &mut Pixmap, ts: Transform) {
+        if self.depth >= SVG_IMAGE_DEPTH {
+            return;
+        }
+        let Some(res) = self.res.get(&im.href).cloned() else {
+            return;
+        };
+        let (nw, nh) = match &res {
+            SvgImage::Bitmap(p) => (p.width() as f32, p.height() as f32),
+            SvgImage::Svg(s) => s.default_size(),
+        };
+        if !(nw > 0.0 && nh > 0.0) {
+            return;
+        }
+        // `auto` (§12.3.2): el tamaño natural, o el que da la proporción con el otro lado.
+        let (w, h) = match (im.width, im.height) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w * nh / nw),
+            (None, Some(h)) => (h * nw / nh, h),
+            (None, None) => (nw, nh),
+        };
+        if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+            return;
+        }
+        match res {
+            SvgImage::Bitmap(p) => {
+                let place = bf_svg::aspect_transform((0.0, 0.0, nw, nh), &im.par, (w, h));
+                let to_user = Transform::from_translate(im.x, im.y).pre_concat(sk(&place));
+                // Lo que se ve: la imagen colocada, recortada al viewport (`slice`).
+                let (x0, y0) = place.apply(0.0, 0.0);
+                let (x1, y1) = place.apply(nw, nh);
+                let (l, t) = (x0.min(x1).max(0.0), y0.min(y1).max(0.0));
+                let (r, b) = (x0.max(x1).min(w), y0.max(y1).min(h));
+                let Some(rect) = Rect::from_ltrb(im.x + l, im.y + t, im.x + r, im.y + b) else {
+                    return;
+                };
+                let paint = tiny_skia::Paint {
+                    shader: tiny_skia::Pattern::new(
+                        p.as_ref().as_ref(),
+                        SpreadMode::Pad,
+                        FilterQuality::Bilinear,
+                        1.0,
+                        to_user,
+                    ),
+                    anti_alias: true,
+                    ..tiny_skia::Paint::default()
+                };
+                canvas.fill_rect(rect, &paint, ts, None);
+            }
+            SvgImage::Svg(s) => {
+                // Con `viewBox`, el viewport del SVG es el rectángulo del elemento y manda el
+                // `preserveAspectRatio` de aquí; sin él, se coloca a su tamaño natural.
+                let (doc, size, place) = if s.has_view_box() {
+                    (s.with_aspect(&im.par), (w, h), bf_svg::Transform::IDENTITY)
+                } else {
+                    let place = bf_svg::aspect_transform((0.0, 0.0, nw, nh), &im.par, (w, h));
+                    (s.as_ref().clone(), (nw, nh), place)
+                };
+                let tree = doc.tree(size.0, size.1);
+                let inner = bf_svg::Transform::translate(im.x, im.y).then(&place);
+                let group = Group {
+                    host_units: false,
+                    transform: bf_svg::Transform::IDENTITY,
+                    opacity: 1.0,
+                    clip: Some(bf_svg::ClipPath {
+                        transform: bf_svg::Transform::IDENTITY,
+                        shapes: vec![(
+                            bf_svg::geom::rect(im.x, im.y, w, h, 0.0, 0.0),
+                            FillRule::NonZero,
+                            bf_svg::Transform::IDENTITY,
+                        )],
+                        texts: Vec::new(),
+                    }),
+                    mask: None,
+                    children: vec![Node::Group(Group {
+                        host_units: false,
+                        transform: inner,
+                        opacity: 1.0,
+                        clip: None,
+                        mask: None,
+                        children: vec![Node::Group(tree.root)],
+                    })],
+                };
+                // `non-scaling-stroke` dentro: el host es el viewport del SVG referenciado.
+                let (sx, sy) = axis_scales(&ts.pre_concat(sk(&inner)));
+                let host = std::mem::replace(&mut self.host_scale, (sx * sy).sqrt());
+                self.depth += 1;
+                self.group(&group, canvas, ts);
+                self.depth -= 1;
+                self.host_scale = host;
             }
         }
     }

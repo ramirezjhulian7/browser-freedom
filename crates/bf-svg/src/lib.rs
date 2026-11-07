@@ -12,8 +12,12 @@
 //! También `pattern`, `mask`, `marker`, `paint-order`, `vector-effect: non-scaling-stroke` y
 //! `pathLength`.
 //!
-//! TODO(svg): `image`, `filter`, `foreignObject`, animación SMIL, `textPath` y el layout de
-//! texto completo (§11).
+//! `image` queda en el árbol con su `href` sin resolver ([`Image`]): el recurso lo carga y
+//! lo decodifica quien pinta (`bf-paint`), con [`Svg::image_hrefs`] para saber cuáles hacen
+//! falta.
+//!
+//! TODO(svg): `filter`, `foreignObject`, animación SMIL, `textPath` y el layout de texto
+//! completo (§11).
 
 #![forbid(unsafe_code)]
 
@@ -225,6 +229,47 @@ impl Svg {
     pub fn tree(&self, width: f32, height: f32) -> Tree {
         build::tree(self, width, height)
     }
+
+    /// Los `href` de los elementos `image` del documento, tal como están escritos (sin
+    /// repetir, en orden de documento).
+    pub fn image_hrefs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for n in &self.nodes {
+            if n.name != "image" {
+                continue;
+            }
+            if let Some(h) = n.attr("href").map(str::trim).filter(|h| !h.is_empty())
+                && !out.iter().any(|o| o == h)
+            {
+                out.push(h.to_owned());
+            }
+        }
+        out
+    }
+
+    /// Si la raíz tiene un `viewBox` válido (o lo da la vista del fragmento).
+    pub fn has_view_box(&self) -> bool {
+        self.view.as_ref().and_then(|v| v.view_box).is_some()
+            || self
+                .nodes
+                .first()
+                .is_some_and(|r| r.name == "svg" && build::root_view_box(r).is_some())
+    }
+
+    /// La misma imagen con otro `preserveAspectRatio` en la raíz: el de un elemento `image`
+    /// que la referencia sustituye al suyo (SVG 2 §12.3, «the preserveAspectRatio attribute on
+    /// the root element in the referenced SVG image shall be ignored»).
+    pub fn with_aspect(&self, par: &str) -> Svg {
+        let mut svg = self.clone();
+        svg.view.get_or_insert_with(View::default).par = Some(par.to_owned());
+        svg
+    }
+}
+
+/// La transformación de `preserveAspectRatio` (SVG 2 §8.6) que lleva el rectángulo
+/// `view_box` (x, y, ancho, alto) a un viewport de `size` con origen en (0, 0).
+pub fn aspect_transform(view_box: (f32, f32, f32, f32), par: &str, size: (f32, f32)) -> Transform {
+    build::view_box_transform(view_box, par, size)
 }
 
 /// Árbol de render: todo en coordenadas de usuario, con transformaciones explícitas.
@@ -240,6 +285,23 @@ pub enum Node {
     Group(Group),
     Path(Path),
     Text(Text),
+    Image(Image),
+}
+
+/// Elemento `image` (SVG 2 §12.3). El recurso se resuelve al pintar: un bitmap o un SVG
+/// (este con su viewport en el rectángulo del elemento y el `preserveAspectRatio` de aquí).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Image {
+    /// `href` tal como está escrito (sin resolver contra la URL del documento).
+    pub href: String,
+    pub x: f32,
+    pub y: f32,
+    /// `None` = `auto`: el tamaño natural del recurso (o el que da su proporción).
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    /// `preserveAspectRatio` sin parsear (vacío = `xMidYMid meet`).
+    pub par: String,
+    pub transform: Transform,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -251,6 +313,10 @@ pub struct Group {
     pub clip: Option<ClipPath>,
     /// Máscara (`mask`, CSS Masking 1 §7), también en el sistema del grupo.
     pub mask: Option<Box<Mask>>,
+    /// Tras `transform`, una unidad del grupo mide un px del host (el viewport raíz): los
+    /// marcadores con `markerUnits="strokeWidth"` de un trazo `non-scaling-stroke`, que se
+    /// escalan por el ancho del trazo en el host (SVG 2 §13.7.2).
+    pub host_units: bool,
     pub children: Vec<Node>,
 }
 

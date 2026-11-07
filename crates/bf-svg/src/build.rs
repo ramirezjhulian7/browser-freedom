@@ -770,6 +770,10 @@ impl<'a> Builder<'a> {
                     t.transform = transform.then(&t.transform);
                     return Some(node);
                 }
+                Node::Image(im) => {
+                    im.transform = transform.then(&im.transform);
+                    return Some(node);
+                }
                 Node::Group(g) if g.opacity >= 1.0 && g.clip.is_none() => {
                     g.transform = transform.then(&g.transform);
                     return Some(node);
@@ -792,6 +796,7 @@ impl<'a> Builder<'a> {
             None => None,
         };
         Some(Node::Group(Group {
+            host_units: false,
             transform,
             opacity,
             clip,
@@ -885,6 +890,7 @@ impl<'a> Builder<'a> {
             luminance,
             rect,
             content: Group {
+                host_units: false,
                 transform: content_t,
                 opacity: 1.0,
                 clip: None,
@@ -999,6 +1005,29 @@ impl<'a> Builder<'a> {
                 segs
             }
             "path" => geom::parse_path(n.attr("d").unwrap_or("")),
+            "image" => {
+                if !st.visible {
+                    return None;
+                }
+                let href = n.attr("href").map(str::trim).filter(|h| !h.is_empty())?;
+                let x = self.len(n, "x", Axis::X, vp, st).unwrap_or(0.0);
+                let y = self.len(n, "y", Axis::Y, vp, st).unwrap_or(0.0);
+                let width = self.len(n, "width", Axis::X, vp, st);
+                let height = self.len(n, "height", Axis::Y, vp, st);
+                // Un ancho o un alto cero (o negativo) desactiva el renderizado (§12.3.2).
+                if width.is_some_and(|w| w <= 0.0) || height.is_some_and(|h| h <= 0.0) {
+                    return None;
+                }
+                return Some(Node::Image(crate::Image {
+                    href: href.to_owned(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    par: n.attr("preserveAspectRatio").unwrap_or("").to_owned(),
+                    transform: Transform::IDENTITY,
+                }));
+            }
             _ => return None,
         };
         let segs = shape(segs)?;
@@ -1006,10 +1035,15 @@ impl<'a> Builder<'a> {
             return None;
         }
         let bbox = geom::bbox(&segs);
+        let non_scaling = n
+            .props
+            .get("vector-effect")
+            .and_then(|v| ident(v))
+            .is_some_and(|v| v == "non-scaling-stroke");
         let markers = if st.markers.iter().any(Option::is_some)
             && matches!(n.name.as_str(), "path" | "line" | "polyline" | "polygon")
         {
-            self.markers(&segs, st, vp)
+            self.markers(&segs, st, vp, non_scaling)
         } else {
             Vec::new()
         };
@@ -1042,11 +1076,7 @@ impl<'a> Builder<'a> {
                     s.dashoffset *= k;
                 }
             }
-            s.non_scaling = n
-                .props
-                .get("vector-effect")
-                .and_then(|v| ident(v))
-                .is_some_and(|v| v == "non-scaling-stroke");
+            s.non_scaling = non_scaling;
         }
         let default_order = st.paint_order == [0, 1, 2];
         if markers.is_empty() && (default_order || fill.is_none() || stroke.is_none()) {
@@ -1093,7 +1123,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Los marcadores de un trazado (§13.7): uno por vértice, orientados según `orient`.
-    fn markers(&mut self, segs: &[Seg], st: &St, vp: Viewport) -> Vec<Node> {
+    fn markers(&mut self, segs: &[Seg], st: &St, vp: Viewport, non_scaling: bool) -> Vec<Node> {
         let verts = vertices(segs);
         let mut out = Vec::new();
         let last = verts.len().saturating_sub(1);
@@ -1111,14 +1141,22 @@ impl<'a> Builder<'a> {
             let Some(m) = self.by_id(url).filter(|&m| self.node(m).name == "marker") else {
                 continue;
             };
-            if let Some(node) = self.marker(m, v, kind == 0, st, vp) {
+            if let Some(node) = self.marker(m, v, kind == 0, st, vp, non_scaling) {
                 out.push(node);
             }
         }
         out
     }
 
-    fn marker(&mut self, m: usize, v: &Vertex, start: bool, st: &St, vp: Viewport) -> Option<Node> {
+    fn marker(
+        &mut self,
+        m: usize,
+        v: &Vertex,
+        start: bool,
+        st: &St,
+        vp: Viewport,
+        non_scaling: bool,
+    ) -> Option<Node> {
         if self.stack.contains(&m) {
             return None;
         }
@@ -1142,14 +1180,10 @@ impl<'a> Builder<'a> {
             }
             None => 0.0,
         };
-        let scale = if mn
+        let stroke_units = !mn
             .attr("markerUnits")
-            .is_some_and(|u| u.trim() == "userSpaceOnUse")
-        {
-            1.0
-        } else {
-            st.stroke_width
-        };
+            .is_some_and(|u| u.trim() == "userSpaceOnUse");
+        let scale = if stroke_units { st.stroke_width } else { 1.0 };
         let vb = view_box_state(mn).ok()?;
         let par = mn.attr("preserveAspectRatio").unwrap_or("");
         let vb_t = vb.map_or(Transform::IDENTITY, |vb| {
@@ -1180,22 +1214,42 @@ impl<'a> Builder<'a> {
             )],
             texts: Vec::new(),
         });
-        let transform = Transform::translate(v.x, v.y)
-            .then(&Transform::rotate(angle))
+        // Con `non-scaling-stroke` el ancho del trazo está en px del host: el marcador se
+        // escala en el host, desde su vértice.
+        let host_units = stroke_units && non_scaling;
+        let place = Transform::rotate(angle)
             .then(&Transform::scale(scale, scale))
             .then(&Transform::translate(-rx, -ry));
-        Some(Node::Group(Group {
+        let transform = if host_units {
+            place
+        } else {
+            Transform::translate(v.x, v.y).then(&place)
+        };
+        let node = Node::Group(Group {
+            host_units: false,
             transform,
             opacity: Self::opacity(mn),
             clip,
             mask: None,
             children: vec![Node::Group(Group {
+                host_units: false,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
                 mask: None,
                 children,
             })],
+        });
+        if !host_units {
+            return Some(node);
+        }
+        Some(Node::Group(Group {
+            transform: Transform::translate(v.x, v.y),
+            opacity: 1.0,
+            clip: None,
+            mask: None,
+            host_units: true,
+            children: vec![node],
         }))
     }
 
@@ -1258,11 +1312,13 @@ impl<'a> Builder<'a> {
             texts: Vec::new(),
         });
         Some(Node::Group(Group {
+            host_units: false,
             transform: Transform::translate(x, y),
             opacity: 1.0,
             clip,
             mask: None,
             children: vec![Node::Group(Group {
+                host_units: false,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
@@ -1315,6 +1371,7 @@ impl<'a> Builder<'a> {
             }
         };
         Some(Node::Group(Group {
+            host_units: false,
             transform: Transform::translate(x, y),
             opacity: 1.0,
             clip: None,
@@ -1501,6 +1558,7 @@ impl<'a> Builder<'a> {
             height: h,
             transform: pt.then(&Transform::translate(x, y)),
             content: Group {
+                host_units: false,
                 transform: content_t,
                 opacity: 1.0,
                 clip: None,
@@ -1998,6 +2056,11 @@ fn node_bbox(node: &Node, t: &Transform) -> Option<Bbox> {
             let b = (x, y - size * 0.8, len as f32 * size * 0.5, size);
             Some(corners(b, &t.then(&tx.transform)))
         }
+        // Con `auto` el tamaño depende del recurso, que aquí no se conoce.
+        Node::Image(im) => {
+            let b = (im.x, im.y, im.width?, im.height?);
+            Some(corners(b, &t.then(&im.transform)))
+        }
     }
 }
 
@@ -2017,6 +2080,8 @@ fn flatten_clip(node: &Node, t: &Transform, rule: crate::FillRule, out: &mut Cli
             tx.transform = t.then(&tx.transform);
             out.texts.push(tx);
         }
+        // `image` no es contenido válido de `clipPath` (§14.3.5).
+        Node::Image(_) => {}
     }
 }
 
@@ -2120,7 +2185,15 @@ fn css_transform(v: &[ComponentValue], vp: Viewport, font: f32) -> Option<Transf
 }
 
 /// Transformación del `viewBox` al viewport de `w`×`h` (§8.7).
-fn view_box_transform((vx, vy, vw, vh): Bbox, par: &str, (w, h): (f32, f32)) -> Transform {
+pub(crate) fn root_view_box(n: &DocNode) -> Option<Bbox> {
+    view_box(n)
+}
+
+pub(crate) fn view_box_transform(
+    (vx, vy, vw, vh): Bbox,
+    par: &str,
+    (w, h): (f32, f32),
+) -> Transform {
     let mut words = par.split_ascii_whitespace();
     let mut align = words.next().unwrap_or("xMidYMid");
     if align == "defer" {
@@ -2235,6 +2308,7 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         let (dw, dh) = inner.default_size();
         let full = tree(&inner, dw, dh);
         let root = Group {
+            host_units: false,
             transform: Transform::scale(width / rw, height / rh)
                 .then(&Transform::translate(-rx, -ry)),
             opacity: 1.0,
@@ -2253,6 +2327,7 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         stack: Vec::new(),
     };
     let mut root = Group {
+        host_units: false,
         transform: Transform::IDENTITY,
         opacity: 1.0,
         clip: None,

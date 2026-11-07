@@ -20,7 +20,91 @@ use bf_style::StyleMap;
 use bf_style::properties::types::Image;
 use tiny_skia::{IntSize, Pixmap};
 
-pub use svg::rasterize as rasterize_svg;
+pub use svg::{rasterize as rasterize_svg, rasterize_with as rasterize_svg_with};
+
+/// Niveles de `<image>` dentro de `<image>` que se cargan y se pintan.
+const SVG_IMAGE_DEPTH: u32 = 4;
+
+/// El recurso de un elemento `image` de SVG, decodificado.
+#[derive(Clone)]
+pub enum SvgImage {
+    Bitmap(Arc<Pixmap>),
+    Svg(Arc<bf_svg::Svg>),
+}
+
+/// Los recursos de los elementos `image` de los SVG, por `href` tal como está escrito. Un
+/// solo mapa por página: dos SVG con el mismo `href` relativo y distinta base comparten
+/// entrada (raro; las `data:` son únicas por contenido).
+#[derive(Clone, Default)]
+pub struct SvgResources {
+    map: HashMap<String, SvgImage>,
+}
+
+impl SvgResources {
+    pub fn get(&self, href: &str) -> Option<&SvgImage> {
+        self.map.get(href.trim())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Carga los `image` de `svg` y los de los SVG que estos usen. `base`: la URL del
+    /// documento SVG. Sin `loader` es el modo seguro de un SVG usado como imagen (`<img>`,
+    /// fondos: SVG Integration §4, *secure static mode*): solo se cargan URLs `data:`.
+    pub fn load(
+        &mut self,
+        svg: &bf_svg::Svg,
+        base: Option<&Url>,
+        loader: Option<&dyn ResourceLoader>,
+    ) {
+        self.load_depth(svg, base, loader, 0);
+    }
+
+    fn load_depth(
+        &mut self,
+        svg: &bf_svg::Svg,
+        base: Option<&Url>,
+        loader: Option<&dyn ResourceLoader>,
+        depth: u32,
+    ) {
+        if depth >= SVG_IMAGE_DEPTH {
+            return;
+        }
+        for href in svg.image_hrefs() {
+            if self.map.contains_key(&href) {
+                continue;
+            }
+            let Ok(url) = Url::parse(&href, base) else {
+                continue;
+            };
+            let res = if url.scheme == "data" {
+                bf_infra::resource::load_local(&url, &[])
+            } else {
+                loader.and_then(|l| l.load(&url))
+            };
+            let Some(res) = res else {
+                continue;
+            };
+            let fragment = href.split_once('#').map(|(_, f)| f);
+            match decode(&res.bytes, res.content_type.as_deref(), fragment) {
+                Ok(Loaded::Bitmap(p)) => {
+                    self.map.insert(href, SvgImage::Bitmap(Arc::new(p)));
+                }
+                Ok(Loaded::Animated(a)) => {
+                    self.map
+                        .insert(href, SvgImage::Bitmap(a.pixmaps[0].clone()));
+                }
+                Ok(Loaded::Svg(s, _)) => {
+                    // Se registra antes de bajar: un ciclo de referencias se corta aquí.
+                    self.map.insert(href, SvgImage::Svg(s.clone()));
+                    self.load_depth(&s, Some(&url), loader, depth + 1);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+}
 
 /// Sobremuestreo de los SVG: se rasterizan al doble del tamaño CSS para que se vean nítidos
 /// también con DPR 2 (el rasterizador reduce con filtro bilineal).
@@ -72,6 +156,8 @@ pub struct PageImages {
     pub svgs: HashMap<String, Arc<bf_svg::Svg>>,
     /// GIF/APNG con más de un fotograma, por URL.
     pub animations: HashMap<String, Arc<Animation>>,
+    /// Recursos de los `image` de los SVG de la página.
+    pub svg_resources: SvgResources,
     /// Rasterizados de SVG por (URL, ancho, alto) en píxeles.
     svg_cache: Mutex<HashMap<(String, u32, u32), Arc<Pixmap>>>,
     /// URL del contenido de cada `<img>`/`<input type=image>`.
@@ -121,7 +207,13 @@ impl PageImages {
         {
             return Some(p.clone());
         }
-        let pixmap = Arc::new(svg::rasterize(&svg.tree(width, height), pw, ph, fonts)?);
+        let pixmap = Arc::new(svg::rasterize_with(
+            &svg.tree(width, height),
+            pw,
+            ph,
+            fonts,
+            &self.svg_resources,
+        )?);
         let mut cache = self.svg_cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() >= SVG_CACHE {
             cache.clear();
@@ -374,6 +466,11 @@ pub fn load_images(
         }
     }
     inline_svgs(doc, styles, &mut images);
+    // Los SVG en línea son parte del documento: sus `image` se cargan como las del HTML.
+    let inline: Vec<Arc<bf_svg::Svg>> = images.svgs.values().cloned().collect();
+    for svg in inline {
+        images.svg_resources.load(&svg, Some(base), Some(loader));
+    }
     for style in styles.values() {
         for img in style.background_image.0.iter().chain(&style.mask_image.0) {
             if let Image::Url(u) = img {
@@ -433,6 +530,9 @@ pub fn load_images(
                 images.by_url.insert(href, Arc::new(p));
             }
             Ok(Loaded::Svg(svg, p)) => {
+                // SVG como imagen: modo seguro, sin recursos externos.
+                let url = Url::parse(&href, Some(base)).ok();
+                images.svg_resources.load(&svg, url.as_ref(), None);
                 images.by_url.insert(href.clone(), Arc::new(p));
                 images.svgs.insert(href, svg);
             }

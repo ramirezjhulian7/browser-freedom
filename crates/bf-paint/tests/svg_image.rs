@@ -6,7 +6,7 @@ use bf_css::selectors::MatchContext;
 use bf_html::{ParseOptions, parse_document};
 use bf_infra::{FileLoader, Url};
 use bf_layout::{Size, TestFont, layout_document_with_images};
-use bf_paint::images::rasterize_svg;
+use bf_paint::images::{SvgResources, rasterize_svg, rasterize_svg_with};
 use bf_paint::{Pixmap, build_display_list_with_images, load_images, render};
 use bf_style::style_document;
 use bf_style::values::color::Rgba;
@@ -208,4 +208,62 @@ fn markers_on_vertices() {
         assert_eq!(px(&p, x, y), (255, 0, 0, 255), "({x}, {y})");
     }
     assert_eq!(px(&p, 20, 20).3, 0);
+}
+
+/// Todos los bytes en `%XX` (para meterlos en una URL `data:` dentro de un atributo).
+fn pct(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("%{b:02X}")).collect()
+}
+
+/// BMP de 2×1 a 24 bits: rojo a la izquierda, azul a la derecha.
+fn bmp_red_blue() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&(14u32 + 40 + 8).to_le_bytes());
+    b.extend_from_slice(&[0, 0, 0, 0]);
+    b.extend_from_slice(&54u32.to_le_bytes());
+    b.extend_from_slice(&40u32.to_le_bytes());
+    b.extend_from_slice(&2i32.to_le_bytes());
+    b.extend_from_slice(&1i32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    b.extend_from_slice(&[0; 24]);
+    // Una fila (BGR), rellena a 4 bytes.
+    b.extend_from_slice(&[0, 0, 255, 255, 0, 0, 0, 0]);
+    b
+}
+
+/// Elemento `image` (SVG 2 §12.3) con URLs `data:`: un bitmap estirado con
+/// `preserveAspectRatio="none"`, un SVG (por `xlink:href`) con su viewport en el rectángulo
+/// del elemento, y `meet` centrando un bitmap.
+#[test]
+fn image_element_with_data_urls() {
+    let inner = pct(format!(
+        "<svg {SVG_NS} viewBox='0 0 10 10'><rect width='10' height='10' fill='lime'/></svg>"
+    )
+    .as_bytes());
+    let bmp = pct(&bmp_red_blue());
+    let src = format!(
+        "<svg {SVG_NS} xmlns:xlink='http://www.w3.org/1999/xlink' width='60' height='20'>\
+         <image href='data:image/bmp,{bmp}' width='20' height='10' preserveAspectRatio='none'/>\
+         <image xlink:href='data:image/svg+xml,{inner}' x='20' width='20' height='20' preserveAspectRatio='none'/>\
+         <image href='data:image/bmp,{bmp}' x='40' width='20' height='20'/>\
+         </svg>"
+    );
+    let svg = Svg::parse(&src).expect("SVG válido");
+    assert_eq!(svg.image_hrefs().len(), 2);
+    let mut res = SvgResources::default();
+    res.load(&svg, None, None);
+    let p = rasterize_svg_with(&svg.tree(60.0, 20.0), 60, 20, None, &res).expect("bitmap");
+    assert_eq!(px(&p, 2, 5), (255, 0, 0, 255));
+    assert_eq!(px(&p, 17, 5), (0, 0, 255, 255));
+    assert_eq!(px(&p, 5, 15).3, 0);
+    assert_eq!(px(&p, 30, 15), (0, 255, 0, 255));
+    // `xMidYMid meet`: 2×1 en 20×20 ocupa y ∈ [5, 15).
+    assert_eq!(px(&p, 50, 2).3, 0);
+    assert_eq!(px(&p, 42, 10), (255, 0, 0, 255));
+    assert_eq!(px(&p, 50, 18).3, 0);
+    // Sin recursos no se pinta nada.
+    let empty = rasterize_svg(&svg.tree(60.0, 20.0), 60, 20, None).expect("bitmap");
+    assert_eq!(px(&empty, 2, 5).3, 0);
 }
