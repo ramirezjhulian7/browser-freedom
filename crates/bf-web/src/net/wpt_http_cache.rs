@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bf_infra::Url;
-use bf_net::{CacheMode, CacheUse, Headers, HttpCache};
 use bf_net::cache::{CacheRequest, CacheResponse};
+use bf_net::{CacheMode, CacheUse, Headers, HttpCache};
 
 use super::headers::HeaderList;
 use super::{NetResponse, NetResult};
@@ -508,7 +508,10 @@ impl JsonParser<'_> {
             _ => {
                 let start = self.i;
                 while self.i < self.s.len()
-                    && matches!(self.s[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                    && matches!(
+                        self.s[self.i],
+                        b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+                    )
                 {
                     self.i += 1;
                 }
