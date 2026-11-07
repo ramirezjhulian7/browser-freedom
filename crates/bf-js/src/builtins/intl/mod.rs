@@ -7,6 +7,7 @@ pub mod cldr;
 pub mod collator;
 pub mod date_time_format;
 pub mod decimal;
+pub mod duration_format;
 pub mod locale;
 // E8
 pub mod list_format;
@@ -14,6 +15,9 @@ pub mod locale_object;
 pub mod number_format;
 pub mod plural_rules;
 pub mod relative_time_format;
+pub mod segment;
+pub mod segment_tables;
+pub mod segmenter;
 
 use crate::builtins::web::{WebData, str_value};
 use crate::heap::{Gc, Trace, Tracer};
@@ -33,6 +37,10 @@ pub enum IntlData {
     Locale(Box<locale_object::LocaleObj>),
     ListFormat(Box<list_format::ListFormat>),
     RelativeTimeFormat(Box<relative_time_format::RelativeTimeFormat>),
+    Segmenter(Box<segmenter::Segmenter>),
+    Segments(Box<segmenter::Segments>),
+    SegmentIterator(Box<segmenter::SegmentIterator>),
+    DurationFormat(Box<duration_format::DurationFormat>),
 }
 
 impl Trace for IntlData {
@@ -46,7 +54,13 @@ impl Trace for IntlData {
                     t.opt(nf.bound_format);
                 }
             }
-            IntlData::PluralRules(_) | IntlData::Locale(_) | IntlData::ListFormat(_) => {}
+            IntlData::PluralRules(_)
+            | IntlData::Locale(_)
+            | IntlData::ListFormat(_)
+            | IntlData::Segmenter(_)
+            | IntlData::Segments(_)
+            | IntlData::SegmentIterator(_)
+            | IntlData::DurationFormat(_) => {}
         }
     }
 }
@@ -66,6 +80,8 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     locale_object::init(agent, realm, intl);
     list_format::init(agent, realm, intl);
     relative_time_format::init(agent, realm, intl);
+    segmenter::init(agent, realm, intl);
+    duration_format::init(agent, realm, intl);
 }
 
 /// Los slots de Intl de `v`.

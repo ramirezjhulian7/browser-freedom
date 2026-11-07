@@ -101,7 +101,7 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 /// Los patrones de CLDR para el locale, el tipo y el estilo.
-fn patterns_for(locale: &str, kind: &str, style: &str) -> [&'static str; 4] {
+pub(crate) fn patterns_for(locale: &str, kind: &str, style: &str) -> [&'static str; 4] {
     let lang = locale.split('-').next().unwrap_or("en");
     let base = match kind {
         "disjunction" => "or",
@@ -158,7 +158,7 @@ pub(crate) fn string_list_from_iterable(
 }
 
 /// Una parte de la salida: (es elemento, texto).
-type Part = (bool, String);
+pub(crate) type Part = (bool, String);
 
 /// Aplica un patrón `…{0}…{1}…` a dos listas de partes.
 fn apply(pattern: &str, first: Vec<Part>, second: Vec<Part>) -> Vec<Part> {
@@ -186,7 +186,7 @@ fn apply(pattern: &str, first: Vec<Part>, second: Vec<Part>) -> Vec<Part> {
 }
 
 /// CreatePartsFromList ( listFormat, list ) (§13.5.2).
-fn create_parts(lf: &ListFormat, list: &[String]) -> Vec<Part> {
+pub(crate) fn create_parts(lf: &ListFormat, list: &[String]) -> Vec<Part> {
     let el = |s: &String| vec![(true, s.clone())];
     let [start, middle, end, two] = lf.patterns;
     match list.len() {
