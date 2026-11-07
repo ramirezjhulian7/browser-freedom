@@ -311,7 +311,6 @@ impl<'a> Layout<'a> {
             GridTemplate::Subgrid(_) => &GridTemplate::None,
             t => t,
         };
-        let axis = explicit_axis(template, &cs.grid_template_areas, !rows, space, gap);
         let mut children: Vec<&'a LayoutBox> = Vec::new();
         let mut abs = Vec::new();
         for c in &container.children {
@@ -324,6 +323,22 @@ impl<'a> Layout<'a> {
             }
         }
         children.sort_by_key(|c| c.style.order.0);
+        let axis = explicit_axis(template, &cs.grid_template_areas, !rows, space, gap);
+        let hyp = self.lanes_hypothetical_sizes(
+            container,
+            template,
+            rows,
+            &children,
+            &axis,
+            (space, gap, size),
+            width,
+        );
+        let axis = match hyp {
+            Some(h) => {
+                explicit_axis_hyp(template, &cs.grid_template_areas, !rows, space, gap, Some(&h))
+            }
+            None => axis,
+        };
         let placements: Vec<Placement> = children
             .iter()
             .map(|c| {
@@ -407,6 +422,129 @@ impl<'a> Layout<'a> {
             items,
             abs,
         }
+    }
+
+    /// Tamaños hipotéticos de las pistas de un `repeat(auto-fill|auto-fit)` con pistas
+    /// intrínsecas (§3.1.1), para contar las repeticiones: se ignora la colocación explícita
+    /// (todos los ítems se auto-colocan con su span), no se colapsa ninguna pista, la repetición
+    /// se expande `2 + (span mayor - 2) / (pistas de la repetición)` veces (redondeado hacia
+    /// abajo; una sola si el span mayor es 1) y cada pista de la repetición toma el mayor
+    /// tamaño de sus copias. `None` si no hay tal repetición.
+    #[allow(clippy::too_many_arguments)]
+    fn lanes_hypothetical_sizes(
+        &mut self,
+        container: &'a LayoutBox,
+        template: &GridTemplate,
+        rows: bool,
+        children: &[&'a LayoutBox],
+        axis: &ExplicitAxis,
+        (space, gap, size): (RepeatSpace, f32, Option<f32>),
+        width: Option<f32>,
+    ) -> Option<Vec<f32>> {
+        let GridTemplate::List(list) = template else {
+            return None;
+        };
+        if !has_intrinsic_auto_repeat(list) {
+            return None;
+        }
+        let (before, inner) = auto_repeat_parts(list)?;
+        let per = inner
+            .iter()
+            .filter(|i| matches!(i, TrackListItem::Track(_)))
+            .count()
+            .max(1);
+        let cs = &container.style;
+        let spans: Vec<usize> = children
+            .iter()
+            .map(|c| {
+                let s = &c.style;
+                let p = if rows {
+                    resolve_placement(&s.grid_row_start, &s.grid_row_end, axis)
+                } else {
+                    resolve_placement(&s.grid_column_start, &s.grid_column_end, axis)
+                };
+                match p {
+                    Placement::Definite(a, b) => (b - a).max(1) as usize,
+                    Placement::Auto(span) => span.max(1) as usize,
+                }
+            })
+            .collect();
+        let largest = spans.iter().copied().max().unwrap_or(1);
+        let times = if largest < 2 {
+            1
+        } else {
+            2 + (largest - 2) / per
+        };
+        let expanded: Vec<TrackListItem> = list
+            .iter()
+            .map(|i| match i {
+                TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, inner) => {
+                    TrackListItem::Repeat(RepeatCount::Count(times as u32), inner.clone())
+                }
+                i => i.clone(),
+            })
+            .collect();
+        let hax = explicit_axis(
+            &GridTemplate::List(expanded),
+            &GridTemplateAreas::None,
+            !rows,
+            space,
+            gap,
+        );
+        let n = hax.count;
+        if n == 0 {
+            return None;
+        }
+        let auto = if rows {
+            &cs.grid_auto_rows.0
+        } else {
+            &cs.grid_auto_columns.0
+        };
+        let mut tracks = build_tracks(&hax, auto, 0, n, size);
+        let mut contribs = Vec::new();
+        for (&b, &span) in children.iter().zip(&spans) {
+            let span = span.min(n);
+            let outer_w = rows.then(|| {
+                let cb_w = width.unwrap_or(0.0);
+                let (w, ml, mr) = self.lanes_stack_width(b, cb_w);
+                w + border_edges(&b.style).horizontal()
+                    + padding_edges(&b.style, cb_w).horizontal()
+                    + ml
+                    + mr
+            });
+            for s in 0..=n - span {
+                let it = GridItem {
+                    b,
+                    col: if rows { (0, 1) } else { (s, s + span) },
+                    row: if rows { (s, s + span) } else { (0, 1) },
+                    extra: [0.0; 4],
+                    area_w: None,
+                    empty: false,
+                };
+                contribs.push(match outer_w {
+                    Some(w) => self.row_contrib(&it, cs, &tracks, gap, w).0,
+                    None => self.column_contrib(&it, &tracks, gap, None),
+                });
+            }
+        }
+        let sizing = size.map_or(Space::MaxContent, Space::Definite);
+        size_tracks(
+            &mut tracks,
+            &contribs,
+            gap,
+            sizing,
+            (0.0, f32::INFINITY),
+            false,
+        );
+        let mut hyp = vec![0.0f32; per];
+        for c in 0..times {
+            for (j, h) in hyp.iter_mut().enumerate() {
+                if let Some(t) = tracks.get(before + c * per + j) {
+                    *h = h.max(t.base);
+                }
+            }
+        }
+        Some(hyp)
     }
 
     /// Rejilla falsa (las pistas de lanes como columnas y una sola fila) para reutilizar el

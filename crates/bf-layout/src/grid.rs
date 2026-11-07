@@ -34,7 +34,7 @@ use bf_style::ComputedStyle;
 use bf_style::properties::types::{
     BoxSizing, ContentAlign, Direction, Display, Gap, GridLine, GridTemplate, GridTemplateAreas,
     ItemAlign, MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth,
-    TrackListItem, TrackSize,
+    TrackListItem, TrackSize, has_intrinsic_auto_repeat,
 };
 
 use crate::block::{
@@ -223,16 +223,55 @@ fn fixed_sum(items: &[TrackListItem], times: usize, basis: Option<f32>) -> (f32,
     (sum, n)
 }
 
-/// Número de repeticiones de `repeat(auto-fill|auto-fit)` (§7.2.3.2).
-fn auto_repeat_count(items: &[TrackListItem], space: RepeatSpace, gap: f32) -> usize {
-    let Some(inner) = items.iter().find_map(|i| match i {
-        TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, inner) => Some(inner),
-        _ => None,
-    }) else {
+/// E5: la lista de `repeat(auto-fill|auto-fit)` y el número de pistas que la preceden.
+fn auto_repeat_parts(items: &[TrackListItem]) -> Option<(usize, &[TrackListItem])> {
+    let i = items.iter().position(|i| {
+        matches!(
+            i,
+            TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, _)
+        )
+    })?;
+    let TrackListItem::Repeat(_, inner) = &items[i] else {
+        return None;
+    };
+    Some((fixed_sum(&items[..i], 1, None).1, inner))
+}
+
+/// Número de repeticiones de `repeat(auto-fill|auto-fit)` (§7.2.3.2). E5: `hyp` son los tamaños
+/// hipotéticos de las pistas de la repetición (CSS Grid 3 §3.1.1), uno por pista; sin ellos,
+/// una repetición con pistas intrínsecas se hace una sola vez (la alternativa que deja abierta
+/// la cuestión de §3.1.1 para Grid).
+fn auto_repeat_count(
+    items: &[TrackListItem],
+    space: RepeatSpace,
+    gap: f32,
+    hyp: Option<&[f32]>,
+) -> usize {
+    let Some((_, inner)) = auto_repeat_parts(items) else {
         return 1;
     };
     let (other_sum, other_count) = fixed_sum(items, 1, space.basis);
-    let (rep_sum, rep_count) = fixed_sum(inner, 1, space.basis);
+    let (rep_sum, rep_count) = if has_intrinsic_auto_repeat(items) {
+        let Some(hyp) = hyp else {
+            return 1;
+        };
+        let tracks = inner.iter().filter_map(|i| match i {
+            TrackListItem::Track(t) => Some(t),
+            _ => None,
+        });
+        let (mut sum, mut n) = (0.0, 0);
+        for (k, t) in tracks.enumerate() {
+            sum += if is_fixed_size(t) {
+                repeat_track_size(t, space.basis)
+            } else {
+                hyp.get(k).copied().unwrap_or(0.0)
+            };
+            n += 1;
+        }
+        (sum, n)
+    } else {
+        fixed_sum(inner, 1, space.basis)
+    };
     if rep_count == 0 {
         return 1;
     }
@@ -249,6 +288,16 @@ fn auto_repeat_count(items: &[TrackListItem], space: RepeatSpace, gap: f32) -> u
     (n.max(1.0) as usize).min(MAX_LINE as usize)
 }
 
+/// E5: `<fixed-size>` (§7.2.1): alguna de las funciones es una longitud (sin `fr` mínimo).
+fn is_fixed_size(t: &TrackSize) -> bool {
+    let fixed = |b: &TrackBreadth| matches!(b, TrackBreadth::Length(_));
+    match t {
+        TrackSize::Breadth(b) => fixed(b),
+        TrackSize::MinMax(a, b) => fixed(a) || (fixed(b) && !matches!(a, TrackBreadth::Flex(_))),
+        TrackSize::FitContent(_) => false,
+    }
+}
+
 fn explicit_axis(
     template: &GridTemplate,
     areas: &GridTemplateAreas,
@@ -256,11 +305,24 @@ fn explicit_axis(
     space: RepeatSpace,
     gap: f32,
 ) -> ExplicitAxis {
+    explicit_axis_hyp(template, areas, columns, space, gap, None)
+}
+
+/// E5: `explicit_axis` con los tamaños hipotéticos de una repetición automática con pistas
+/// intrínsecas (CSS Grid 3 §3.1.1).
+fn explicit_axis_hyp(
+    template: &GridTemplate,
+    areas: &GridTemplateAreas,
+    columns: bool,
+    space: RepeatSpace,
+    gap: f32,
+    hyp: Option<&[f32]>,
+) -> ExplicitAxis {
     let mut sizes = Vec::new();
     let mut names = vec![Vec::new()];
     let mut auto_fit = None;
     if let GridTemplate::List(items) = template {
-        let n = auto_repeat_count(items, space, gap);
+        let n = auto_repeat_count(items, space, gap, hyp);
         expand_tracks(items, n, &mut sizes, &mut names, &mut auto_fit);
     }
     let mut count = sizes.len();
