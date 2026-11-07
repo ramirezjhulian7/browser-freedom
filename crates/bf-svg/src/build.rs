@@ -1389,6 +1389,19 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// `patternTransform`/`gradientTransform` de una cadena de `href`: el primero que esté
+    /// especificado. Un valor vacío o inválido cuenta como no especificado y no corta la herencia
+    /// (SVG 2 §14.4.1: «if this element has no defined … attribute»; WPT
+    /// `pservers/reftests/pattern-transform-empty-attr.svg`).
+    fn chain_transform(&self, chain: &[usize], name: &str) -> Transform {
+        chain
+            .iter()
+            .filter_map(|&c| self.node(c).attr(name))
+            .filter(|v| !v.trim().is_empty())
+            .find_map(geom::parse_transform)
+            .unwrap_or_default()
+    }
+
     /// Cadena de `href` de un `pattern` (él primero, SVG 2 §14.4.1).
     fn pattern_chain(&self, s: usize) -> Vec<usize> {
         let mut out = vec![s];
@@ -1412,9 +1425,7 @@ impl<'a> Builder<'a> {
         }
         let chain = self.pattern_chain(s);
         let attr = |name: &str| chain.iter().find_map(|&c| self.node(c).attr(name));
-        let pt = attr("patternTransform")
-            .and_then(geom::parse_transform)
-            .unwrap_or_default();
+        let pt = self.chain_transform(&chain, "patternTransform");
         if !pt.is_invertible() {
             return Err(());
         }
@@ -1529,12 +1540,7 @@ impl<'a> Builder<'a> {
         vp: Viewport,
         st: &St,
     ) -> Result<Option<Paint>, ()> {
-        let gt = self
-            .chain(s)
-            .iter()
-            .find_map(|&c| self.node(c).attr("gradientTransform"))
-            .and_then(geom::parse_transform)
-            .unwrap_or_default();
+        let gt = self.chain_transform(&self.chain(s), "gradientTransform");
         if !gt.is_invertible() {
             return Err(());
         }
@@ -1604,9 +1610,7 @@ impl<'a> Builder<'a> {
         } else {
             Transform::IDENTITY
         };
-        let gt = attr("gradientTransform")
-            .and_then(geom::parse_transform)
-            .unwrap_or_default();
+        let gt = self.chain_transform(&chain, "gradientTransform");
         let coord = |name: &str, default: &str, axis: Axis| -> f32 {
             let l = attr(name)
                 .and_then(parse_len)
