@@ -679,11 +679,11 @@ fn run(
             wake,
             last_wake: std::time::Instant::now(),
         };
-        let cookie = net.fetcher.cookies.cookie_header(url);
+        // Con las cookies del navegador en cada salto (`credentials` por omisión).
         let result = bf_net::streaming::fetch_streaming(
             url,
             &bf_net::RequestOptions::default(),
-            cookie.as_deref(),
+            Some(&net.fetcher.cookies),
             &mut sink,
         );
         let _ = sink.file.flush();
