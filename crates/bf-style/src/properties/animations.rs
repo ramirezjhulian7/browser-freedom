@@ -248,7 +248,10 @@ fn parse_linear_points(args: &[Vec<&ComponentValue>]) -> Option<TimingFunction> 
         i = end;
     }
     Some(TimingFunction::Points(
-        stops.into_iter().map(|(o, i)| (i.unwrap_or(0.0), o)).collect(),
+        stops
+            .into_iter()
+            .map(|(o, i)| (i.unwrap_or(0.0), o))
+            .collect(),
     ))
 }
 
@@ -585,7 +588,8 @@ impl ListItem for AnimationName {
                 if !s.is_empty()
                     && custom_ident(s)
                     && !s.eq_ignore_ascii_case("none")
-                    && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    && s.chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
                     && !s.starts_with(|c: char| c.is_ascii_digit())
                 {
                     s.clone()

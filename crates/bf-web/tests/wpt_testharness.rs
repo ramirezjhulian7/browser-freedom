@@ -103,7 +103,12 @@ fn animation_frames_run_on_the_virtual_clock() {
     let r = run(&root, "t/raf.html");
     assert_eq!(r[0].harness, Harness::Ok);
     assert_eq!(r[0].subtests.len(), 1);
-    assert_eq!(r[0].subtests[0].1, SubStatus::Pass, "{}", r[0].subtests[0].2);
+    assert_eq!(
+        r[0].subtests[0].1,
+        SubStatus::Pass,
+        "{}",
+        r[0].subtests[0].2
+    );
 }
 
 #[test]

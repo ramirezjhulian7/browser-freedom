@@ -246,9 +246,10 @@ impl TransformFunction {
         };
         // Una coma al final deja un argumento vacío (`translate(1px,)` es inválido), pero
         // `split_comma_separated` no lo devuelve.
-        if trim(&f.value).last().is_some_and(|v| {
-            matches!(v.token(), Some(bf_css::syntax::TokenKind::Comma))
-        }) {
+        if trim(&f.value)
+            .last()
+            .is_some_and(|v| matches!(v.token(), Some(bf_css::syntax::TokenKind::Comma)))
+        {
             return None;
         }
         let args: Vec<Vec<ComponentValue>> = split_comma_separated(&f.value);
@@ -510,13 +511,9 @@ impl TransformFunction {
                 RotateName::X => format!("rotateX({})", deg(*angle)),
                 RotateName::Y => format!("rotateY({})", deg(*angle)),
                 RotateName::Z => format!("rotateZ({})", deg(*angle)),
-                RotateName::ThreeD => format!(
-                    "rotate3d({}, {}, {}, {})",
-                    n(*x),
-                    n(*y),
-                    n(*z),
-                    deg(*angle)
-                ),
+                RotateName::ThreeD => {
+                    format!("rotate3d({}, {}, {}, {})", n(*x), n(*y), n(*z), deg(*angle))
+                }
             },
             TransformFunction::Skew { name, x, y } => match name {
                 SkewName::Skew if *y == 0.0 => format!("skew({})", deg(*x)),
@@ -692,7 +689,11 @@ impl PropValue for Translate {
         Some(Translate(Some(match items.as_slice() {
             [v] if is_ident(v, "none") => return Some(Translate(None)),
             [x] => (parse_length_percentage(x)?, zero(), zero()),
-            [x, y] => (parse_length_percentage(x)?, parse_length_percentage(y)?, zero()),
+            [x, y] => (
+                parse_length_percentage(x)?,
+                parse_length_percentage(y)?,
+                zero(),
+            ),
             [x, y, z] => (
                 parse_length_percentage(x)?,
                 parse_length_percentage(y)?,
@@ -702,11 +703,13 @@ impl PropValue for Translate {
         })))
     }
     fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
-        Translate(
-            self.0
-                .as_ref()
-                .map(|(x, y, z)| (x.compute(&ctx.len), y.compute(&ctx.len), z.compute(&ctx.len))),
-        )
+        Translate(self.0.as_ref().map(|(x, y, z)| {
+            (
+                x.compute(&ctx.len),
+                y.compute(&ctx.len),
+                z.compute(&ctx.len),
+            )
+        }))
     }
     fn to_css(&self) -> String {
         match &self.0 {
@@ -754,7 +757,9 @@ impl PropValue for Rotate {
                 _ => return None,
             },
             [a, b, c, d] => {
-                if let (Some(x), Some(y), Some(z)) = (parse_number(a), parse_number(b), parse_number(c)) {
+                if let (Some(x), Some(y), Some(z)) =
+                    (parse_number(a), parse_number(b), parse_number(c))
+                {
                     (3, [x, y, z])
                 } else if let (Some(x), Some(y), Some(z)) =
                     (parse_number(b), parse_number(c), parse_number(d))
@@ -899,7 +904,10 @@ mod tests {
     fn parses_and_composes() {
         let t = parse("translate(10px, 20px) scale(2)").unwrap();
         assert_eq!(t.to_css(), "translate(10px, 20px) scale(2)");
-        assert_eq!(matrix_css(&t.matrix(0.0, 0.0)), "matrix(2, 0, 0, 2, 10, 20)");
+        assert_eq!(
+            matrix_css(&t.matrix(0.0, 0.0)),
+            "matrix(2, 0, 0, 2, 10, 20)"
+        );
         let r = parse("rotate(90deg)").unwrap();
         assert_eq!(matrix_css(&r.matrix(0.0, 0.0)), "matrix(0, 1, -1, 0, 0, 0)");
         let p = parse("translateX(50%)").unwrap();

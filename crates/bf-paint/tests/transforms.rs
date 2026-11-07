@@ -92,4 +92,3 @@ fn transformed_descendants_and_clip() {
     assert_eq!(px(&p, 90, 10), GREEN);
     assert_eq!(px(&p, 120, 10), WHITE);
 }
-
