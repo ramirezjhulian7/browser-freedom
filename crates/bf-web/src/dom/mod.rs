@@ -327,11 +327,32 @@ pub fn this_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
 }
 
 /// Un argumento que debe ser un `Node` (TypeError si no lo es).
+///
+/// E4: un nodo de otra ventana (un `<iframe>`) no se puede usar: cada `NodeRef` se interpreta
+/// contra el `WebContext` de la ventana en curso y los documentos de dos ventanas no comparten
+/// arena, así que adoptarlo o insertarlo entre browsing contexts (DOM §4.5 "adopt") lanza
+/// `NotSupportedError` en vez de tocar un nodo equivocado.
 pub fn arg_node(agent: &mut Agent, v: &Value, what: &str) -> JsResult<NodeRef> {
     match unwrap_node(agent, v) {
+        Some(n) if foreign_realm(agent, v, n).is_some() => {
+            throw_dom(agent, DomException::NotSupportedError)
+        }
         Some(n) => Ok(n),
         None => agent.type_error(&format!("{what} is not of type 'Node'")),
     }
+}
+
+/// E4: si el wrapper `v` del nodo `n` es de la ventana de otro realm, ese realm.
+pub fn foreign_realm(agent: &Agent, v: &Value, n: NodeRef) -> Option<bf_js::vm::RealmId> {
+    let Value::Object(o) = v else {
+        return None;
+    };
+    let current = agent.current_realm;
+    if agent.host_lookup(current, n.key()) == Some(*o) {
+        return None;
+    }
+    (0..agent.realms.len())
+        .find(|&r| r != current && agent.host_lookup(r, n.key()) == Some(*o))
 }
 
 /// Un `Node?`.

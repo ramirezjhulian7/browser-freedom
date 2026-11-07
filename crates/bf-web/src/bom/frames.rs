@@ -58,6 +58,8 @@ pub struct Frame {
 #[derive(Debug, Default)]
 pub struct Frames {
     pub list: Vec<Frame>,
+    /// Navegaciones hechas (para saber si [`sync_frames`] hizo algo).
+    navigations: u64,
 }
 
 fn frames(agent: &Agent) -> Option<&Frames> {
@@ -281,9 +283,7 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
     if let Some(net) = super::script::net_of(agent, parent) {
         super::script::install_net(agent, realm, net);
     }
-    if let Some(loader) =
-        super::script::script_env(agent, parent).map(super::script::ScriptEnv::loader)
-    {
+    if let Some(loader) = window_loader(agent, parent) {
         super::script::install_frame_scripting(agent, realm, &blank, loader);
     }
     frames_mut(agent).list.push(Frame {
@@ -297,9 +297,21 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
     realm
 }
 
+/// El loader de los recursos de la ventana `realm`: el de sus scripts (el navegador) o, en el
+/// runner de WPT, que parsea con su propio parser, el de sus `PageResources`.
+fn window_loader(agent: &Agent, realm: RealmId) -> Option<Arc<dyn ResourceLoader>> {
+    super::script::script_env(agent, realm)
+        .map(super::script::ScriptEnv::loader)
+        .or_else(|| {
+            agent
+                .realm_data::<crate::html::scripting::PageResources>(realm)
+                .map(|r| r.loader.clone())
+        })
+}
+
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<(String, Url)> {
-    let loader: Arc<dyn ResourceLoader> = super::script::script_env(agent, realm)?.loader();
+    let loader = window_loader(agent, realm)?;
     let res = loader.load(url)?;
     let (text, _) = encoding::decode(&res.bytes, Encoding::Utf8);
     Some((text, res.url))
@@ -321,7 +333,9 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     let opaque = parent_doc_sandbox
         .as_ref()
         .is_some_and(|t| !t.iter().any(|t| t == "allow-same-origin"));
-    if let Some(f) = frames_mut(agent).list.iter_mut().find(|f| f.realm == realm) {
+    let all = frames_mut(agent);
+    all.navigations += 1;
+    if let Some(f) = all.list.iter_mut().find(|f| f.realm == realm) {
         f.opaque = opaque;
     }
     let deep = depth_of(agent, realm) > MAX_DEPTH;
@@ -380,8 +394,10 @@ fn load_document(
 
 /// Pone al día los marcos de la ventana `realm` y de sus marcos: crea los de los `<iframe>`
 /// nuevos, vuelve a navegar los que cambiaron `src`/`srcdoc`, atiende las navegaciones
-/// pedidas desde los marcos y olvida los de los elementos que ya no están.
-pub fn sync_frames(agent: &mut Agent, realm: RealmId) {
+/// pedidas desde los marcos y olvida los de los elementos que ya no están. Devuelve si navegó
+/// algún marco (y por tanto pudo haber disparado eventos o encolado tareas).
+pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
+    let before = frames(agent).map_or(0, |f| f.navigations);
     // Navegaciones pedidas desde dentro de los marcos.
     let requested: Vec<(RealmId, Url, bool)> =
         frame_requests(agent).borrow_mut().drain(..).collect();
@@ -391,6 +407,7 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) {
         }
     }
     sync_level(agent, realm, 0);
+    frames(agent).map_or(0, |f| f.navigations) != before
 }
 
 fn sync_level(agent: &mut Agent, realm: RealmId, depth: usize) {

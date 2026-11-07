@@ -1026,6 +1026,40 @@ fn srcdoc_frame_has_its_own_window_and_document() {
     assert_eq!(p.show("loads"), "1");
 }
 
+/// E4: adoptar o insertar un nodo de otra ventana (DOM §4.5 "adopt" entre browsing contexts)
+/// lanza `NotSupportedError` sin tocar ninguno de los dos documentos (antes: pánico en
+/// `adopt_into`, `CustomElementRegistry-constructor-and-callbacks-are-held-strongly.html`).
+#[test]
+fn nodes_from_another_window_cannot_be_adopted() {
+    let mut p = framed(
+        "<div id=d>hola</div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
+        &[],
+    );
+    let try_ = |what: &str| {
+        format!(
+            "(function () {{ var fd = document.getElementById('f').contentDocument;              try {{ {what}; return 'sin error'; }} catch (e) {{ return e.name; }} }})()"
+        )
+    };
+    assert_eq!(
+        p.show(&try_("fd.adoptNode(document.getElementById('d'))")),
+        "NotSupportedError"
+    );
+    assert_eq!(
+        p.show(&try_("fd.body.appendChild(document.createElement('b'))")),
+        "NotSupportedError"
+    );
+    assert_eq!(
+        p.show(&try_(
+            "document.body.appendChild(fd.getElementById('dentro'))"
+        )),
+        "NotSupportedError"
+    );
+    // Los dos documentos quedan como estaban; dentro de cada ventana, todo sigue igual.
+    assert!(p.truthy(
+        "var fd = document.getElementById('f').contentDocument;          document.getElementById('d').textContent === 'hola' &&          fd.getElementById('dentro').textContent === 'x' &&          fd.body.childNodes.length === 1 &&          fd.body.appendChild(fd.createElement('i')).parentNode === fd.body &&          fd.adoptNode(fd.createElement('u')).ownerDocument === fd"
+    ));
+}
+
 #[test]
 fn src_frame_loads_through_the_loader() {
     let mut p = framed(

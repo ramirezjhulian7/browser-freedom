@@ -506,6 +506,10 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         p.feed(&doc.html, host);
         p.finish(host);
     });
+    // E4: los `<iframe>` (HTML §4.8.5), como en el hilo de la pestaña: tras el parseo y cada
+    // vez que el bucle queda sin trabajo (srcdoc, src servido por wptserve, about:blank, el
+    // `load` del elemento).
+    crate::bom::frames::sync_frames(&mut rt.agent, realm);
     // El bucle de eventos hasta el completion callback.
     loop {
         if rt
@@ -531,6 +535,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             Err(Throw::Value(_)) => {}
         }
         with_parser(&mut rt.agent, realm, |p, host| p.run_tasks(host));
+        if crate::bom::frames::sync_frames(&mut rt.agent, realm) {
+            continue;
+        }
         if rt
             .agent
             .embedder_data::<Report>()

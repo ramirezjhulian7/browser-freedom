@@ -111,6 +111,36 @@ fn animation_frames_run_on_the_virtual_clock() {
     );
 }
 
+/// E4: el runner crea los marcos de los `<iframe>` (HTML §4.8.5) como el hilo de la pestaña:
+/// `srcdoc`, `src` servido desde la raíz y `about:blank`, con su `load`.
+#[test]
+fn iframes_get_their_documents() {
+    let root = fake_root("frames");
+    std::fs::write(
+        root.join("t/sub.html"),
+        "<title>sub</title><script>var marca = 42;</script>",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("t/frames.html"),
+        "<!doctype html><script src=/resources/testharness.js></script>         <script src=/resources/testharnessreport.js></script>         <iframe id=f srcdoc='<p id=x>hola</p>'></iframe>         <iframe id=g src=sub.html></iframe>         <script>           var b = document.createElement('iframe');           document.body.appendChild(b);           test(function () {             if (b.contentDocument.URL !== 'about:blank') throw new Error(b.contentDocument.URL);           }, 'blank');           var n = 0;           function check() {             if (++n < 2) return;             test(function () {               var d = document.getElementById('f').contentDocument;               if (d.getElementById('x').textContent !== 'hola') throw new Error('srcdoc');               var w = document.getElementById('g').contentWindow;               if (w.marca !== 42 || w.document.title !== 'sub') throw new Error('src');             }, 'load');             done();           }           document.getElementById('f').addEventListener('load', check);           document.getElementById('g').addEventListener('load', check);         </script>",
+    )
+    .unwrap();
+    let r = run(&root, "t/frames.html");
+    assert_eq!(r[0].harness, Harness::Ok, "{:?}", r[0].subtests);
+    let st: Vec<(&str, SubStatus)> = r[0]
+        .subtests
+        .iter()
+        .map(|(n, s, _)| (n.as_str(), *s))
+        .collect();
+    assert_eq!(
+        st,
+        [("blank", SubStatus::Pass), ("load", SubStatus::Pass)],
+        "{:?}",
+        r[0].subtests
+    );
+}
+
 #[test]
 fn any_js_wrapper_and_meta() {
     let root = fake_root("any");
