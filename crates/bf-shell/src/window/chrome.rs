@@ -217,6 +217,9 @@ impl UrlField {
 
     fn delete_selection(&mut self) -> bool {
         let Some((start, end)) = self.selection() else {
+            // Un ancla sobre el cursor (seleccionar todo en un campo vacío) no es selección,
+            // pero quedaría y volvería selección al escribir: la primera letra se perdería.
+            self.anchor = None;
             return false;
         };
         let (bs, be) = (self.byte(start), self.byte(end));
@@ -945,6 +948,26 @@ impl Chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_after_select_all_on_empty_field() {
+        let mut f = UrlField::default();
+        f.select_all();
+        for c in ["c", "a", "n"] {
+            f.insert(c);
+        }
+        assert_eq!(f.text, "can");
+        // Con texto, seleccionar todo y escribir lo reemplaza.
+        f.select_all();
+        f.insert("á");
+        f.insert("r");
+        assert_eq!(f.text, "ár");
+        f.select_all();
+        f.backspace();
+        f.insert("x");
+        f.insert("y");
+        assert_eq!(f.text, "xy");
+    }
 
     #[test]
     fn url_field_selection_and_paste() {
