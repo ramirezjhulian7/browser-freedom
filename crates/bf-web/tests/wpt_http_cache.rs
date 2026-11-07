@@ -12,7 +12,10 @@ use bf_web::html::testharness::{Harness, SubStatus, doc_limit, is_test_file, run
 fn wpt_fetch_http_cache() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt");
     let dir = root.join("fetch/http-cache");
-    assert!(dir.exists(), "falta tests/wpt/fetch/http-cache: tools/fetch-wpt");
+    assert!(
+        dir.exists(),
+        "falta tests/wpt/fetch/http-cache: tools/fetch-wpt"
+    );
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .expect("fetch/http-cache")
         .flatten()
