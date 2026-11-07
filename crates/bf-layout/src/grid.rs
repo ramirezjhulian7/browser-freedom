@@ -55,8 +55,7 @@ pub(crate) fn is_grid_container(b: &LayoutBox) -> bool {
     matches!(
         b.style.display,
         Display::Grid | Display::InlineGrid | Display::GridLanes | Display::InlineGridLanes
-    )
-        && !matches!(b.kind, BoxKind::Replaced { .. })
+    ) && !matches!(b.kind, BoxKind::Replaced { .. })
 }
 
 /// Baseline de un contenedor grid (§10.7): la que calculó [`Layout::grid_layout`] y dejó en el

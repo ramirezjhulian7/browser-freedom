@@ -334,9 +334,14 @@ impl<'a> Layout<'a> {
             width,
         );
         let axis = match hyp {
-            Some(h) => {
-                explicit_axis_hyp(template, &cs.grid_template_areas, !rows, space, gap, Some(&h))
-            }
+            Some(h) => explicit_axis_hyp(
+                template,
+                &cs.grid_template_areas,
+                !rows,
+                space,
+                gap,
+                Some(&h),
+            ),
             None => axis,
         };
         let placements: Vec<Placement> = children
@@ -618,7 +623,11 @@ impl<'a> Layout<'a> {
     }
 
     /// Layout de un contenedor grid lanes: fragmentos de los ítems y altura del contenido.
-    pub(super) fn lanes_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+    pub(super) fn lanes_layout(
+        &mut self,
+        container: &'a LayoutBox,
+        cb: Cb,
+    ) -> (Vec<Fragment>, f32) {
         let cs = &container.style;
         let rows = rows_are_lanes(cs);
         let setup = self.lanes_setup(container, rows, Some(cb.width), cb.height);
@@ -632,8 +641,7 @@ impl<'a> Layout<'a> {
         let mut first: Option<(f32, usize, usize)> = None;
         let content_h;
         // Líneas del eje de rejilla (inicio y fin de cada pista) para los absolutos.
-        let lines: (Vec<f32>, Vec<f32>);
-        if !rows {
+        let lines: (Vec<f32>, Vec<f32>) = if !rows {
             // --- Columnas como eje de rejilla ---
             let col_gap = gap_px(&cs.column_gap, Some(cb.width));
             let row_gap = gap_px(&cs.row_gap, cb.height);
@@ -730,7 +738,7 @@ impl<'a> Layout<'a> {
                 };
                 f.translate(0.0, dy + off);
             }
-            lines = (starts, ends);
+            (starts, ends)
         } else {
             // --- Filas como eje de rejilla ---
             let col_gap = gap_px(&cs.column_gap, Some(cb.width));
@@ -759,7 +767,10 @@ impl<'a> Layout<'a> {
                 let (c, _) = self.row_contrib(&it, cs, &tracks, row_gap, w + bp_h + ml + mr);
                 contribs.push(c);
             }
-            let stretch = matches!(cs.align_content, ContentAlign::Normal | ContentAlign::Stretch);
+            let stretch = matches!(
+                cs.align_content,
+                ContentAlign::Normal | ContentAlign::Stretch
+            );
             let (space, limits) = match cb.height {
                 Some(h) => (Space::Definite(h), (h, h)),
                 None => (Space::MaxContent, (hmin, hmax)),
@@ -893,15 +904,11 @@ impl<'a> Layout<'a> {
                 // En rtl el flujo va de derecha a izquierda; `fill-reverse` lo invierte.
                 let mirrored = rtl != fill_reverse;
                 let dx = if mirrored { range - x - outer - x } else { 0.0 };
-                let off = if rtl {
-                    cb.width - range - off
-                } else {
-                    off
-                };
+                let off = if rtl { cb.width - range - off } else { off };
                 f.translate(dx + off, 0.0);
             }
-            lines = (starts, ends);
-        }
+            (starts, ends)
+        };
         let baseline = first.map(|(_, _, i)| {
             let f = &out[i];
             crate::flex::first_baseline(f).unwrap_or(f.rect.bottom())
@@ -948,10 +955,11 @@ impl<'a> Layout<'a> {
                     .map(|l| l as usize)
             };
             if rows {
-                let top = to_index(l0)
-                    .map_or(padding_box.y, |l| cb.y + line_pos(starts, ends, l, true));
-                let bottom = to_index(l1)
-                    .map_or(padding_box.bottom(), |l| cb.y + line_pos(starts, ends, l, false));
+                let top =
+                    to_index(l0).map_or(padding_box.y, |l| cb.y + line_pos(starts, ends, l, true));
+                let bottom = to_index(l1).map_or(padding_box.bottom(), |l| {
+                    cb.y + line_pos(starts, ends, l, false)
+                });
                 Rect::new(
                     padding_box.x,
                     top,
