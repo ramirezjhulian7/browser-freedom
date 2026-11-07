@@ -746,8 +746,8 @@ impl Fetcher {
                 let req = http2::Request::from_http1(
                     method,
                     &url.scheme,
-                    &target,
-                    &headers,
+                    target,
+                    headers,
                     body.map(|(b, _)| b),
                 );
                 match conn.request(req) {
@@ -833,8 +833,8 @@ impl Fetcher {
                 http::write_request(
                     conn.get_mut(),
                     method,
-                    &target,
-                    &headers,
+                    target,
+                    headers,
                     body.map(|(b, _)| b),
                 )?;
                 let mut head = http::read_head(&mut conn)?;
