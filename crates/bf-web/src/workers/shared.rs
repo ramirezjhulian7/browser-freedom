@@ -135,7 +135,12 @@ fn shared_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let origin = crate::net::document_origin(agent);
     let partition = super::partition(agent);
-    let key = (partition, origin, url.serialize(false), options.name.clone());
+    let key = (
+        partition,
+        origin,
+        url.serialize(false),
+        options.name.clone(),
+    );
     let entry = {
         let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
         let alive = r.get(&key).filter(|e| {

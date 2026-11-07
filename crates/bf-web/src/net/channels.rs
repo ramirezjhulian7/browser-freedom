@@ -520,6 +520,12 @@ fn bc_name(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// nombre y origen, en orden de creación.
 fn bc_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (id, _) = this_bc(agent, a)?;
+    // WebIDL §3.7.4 (overload resolution): `message` es obligatorio.
+    if a.args.is_empty() {
+        return agent.type_error(
+            "Failed to execute 'postMessage' on 'BroadcastChannel': 1 argument required, but only 0 present.",
+        );
+    }
     let closed = state(agent).ports.ports.get(&id).is_none_or(|p| p.closed);
     if closed {
         return crate::net::dom_error(

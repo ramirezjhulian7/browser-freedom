@@ -920,10 +920,21 @@ mod tests {
         let (r, elapsed) = t.join().expect("hilo");
         assert_eq!(r, WaitResult::Terminated);
         assert!(elapsed < Duration::from_secs(2), "tardó {elapsed:?}");
-        assert!(notify(&b, 0, usize::MAX).is_empty(), "el waiter salió de la lista");
+        assert!(
+            notify(&b, 0, usize::MAX).is_empty(),
+            "el waiter salió de la lista"
+        );
         // Ya interrumpido: ni se queda esperando (aunque haya `timeout`).
         assert_eq!(
-            wait(&b, 0, 4, 0, Some(Duration::from_secs(10)), None, Some(&stop)),
+            wait(
+                &b,
+                0,
+                4,
+                0,
+                Some(Duration::from_secs(10)),
+                None,
+                Some(&stop)
+            ),
             WaitResult::Terminated
         );
     }

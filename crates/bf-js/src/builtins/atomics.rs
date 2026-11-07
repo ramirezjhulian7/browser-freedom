@@ -495,7 +495,9 @@ fn wait(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         agents::WaitResult::Ok => "ok",
         agents::WaitResult::TimedOut => "timed-out",
         agents::WaitResult::Terminated => {
-            return Err(Throw::Terminate("espera interrumpida o tiempo agotado".into()));
+            return Err(Throw::Terminate(
+                "espera interrumpida o tiempo agotado".into(),
+            ));
         }
     }))
 }
