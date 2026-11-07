@@ -334,3 +334,23 @@ fn form_associated_custom_elements() {
         "true,false,\"a\\nb\",false,1,true,true,TypeError,NotSupportedError"
     );
 }
+
+#[test]
+fn aria_element_reflection() {
+    let mut p = Page::new("<div id=a></div><div id=b></div><p id=x aria-owns='b a'></p>");
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'), b = document.getElementById('b'), \
+                 x = document.getElementById('x'); \
+             var byId = x.ariaOwnsElements.map(e => e.id).join(' '); \
+             x.ariaOwnsElements = [a]; \
+             var same = x.ariaOwnsElements === x.ariaOwnsElements; \
+             x.ariaActiveDescendantElement = b; \
+             var r = [byId, x.getAttribute('aria-owns'), x.ariaOwnsElements[0] === a, same, \
+                      Object.isFrozen(x.ariaOwnsElements), x.ariaActiveDescendantElement === b]; \
+             x.ariaOwnsElements = null; r.push(x.hasAttribute('aria-owns'), x.ariaOwnsElements); \
+             r.join()"
+        ),
+        "b a,,true,true,true,true,false,"
+    );
+}

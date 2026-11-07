@@ -178,6 +178,9 @@ pub fn register(agent: &mut Agent) {
     for name in ARIA_ATTRIBUTES {
         aria = aria.attribute(name, Some(element_aria_get), Some(element_aria_set));
     }
+    for (name, _, _) in ARIA_ELEMENT_ATTRIBUTES {
+        aria = aria.attribute(name, Some(aria_element_get), Some(aria_element_set));
+    }
     agent.host_extend_class(element, aria);
 }
 
@@ -1648,6 +1651,163 @@ fn aria_content_name(idl: &str) -> String {
         Some(rest) => format!("aria-{}", rest.to_ascii_lowercase()),
         None => idl.to_owned(),
     }
+}
+
+/// Los atributos de `ARIAMixin` que reflejan elementos (WAI-ARIA 1.3 §10.1; HTML §2.6.1
+/// "reflecting content attributes in IDL attributes", `Element?` y `FrozenArray<Element>?`):
+/// nombre IDL, atributo de contenido y si es una lista.
+const ARIA_ELEMENT_ATTRIBUTES: [(&str, &str, bool); 8] = [
+    (
+        "ariaActiveDescendantElement",
+        "aria-activedescendant",
+        false,
+    ),
+    ("ariaControlsElements", "aria-controls", true),
+    ("ariaDescribedByElements", "aria-describedby", true),
+    ("ariaDetailsElements", "aria-details", true),
+    ("ariaErrorMessageElements", "aria-errormessage", true),
+    ("ariaFlowToElements", "aria-flowto", true),
+    ("ariaLabelledByElements", "aria-labelledby", true),
+    ("ariaOwnsElements", "aria-owns", true),
+];
+
+/// Los *explicitly set attr-elements* de cada elemento y atributo, y el `FrozenArray` que se
+/// devolvió por última vez (para devolver el mismo objeto mientras no cambie).
+#[derive(Default)]
+struct AriaElements {
+    explicit: HashMap<(NodeRef, &'static str), Vec<NodeRef>>,
+    cached: HashMap<(NodeRef, &'static str), (Vec<NodeRef>, HostHandle)>,
+}
+
+fn aria_elements(agent: &mut Agent) -> &mut AriaElements {
+    let r = realm(agent);
+    if agent.realm_data::<AriaElements>(r).is_none() {
+        agent.set_realm_data(r, AriaElements::default());
+    }
+    agent
+        .realm_data_mut::<AriaElements>(r)
+        .expect("AriaElements")
+}
+
+/// El nombre del accessor en curso (`get ariaOwnsElements` → `ariaOwnsElements`).
+fn callee_accessor(agent: &mut Agent, a: &CallArgs<'_>) -> String {
+    let name = agent
+        .get_str(a.callee, "name")
+        .ok()
+        .and_then(|v| v.as_string().map(|s| s.to_string_lossy()))
+        .unwrap_or_default();
+    name.strip_prefix("get ")
+        .or_else(|| name.strip_prefix("set "))
+        .unwrap_or(&name)
+        .to_owned()
+}
+
+fn aria_element_entry(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+) -> Option<(&'static str, &'static str, bool)> {
+    let name = callee_accessor(agent, a);
+    ARIA_ELEMENT_ATTRIBUTES
+        .iter()
+        .copied()
+        .find(|(n, _, _)| *n == name)
+}
+
+/// El getter: los elementos fijados explícitamente (mientras el atributo valga `""`, como lo
+/// deja el setter) o los de los ids del atributo.
+fn aria_element_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some((idl, content, list)) = aria_element_entry(agent, a) else {
+        return Ok(Value::Null);
+    };
+    let n = this_node(agent, a)?;
+    let Some(value) = crate::html::elements::attr_value(agent, n, content) else {
+        return Ok(Value::Null);
+    };
+    let explicit = aria_elements(agent).explicit.get(&(n, idl)).cloned();
+    let els: Vec<NodeRef> = match explicit {
+        Some(els) if value.is_empty() => els,
+        _ => {
+            let ids = value.to_string_lossy().into_owned();
+            let ids: Vec<&str> = if list {
+                ids.split_ascii_whitespace().collect()
+            } else {
+                vec![ids.as_str()]
+            };
+            with_doc(agent, n.doc, |d| {
+                ids.iter()
+                    .filter_map(|id| d.get_element_by_id(&DomString::from(*id)))
+                    .map(|e| NodeRef::new(n.doc, e))
+                    .collect()
+            })
+        }
+    };
+    if !list {
+        return Ok(els.first().map_or(Value::Null, |e| wrap_node(agent, *e)));
+    }
+    if let Some((cached, h)) = aria_elements(agent).cached.get(&(n, idl))
+        && *cached == els
+    {
+        let h = *h;
+        return Ok(pinned(agent, h));
+    }
+    let values: Vec<Value> = els.iter().map(|e| wrap_node(agent, *e)).collect();
+    let arr = agent.create_array_from_list(&values)?;
+    agent.set_integrity_level(arr, true)?;
+    let v = Value::Object(arr);
+    let h = agent.host_pin(v.clone());
+    if let Some((_, old)) = aria_elements(agent).cached.insert((n, idl), (els, h)) {
+        agent.host_unpin(old);
+    }
+    Ok(v)
+}
+
+/// El setter: `null` quita el atributo; si no, el atributo vale `""` y se guardan los
+/// elementos.
+fn aria_element_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some((idl, content, list)) = aria_element_entry(agent, a) else {
+        return Ok(Value::Undefined);
+    };
+    let n = this_node(agent, a)?;
+    let v = a.arg(0);
+    let els: Option<Vec<NodeRef>> = if matches!(v, Value::Null | Value::Undefined) {
+        None
+    } else if list {
+        let Value::Object(o) = v else {
+            return agent.type_error("The provided value cannot be converted to a sequence.");
+        };
+        let len = agent.get_str(o, "length")?;
+        let len = agent.to_number(&len)? as usize;
+        let mut out = Vec::new();
+        for i in 0..len {
+            let item = agent.get_str(o, &i.to_string())?;
+            match unwrap_node(agent, &item)
+                .filter(|e| with_doc(agent, e.doc, |d| d.element(e.node).is_some()))
+            {
+                Some(e) => out.push(e),
+                None => return agent.type_error("Failed to convert value to 'Element'."),
+            }
+        }
+        Some(out)
+    } else {
+        match unwrap_node(agent, &v)
+            .filter(|e| with_doc(agent, e.doc, |d| d.element(e.node).is_some()))
+        {
+            Some(e) => Some(vec![e]),
+            None => return agent.type_error("Failed to convert value to 'Element'."),
+        }
+    };
+    match els {
+        None => {
+            aria_elements(agent).explicit.remove(&(n, idl));
+            crate::html::elements::remove_attr(agent, n, content);
+        }
+        Some(els) => {
+            crate::html::elements::set_attr(agent, n, content, DomString::new())?;
+            aria_elements(agent).explicit.insert((n, idl), els);
+        }
+    }
+    crate::dom::events::content_attribute_changed(agent, n, &DomString::from(content));
+    Ok(Value::Undefined)
 }
 
 fn element_aria_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
