@@ -380,8 +380,6 @@ impl Fonts {
         glyphs
     }
 
-    }
-
     /// La "first available font" (CSS Fonts 4 §5): la primera cuya cobertura incluye U+0020.
     fn primary(&self, request: &FontRequest<'_>) -> Option<(FontKey, Arc<LoadedFace>)> {
         let families = self.resolve(request);
