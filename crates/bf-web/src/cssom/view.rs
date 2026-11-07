@@ -799,9 +799,8 @@ fn scroll_element_to(agent: &mut Agent, n: NodeRef, x: Option<f64>, y: Option<f6
     let Some(sb) = scroll_box(agent, n) else {
         return;
     };
-    let pick = |v: Option<f64>, cur: f32| {
-        v.map_or(cur, |v| if v.is_finite() { v as f32 } else { 0.0 })
-    };
+    let pick =
+        |v: Option<f64>, cur: f32| v.map_or(cur, |v| if v.is_finite() { v as f32 } else { 0.0 });
     let new = sb.clamp((pick(x, sb.offset.0), pick(y, sb.offset.1)));
     if new != sb.offset {
         set_element_scroll(agent, n, new, true);

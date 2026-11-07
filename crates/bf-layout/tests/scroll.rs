@@ -198,3 +198,36 @@ fn sticky_inside_scroll_container() {
     scroll::set_scroll_offset(&mut tree, s, (0.0, 10.0));
     assert_eq!(frag(&tree, st).rect.y, 20.0);
 }
+
+/// CSS Transforms 1 §3: un elemento transformado es el containing block (su padding box) de
+/// sus descendientes absolutos y fijos, aunque sea `static`.
+#[test]
+#[ignore = "E4: `transform` aún no es un longhand de ComputedStyle (ver positioned::transform_contains)"]
+fn transform_contains_absolute_and_fixed_descendants() {
+    let (doc, tree) = layout(
+        "<!doctype html><style>body{margin:0}\
+         #t{transform:translateX(0);margin:40px 0 0 30px;width:200px;height:100px;\
+         padding:5px;border:3px solid}\
+         #a{position:absolute;left:10px;top:20px;width:10px;height:10px}\
+         #f{position:fixed;right:0;bottom:0;width:10px;height:10px}\
+         #n{position:fixed;left:0;top:0;width:10px;height:10px}</style>\
+         <div id=t><div id=a></div><div><div id=f></div></div></div><div id=n></div>",
+    );
+    // Padding box de #t: (33, 43) con 210×110.
+    let a = frag(&tree, by_id(&doc, "a"));
+    assert_eq!((a.rect.x, a.rect.y), (43.0, 63.0));
+    let f = frag(&tree, by_id(&doc, "f"));
+    assert_eq!((f.rect.x, f.rect.y), (233.0, 143.0));
+    // Ya no está fijado al viewport.
+    assert_eq!(
+        f.style.position,
+        bf_style::properties::types::Position::Absolute
+    );
+    // Un fijo fuera del elemento transformado sigue contra el viewport.
+    let n = frag(&tree, by_id(&doc, "n"));
+    assert_eq!((n.rect.x, n.rect.y), (0.0, 0.0));
+    assert_eq!(
+        n.style.position,
+        bf_style::properties::types::Position::Fixed
+    );
+}

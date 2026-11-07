@@ -203,7 +203,16 @@ fn meta(doc: &Document) -> Meta {
         let NodeData::Element(el) = &doc.get(node).data else {
             continue;
         };
-        if el.name.as_lossy_str() == "script" {
+        // E12: los atributos manejadores de eventos (HTML §8.1.8.1, `onload="…"`) también son
+        // script; muchos tests de `css/css-position/sticky` desplazan así sus contenedores.
+        let handler = el.attrs.iter().any(|a| {
+            a.ns.is_none()
+                && a.name
+                    .as_lossy_str()
+                    .get(..2)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("on"))
+        });
+        if el.name.as_lossy_str() == "script" || handler {
             m.has_script = true;
         }
         if el.is_html("link") {

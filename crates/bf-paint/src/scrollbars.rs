@@ -41,8 +41,60 @@ fn pill(rect: Rect, color: Rgba) -> DisplayItem {
     }
 }
 
-/// Las barras de un scrollport `port` (padding box) con área `size`, posición `offset` y
+/// Un pulgar dibujado: su rectángulo, su eje y cuántos px de scroll mueve cada px que el
+/// puntero lo arrastra a lo largo del carril.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thumb {
+    pub rect: Rect,
+    pub vertical: bool,
+    pub ratio: f32,
+}
+
+/// Los pulgares de un scrollport `port` (padding box) con área `size`, posición `offset` y
 /// ejes con barra `show`.
+fn thumbs(
+    port: Rect,
+    client: Size,
+    size: Size,
+    offset: (f32, f32),
+    show: (bool, bool),
+) -> Vec<Thumb> {
+    let mut out = Vec::new();
+    let both = show.0 && show.1;
+    let corner = if both { THICKNESS + INSET } else { 0.0 };
+    let ratio = |track: f32, len: f32, client: f32, total: f32| {
+        if track - len > 0.0 {
+            (total - client) / (track - len)
+        } else {
+            0.0
+        }
+    };
+    if show.1 {
+        let track = port.height - 2.0 * INSET - corner;
+        if let Some((start, len)) = thumb(track, client.height, size.height, offset.1) {
+            let x = port.right() - INSET - THICKNESS;
+            out.push(Thumb {
+                rect: Rect::new(x, port.y + INSET + start, THICKNESS, len),
+                vertical: true,
+                ratio: ratio(track, len, client.height, size.height),
+            });
+        }
+    }
+    if show.0 {
+        let track = port.width - 2.0 * INSET - corner;
+        if let Some((start, len)) = thumb(track, client.width, size.width, offset.0) {
+            let y = port.bottom() - INSET - THICKNESS;
+            out.push(Thumb {
+                rect: Rect::new(port.x + INSET + start, y, len, THICKNESS),
+                vertical: false,
+                ratio: ratio(track, len, client.width, size.width),
+            });
+        }
+    }
+    out
+}
+
+/// Las barras de un scrollport (ver [`thumbs`]).
 fn bars(
     port: Rect,
     client: Size,
@@ -52,28 +104,18 @@ fn bars(
     color: Rgba,
     out: &mut Vec<DisplayItem>,
 ) {
-    let both = show.0 && show.1;
-    let corner = if both { THICKNESS + INSET } else { 0.0 };
-    if show.1 {
-        let track = port.height - 2.0 * INSET - corner;
-        if let Some((start, len)) = thumb(track, client.height, size.height, offset.1) {
-            let x = port.right() - INSET - THICKNESS;
-            out.push(pill(
-                Rect::new(x, port.y + INSET + start, THICKNESS, len),
-                color,
-            ));
-        }
+    for t in thumbs(port, client, size, offset, show) {
+        out.push(pill(t.rect, color));
     }
-    if show.0 {
-        let track = port.width - 2.0 * INSET - corner;
-        if let Some((start, len)) = thumb(track, client.width, size.width, offset.0) {
-            let y = port.bottom() - INSET - THICKNESS;
-            out.push(pill(
-                Rect::new(port.x + INSET + start, y, len, THICKNESS),
-                color,
-            ));
-        }
-    }
+}
+
+/// Los ejes con barra de un scroll container.
+fn shown(sb: &bf_layout::scroll::ScrollBox) -> (bool, bool) {
+    let (ox, oy) = sb.overflows();
+    (
+        (ox && sb.user.0) || sb.always.0,
+        (oy && sb.user.1) || sb.always.1,
+    )
 }
 
 fn intersect(a: Rect, b: Rect) -> Rect {
@@ -105,11 +147,7 @@ pub fn scrollbars(tree: &FragmentTree, color: Rgba) -> DisplayList {
             .filter(|_| f.pseudo.is_none() && !f.anonymous)
             .and_then(|n| w.tree.scroll.boxes.get(&n))
         {
-            let (ox, oy) = sb.overflows();
-            let show = (
-                (ox && sb.user.0) || sb.always.0,
-                (oy && sb.user.1) || sb.always.1,
-            );
+            let show = shown(sb);
             let mut items = Vec::new();
             bars(
                 f.padding_rect(),
@@ -203,6 +241,109 @@ pub fn viewport_scrollbars(
     list
 }
 
+/// Margen alrededor del pulgar que todavía lo agarra (la barra es fina).
+const GRAB: f32 = 4.0;
+
+/// Un pulgar bajo el puntero: el scroll container (`None`: el viewport), el pulgar y la
+/// posición de scroll al agarrarlo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThumbHit {
+    pub node: Option<bf_dom::NodeId>,
+    pub thumb: Thumb,
+    pub offset: (f32, f32),
+}
+
+fn grabs(r: Rect, (x, y): (f32, f32)) -> bool {
+    x >= r.x - GRAB && x < r.right() + GRAB && y >= r.y - GRAB && y < r.bottom() + GRAB
+}
+
+/// El pulgar bajo `point` (coordenadas del viewport) con la página desplazada `scroll`: los
+/// del viewport van encima; entre los de los scroll containers gana el último pintado (el más
+/// interno). Respeta los recortes de los ancestros como [`scrollbars`].
+pub fn thumb_at(
+    tree: &FragmentTree,
+    viewport: Size,
+    extent: Size,
+    scroll: (f32, f32),
+    point: (f32, f32),
+) -> Option<ThumbHit> {
+    let port = Rect::new(0.0, 0.0, viewport.width, viewport.height);
+    let show = (
+        extent.width > viewport.width + 0.5,
+        extent.height > viewport.height + 0.5,
+    );
+    if let Some(t) = thumbs(port, viewport, extent, scroll, show)
+        .into_iter()
+        .find(|t| grabs(t.rect, point))
+    {
+        return Some(ThumbHit {
+            node: None,
+            thumb: t,
+            offset: scroll,
+        });
+    }
+    struct Walk<'t> {
+        tree: &'t FragmentTree,
+        point: (f32, f32),
+        scroll: (f32, f32),
+        hit: Option<ThumbHit>,
+    }
+    fn visit(w: &mut Walk<'_>, f: &Fragment, clip: Option<Rect>, fixed: bool) {
+        let is_box = !matches!(f.kind, FragmentKind::Line | FragmentKind::Text);
+        let fixed = fixed || (is_box && f.style.position == Position::Fixed);
+        let p = if fixed {
+            w.point
+        } else {
+            (w.point.0 + w.scroll.0, w.point.1 + w.scroll.1)
+        };
+        let inside_clip =
+            clip.is_none_or(|c| p.0 >= c.x && p.0 < c.right() && p.1 >= c.y && p.1 < c.bottom());
+        if let Some((node, sb)) = f
+            .node
+            .filter(|_| f.pseudo.is_none() && !f.anonymous && inside_clip)
+            .and_then(|n| w.tree.scroll.boxes.get(&n).map(|sb| (n, sb)))
+            && let Some(t) = thumbs(
+                f.padding_rect(),
+                sb.client,
+                sb.scroll_size,
+                sb.offset,
+                shown(sb),
+            )
+            .into_iter()
+            .find(|t| grabs(t.rect, p))
+        {
+            w.hit = Some(ThumbHit {
+                node: Some(node),
+                thumb: t,
+                offset: sb.offset,
+            });
+        }
+        let inner = match (f.clip, clip) {
+            (Some(c), Some(outer)) => Some(intersect(c, outer)),
+            (Some(c), None) => Some(c),
+            (None, outer) => outer,
+        };
+        for c in &f.children {
+            let child_clip = if c.style.position == Position::Fixed {
+                None
+            } else {
+                inner
+            };
+            visit(w, c, child_clip, fixed);
+        }
+    }
+    let mut w = Walk {
+        tree,
+        point,
+        scroll,
+        hit: None,
+    };
+    if let Some(root) = &tree.root {
+        visit(&mut w, root, None, false);
+    }
+    w.hit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +360,31 @@ mod tests {
             thumb(100.0, 1.0, 10_000.0, 0.0).map(|t| t.1),
             Some(MIN_THUMB)
         );
+    }
+
+    #[test]
+    fn grabbing_the_viewport_thumb() {
+        let vp = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let doc = Size {
+            width: 800.0,
+            height: 2400.0,
+        };
+        let tree = FragmentTree {
+            root: None,
+            viewport: vp,
+            report: Default::default(),
+            scroll: Default::default(),
+        };
+        // Carril de 596 px y pulgar de 149: cada px arrastrado mueve 1800 / 447 px.
+        let hit = thumb_at(&tree, vp, doc, (0.0, 0.0), (795.0, 20.0)).expect("pulgar");
+        assert_eq!(hit.node, None);
+        assert!(hit.thumb.vertical);
+        assert!((hit.thumb.ratio - 1800.0 / 447.0).abs() < 1e-3);
+        // Fuera del pulgar (más abajo) no agarra nada.
+        assert_eq!(thumb_at(&tree, vp, doc, (0.0, 0.0), (795.0, 400.0)), None);
     }
 
     #[test]

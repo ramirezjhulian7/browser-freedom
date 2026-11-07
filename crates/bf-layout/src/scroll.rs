@@ -329,12 +329,23 @@ pub fn scroll_at(
     target: NodeId,
     delta: (f32, f32),
 ) -> Option<(NodeId, (f32, f32))> {
+    scroll_at_with(tree, target, |_| delta)
+}
+
+/// Como [`scroll_at`], con un desplazamiento que depende del contenedor (el teclado: AvPág
+/// desplaza casi un scrollport entero, Inicio/Fin hasta el borde).
+pub fn scroll_at_with(
+    tree: &mut FragmentTree,
+    target: NodeId,
+    delta: impl Fn(&ScrollBox) -> (f32, f32),
+) -> Option<(NodeId, (f32, f32))> {
     let mut path = Vec::new();
     ancestor_chain(tree.root.as_ref()?, target, &mut path);
     for node in path {
         let Some(sb) = tree.scroll.boxes.get(&node).copied() else {
             continue;
         };
+        let delta = delta(&sb);
         let want = (
             if sb.user.0 {
                 sb.offset.0 + delta.0

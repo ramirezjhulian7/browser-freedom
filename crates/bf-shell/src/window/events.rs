@@ -104,10 +104,7 @@ pub enum UserInput {
     Focus(Option<NodeId>),
     /// E12: la rueda desplazó el scroll container `node` a `offset` (la ventana ya lo aplicó
     /// a su página; el documento lo guarda y dispara `scroll`).
-    ScrollElement {
-        node: NodeId,
-        offset: (f32, f32),
-    },
+    ScrollElement { node: NodeId, offset: (f32, f32) },
 }
 
 /// E4: el canal por el que el hilo responde a la ventana si el `keydown` se canceló (la

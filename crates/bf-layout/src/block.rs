@@ -747,9 +747,13 @@ impl<'a> Layout<'a> {
                 .or_else(|| cb.height.filter(|_| crate::table::is_table_wrapper(b))),
         };
         let positioned = is_positioned(style);
-        if positioned {
+        // E12: un elemento transformado es containing block de los absolutos y los fijos de su
+        // subárbol (CSS Transforms 1 §3); los fijos se recogen aparte y se maquetan al final.
+        let transformed = crate::positioned::transform_contains(style);
+        if positioned || transformed {
             self.abs_frames.push(Vec::new());
         }
+        let outer_fixed = transformed.then(|| std::mem::take(&mut self.fixed));
         let bfc = establishes_bfc(b, is_root) || self.bfc(b); // E4 grid
         let mut own_floats = FloatContext::default();
         let fl: &mut FloatContext = if bfc { &mut own_floats } else { floats };
@@ -896,12 +900,19 @@ impl<'a> Layout<'a> {
                 ZIndex::Integer(z) => Some(z),
                 ZIndex::Auto => None,
             };
+        }
+        if positioned || transformed {
             let pending = self.abs_frames.pop().unwrap_or_default();
             let padding_box = fragment.padding_rect();
             for p in pending {
                 let f = self.absolute(p, padding_box);
                 fragment.children.push(f);
             }
+        }
+        if let Some(outer) = outer_fixed {
+            let pending = std::mem::replace(&mut self.fixed, outer);
+            let fixed = self.contained_fixed(pending, fragment.padding_rect());
+            fragment.children.extend(fixed);
         }
         if style.position == Position::Relative {
             let (dx, dy) = self.relative_offset(style, cb);
