@@ -629,14 +629,11 @@ fn invoke_reactions(agent: &mut Agent) {
         let Some(el) = registry(agent).queue.pop_front() else {
             return;
         };
-        loop {
-            let Some(reaction) = registry(agent)
-                .reactions
-                .get_mut(&el)
-                .and_then(VecDeque::pop_front)
-            else {
-                break;
-            };
+        while let Some(reaction) = registry(agent)
+            .reactions
+            .get_mut(&el)
+            .and_then(VecDeque::pop_front)
+        {
             let r = match reaction {
                 Reaction::Upgrade(def) => upgrade(agent, el, def),
                 other => invoke_callback(agent, el, other),

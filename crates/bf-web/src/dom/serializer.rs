@@ -13,7 +13,7 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
-use crate::dom::{classes, from_dom_string, unwrap_node};
+use crate::dom::{from_dom_string, unwrap_node};
 use crate::with_doc;
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
@@ -52,12 +52,17 @@ impl PrefixMap {
 
     /// "Found": ¿`prefix` está en la lista de `ns`?
     fn found(&self, prefix: &str, ns: &Ns) -> bool {
-        self.0.get(ns).is_some_and(|l| l.iter().any(|x| x == prefix))
+        self.0
+            .get(ns)
+            .is_some_and(|l| l.iter().any(|x| x == prefix))
     }
 
     /// "Add" `prefix` a la lista de `ns`.
     fn add(&mut self, prefix: &str, ns: &Ns) {
-        self.0.entry(ns.clone()).or_default().push(prefix.to_owned());
+        self.0
+            .entry(ns.clone())
+            .or_default()
+            .push(prefix.to_owned());
     }
 }
 
@@ -160,7 +165,9 @@ impl<'a> Serializer<'a> {
             }
             NodeData::Comment(data) => {
                 // §3.2.1.3.
-                if self.well_formed && (!is_xml_chars(data) || has(data, "--") || ends_with_dash(data)) {
+                if self.well_formed
+                    && (!is_xml_chars(data) || has(data, "--") || ends_with_dash(data))
+                {
                     return self.fail("the comment is not well-formed");
                 }
                 self.push("<!--");
@@ -380,7 +387,10 @@ impl<'a> Serializer<'a> {
         for attr in &e.attrs {
             let attr_ns = attr_ns(&attr.ns);
             let local = attr.name.to_string_lossy().into_owned();
-            let attr_prefix = attr.prefix.as_ref().map(|p| p.to_string_lossy().into_owned());
+            let attr_prefix = attr
+                .prefix
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
             let value = attr.value.to_string_lossy();
             // 3.1-3.2.
             let key = (attr_ns.clone(), local.clone());
@@ -408,7 +418,8 @@ impl<'a> Serializer<'a> {
                         || (attr_prefix.is_none() && ignore_ns_definition)
                         || (attr_prefix.is_some()
                             && local_prefixes.get(&local).is_none_or(|v| {
-                                v.as_deref() != Some(value.as_ref()) && !(v.is_none() && value.is_empty())
+                                v.as_deref() != Some(value.as_ref())
+                                    && !(v.is_none() && value.is_empty())
                             }));
                     if redundant {
                         continue;
@@ -511,17 +522,16 @@ fn ends_with_dash(s: &DomString) -> bool {
 
 /// ¿Todos los code points casan con la producción `Char` de XML 1.0?
 fn is_xml_chars(s: &DomString) -> bool {
-    s.code_points().all(|c| {
-        matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
-    })
+    s.code_points().all(
+        |c| matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF),
+    )
 }
 
 /// `PubidChar` de XML 1.0.
 fn is_pubid_char(c: u32) -> bool {
     matches!(c, 0x20 | 0xD | 0xA)
-        || char::from_u32(c).is_some_and(|c| {
-            c.is_ascii_alphanumeric() || "-'()+,./:=?;!*#@$_%".contains(c)
-        })
+        || char::from_u32(c)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || "-'()+,./:=?;!*#@$_%".contains(c))
 }
 
 fn is_name_start_char(c: char) -> bool {
@@ -578,14 +588,32 @@ impl PushDom for DomString {
 #[derive(Debug, Clone, Copy)]
 pub struct XmlSerializerData;
 
+/// La clase registrada (una vez por agente).
+#[derive(Debug, Clone, Copy)]
+struct XmlSerializerClass(bf_js::host::HostClassId);
+
+/// Registra `XMLSerializer`.
+pub fn register(agent: &mut Agent) {
+    if agent.embedder_data::<XmlSerializerClass>().is_some() {
+        return;
+    }
+    let class = agent.register_host_class(xml_serializer_class());
+    agent.set_embedder_data(XmlSerializerClass(class));
+}
+
 pub fn xml_serializer_class() -> HostClass {
-    HostClass::new("XMLSerializer")
-        .constructor(ctor, 0)
-        .method("serializeToString", 1, serialize_to_string)
+    HostClass::new("XMLSerializer").constructor(ctor, 0).method(
+        "serializeToString",
+        1,
+        serialize_to_string,
+    )
 }
 
 fn ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let class = classes(agent).xml_serializer;
+    let class = agent
+        .embedder_data::<XmlSerializerClass>()
+        .expect("XMLSerializer")
+        .0;
     let nt = a.new_target.expect("new.target");
     let o = agent.host_create_from_new_target(nt, class, None, Box::new(XmlSerializerData))?;
     Ok(Value::Object(o))

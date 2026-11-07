@@ -19,6 +19,7 @@ pub mod node;
 pub mod observer;
 pub mod parser;
 pub mod range;
+pub mod serializer; // E1
 pub mod shadow; // E1
 pub mod state;
 pub mod traversal;
