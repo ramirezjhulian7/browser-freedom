@@ -56,6 +56,13 @@ pub enum Envelope {
     PortClosed { local: u64 },
     /// A un `SharedWorker`: una conexión nueva (el puerto del lado del worker).
     Connect { port: ports::PortRecord },
+    /// A un `BroadcastChannel` de este agente (el id local de su target), desde un canal de
+    /// otro agente con el origen `origin` (HTML §9.5).
+    Broadcast {
+        local: u64,
+        origin: String,
+        message: Serialized,
+    },
 }
 
 /// Un evento de un worker para su dueño.
@@ -173,6 +180,8 @@ pub struct WorkerHost {
     pub(crate) shared: HashMap<u64, Arc<shared::SharedEntry>>,
     /// Los `SharedWorker` que no se pudieron conectar (su `error` está en camino) y su realm.
     pub(crate) shared_errors: HashMap<u64, RealmId>,
+    /// La partición del proceso a la que pertenece el agente (ver [`set_partition`]).
+    pub(crate) partition: u64,
 }
 
 /// El estado de workers del agente (se crea la primera vez).
@@ -187,6 +196,7 @@ pub fn host(agent: &mut Agent) -> &mut WorkerHost {
             scope: None,
             shared: HashMap::new(),
             shared_errors: HashMap::new(),
+            partition: 0,
         });
     }
     agent.embedder_data_mut::<WorkerHost>().expect("WorkerHost")
@@ -195,6 +205,28 @@ pub fn host(agent: &mut Agent) -> &mut WorkerHost {
 /// La bandeja del agente.
 pub fn inbox(agent: &mut Agent) -> Arc<AgentInbox> {
     host(agent).inbox.clone()
+}
+
+/// Pone el agente en la partición `p` del proceso. Los `BroadcastChannel` solo se hablan
+/// dentro de una partición, y los workers heredan la de su dueño. Por defecto todos los
+/// agentes están en la 0 (las pestañas del shell se ven entre sí); el runner de WPT y los
+/// tests, que corren documentos en paralelo con el mismo origen, dan a cada documento una
+/// partición propia ([`new_partition`]) para que no se crucen sus mensajes.
+pub fn set_partition(agent: &mut Agent, p: u64) {
+    host(agent).partition = p;
+}
+
+/// Una partición nueva (nunca la 0).
+pub fn new_partition() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, Ordering::SeqCst)
+}
+
+/// La partición del agente.
+pub(crate) fn partition(agent: &Agent) -> u64 {
+    agent
+        .embedder_data::<WorkerHost>()
+        .map_or(0, |h| h.partition)
 }
 
 /// El embebedor vacía la bandeja él mismo (el runner de WPT): sin temporizador de sondeo.
@@ -251,6 +283,11 @@ fn handle(agent: &mut Agent, e: Envelope) {
         Envelope::Port { local, message } => ports::deliver(agent, local, message),
         Envelope::PortClosed { local } => ports::peer_closed(agent, local),
         Envelope::Connect { port } => shared::deliver_connect(agent, port),
+        Envelope::Broadcast {
+            local,
+            origin,
+            message,
+        } => ports::deliver_broadcast(agent, local, origin, message),
     }
 }
 

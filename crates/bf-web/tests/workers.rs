@@ -93,6 +93,8 @@ impl Page {
             rt.agent
                 .set_realm_data(realm, bf_web::workers::Isolation(true));
         }
+        // Los tests corren en paralelo con el mismo origen: cada página, su partición.
+        bf_web::workers::set_partition(&mut rt.agent, bf_web::workers::new_partition());
         let mut p = Page { rt, ctx, console };
         p.exec(PRELUDE);
         p
@@ -622,3 +624,103 @@ w!(
     "var s = new SharedWorker('sw4.js'); s.port.onmessage = e => finish(e.data); s.port.postMessage('hola');",
     "HOLA"
 );
+
+// --- BroadcastChannel entre agentes (HTML §9.5) ---
+
+w!(
+    broadcast_channel_page_and_worker,
+    ["/dir/bc.js" => "var c = new BroadcastChannel('bc'); var got = []; \
+      c.onmessage = e => { got.push(e.data + '@' + e.origin); if (e.data == 'fin') postMessage(got.join()); }; \
+      c.postMessage('del worker');"],
+    "var a = new BroadcastChannel('bc'), b = new BroadcastChannel('bc'), ev = []; \
+     a.onmessage = e => ev.push('a:' + e.data); \
+     b.onmessage = e => { ev.push('b:' + e.data + ':' + (e.origin == location.origin) + ':' + (e.source === null)); \
+       if (e.data == 'del worker') { b.postMessage('hola'); a.postMessage('fin'); } }; \
+     new Worker('bc.js').onmessage = e => finish(ev.join() + ' | ' + e.data);",
+    "a:del worker,b:del worker:true:true,a:hola,b:fin:true:true | hola@http://workers.test,fin@http://workers.test"
+);
+
+w!(
+    broadcast_channel_between_workers,
+    ["/dir/bc1.js" => "var c = new BroadcastChannel('ww'); c.onmessage = e => postMessage('1 recibe ' + e.data); postMessage('listo');",
+     "/dir/bc2.js" => "new BroadcastChannel('ww').postMessage('de 2'); postMessage('mandé');"],
+    "var w1 = new Worker('bc1.js'); w1.onmessage = e => { if (e.data == 'listo') new Worker('bc2.js'); else finish(e.data); };",
+    "1 recibe de 2"
+);
+
+w!(
+    broadcast_channel_closed_receiver_in_worker,
+    ["/dir/bc3.js" => "var c = new BroadcastChannel('cerrado'); var d = new BroadcastChannel('abierto'); \
+      c.onmessage = () => postMessage('no debía'); d.onmessage = e => postMessage('abierto ' + e.data); \
+      c.close(); postMessage('listo');"],
+    "var w = new Worker('bc3.js'); w.onmessage = e => { if (e.data == 'listo') { \
+       new BroadcastChannel('cerrado').postMessage(1); new BroadcastChannel('abierto').postMessage(2); } else finish(e.data); };",
+    "abierto 2"
+);
+
+w!(
+    broadcast_channel_closing_worker_does_not_send,
+    ["/dir/bc4.js" => "var n = self.name; if (n == 'cierra') close(); \
+      new BroadcastChannel('cierre').postMessage(n); postMessage('listo');"],
+    "var c = new BroadcastChannel('cierre'); c.onmessage = e => finish(e.data); \
+     new Worker('bc4.js', {name: 'cierra'}).onmessage = () => new Worker('bc4.js', {name: 'sigue'});",
+    "sigue"
+);
+
+w!(
+    broadcast_channel_data_clone_error_without_destinations,
+    [],
+    "try { new BroadcastChannel('solo').postMessage(() => 1); finish('sin error'); } \
+     catch (e) { finish(e.name + ' ' + (e instanceof DOMException)); }",
+    "DataCloneError true"
+);
+
+w!(
+    broadcast_channel_opaque_origin_does_not_cross,
+    [],
+    "var c = new BroadcastChannel('opaco'); c.onmessage = e => finish('cruzó ' + e.origin); \
+     var w = new Worker('data:text/javascript,' + encodeURIComponent(\"new BroadcastChannel('opaco').postMessage(self.origin); postMessage('listo');\")); \
+     w.onmessage = () => setTimeout(() => finish('no cruzó'), 50);",
+    "no cruzó"
+);
+
+/// Dos páginas en particiones distintas (como dos documentos del runner de WPT) no se oyen;
+/// en la misma partición (como dos pestañas del shell), sí.
+#[test]
+fn broadcast_channel_partitions() {
+    let mut a = Page::new(&[]);
+    let mut b = Page::new(&[]);
+    let mut c = Page::new(&[]);
+    let shared = bf_web::workers::new_partition();
+    bf_web::workers::set_partition(&mut a.rt.agent, shared);
+    bf_web::workers::set_partition(&mut c.rt.agent, shared);
+    a.exec("var got = []; new BroadcastChannel('part').onmessage = e => got.push(e.data);");
+    b.exec("new BroadcastChannel('part').postMessage('otra partición');");
+    c.exec("new BroadcastChannel('part').postMessage('misma partición');");
+    let r = a.run("setTimeout(() => finish(got.join()), 50);");
+    assert_eq!(r, "misma partición");
+}
+
+// --- terminate() durante Atomics.wait ---
+
+/// HTML §10.2.4 "terminate a worker": un worker dormido en `Atomics.wait` sin límite
+/// despierta con la interrupción y su waiter sale de la lista, así que un `notify` posterior
+/// no despierta a nadie (sin la interrupción, el hilo seguiría en la lista).
+#[test]
+fn terminate_interrupts_atomics_wait() {
+    let mut p = Page::with_isolation(
+        &[(
+            "/dir/t.js",
+            "onmessage = e => { var ia = new Int32Array(e.data); postMessage('esperando'); \
+             Atomics.wait(ia, 0, 0); postMessage('despertó'); };",
+        )],
+        true,
+    );
+    let r = p.run(
+        "var ia = new Int32Array(new SharedArrayBuffer(8)); var w = new Worker('t.js'); \
+         w.onmessage = e => { if (e.data != 'esperando') return finish('no debía: ' + e.data); \
+           setTimeout(() => { w.terminate(); setTimeout(() => finish('despiertos ' + Atomics.notify(ia, 0)), 100); }, 20); }; \
+         w.postMessage(ia.buffer);",
+    );
+    assert_eq!(r, "despiertos 0");
+}

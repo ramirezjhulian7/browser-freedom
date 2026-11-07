@@ -2,8 +2,8 @@
 //! `MessagePort` y `BroadcastChannel`, dentro del mismo agente. Los mensajes se copian con
 //! `structuredClone` y se entregan en tareas de la fuente *posted message*.
 //!
-//! `BroadcastChannel` entre pestañas necesita un canal entre los hilos de las pestañas (el
-//! shell): por ahora llega a los `BroadcastChannel` del mismo agente.
+//! Los `BroadcastChannel` de otros agentes (workers, pestañas) los alcanza E3 con el registro
+//! de `workers::ports` (`broadcast_open`/`broadcast_post`/`broadcast_close`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -483,6 +483,8 @@ fn bc_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let id = target_id(t);
     let pin = agent.host_pin(Value::Object(o));
+    // E3: el canal también recibe de los de otros agentes.
+    crate::workers::ports::broadcast_open(agent, id, &origin, &name);
     let st = &mut state(agent).ports;
     st.broadcast.push((id, origin, name));
     st.ports.insert(
@@ -526,6 +528,11 @@ fn bc_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             "The BroadcastChannel is closed.",
         );
     }
+    // E3: serializa (DataCloneError antes de entregar nada) y manda a los de otros agentes;
+    // `false` si el canal no es "eligible for messaging" (un worker que cierra).
+    if !crate::workers::ports::broadcast_post(agent, id, &a.arg(0))? {
+        return Ok(Value::Undefined);
+    }
     let (origin, name) = match state(agent).ports.broadcast.iter().find(|b| b.0 == id) {
         Some(b) => (b.1.clone(), b.2.clone()),
         None => return Ok(Value::Undefined),
@@ -565,6 +572,7 @@ fn bc_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn bc_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (id, _) = this_bc(agent, a)?;
+    crate::workers::ports::broadcast_close(agent, id);
     let st = &mut state(agent).ports;
     st.broadcast.retain(|b| b.0 != id);
     let pin = st.ports.get_mut(&id).and_then(|p| {

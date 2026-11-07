@@ -416,8 +416,13 @@ pub fn remove_waiter(w: &Arc<Waiter>) -> bool {
     removed
 }
 
+/// Con interrupción, el hilo duerme en tramos de este largo y la mira entre uno y otro.
+const INTERRUPT_SLICE: Duration = Duration::from_millis(5);
+
 /// `Atomics.wait` (DoWait síncrono): suspende el hilo hasta que lo notifiquen, venza
-/// `timeout` o llegue `deadline` (el límite del agente).
+/// `timeout`, llegue `deadline` (el límite del agente) o se ponga `interrupt` (otro hilo
+/// termina el agente: `Worker.terminate()`, HTML §10.2.4 "terminate a worker"). Con
+/// `interrupt`, la espera va en tramos de [`INTERRUPT_SLICE`] para verla a tiempo.
 pub fn wait(
     block: &SharedBlock,
     index: usize,
@@ -425,6 +430,7 @@ pub fn wait(
     expected: u64,
     timeout: Option<Duration>,
     deadline: Option<Instant>,
+    interrupt: Option<&AtomicBool>,
 ) -> WaitResult {
     let Some(w) = enqueue(block, index, size, expected, None) else {
         return WaitResult::NotEqual;
@@ -435,29 +441,34 @@ pub fn wait(
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
+    let interrupted = || interrupt.is_some_and(|i| i.load(Ordering::SeqCst));
     let mut n = lock(&w.notified);
     loop {
         if *n {
             return WaitResult::Ok;
         }
-        let now = Instant::now();
-        match limit {
-            Some(l) if now >= l => break,
-            Some(l) => {
-                n =
-                    w.cv.wait_timeout(n, l - now)
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
-            }
-            None => n = w.cv.wait(n).unwrap_or_else(|e| e.into_inner()),
+        if interrupted() {
+            break;
         }
+        let now = Instant::now();
+        let slice = match (limit, interrupt) {
+            (Some(l), _) if now >= l => break,
+            (Some(l), Some(_)) => Some((l - now).min(INTERRUPT_SLICE)),
+            (Some(l), None) => Some(l - now),
+            (None, Some(_)) => Some(INTERRUPT_SLICE),
+            (None, None) => None,
+        };
+        n = match slice {
+            Some(d) => w.cv.wait_timeout(n, d).unwrap_or_else(|e| e.into_inner()).0,
+            None => w.cv.wait(n).unwrap_or_else(|e| e.into_inner()),
+        };
     }
     drop(n);
     // Venció: si nadie lo notificó mientras tanto, sale de la lista.
     if !remove_waiter(&w) {
         return WaitResult::Ok;
     }
-    if timeout_at.is_some_and(|t| Instant::now() >= t) {
+    if !interrupted() && timeout_at.is_some_and(|t| Instant::now() >= t) {
         WaitResult::TimedOut
     } else {
         WaitResult::Terminated
@@ -870,15 +881,15 @@ mod tests {
     fn wait_and_notify_between_threads() {
         let b = SharedBlock::new(8, 8);
         assert_eq!(
-            wait(&b, 0, 4, 1, Some(Duration::from_millis(1)), None),
+            wait(&b, 0, 4, 1, Some(Duration::from_millis(1)), None, None),
             WaitResult::NotEqual
         );
         assert_eq!(
-            wait(&b, 0, 4, 0, Some(Duration::from_millis(5)), None),
+            wait(&b, 0, 4, 0, Some(Duration::from_millis(5)), None, None),
             WaitResult::TimedOut
         );
         let b2 = b.clone();
-        let t = std::thread::spawn(move || wait(&b2, 0, 4, 0, None, None));
+        let t = std::thread::spawn(move || wait(&b2, 0, 4, 0, None, None, None));
         // Hasta que el otro hilo esté en la lista.
         let mut woken = Vec::new();
         for _ in 0..1000 {
@@ -890,6 +901,31 @@ mod tests {
         }
         assert_eq!(woken.len(), 1);
         assert_eq!(t.join().expect("hilo"), WaitResult::Ok);
+    }
+
+    /// Una espera sin límite termina cuando otro hilo pone la interrupción del agente
+    /// (`Worker.terminate()`), y su waiter sale de la lista.
+    #[test]
+    fn wait_without_limit_is_interruptible() {
+        let b = SharedBlock::new(8, 8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (b2, stop2) = (b.clone(), stop.clone());
+        let t = std::thread::spawn(move || {
+            let start = Instant::now();
+            let r = wait(&b2, 0, 4, 0, None, None, Some(&stop2));
+            (r, start.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        stop.store(true, Ordering::SeqCst);
+        let (r, elapsed) = t.join().expect("hilo");
+        assert_eq!(r, WaitResult::Terminated);
+        assert!(elapsed < Duration::from_secs(2), "tardó {elapsed:?}");
+        assert!(notify(&b, 0, usize::MAX).is_empty(), "el waiter salió de la lista");
+        // Ya interrumpido: ni se queda esperando (aunque haya `timeout`).
+        assert_eq!(
+            wait(&b, 0, 4, 0, Some(Duration::from_secs(10)), None, Some(&stop)),
+            WaitResult::Terminated
+        );
     }
 
     #[test]

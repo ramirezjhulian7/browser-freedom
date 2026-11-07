@@ -166,6 +166,7 @@ fn worker_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         control,
         cross_origin_isolated: cross_origin_isolated(agent),
         user_agent: agent.host.hooks.user_agent(),
+        partition: super::partition(agent),
     };
     if super::scope::spawn(spec).is_err() {
         parent.push(Envelope::FromWorker {

@@ -64,6 +64,8 @@ pub struct WorkerSpec {
     pub cross_origin_isolated: bool,
     /// El User-Agent del dueño.
     pub user_agent: String,
+    /// La partición del dueño (`workers::set_partition`).
+    pub partition: u64,
 }
 
 /// El estado del lado worker (en el `WorkerHost` del agente del worker).
@@ -211,6 +213,7 @@ fn create_agent(spec: &WorkerSpec) -> Runtime {
         }),
         shared: Default::default(),
         shared_errors: Default::default(),
+        partition: spec.partition,
     });
     install(agent, realm, &spec.url, &spec.kind, spec.backend.clone());
     rt
@@ -338,7 +341,8 @@ fn event_loop(agent: &mut Agent, inbox: &Arc<AgentInbox>, control: &Arc<WorkerCo
     }
 }
 
-fn closing(agent: &Agent) -> bool {
+/// ¿Es este agente un worker con el *closing flag* puesto (`close()`)?
+pub(crate) fn closing(agent: &Agent) -> bool {
     agent
         .embedder_data::<WorkerHost>()
         .and_then(|h| h.scope.as_ref())
