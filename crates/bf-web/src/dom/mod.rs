@@ -388,6 +388,7 @@ pub fn mutated(agent: &mut Agent) {
         crate::html::activation::queue_details_toggles(agent, doc);
     }
     crate::dom::shadow::sync_adopted(agent); // E1
+    crate::html::custom_elements::process_reactions(agent); // E1
 }
 
 /// Después de que un algoritmo de `bf-dom` corrió con script (dispatch, abort): agenda la
@@ -395,4 +396,5 @@ pub fn mutated(agent: &mut Agent) {
 pub fn after_dom_mutation(agent: &mut Agent, doc: DocIndex) {
     observer::schedule_delivery(agent, doc);
     crate::html::activation::queue_details_toggles(agent, doc); // E1
+    crate::html::custom_elements::process_reactions(agent); // E1
 }

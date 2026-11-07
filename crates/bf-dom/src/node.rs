@@ -351,6 +351,13 @@ impl Document {
     }
 
     fn import_from_inner(&mut self, other: &Document, node: NodeId) -> NodeId {
+        let copy = self.import_from_node(other, node);
+        // E1: el estado de custom element y el *is value*.
+        self.import_custom_state(other, node, copy);
+        copy
+    }
+
+    fn import_from_node(&mut self, other: &Document, node: NodeId) -> NodeId {
         let mut data = other.get(node).data.clone();
         let template_source = match &mut data {
             NodeData::Element(e) => e.template_contents.take(),

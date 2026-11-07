@@ -142,6 +142,15 @@ fn serialize_node(
             };
             out.push('<');
             out.push_dom_str(&tagname);
+            // E1: HTML §13.3 "Serializing HTML fragments": si el *is value* no es nulo y el
+            // elemento no tiene atributo `is`, se añade ` is="<is value escapado>"`.
+            if let Some(is) = doc.is_value(child)
+                && !e.attrs.iter().any(|a| a.ns.is_none() && a.name == "is")
+            {
+                out.push_str(" is=\"");
+                escape(is, true, out);
+                out.push('"');
+            }
             for a in &e.attrs {
                 out.push(' ');
                 out.push_dom_str(&attribute_name(a));

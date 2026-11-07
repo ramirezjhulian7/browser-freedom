@@ -696,13 +696,20 @@ impl TreeBuilder {
     /// Create an element for a token. `intended_parent` solo importa para custom elements y
     /// form owners, que aún no existen.
     fn create_element_for_token(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
-        self.create_element(Element {
+        let id = self.create_element(Element {
             ns,
             prefix: None,
             name: tag.name.clone(),
             attrs: tag.attrs.clone(),
             template_contents: None,
-        })
+        });
+        // E1: el *is value* (paso 4 de "create an element for a token").
+        if ns == Namespace::Html
+            && let Some(is) = tag.attr("is")
+        {
+            self.doc.set_is_value(id, Some(is.into()));
+        }
+        id
     }
 
     /// Appropriate place for inserting a node.

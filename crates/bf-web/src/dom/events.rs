@@ -2163,6 +2163,8 @@ const NATIVE_WRAPPERS: usize = 8;
 /// ya devuelto al contexto y el realm de la ventana en curso. El wrapper del evento es el mismo para
 /// todos los listeners del dispatch (se reconoce por la dirección y el `timeStamp` del evento).
 pub fn invoke_listener(agent: &mut Agent, handle: u64, event: &mut Event) -> bool {
+    // E1: los custom elements del parser se actualizan antes (`DOMContentLoaded`, `load`).
+    crate::html::custom_elements::process_reactions(agent);
     invoke_listener_in(agent, 0, handle, event)
 }
 

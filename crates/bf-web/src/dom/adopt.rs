@@ -73,6 +73,8 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
             *wc.doc_mut(to) = target;
         }
         move_handlers(agent, (from, o), (to, nw));
+        // E1: la definición y `adoptedCallback` de los custom elements.
+        crate::html::custom_elements::adopted(agent, old_ref, new_ref);
     }
     mutated(agent);
     Ok(NodeRef::new(to, copy))

@@ -23,6 +23,7 @@ use crate::WebContextHandle;
 pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     canvas::register(agent);
     crate::dom::shadow::register(agent);
+    custom_elements::register(agent);
     submission::register(agent);
     elements::register(agent, realm, ctx);
 }

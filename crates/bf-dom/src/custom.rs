@@ -177,6 +177,19 @@ impl Document {
             });
     }
 
+    /// Copia el estado y el *is value* de `node` de `other` a `copy` (adopción entre arenas).
+    pub(crate) fn import_custom_state(&mut self, other: &Document, node: NodeId, copy: NodeId) {
+        if let Some(s) = other.custom.states.get(&node) {
+            self.custom.states.insert(copy, *s);
+        }
+        if let Some(v) = other.custom.is_values.get(&node) {
+            self.custom.is_values.insert(copy, v.clone());
+        }
+        if other.custom.enabled {
+            self.custom.enabled = true;
+        }
+    }
+
     /// Copia el *is value* al clonar (paso 2 de "clone a single node").
     pub(crate) fn clone_custom_state(&mut self, from: NodeId, to: NodeId) {
         if let Some(v) = self.custom.is_values.get(&from).cloned() {

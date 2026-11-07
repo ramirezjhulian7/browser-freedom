@@ -59,6 +59,9 @@ fn html_element_class(element: HostClassId) -> HostClass {
     );
     class
         .parent(element)
+        // E1: [HTMLConstructor] y `attachInternals()` (HTML §3.2.3, §4.13.7).
+        .constructor(super::custom_elements::html_constructor, 0)
+        .method("attachInternals", 0, super::custom_elements::attach_internals)
         .attribute("tabIndex", Some(get_tab_index), Some(set_tab_index))
         .attribute("innerText", Some(get_inner_text), Some(set_inner_text))
         .attribute("outerText", Some(get_inner_text), Some(set_outer_text))
@@ -90,10 +93,13 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             .collect();
         for iface in INTERFACES {
             let parent = by_name[iface.parent];
-            let class = agent.register_host_class(extend(
-                iface.name,
-                HostClass::new(iface.name).parent(parent),
-            ));
+            // E1: [HTMLConstructor] (todas menos HTMLUnknownElement), para los customized
+            // built-ins.
+            let mut base = HostClass::new(iface.name).parent(parent);
+            if iface.name != "HTMLUnknownElement" {
+                base = base.constructor(super::custom_elements::html_constructor, 0);
+            }
+            let class = agent.register_host_class(extend(iface.name, base));
             by_name.insert(iface.name, class);
             reflected.extend(iface.attrs.iter().map(|a| (class, a)));
         }

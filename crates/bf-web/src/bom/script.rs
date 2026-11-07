@@ -587,6 +587,8 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         let placeholder = Parser::new(&parse_options());
         let parser = std::mem::replace(doc, placeholder);
         put_parser(self.agent, self.realm, parser);
+        // E1: los custom elements que el parser insertó se actualizan antes del script.
+        crate::html::custom_elements::process_reactions(self.agent);
         match info.type_ {
             ScriptType::Classic => match fetched {
                 Some(f) => self.run_classic(&f.source, &f.url),

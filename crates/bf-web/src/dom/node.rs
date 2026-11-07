@@ -291,7 +291,11 @@ fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let r = with_doc_mut(agent, n.doc, |d| d.clone_node_checked(n.node, deep));
     match r {
-        Ok(c) => Ok(wrap_node(agent, NodeRef::new(n.doc, c))),
+        Ok(c) => {
+            // E1: los custom elements de la copia.
+            crate::html::custom_elements::cloned(agent, NodeRef::new(n.doc, c));
+            Ok(wrap_node(agent, NodeRef::new(n.doc, c)))
+        }
         Err(e) => throw_dom(agent, e),
     }
 }
