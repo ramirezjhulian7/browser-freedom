@@ -1488,6 +1488,12 @@ pub fn render_scrolled(
                 let ts = canvas.ts().pre_translate(*dx, *dy);
                 canvas.transforms.push(ts);
             }
+            DisplayItem::PushMatrix([a, b, c, d, e, f]) => {
+                let ts = canvas
+                    .ts()
+                    .pre_concat(Transform::from_row(*a, *b, *c, *d, *e, *f));
+                canvas.transforms.push(ts);
+            }
             DisplayItem::PopTransform | DisplayItem::PopFixed => {
                 if canvas.transforms.len() > 1 {
                     canvas.transforms.pop();
