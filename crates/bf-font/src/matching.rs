@@ -216,6 +216,74 @@ pub const FALLBACK_FAMILIES: &[&str] = &[
     "Noto Sans Devanagari",
 ];
 
+/// E9: familias de fallback por script (etiqueta ISO 15924), de todas las plataformas: se
+/// usan las que existan, antes del fallback por carácter. Así un mismo texto árabe, hebreo,
+/// CJK o índico se da forma con una sola cara que tenga sus tablas OpenType.
+pub fn script_fallback(script: &str) -> &'static [&'static str] {
+    match script {
+        "Arab" | "Syrc" | "Thaa" | "Nkoo" => &[
+            "Segoe UI",
+            "Tahoma",
+            "Arial",
+            "Times New Roman",
+            "Noto Naskh Arabic",
+            "Noto Sans Arabic",
+            "Geeza Pro",
+            "DejaVu Sans",
+        ],
+        "Hebr" => &[
+            "Segoe UI",
+            "Arial",
+            "David",
+            "Times New Roman",
+            "Noto Sans Hebrew",
+            "Arial Hebrew",
+            "DejaVu Sans",
+        ],
+        "Hani" | "Bopo" => &[
+            "Microsoft YaHei",
+            "SimSun",
+            "Yu Gothic",
+            "Meiryo",
+            "MS Gothic",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "PingFang SC",
+            "Hiragino Sans",
+        ],
+        "Hira" | "Kana" => &[
+            "Yu Gothic",
+            "Meiryo",
+            "MS Gothic",
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+            "Hiragino Sans",
+        ],
+        "Hang" => &[
+            "Malgun Gothic",
+            "Gulim",
+            "Noto Sans CJK KR",
+            "Noto Sans KR",
+            "Apple SD Gothic Neo",
+        ],
+        "Deva" | "Beng" | "Guru" | "Gujr" | "Orya" | "Taml" | "Telu" | "Knda" | "Mlym"
+        | "Sinh" => &[
+            "Nirmala UI",
+            "Mangal",
+            "Noto Sans Devanagari",
+            "Kohinoor Devanagari",
+            "Lohit Devanagari",
+        ],
+        "Thai" | "Laoo" | "Khmr" => &[
+            "Leelawadee UI",
+            "Tahoma",
+            "Noto Sans Thai",
+            "Thonburi",
+        ],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

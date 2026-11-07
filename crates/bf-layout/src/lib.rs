@@ -17,6 +17,7 @@ mod inline;
 pub mod linebreak; // E9: UAX #14
 mod positioned;
 mod table; // E4
+pub mod unicode; // E9: Script y Vertical_Orientation
 mod unicode_tables; // E9: generado por tools/gen_unicode_text.py
 
 use bf_dom::Document;

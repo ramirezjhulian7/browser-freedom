@@ -386,6 +386,92 @@ keyword_enum!(UnicodeBidi {
 });
 keyword_prop!(UnicodeBidi);
 
+// E9: CSS Writing Modes 4 §3.1. Los valores SVG 1.1 (`lr`, `lr-tb`, `rl`, `rl-tb`, `tb`,
+// `tb-rl`) se aceptan y computan a su equivalente CSS (§3.1.1).
+keyword_enum!(WritingMode {
+    HorizontalTb = "horizontal-tb",
+    VerticalRl = "vertical-rl",
+    VerticalLr = "vertical-lr",
+    SidewaysRl = "sideways-rl",
+    SidewaysLr = "sideways-lr",
+});
+
+impl PropValue for WritingMode {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        WritingMode::from_ident(id).or_else(|| {
+            Some(match id.to_ascii_lowercase().as_str() {
+                "lr" | "lr-tb" | "rl" | "rl-tb" => WritingMode::HorizontalTb,
+                "tb" | "tb-rl" => WritingMode::VerticalRl,
+                _ => return None,
+            })
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+impl WritingMode {
+    /// ¿La dirección inline es vertical?
+    pub fn is_vertical(self) -> bool {
+        !matches!(self, WritingMode::HorizontalTb)
+    }
+    /// ¿Los bloques avanzan de derecha a izquierda (`vertical-rl`, `sideways-rl`)?
+    pub fn is_block_rtl(self) -> bool {
+        matches!(self, WritingMode::VerticalRl | WritingMode::SidewaysRl)
+    }
+}
+
+// E9: CSS Writing Modes 4 §5.1 (`sideways-right` es un alias de `sideways`).
+keyword_enum!(TextOrientation {
+    Mixed = "mixed",
+    Upright = "upright",
+    Sideways = "sideways",
+});
+
+impl PropValue for TextOrientation {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        TextOrientation::from_ident(id).or_else(|| {
+            id.eq_ignore_ascii_case("sideways-right")
+                .then_some(TextOrientation::Sideways)
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+// E9: CSS Text 3 §5.4.
+keyword_enum!(Hyphens {
+    None = "none",
+    Manual = "manual",
+    Auto = "auto",
+});
+keyword_prop!(Hyphens);
+
+// E9: CSS Text 3 §7.4 (`distribute` es un alias heredado de `inter-character`).
+keyword_enum!(TextJustify {
+    Auto = "auto",
+    None = "none",
+    InterWord = "inter-word",
+    InterCharacter = "inter-character",
+});
+
+impl PropValue for TextJustify {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        TextJustify::from_ident(id).or_else(|| {
+            id.eq_ignore_ascii_case("distribute")
+                .then_some(TextJustify::InterCharacter)
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
 keyword_enum!(PointerEvents {
     Auto = "auto",
     None = "none",

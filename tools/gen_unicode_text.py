@@ -7,7 +7,8 @@ internacional del layout.
   Extended_Pictographic (emoji-data.txt), General_Category Pi/Pf/Cn (UnicodeData.txt), que usan
   las reglas LB15a, LB15b, LB19a, LB30 y LB30b;
 - Vertical_Orientation (VerticalOrientation.txt) para `text-orientation: mixed` (UAX #50);
-- Script (Scripts.txt) para el fallback de fuentes y el shaping por run de script.
+- Script (Scripts.txt, con la etiqueta ISO 15924 de PropertyValueAliases.txt) para el
+  fallback de fuentes y el shaping por run de script.
 
 Datos: UCD 17.0.0 en crates/bf-infra/data/ucd-17.0.0/ (UnicodeData.txt y emoji-data.txt de la
 misma versión, en crates/bf-js/data/ucd-17.0.0/).
@@ -177,10 +178,15 @@ def main():
     sc = load_property(os.path.join(DATA, "Scripts.txt"))
     names = ["Unknown"] + sorted(set(v for v in sc if v != "Unknown"))
     index = {n: i for i, n in enumerate(names)}
-    out.append("/// Nombres de los scripts (valores largos de la UCD); el índice 0 es `Unknown`.")
-    out.append("pub(crate) static SCRIPT_NAMES: &[&str] = &[")
+    tags = {}
+    for line in lines(os.path.join(JSDATA, "PropertyValueAliases.txt")):
+        f = [x.strip() for x in line.split("#")[0].split(";")]
+        if len(f) >= 3 and f[0] == "sc":
+            tags[f[2]] = f[1]
+    out.append("/// Scripts: (valor largo de la UCD, etiqueta ISO 15924); el índice 0 es `Unknown`.")
+    out.append("pub(crate) static SCRIPT_NAMES: &[(&str, &str)] = &[")
     for n in names:
-        out.append(f"    \"{n}\",")
+        out.append(f"    (\"{n}\", \"{tags[n]}\"),")
     out.append("];")
     out.append("")
     emit_ranges(out, "SCRIPT", "u8",

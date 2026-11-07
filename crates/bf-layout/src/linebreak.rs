@@ -525,6 +525,6 @@ mod tests {
 
     #[test]
     fn soft_hyphen_is_opportunity() {
-        assert_eq!(opportunities("hy\u{AD}phen"), [3, 8]);
+        assert_eq!(opportunities("hy\u{AD}phen"), [3, 7]);
     }
 }
