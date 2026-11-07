@@ -483,6 +483,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     });
     parser.document_mut().url = url.clone();
     parser.document_mut().character_set = doc.encoding.name().into();
+    // E4: los `<iframe>` del documento demoran su `load` (HTML §4.8.5, "iframe load event
+    // steps"; §8.4 "the end"): se suelta después de cargar los marcos.
+    parser.delay_load_event();
     crate::install(
         &mut rt.agent,
         realm,
@@ -510,6 +513,7 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     // vez que el bucle queda sin trabajo (srcdoc, src servido por wptserve, about:blank, el
     // `load` del elemento).
     crate::bom::frames::sync_frames(&mut rt.agent, realm);
+    with_parser(&mut rt.agent, realm, |p, host| p.release_load_event(host));
     // El bucle de eventos hasta el completion callback.
     loop {
         if rt

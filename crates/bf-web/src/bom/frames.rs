@@ -309,12 +309,55 @@ fn window_loader(agent: &Agent, realm: RealmId) -> Option<Arc<dyn ResourceLoader
         })
 }
 
+/// Un documento leído para un marco.
+struct Fetched {
+    text: String,
+    url: Url,
+    /// El tipo MIME XML con que se parsea (`None`: HTML).
+    xml: Option<&'static str>,
+}
+
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
-fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<(String, Url)> {
+fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
     let loader = window_loader(agent, realm)?;
     let res = loader.load(url)?;
     let (text, _) = encoding::decode(&res.bytes, Encoding::Utf8);
-    Some((text, res.url))
+    let xml = xml_type(res.content_type.as_deref(), &res.url);
+    Some(Fetched {
+        text,
+        url: res.url,
+        xml,
+    })
+}
+
+/// ¿Es un documento XML (HTML §7.4.1 "navigate": `text/xml`, `application/xml`, `+xml`)? Sin
+/// `Content-Type` (archivos) decide la extensión, como en el navegador.
+fn xml_type(content_type: Option<&str>, url: &Url) -> Option<&'static str> {
+    if let Some(ct) = content_type {
+        let essence = ct
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        return match essence.as_str() {
+            "application/xhtml+xml" => Some("application/xhtml+xml"),
+            "image/svg+xml" => Some("image/svg+xml"),
+            "text/xml" => Some("text/xml"),
+            e if e == "application/xml" || e.ends_with("+xml") => Some("application/xml"),
+            _ => None,
+        };
+    }
+    let path = url.path_string().to_ascii_lowercase();
+    if path.ends_with(".xhtml") || path.ends_with(".xht") {
+        Some("application/xhtml+xml")
+    } else if path.ends_with(".svg") {
+        Some("image/svg+xml")
+    } else if path.ends_with(".xml") {
+        Some("application/xml")
+    } else {
+        None
+    }
 }
 
 /// Navega el marco `realm` a `target` y, al terminar, dispara `load` en su `<iframe>`.
@@ -358,7 +401,16 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
             let _ = url;
         }
         Target::Url(url) => match fetch(agent, parent, &url) {
-            Some((text, final_url)) => {
+            Some(Fetched {
+                xml: Some(mime),
+                text,
+                url: final_url,
+            }) => load_xml_document(agent, realm, &final_url, &text, mime),
+            Some(Fetched {
+                text,
+                url: final_url,
+                xml: None,
+            }) => {
                 load_document(agent, realm, &final_url, None, &text, scripts);
             }
             None => {
@@ -372,6 +424,20 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     // El `load` del `<iframe>` (HTML §4.8.5 "iframe load event steps").
     let mut ev = Event::new("load", EventInit::default());
     super::script::dispatch_trusted(agent, parent, EventTarget::Node(element), &mut ev);
+}
+
+/// Parsea `text` como el documento XML del marco `realm` en `url` (sin ejecutar sus scripts:
+/// el parser XML no los prepara todavía).
+fn load_xml_document(agent: &mut Agent, realm: RealmId, url: &Url, text: &str, mime: &str) {
+    let mut doc = bf_html::parse_xml_document(text);
+    doc.is_html = false;
+    doc.content_type = mime.into();
+    doc.url = url.clone();
+    let ctx = WebContextHandle { realm }.get_mut(agent);
+    ctx.url = url.clone();
+    ctx.base = url.clone();
+    ctx.documents[0] = DocumentOwner::Document(Box::new(doc));
+    super::script::set_base(agent, realm, url);
 }
 
 /// Parsea `text` como el documento del marco `realm` en `url`.
@@ -458,6 +524,8 @@ fn sync_level(agent: &mut Agent, realm: RealmId, depth: usize) {
             None => {
                 let child = create_frame(agent, realm, el);
                 set_signature(agent, child, &sig);
+                // `window[i]` ya vale en el `load` del `<iframe>`.
+                index_children(agent, realm);
                 navigate(agent, child, target);
                 child
             }

@@ -1037,7 +1037,8 @@ fn nodes_from_another_window_cannot_be_adopted() {
     );
     let try_ = |what: &str| {
         format!(
-            "(function () {{ var fd = document.getElementById('f').contentDocument;              try {{ {what}; return 'sin error'; }} catch (e) {{ return e.name; }} }})()"
+            "(function () {{ var fd = document.getElementById('f').contentDocument; \
+             try {{ {what}; return 'sin error'; }} catch (e) {{ return e.name; }} }})()"
         )
     };
     assert_eq!(
@@ -1056,7 +1057,12 @@ fn nodes_from_another_window_cannot_be_adopted() {
     );
     // Los dos documentos quedan como estaban; dentro de cada ventana, todo sigue igual.
     assert!(p.truthy(
-        "var fd = document.getElementById('f').contentDocument;          document.getElementById('d').textContent === 'hola' &&          fd.getElementById('dentro').textContent === 'x' &&          fd.body.childNodes.length === 1 &&          fd.body.appendChild(fd.createElement('i')).parentNode === fd.body &&          fd.adoptNode(fd.createElement('u')).ownerDocument === fd"
+        "var fd = document.getElementById('f').contentDocument; \
+         document.getElementById('d').textContent === 'hola' && \
+         fd.getElementById('dentro').textContent === 'x' && \
+         fd.body.childNodes.length === 1 && \
+         fd.body.appendChild(fd.createElement('i')).parentNode === fd.body && \
+         fd.adoptNode(fd.createElement('u')).ownerDocument === fd"
     ));
 }
 

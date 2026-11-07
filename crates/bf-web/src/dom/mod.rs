@@ -351,8 +351,7 @@ pub fn foreign_realm(agent: &Agent, v: &Value, n: NodeRef) -> Option<bf_js::vm::
     if agent.host_lookup(current, n.key()) == Some(*o) {
         return None;
     }
-    (0..agent.realms.len())
-        .find(|&r| r != current && agent.host_lookup(r, n.key()) == Some(*o))
+    (0..agent.realms.len()).find(|&r| r != current && agent.host_lookup(r, n.key()) == Some(*o))
 }
 
 /// Un `Node?`.

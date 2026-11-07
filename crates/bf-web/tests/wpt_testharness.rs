@@ -123,7 +123,34 @@ fn iframes_get_their_documents() {
     .unwrap();
     std::fs::write(
         root.join("t/frames.html"),
-        "<!doctype html><script src=/resources/testharness.js></script>         <script src=/resources/testharnessreport.js></script>         <iframe id=f srcdoc='<p id=x>hola</p>'></iframe>         <iframe id=g src=sub.html></iframe>         <script>           var b = document.createElement('iframe');           document.body.appendChild(b);           test(function () {             if (b.contentDocument.URL !== 'about:blank') throw new Error(b.contentDocument.URL);           }, 'blank');           var n = 0;           function check() {             if (++n < 2) return;             test(function () {               var d = document.getElementById('f').contentDocument;               if (d.getElementById('x').textContent !== 'hola') throw new Error('srcdoc');               var w = document.getElementById('g').contentWindow;               if (w.marca !== 42 || w.document.title !== 'sub') throw new Error('src');             }, 'load');             done();           }           document.getElementById('f').addEventListener('load', check);           document.getElementById('g').addEventListener('load', check);         </script>",
+        concat!(
+            "<!doctype html><script src=/resources/testharness.js></script>",
+            "<script src=/resources/testharnessreport.js></script>",
+            "<iframe id=f srcdoc='<p id=x>hola</p>'></iframe>",
+            "<iframe id=g src=sub.html></iframe>",
+            "<script>",
+            "var b = document.createElement('iframe');",
+            "document.body.appendChild(b);",
+            "test(function () {",
+            "  if (b.contentDocument.URL !== 'about:blank') throw new Error(b.contentDocument.URL);",
+            "}, 'blank');",
+            "var n = 0;",
+            "function check() { n++; }",
+            "document.getElementById('f').addEventListener('load', check);",
+            "document.getElementById('g').addEventListener('load', check);",
+            // El `load` de la ventana espera al de los marcos (HTML §8.4, "the end").
+            "window.addEventListener('load', function () {",
+            "  test(function () {",
+            "    if (n !== 2) throw new Error('load de la ventana antes que el de los marcos');",
+            "    var d = document.getElementById('f').contentDocument;",
+            "    if (d.getElementById('x').textContent !== 'hola') throw new Error('srcdoc');",
+            "    var w = frames[1];",
+            "    if (w.marca !== 42 || w.document.title !== 'sub') throw new Error('src');",
+            "  }, 'load');",
+            "  done();",
+            "});",
+            "</script>",
+        ),
     )
     .unwrap();
     let r = run(&root, "t/frames.html");
