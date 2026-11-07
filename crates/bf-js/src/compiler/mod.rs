@@ -408,11 +408,7 @@ impl<'t> Codegen<'t> {
             st.ops.truncate(n - 3);
             st.trim_positions();
             st.patches.push((n - 3, l));
-            st.ops.push(Op::JumpIfNotLocalLtInt {
-                slot,
-                k,
-                target: 0,
-            });
+            st.ops.push(Op::JumpIfNotLocalLtInt { slot, k, target: 0 });
             return;
         }
         st.patches.push((st.ops.len(), l));

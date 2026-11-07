@@ -168,7 +168,9 @@ fn update_language_id(agent: &mut Agent, tag: &str, options: Gc<Object>) -> JsRe
 
     let language = get_string(agent, options, "language", Some(language))?.unwrap_or_default();
     if !is_language_subtag(&language) {
-        return agent.range_error(&format!("Incorrect locale information provided: {language}"));
+        return agent.range_error(&format!(
+            "Incorrect locale information provided: {language}"
+        ));
     }
     let script = get_string(agent, options, "script", script)?;
     if let Some(s) = &script
@@ -280,7 +282,10 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             None => agent.to_string(&tag_arg)?.to_string_lossy(),
         },
         Value::String(s) => s.to_string_lossy(),
-        _ => return agent.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
+        _ => {
+            return agent
+                .type_error("First argument to Intl.Locale constructor can't be empty or missing");
+        }
     };
     let options = coerce_options_to_object(agent, &a.arg(1))?;
     if !locale::is_structurally_valid(&tag) {
@@ -304,16 +309,34 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let ca = type_option(agent, "calendar")?;
     let co = type_option(agent, "collation")?;
-    let fw = get_string_option(agent, options, "firstDayOfWeek", &[], None)?.map(|f| weekday_to_u_value(&f));
+    let fw = get_string_option(agent, options, "firstDayOfWeek", &[], None)?
+        .map(|f| weekday_to_u_value(&f));
     if let Some(f) = &fw
         && !is_type_sequence(f)
     {
         return agent.range_error(&format!("Incorrect firstDayOfWeek provided: {f}"));
     }
-    let hc = get_string_option(agent, options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
-    let kf = get_string_option(agent, options, "caseFirst", &["upper", "lower", "false"], None)?;
-    let kn = crate::builtins::intl::get_boolean_option(agent, options, "numeric")?
-        .map(|b| if b { "true".to_owned() } else { "false".to_owned() });
+    let hc = get_string_option(
+        agent,
+        options,
+        "hourCycle",
+        &["h11", "h12", "h23", "h24"],
+        None,
+    )?;
+    let kf = get_string_option(
+        agent,
+        options,
+        "caseFirst",
+        &["upper", "lower", "false"],
+        None,
+    )?;
+    let kn = crate::builtins::intl::get_boolean_option(agent, options, "numeric")?.map(|b| {
+        if b {
+            "true".to_owned()
+        } else {
+            "false".to_owned()
+        }
+    });
     let nu = type_option(agent, "numberingSystem")?;
     let r = make_locale_record(
         &tag,
@@ -379,11 +402,7 @@ fn add_likely(lsr: &Lsr) -> Option<Lsr> {
     let m = keys.iter().find_map(|k| lookup_likely(k))?;
     let mt = locale::parse(m)?;
     Some((
-        if l == "und" {
-            mt.language
-        } else {
-            l.clone()
-        },
+        if l == "und" { mt.language } else { l.clone() },
         s.clone().or(mt.script),
         r.clone().or(mt.region),
     ))
@@ -645,7 +664,11 @@ fn get_hour_cycles(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// datos usan `latn`).
 fn get_numbering_systems(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let loc = this_locale(agent, &a.this, "getNumberingSystems")?;
-    let list = vec![loc.numbering_system.clone().unwrap_or_else(|| "latn".into())];
+    let list = vec![
+        loc.numbering_system
+            .clone()
+            .unwrap_or_else(|| "latn".into()),
+    ];
     string_array(agent, &list)
 }
 

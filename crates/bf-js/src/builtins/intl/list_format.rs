@@ -135,7 +135,10 @@ fn this_list_format(agent: &mut Agent, this: &Value, method: &str) -> JsResult<L
 
 /// StringListFromIterable ( iterable ) (§13.5.x): los strings de un iterable; un valor que
 /// no es string cierra el iterador con un TypeError.
-pub(crate) fn string_list_from_iterable(agent: &mut Agent, iterable: &Value) -> JsResult<Vec<String>> {
+pub(crate) fn string_list_from_iterable(
+    agent: &mut Agent,
+    iterable: &Value,
+) -> JsResult<Vec<String>> {
     if iterable.is_undefined() {
         return Ok(Vec::new());
     }

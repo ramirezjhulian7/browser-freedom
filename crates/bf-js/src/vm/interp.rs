@@ -2824,7 +2824,9 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
         },
         Op::JumpIfNotLocalLtInt { slot, k, target } => match &f.locals[slot as usize] {
             Some(Value::Number(n)) => {
-                if !(*n < f64::from(k)) {
+                // NaN no es menor: también salta.
+                let lt = *n < f64::from(k);
+                if !lt {
                     return jump!(target);
                 }
             }
@@ -3525,10 +3527,7 @@ fn fast_call(
         let old = frames.pop().expect("frame");
         recycle_into(old, pools.values, pools.locals);
     }
-    let stack = pools
-        .values
-        .pop()
-        .unwrap_or_else(|| Vec::with_capacity(16));
+    let stack = pools.values.pop().unwrap_or_else(|| Vec::with_capacity(16));
     let mut locals = pools.locals.pop().unwrap_or_default();
     locals.resize(code.num_locals as usize, None);
     let mut frame = Frame::with_buffers(code, env, realm, stack, locals);
@@ -3545,8 +3544,7 @@ fn fast_call(
 #[inline]
 fn fast_return(frames: &mut Vec<Frame>, pools: &mut Pools<'_>) -> bool {
     let f = frames.last_mut().expect("frame");
-    if !f.inline || !f.handlers.is_empty() || f.construct.is_some() || f.caller_realm != f.realm
-    {
+    if !f.inline || !f.handlers.is_empty() || f.construct.is_some() || f.caller_realm != f.realm {
         return false;
     }
     let v = f.stack.pop().expect("pila vacía");

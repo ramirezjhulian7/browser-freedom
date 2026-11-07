@@ -91,8 +91,14 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Some("long"),
     )?
     .unwrap_or_default();
-    let numeric = get_string_option(agent, options, "numeric", &["always", "auto"], Some("always"))?
-        .unwrap_or_default();
+    let numeric = get_string_option(
+        agent,
+        options,
+        "numeric",
+        &["always", "auto"],
+        Some("always"),
+    )?
+    .unwrap_or_default();
     let numbering_system = r.get("nu").unwrap_or("latn").to_owned();
     // §18.1.1 pasos 19-20: un Intl.NumberFormat con el locale y el sistema de numeración.
     let nf_options = agent.new_object(None);
@@ -139,7 +145,11 @@ fn singular_unit(unit: &str) -> Option<&'static str> {
 type Part = (&'static str, String, bool);
 
 /// PartitionRelativeTimePattern ( relativeTimeFormat, value, unit ) (§18.5.2).
-fn partition(agent: &mut Agent, rtf: &RelativeTimeFormat, a: &CallArgs<'_>) -> JsResult<(Vec<Part>, &'static str)> {
+fn partition(
+    agent: &mut Agent,
+    rtf: &RelativeTimeFormat,
+    a: &CallArgs<'_>,
+) -> JsResult<(Vec<Part>, &'static str)> {
     let value = agent.to_number(&a.arg(0))?;
     let unit_s = agent.to_string(&a.arg(1))?.to_string_lossy();
     if !value.is_finite() {
@@ -176,7 +186,11 @@ fn partition(agent: &mut Agent, rtf: &RelativeTimeFormat, a: &CallArgs<'_>) -> J
     let nf = rtf.number_format.as_deref().expect("NumberFormat");
     let fv = number_format::partition(nf, &number_format::from_number(abs));
     let formatted = format_numeric_to_string(&nf.digits, &Decimal::from_f64(abs));
-    let category = select_category(&rtf.locale, false, &Operands::from_str(&formatted.string, 0));
+    let category = select_category(
+        &rtf.locale,
+        false,
+        &Operands::from_str(&formatted.string, 0),
+    );
     let pattern = patterns
         .iter()
         .find(|(c, _)| *c == category)

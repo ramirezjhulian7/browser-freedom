@@ -26,7 +26,11 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     const STATICS: &[FnEntry] = &[
         ("from", 1, from),
         // E8: Array.fromAsync (§23.1.2.2).
-        ("fromAsync", 1, crate::builtins::array_from_async::from_async),
+        (
+            "fromAsync",
+            1,
+            crate::builtins::array_from_async::from_async,
+        ),
         ("isArray", 1, is_array),
         ("of", 0, of),
     ];

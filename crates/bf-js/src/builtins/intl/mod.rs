@@ -11,9 +11,9 @@ pub mod locale;
 // E8
 pub mod list_format;
 pub mod locale_object;
-pub mod relative_time_format;
 pub mod number_format;
 pub mod plural_rules;
+pub mod relative_time_format;
 
 use crate::builtins::web::{WebData, str_value};
 use crate::heap::{Gc, Trace, Tracer};

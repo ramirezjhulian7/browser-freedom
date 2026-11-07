@@ -185,7 +185,7 @@ fn decode_hex(s: &[u16], max_length: usize) -> Decoded {
         bytes: Vec::new(),
         error: false,
     };
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         out.error = true;
         return out;
     }
