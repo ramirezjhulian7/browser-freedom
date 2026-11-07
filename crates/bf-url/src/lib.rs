@@ -93,12 +93,13 @@ impl Url {
             .ok_or(ParseError)
     }
 
-    /// Como [`Url::parse`] con el encoding del documento para el query: `encode` da los bytes
-    /// de cada code point, o `None` si no es representable.
+    /// Como [`Url::parse`] con el encoding del documento para el query: `encode` codifica el
+    /// query entero en trozos de bytes, cada uno seguido del code point no representable que
+    /// lo cortó (ver [`parser::QueryEncoder`]).
     pub fn parse_with_encoding(
         input: &str,
         base: Option<&Url>,
-        encode: &dyn Fn(char) -> Option<Vec<u8>>,
+        encode: &dyn Fn(&str) -> Vec<(Vec<u8>, Option<u32>)>,
     ) -> Result<Url, ParseError> {
         basic_parse(input, base, None, None, Some(encode))
             .ok()
