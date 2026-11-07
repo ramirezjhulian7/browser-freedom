@@ -1,10 +1,10 @@
-//! WHATWG Encoding Standard: etiquetas, BOM y decodificadores de UTF-8, UTF-16LE/BE, todos los
-//! single-byte (tablas generadas con `tools/gen_encodings.py`), `x-user-defined` y
-//! `replacement`, más el encoder que usa el parser de URLs.
-//!
-//! TODO(roadmap): los multibyte (GBK, gb18030, Big5, EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR) se
-//! reconocen por su etiqueta pero se decodifican como windows-1252.
+//! WHATWG Encoding Standard: etiquetas, BOM y los decodificadores y encoders de todos los
+//! encodings: UTF-8, UTF-16LE/BE, los single-byte (tablas generadas con
+//! `tools/gen_encodings.py`), los multibyte (GBK, gb18030, Big5, EUC-JP, ISO-2022-JP,
+//! Shift_JIS y EUC-KR, §10–§13), `x-user-defined` y `replacement`. Las máquinas de estado
+//! están en [`crate::encoding_codec`]: [`Decoder`] y [`Encoder`].
 
+pub use crate::encoding_codec::{DecodeError, Decoder, Encoder};
 use crate::encoding_tables::{LABELS, SINGLE_BYTE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,8 +16,28 @@ pub enum Encoding {
     SingleByte(usize),
     XUserDefined,
     Replacement,
-    /// Multibyte sin decodificador todavía (nombre canónico).
-    Unsupported(&'static str),
+    /// GBK (§10.1).
+    Gbk,
+    /// gb18030 (§10.2).
+    Gb18030,
+    /// Big5 (§11.1).
+    Big5,
+    /// EUC-JP (§12.1).
+    EucJp,
+    /// ISO-2022-JP (§12.2).
+    Iso2022Jp,
+    /// Shift_JIS (§12.3).
+    ShiftJis,
+    /// EUC-KR (§13.1).
+    EucKr,
+}
+
+/// Modo de error de un encoder (§4.5): `Fatal` corta en el primer code point no
+/// representable; `Html` lo escribe como `&#N;`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeErrorMode {
+    Fatal,
+    Html,
 }
 
 pub const WINDOWS_1252: &str = "windows-1252";
@@ -41,10 +61,19 @@ impl Encoding {
             "UTF-16BE" => Encoding::Utf16Be,
             "x-user-defined" => Encoding::XUserDefined,
             "replacement" => Encoding::Replacement,
-            _ => match SINGLE_BYTE.iter().position(|(n, _)| *n == name) {
-                Some(i) => Encoding::SingleByte(i),
-                None => Encoding::Unsupported(name),
-            },
+            "GBK" => Encoding::Gbk,
+            "gb18030" => Encoding::Gb18030,
+            "Big5" => Encoding::Big5,
+            "EUC-JP" => Encoding::EucJp,
+            "ISO-2022-JP" => Encoding::Iso2022Jp,
+            "Shift_JIS" => Encoding::ShiftJis,
+            "EUC-KR" => Encoding::EucKr,
+            _ => Encoding::SingleByte(
+                SINGLE_BYTE
+                    .iter()
+                    .position(|(n, _)| *n == name)
+                    .expect("encodings.json y SINGLE_BYTE coinciden"),
+            ),
         }
     }
 
@@ -60,13 +89,29 @@ impl Encoding {
             Encoding::SingleByte(i) => SINGLE_BYTE[*i].0,
             Encoding::XUserDefined => "x-user-defined",
             Encoding::Replacement => "replacement",
-            Encoding::Unsupported(n) => n,
+            Encoding::Gbk => "GBK",
+            Encoding::Gb18030 => "gb18030",
+            Encoding::Big5 => "Big5",
+            Encoding::EucJp => "EUC-JP",
+            Encoding::Iso2022Jp => "ISO-2022-JP",
+            Encoding::ShiftJis => "Shift_JIS",
+            Encoding::EucKr => "EUC-KR",
         }
     }
 
-    /// ¿Hay decodificador propio? (Los multibyte se decodifican como windows-1252.)
+    /// ¿Hay decodificador propio? Todos los encodings del spec lo tienen.
     pub fn is_supported(&self) -> bool {
-        !matches!(self, Encoding::Unsupported(_))
+        true
+    }
+
+    /// Un decodificador nuevo de este encoding.
+    pub fn new_decoder(&self) -> Decoder {
+        Decoder::new(*self)
+    }
+
+    /// Un encoder nuevo del output encoding de este encoding.
+    pub fn new_encoder(&self) -> Encoder {
+        Encoder::new(*self)
     }
 
     /// Decodifica `bytes` (sin mirar el BOM; ver [`decode`]), reemplazando los errores por
@@ -127,7 +172,12 @@ impl Encoding {
                     "\u{FFFD}".to_owned()
                 }
             }
-            Encoding::Unsupported(_) => Encoding::windows_1252().decode_without_bom(bytes),
+            _ => {
+                let mut out = String::with_capacity(bytes.len());
+                // Sin `fatal` no hay errores que propagar.
+                let _ = self.new_decoder().decode(bytes, true, false, &mut out);
+                out
+            }
         }
     }
 
@@ -139,78 +189,65 @@ impl Encoding {
         }
     }
 
-    /// ¿Hay encoder? (UTF-8 y single-byte; los multibyte no.)
+    /// ¿Hay encoder? Todos los output encodings lo tienen.
     pub fn can_encode(&self) -> bool {
-        !matches!(self.output_encoding(), Encoding::Unsupported(_))
+        true
     }
 
-    /// Bytes de `c` en el encoding de salida, o `None` si no es representable.
+    /// Bytes de `c` en el encoding de salida (con un encoder nuevo, así que ISO-2022-JP
+    /// incluye sus secuencias de escape), o `None` si no es representable.
     pub fn encode_char(&self, c: char) -> Option<Vec<u8>> {
-        let cp = c as u32;
-        match self.output_encoding() {
-            Encoding::SingleByte(i) => {
-                if cp < 0x80 {
-                    return Some(vec![cp as u8]);
+        let mut out = Vec::new();
+        match self
+            .new_encoder()
+            .encode_or_fail(&mut std::iter::once(c), &mut out)
+        {
+            None => Some(out),
+            Some(_) => None,
+        }
+    }
+
+    /// "Encode" (§6) de `s` con el modo de error dado; con `Fatal`, `Err` lleva el primer
+    /// code point no representable.
+    pub fn encode(&self, s: &str, mode: EncodeErrorMode) -> Result<Vec<u8>, u32> {
+        let mut encoder = self.new_encoder();
+        let mut out = Vec::with_capacity(s.len());
+        let mut input = s.chars();
+        loop {
+            match encoder.encode_or_fail(&mut input, &mut out) {
+                None => return Ok(out),
+                Some(cp) if mode == EncodeErrorMode::Fatal => return Err(cp),
+                // Modo html: "&#N;" se antepone a la entrada y pasa por el encoder (§3,
+                // "process an item"); todo es ASCII, así que basta con codificarlo aparte
+                // con la misma instancia.
+                Some(cp) => {
+                    let r = encoder.encode_items(&mut format!("&#{cp};").chars(), false, &mut out);
+                    debug_assert!(r.is_none(), "las referencias de carácter son ASCII");
                 }
-                let table = &SINGLE_BYTE[i].1;
-                table
-                    .iter()
-                    .position(|&t| u32::from(t) == cp && t != 0)
-                    .map(|b| vec![0x80 + b as u8])
-            }
-            Encoding::XUserDefined => {
-                if cp < 0x80 {
-                    Some(vec![cp as u8])
-                } else if (0xF780..=0xF7FF).contains(&cp) {
-                    Some(vec![(cp - 0xF780 + 0x80) as u8])
-                } else {
-                    None
-                }
-            }
-            Encoding::Unsupported(_) => None,
-            _ => {
-                let mut buf = [0u8; 4];
-                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
             }
         }
     }
 
-    /// Codifica `s` con el modo de error HTML: lo no representable pasa a `&#N;` (lo usa el
-    /// parser de URLs para el query).
-    pub fn encode_for_url(&self, s: &str) -> Vec<u8> {
-        match self.output_encoding() {
-            Encoding::SingleByte(i) => {
-                let table = &SINGLE_BYTE[i].1;
-                let mut out = Vec::with_capacity(s.len());
-                for c in s.chars() {
-                    let cp = c as u32;
-                    if cp < 0x80 {
-                        out.push(cp as u8);
-                    } else if let Some(b) = table.iter().position(|&t| u32::from(t) == cp && t != 0)
-                    {
-                        out.push(0x80 + b as u8);
-                    } else {
-                        out.extend_from_slice(format!("&#{cp};").as_bytes());
-                    }
-                }
-                out
+    /// "Percent-encode after encoding" (URL §1.3) por partes: cada trozo de bytes codificados
+    /// seguido del code point no representable que lo cortó (el último, sin ninguno).
+    pub fn encode_segments(&self, s: &str) -> Vec<(Vec<u8>, Option<u32>)> {
+        let mut encoder = self.new_encoder();
+        let mut input = s.chars();
+        let mut segments = Vec::new();
+        loop {
+            let mut out = Vec::new();
+            let error = encoder.encode_or_fail(&mut input, &mut out);
+            segments.push((out, error));
+            if error.is_none() {
+                return segments;
             }
-            Encoding::XUserDefined => {
-                let mut out = Vec::with_capacity(s.len());
-                for c in s.chars() {
-                    let cp = c as u32;
-                    if cp < 0x80 {
-                        out.push(cp as u8);
-                    } else if (0xF780..=0xF7FF).contains(&cp) {
-                        out.push((cp - 0xF780 + 0x80) as u8);
-                    } else {
-                        out.extend_from_slice(format!("&#{cp};").as_bytes());
-                    }
-                }
-                out
-            }
-            _ => s.as_bytes().to_vec(),
         }
+    }
+
+    /// Codifica `s` con el modo de error HTML: lo no representable pasa a `&#N;`.
+    pub fn encode_for_url(&self, s: &str) -> Vec<u8> {
+        self.encode(s, EncodeErrorMode::Html)
+            .expect("el modo html no falla")
     }
 }
 

@@ -1,10 +1,8 @@
-//! `TextEncoder` y `TextDecoder` (Encoding Standard §8) con los decodificadores de UTF-8
-//! (§9.1.1) y UTF-16 (§14.2.1) en streaming y con modo `fatal`; los single-byte y
-//! `x-user-defined` usan las tablas de `bf_infra::encoding`. Los multibyte legacy (gb18030,
-//! Big5, EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR) se decodifican como windows-1252, como en
-//! `bf_infra` (TODO(roadmap) fase 3.5).
+//! `TextEncoder` y `TextDecoder` (Encoding Standard §8). Los decodificadores de todos los
+//! encodings (UTF-8, UTF-16, single-byte, multibyte legacy y `x-user-defined`), en streaming
+//! y con modo `fatal`, son los de `bf_infra::encoding`.
 
-use bf_infra::encoding::Encoding;
+use bf_infra::encoding::{Decoder, Encoding};
 
 use crate::builtins::array_buffer::{ArrayBufferData, ElementType};
 use crate::builtins::typed_array::TypedArrayData;
@@ -206,210 +204,6 @@ fn encode_into(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Object(r))
 }
 
-// --- Decodificadores ---
-
-/// El estado de un decodificador.
-#[derive(Debug, Clone)]
-enum Decoder {
-    /// UTF-8 decoder (§9.1.1).
-    Utf8 {
-        code_point: u32,
-        seen: u8,
-        needed: u8,
-        lower: u8,
-        upper: u8,
-    },
-    /// Shared UTF-16 decoder (§14.2.1).
-    Utf16 {
-        little: bool,
-        lead_byte: Option<u8>,
-        lead_surrogate: Option<u16>,
-    },
-    /// Single-byte, x-user-defined y los multibyte sin decodificador propio.
-    Table(Encoding),
-}
-
-impl Decoder {
-    fn new(e: Encoding) -> Decoder {
-        match e {
-            Encoding::Utf8 => Decoder::Utf8 {
-                code_point: 0,
-                seen: 0,
-                needed: 0,
-                lower: 0x80,
-                upper: 0xBF,
-            },
-            Encoding::Utf16Le | Encoding::Utf16Be => Decoder::Utf16 {
-                little: e == Encoding::Utf16Le,
-                lead_byte: None,
-                lead_surrogate: None,
-            },
-            other => Decoder::Table(other),
-        }
-    }
-
-    /// Procesa la cola: los code points decodificados en `out`. Con `flush`, el
-    /// end-of-queue. `Err` en un error con `fatal`.
-    fn run(
-        &mut self,
-        input: &[u8],
-        flush: bool,
-        fatal: bool,
-        out: &mut Vec<u32>,
-    ) -> Result<(), ()> {
-        let mut queue: std::collections::VecDeque<u8> = input.iter().copied().collect();
-        let error = |out: &mut Vec<u32>| -> Result<(), ()> {
-            if fatal {
-                Err(())
-            } else {
-                out.push(0xFFFD);
-                Ok(())
-            }
-        };
-        loop {
-            let Some(byte) = queue.pop_front() else {
-                if !flush {
-                    return Ok(());
-                }
-                // end-of-queue.
-                match self {
-                    Decoder::Utf8 { needed, .. } if *needed != 0 => {
-                        *self = Decoder::new(Encoding::Utf8);
-                        return error(out);
-                    }
-                    Decoder::Utf16 {
-                        lead_byte,
-                        lead_surrogate,
-                        ..
-                    } if lead_byte.is_some() || lead_surrogate.is_some() => {
-                        *lead_byte = None;
-                        *lead_surrogate = None;
-                        return error(out);
-                    }
-                    _ => return Ok(()),
-                }
-            };
-            match self {
-                Decoder::Utf8 {
-                    code_point,
-                    seen,
-                    needed,
-                    lower,
-                    upper,
-                } => {
-                    if *needed == 0 {
-                        match byte {
-                            0x00..=0x7F => out.push(u32::from(byte)),
-                            0xC2..=0xDF => {
-                                *needed = 1;
-                                *code_point = u32::from(byte & 0x1F);
-                            }
-                            0xE0..=0xEF => {
-                                if byte == 0xE0 {
-                                    *lower = 0xA0;
-                                }
-                                if byte == 0xED {
-                                    *upper = 0x9F;
-                                }
-                                *needed = 2;
-                                *code_point = u32::from(byte & 0x0F);
-                            }
-                            0xF0..=0xF4 => {
-                                if byte == 0xF0 {
-                                    *lower = 0x90;
-                                }
-                                if byte == 0xF4 {
-                                    *upper = 0x8F;
-                                }
-                                *needed = 3;
-                                *code_point = u32::from(byte & 0x07);
-                            }
-                            _ => error(out)?,
-                        }
-                        continue;
-                    }
-                    if !(*lower..=*upper).contains(&byte) {
-                        *code_point = 0;
-                        *needed = 0;
-                        *seen = 0;
-                        *lower = 0x80;
-                        *upper = 0xBF;
-                        queue.push_front(byte);
-                        error(out)?;
-                        continue;
-                    }
-                    *lower = 0x80;
-                    *upper = 0xBF;
-                    *code_point = (*code_point << 6) | u32::from(byte & 0x3F);
-                    *seen += 1;
-                    if *seen != *needed {
-                        continue;
-                    }
-                    out.push(*code_point);
-                    *code_point = 0;
-                    *seen = 0;
-                    *needed = 0;
-                }
-                Decoder::Utf16 {
-                    little,
-                    lead_byte,
-                    lead_surrogate,
-                } => {
-                    let Some(lead) = lead_byte.take() else {
-                        *lead_byte = Some(byte);
-                        continue;
-                    };
-                    let cu = if *little {
-                        u16::from(byte) << 8 | u16::from(lead)
-                    } else {
-                        u16::from(lead) << 8 | u16::from(byte)
-                    };
-                    if let Some(ls) = lead_surrogate.take() {
-                        if (0xDC00..0xE000).contains(&cu) {
-                            out.push(
-                                0x10000
-                                    + ((u32::from(ls) - 0xD800) << 10)
-                                    + (u32::from(cu) - 0xDC00),
-                            );
-                            continue;
-                        }
-                        let (b1, b2) = ((cu >> 8) as u8, (cu & 0xFF) as u8);
-                        if *little {
-                            queue.push_front(b1);
-                            queue.push_front(b2);
-                        } else {
-                            queue.push_front(b2);
-                            queue.push_front(b1);
-                        }
-                        error(out)?;
-                        continue;
-                    }
-                    if (0xD800..0xDC00).contains(&cu) {
-                        *lead_surrogate = Some(cu);
-                        continue;
-                    }
-                    if (0xDC00..0xE000).contains(&cu) {
-                        error(out)?;
-                        continue;
-                    }
-                    out.push(u32::from(cu));
-                }
-                Decoder::Table(e) => {
-                    if byte < 0x80 && !matches!(e, Encoding::Replacement) {
-                        out.push(u32::from(byte));
-                        continue;
-                    }
-                    let s = e.decode_without_bom(&[byte]);
-                    match s.chars().next() {
-                        Some('\u{FFFD}') | None => error(out)?,
-                        Some(c) => out.push(c as u32),
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Los slots de un TextDecoder.
 #[derive(Debug, Clone)]
 pub struct DecoderData {
@@ -520,28 +314,23 @@ fn decode(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.bom_seen = false;
     }
     d.do_not_flush = stream;
-    let mut cps = Vec::new();
-    let r = d.decoder.run(&bytes, !stream, d.fatal, &mut cps);
+    let mut text = String::new();
+    let r = d.decoder.decode(&bytes, !stream, d.fatal, &mut text);
     // Serialize I/O queue (§8.1.4): el BOM inicial de UTF-8 y UTF-16 se quita.
-    let mut units: Vec<u16> = Vec::with_capacity(cps.len());
+    let mut units: Vec<u16> = Vec::with_capacity(text.len());
     let bom_encoding = matches!(
         d.encoding,
         Encoding::Utf8 | Encoding::Utf16Le | Encoding::Utf16Be
     );
-    for cp in cps {
+    for c in text.chars() {
         if bom_encoding && !d.ignore_bom && !d.bom_seen {
             d.bom_seen = true;
-            if cp == 0xFEFF {
+            if c as u32 == 0xFEFF {
                 continue;
             }
         }
-        match char::from_u32(cp) {
-            Some(c) => {
-                let mut b = [0u16; 2];
-                units.extend_from_slice(c.encode_utf16(&mut b));
-            }
-            None => units.push(cp as u16),
-        }
+        let mut b = [0u16; 2];
+        units.extend_from_slice(c.encode_utf16(&mut b));
     }
     if r.is_err() {
         // Un error fatal deja el decodificador para un decode nuevo.
