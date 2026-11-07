@@ -48,8 +48,14 @@ use crate::fragment::{Edges, Fragment, FragmentKind, Rect};
 /// Línea más alejada admitida a cada lado de la rejilla explícita (§8.3.1, nota sobre límites).
 const MAX_LINE: i32 = 1000;
 
+// E5: grid lanes (CSS Grid 3).
+mod lanes;
+
 pub(crate) fn is_grid_container(b: &LayoutBox) -> bool {
-    matches!(b.style.display, Display::Grid | Display::InlineGrid)
+    matches!(
+        b.style.display,
+        Display::Grid | Display::InlineGrid | Display::GridLanes | Display::InlineGridLanes
+    )
         && !matches!(b.kind, BoxKind::Replaced { .. })
 }
 
@@ -310,6 +316,7 @@ pub(crate) struct SubgridParent {
 fn subgrid_axes(b: &LayoutBox) -> (bool, bool) {
     let s = &b.style;
     if !is_grid_container(b)
+        || lanes::is_lanes_container(b)
         || b.is_absolutely_positioned()
         || s.contain.layout
         || s.contain.paint
@@ -2140,6 +2147,9 @@ impl<'a> Layout<'a> {
     /// por `order`) y altura del contenido. `cb` es el content box del contenedor (`height` si
     /// es definida).
     pub(crate) fn grid_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+        if lanes::is_lanes_container(container) {
+            return self.lanes_layout(container, cb);
+        }
         let cs = &container.style;
         let mut grid = self.grid_setup(container, Some(cb.width), cb.height);
         let col_gap = axis_gap(&cs.column_gap, Some(cb.width), grid.sub.cols.as_ref());
@@ -2732,6 +2742,9 @@ impl<'a> Layout<'a> {
     /// Anchos intrínsecos (min-content, max-content) de un contenedor grid: el algoritmo de
     /// §12.1 con el espacio disponible bajo una restricción min-content o max-content.
     pub(crate) fn grid_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        if lanes::is_lanes_container(b) {
+            return self.lanes_intrinsic_widths(b);
+        }
         let cs = &b.style;
         let grid = self.grid_setup(b, None, None);
         let gap = axis_gap(&cs.column_gap, None, grid.sub.cols.as_ref());
