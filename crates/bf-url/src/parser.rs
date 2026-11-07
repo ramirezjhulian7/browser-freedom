@@ -30,9 +30,11 @@ pub(crate) enum State {
     Fragment,
 }
 
-/// Codificación del query con el encoding del documento: los bytes de un code point, o
-/// `None` si no es representable (se emite `%26%23N%3B`).
-pub type QueryEncoder<'a> = &'a dyn Fn(char) -> Option<Vec<u8>>;
+/// Codificación del query con el encoding del documento ("encode or fail" repetido, Encoding
+/// §4.6): trozos de bytes, cada uno seguido del code point no representable que lo cortó (se
+/// emite `%26%23N%3B`). Es una sola función para todo el buffer porque hay encoders con
+/// estado (ISO-2022-JP).
+pub type QueryEncoder<'a> = &'a dyn Fn(&str) -> Vec<(Vec<u8>, Option<u32>)>;
 
 fn is_windows_drive_letter(s: &[char]) -> bool {
     s.len() == 2 && s[0].is_ascii_alphabetic() && matches!(s[1], ':' | '|')
@@ -582,13 +584,10 @@ pub(crate) fn basic_parse(
                     let mut encoded = String::new();
                     match encoder {
                         Some(e) if !utf8 => {
-                            for ch in buffer.chars() {
-                                match e(ch) {
-                                    Some(bytes) => {
-                                        encoded
-                                            .push_str(&percent::encode_bytes(&bytes, set, false));
-                                    }
-                                    None => encoded.push_str(&format!("%26%23{}%3B", ch as u32)),
+                            for (bytes, error) in e(&buffer) {
+                                encoded.push_str(&percent::encode_bytes(&bytes, set, false));
+                                if let Some(cp) = error {
+                                    encoded.push_str(&format!("%26%23{cp}%3B"));
                                 }
                             }
                         }
