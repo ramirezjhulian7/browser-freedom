@@ -643,6 +643,10 @@ pub const GROUPS: &[&str] = &[
     "css/css-ui",
     // E7: SVG (documentos `.svg` sueltos y SVG en línea en HTML).
     "svg",
+    // E9: escritura vertical, bidi y texto.
+    "css/css-writing-modes",
+    "css/CSS2/bidi-text",
+    "css/css-text",
 ];
 
 /// Tabla Markdown por directorio.

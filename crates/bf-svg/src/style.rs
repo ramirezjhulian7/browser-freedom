@@ -30,7 +30,10 @@ const PRESENTATION: &[&str] = &[
     "marker-end",
     "marker-mid",
     "marker-start",
+    "mask",
+    "mask-type",
     "opacity",
+    "paint-order",
     "stop-color",
     "stop-opacity",
     "stroke",
@@ -42,6 +45,7 @@ const PRESENTATION: &[&str] = &[
     "stroke-opacity",
     "stroke-width",
     "text-anchor",
+    "vector-effect",
     "visibility",
 ];
 

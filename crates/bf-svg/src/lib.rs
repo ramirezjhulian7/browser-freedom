@@ -9,8 +9,11 @@
 //! `miterlimit`, guiones), gradientes lineales y radiales (con `href`, unidades y
 //! `gradientTransform`), `opacity`, `clipPath`, `display` y `visibility`.
 //!
-//! TODO(svg): `mask`, `pattern`, `marker`, `image`, `filter`, `foreignObject`, animación SMIL,
-//! `textPath` y el layout de texto completo (§11).
+//! También `pattern`, `mask`, `marker`, `paint-order`, `vector-effect: non-scaling-stroke` y
+//! `pathLength`.
+//!
+//! TODO(svg): `image`, `filter`, `foreignObject`, animación SMIL, `textPath` y el layout de
+//! texto completo (§11).
 
 #![forbid(unsafe_code)]
 
@@ -246,7 +249,33 @@ pub struct Group {
     pub opacity: f32,
     /// Recorte, en el sistema de coordenadas del grupo (ya transformado).
     pub clip: Option<ClipPath>,
+    /// Máscara (`mask`, CSS Masking 1 §7), también en el sistema del grupo.
+    pub mask: Option<Box<Mask>>,
     pub children: Vec<Node>,
+}
+
+/// Elemento `mask` resuelto (CSS Masking 1 §7.1): el contenido se pinta, se recorta a la
+/// región `rect` y su luminancia (o su alfa) multiplica la capa del elemento enmascarado.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mask {
+    /// `mask-type: luminance` (por defecto) o `alpha`.
+    pub luminance: bool,
+    /// Región de la máscara (`x`, `y`, `width`, `height` ya resueltos según `maskUnits`).
+    pub rect: (f32, f32, f32, f32),
+    /// Contenido, con la transformación de `maskContentUnits` en el grupo.
+    pub content: Group,
+}
+
+/// Servidor `pattern` resuelto (SVG 2 §14.4): una tesela de `width`×`height` que se repite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub width: f32,
+    pub height: f32,
+    /// Del sistema de la tesela (origen en su esquina) al espacio de usuario de la forma:
+    /// `patternTransform` y el desplazamiento `x`, `y` (con `patternUnits` ya aplicadas).
+    pub transform: Transform,
+    /// Contenido en el sistema de la tesela (`viewBox` o `patternContentUnits` en el grupo).
+    pub content: Group,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -315,6 +344,7 @@ pub struct Gradient {
 pub enum Paint {
     Color(Rgba),
     Gradient(Box<Gradient>),
+    Pattern(Box<Pattern>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +365,9 @@ pub struct Stroke {
     /// Vacío = línea continua.
     pub dasharray: Vec<f32>,
     pub dashoffset: f32,
+    /// `vector-effect: non-scaling-stroke` (SVG 2 §13.6.2): ancho y guiones en el espacio del
+    /// host (el del viewport raíz), no en el de usuario.
+    pub non_scaling: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,6 +399,8 @@ pub struct Span {
     /// Desplazamiento antes del fragmento (`dx`, `dy`).
     pub dx: f32,
     pub dy: f32,
+    /// `paint-order` con el trazo antes que el relleno (SVG 2 §13.7.3).
+    pub stroke_first: bool,
 }
 
 /// *Text chunk* (§11.8.3): empieza en una posición absoluta (o donde terminó el anterior) y

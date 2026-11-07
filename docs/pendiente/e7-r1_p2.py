@@ -16,7 +16,7 @@ def rep(s, a, b, cnt=1):
 
 
 # ---------- lib.rs: tipos (preparado antes) ----------
-lib = open('D:/Personales/Repos/browser-freedom-army-e7/target/e7/lib.rs.p2', encoding='utf-8').read()
+lib = open('D:/Personales/Repos/browser-freedom-army-e7/docs/pendiente/e7-lib.rs.p2', encoding='utf-8').read()
 save('lib.rs', lib)
 
 # ---------- style.rs: nuevas propiedades de presentación ----------

@@ -540,6 +540,62 @@ pub fn parse_transform(s: &str) -> Option<Transform> {
 }
 
 /// Caja envolvente exacta de un trazado (extremos de las curvas incluidos): x, y, ancho, alto.
+/// Longitud de un trazado (para `pathLength`, SVG 2 §9.5.1): las curvas se aproximan con
+/// 64 cuerdas.
+pub fn length(segs: &[Seg]) -> f32 {
+    const STEPS: usize = 64;
+    let mut total = 0.0f32;
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let dist = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    for s in segs {
+        match *s {
+            Seg::MoveTo(x, y) => {
+                (cx, cy) = (x, y);
+                (sx, sy) = (x, y);
+            }
+            Seg::LineTo(x, y) => {
+                total += dist((cx, cy), (x, y));
+                (cx, cy) = (x, y);
+            }
+            Seg::QuadTo(x1, y1, x, y) => {
+                let mut prev = (cx, cy);
+                for k in 1..=STEPS {
+                    let t = k as f32 / STEPS as f32;
+                    let u = 1.0 - t;
+                    let p = (
+                        u * u * cx + 2.0 * u * t * x1 + t * t * x,
+                        u * u * cy + 2.0 * u * t * y1 + t * t * y,
+                    );
+                    total += dist(prev, p);
+                    prev = p;
+                }
+                (cx, cy) = (x, y);
+            }
+            Seg::CubicTo(x1, y1, x2, y2, x, y) => {
+                let mut prev = (cx, cy);
+                for k in 1..=STEPS {
+                    let t = k as f32 / STEPS as f32;
+                    let u = 1.0 - t;
+                    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                    let p = (
+                        a * cx + b * x1 + c * x2 + d * x,
+                        a * cy + b * y1 + c * y2 + d * y,
+                    );
+                    total += dist(prev, p);
+                    prev = p;
+                }
+                (cx, cy) = (x, y);
+            }
+            Seg::Close => {
+                total += dist((cx, cy), (sx, sy));
+                (cx, cy) = (sx, sy);
+            }
+        }
+    }
+    total
+}
+
 pub fn bbox(segs: &[Seg]) -> Option<(f32, f32, f32, f32)> {
     let mut b: Option<(f32, f32, f32, f32)> = None;
     let mut add = |x: f32, y: f32| {
@@ -686,6 +742,15 @@ mod tests {
             panic!()
         };
         assert_eq!((*x, *y), (10.0, 0.0));
+    }
+
+    #[test]
+    fn path_length() {
+        let square = parse_path("M10,10L110,10L110,110L10,110Z");
+        assert!((length(&square) - 400.0).abs() < 1e-3);
+        let circle = ellipse(0.0, 0.0, 100.0, 100.0);
+        let c = 2.0 * std::f32::consts::PI * 100.0;
+        assert!((length(&circle) - c).abs() < 0.5, "{}", length(&circle));
     }
 
     #[test]
