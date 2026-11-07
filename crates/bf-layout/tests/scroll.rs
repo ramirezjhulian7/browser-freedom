@@ -231,3 +231,47 @@ fn transform_contains_absolute_and_fixed_descendants() {
         bf_style::properties::types::Position::Fixed
     );
 }
+
+fn texts(f: &Fragment, out: &mut Vec<String>) {
+    if let Some((t, _)) = &f.text {
+        out.push(t.clone());
+    }
+    for c in &f.children {
+        texts(c, out);
+    }
+}
+
+/// CSS Overflow 4 §5: `line-clamp: 2` corta tras la segunda línea, la caja mide dos líneas y
+/// la última termina en "…".
+#[test]
+fn line_clamp_counts_lines_and_inserts_ellipsis() {
+    let (doc, tree) = layout(
+        "<!doctype html><style>body{margin:0}\
+         #c{line-clamp:2;font:10px/20px x;width:300px}</style>\
+         <div id=c>aaa<br>bbb<br>ccc</div><div id=n>x</div>",
+    );
+    let c = frag(&tree, by_id(&doc, "c"));
+    assert_eq!(c.rect.height, 40.0);
+    let mut t = Vec::new();
+    texts(&c, &mut t);
+    assert_eq!(t.join("|"), "aaa|bbb|\u{2026}");
+    // El siguiente bloque sube.
+    assert_eq!(frag(&tree, by_id(&doc, "n")).rect.y, 40.0);
+}
+
+/// `line-clamp: auto` corta en la última línea que cabe en `max-height`; la heredada de WebKit
+/// solo actúa con `display: -webkit-box` y `-webkit-box-orient: vertical`.
+#[test]
+fn line_clamp_auto_and_webkit_legacy() {
+    let (doc, tree) = layout(
+        "<!doctype html><style>body{margin:0}\
+         div{font:10px/20px x;width:60px}\
+         #a{line-clamp:auto;max-height:50px}\
+         #w{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1}\
+         #h{display:-webkit-box;-webkit-line-clamp:1}</style>\
+         <div id=a>a<br>b<br>c<br>d</div><div id=w>a<br>b</div><div id=h>a<br>b</div>",
+    );
+    assert_eq!(frag(&tree, by_id(&doc, "a")).rect.height, 40.0);
+    assert_eq!(frag(&tree, by_id(&doc, "w")).rect.height, 20.0);
+    assert_eq!(frag(&tree, by_id(&doc, "h")).rect.height, 40.0);
+}

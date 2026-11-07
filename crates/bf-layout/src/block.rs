@@ -781,6 +781,17 @@ impl<'a> Layout<'a> {
             }
         };
         self.legend = outer_legend;
+        // E12: `line-clamp` (CSS Overflow 4 §5) en los block containers.
+        let auto_h = if matches!(b.kind, BoxKind::Replaced { .. } | BoxKind::Table)
+            || crate::flex::is_flex_container(b)
+            || crate::grid::is_grid_container(b)
+        {
+            auto_h
+        } else {
+            let max_h = Some(height_limits(style, cb.height, edges_v).1).filter(|h| h.is_finite());
+            self.line_clamp(style, &mut children, content_top, auto_h, spec_h, max_h)
+                .unwrap_or(auto_h)
+        };
         let mut content_h = spec_h.unwrap_or(auto_h);
         // E4: en tablas `height` es un mínimo; en celdas solo cuenta para la altura de la fila
         // (CSS 2.2 §17.5.3), así que la celda mide su contenido.
