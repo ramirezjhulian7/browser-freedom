@@ -360,6 +360,12 @@ w!(
     "DataCloneError"
 );
 
+/// ECMA-262 §25.4.3.14 `Atomics.wait` / §25.4.3.12 `Atomics.notify`. El
+/// slot 0 sirve solo para esperar y nunca cambia: si el `notify` de la
+/// página llegara antes de que el worker entre en `wait`, éste seguiría
+/// viendo 0 y dormiría en vez de devolver "not-equal". El dato va en
+/// `ia[2]`, escrito antes de cada `notify`, y el intervalo insiste hasta
+/// que `notify` despierte a un agente.
 #[test]
 fn shared_memory_and_atomics_between_threads() {
     let mut p = Page::with_isolation(
@@ -367,13 +373,13 @@ fn shared_memory_and_atomics_between_threads() {
             "/dir/a.js",
             "onmessage = e => { var ia = new Int32Array(e.data); Atomics.add(ia, 1, 5); \
              postMessage('esperando'); var r = Atomics.wait(ia, 0, 0, 10000); \
-             postMessage(r + ' ' + Atomics.load(ia, 0) + ' ' + crossOriginIsolated); };",
+             postMessage(r + ' ' + Atomics.load(ia, 2) + ' ' + crossOriginIsolated); };",
         )],
         true,
     );
     let r = p.run(
-        "var sab = new SharedArrayBuffer(8); var ia = new Int32Array(sab); var w = new Worker('a.js'); \
-         w.onmessage = e => { if (e.data == 'esperando') { var t = setInterval(() => { Atomics.store(ia, 0, 7); \
+        "var sab = new SharedArrayBuffer(12); var ia = new Int32Array(sab); var w = new Worker('a.js'); \
+         w.onmessage = e => { if (e.data == 'esperando') { var t = setInterval(() => { Atomics.store(ia, 2, 7); \
          if (Atomics.notify(ia, 0) == 1) clearInterval(t); }, 1); } else finish(e.data + ' ' + Atomics.load(ia, 1)); }; \
          w.postMessage(sab);",
     );
