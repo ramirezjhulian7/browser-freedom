@@ -29,10 +29,10 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
 | css/css-grid | 562 | 992 | 913 | 13 | 2480 | 35.9% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| svg (E7, 2026-11-06) | 257 | 197 | 968 | 0 | 1422 | 56.6% |
-| **Total** | 5419 | 2154 | 6141 | 15 | 13729 | 71.4% |
+| svg (E7, 2026-11-07) | 269 | 185 | 968 | 0 | 1422 | 59.3% |
+| **Total** | 5431 | 2142 | 6141 | 15 | 13729 | 71.6% |
 
-La fila `svg` se midió aparte el 2026-11-06 en `army/e7` con el mismo commit de WPT
+La fila `svg` se midió aparte el 2026-11-07 en `army/e7` con el mismo commit de WPT
 (`cargo test --release -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); el resto
 es del 2026-10-20.
 
