@@ -15,7 +15,7 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextJustify, TextTransform,
+    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify, TextTransform,
     UnicodeBidi, VerticalAlign, VerticalAlignKeyword, WhiteSpace, WordBreak,
 };
 
@@ -608,7 +608,34 @@ impl<'a> Layout<'a> {
                 }
                 _ => false,
             };
-            if breaks[k] == Break::Prohibited && !preserved_space {
+            // CSS Text 3 §5.1: por compatibilidad web hay una oportunidad antes y después de
+            // cada atómica, aunque el carácter vecino la suprima (U+00A0, `:`…). Los caracteres
+            // de pegado (GL salvo U+00A0, WJ, ZWJ y las marcas combinantes) la siguen
+            // suprimiendo, como en los demás navegadores (WPT line-breaking-atomic-*).
+            // Los espacios y saltos siguen sus reglas (LB4–LB7: no se corta antes de ellos).
+            let glue = |c: char| {
+                c != '\u{A0}'
+                    && matches!(
+                        linebreak::resolve_class(c),
+                        LineBreak::GL
+                            | LineBreak::WJ
+                            | LineBreak::ZWJ
+                            | LineBreak::CM
+                            | LineBreak::SP
+                            | LineBreak::BK
+                            | LineBreak::CR
+                            | LineBreak::LF
+                            | LineBreak::NL
+                    )
+            };
+            let atomic_edge = match (before, origin[k]) {
+                (Origin::Atomic(_), Origin::Atomic(_)) => true,
+                (Origin::Atomic(_), _) | (_, Origin::Atomic(_)) => {
+                    !glue(chars[k - 1]) && !glue(chars[k])
+                }
+                _ => false,
+            };
+            if breaks[k] == Break::Prohibited && !preserved_space && !atomic_edge {
                 continue;
             }
             // ¿Qué `white-space` controla la posición?
@@ -916,9 +943,27 @@ impl<'a> Layout<'a> {
                         y = next;
                         continue 'attempt;
                     }
+                    // El cierre de una caja no deja de colgar los espacios que lo preceden (la
+                    // fase 2 los quita igual): no cuentan para ver si el cierre cabe.
+                    let hanging = if matches!(seg.kind, SegKind::End(_)) {
+                        line.iter()
+                            .rev()
+                            .filter(|&&s| !matches!(ifc.segs[s].kind, SegKind::End(_)))
+                            .map_while(|&s| match ifc.segs[s].kind {
+                                SegKind::Space {
+                                    item, collapsible, ..
+                                } if collapsible || ifc.texts[item].b.style.white_space.wraps() => {
+                                    Some(ifc.segs[s].width)
+                                }
+                                _ => None,
+                            })
+                            .sum::<f32>()
+                    } else {
+                        0.0
+                    };
                     if has_content
                         && !is_space
-                        && width + seg.width > available + 0.01
+                        && width - hanging + seg.width > available + 0.01
                         && let Some(pos) = last_break
                     {
                         i = line[pos] + 1;
@@ -1308,15 +1353,127 @@ impl<'a> Layout<'a> {
                 _ => trailing = false,
             }
         }
-        let levels: Vec<u8> = leaves.iter().map(|l| l.level).collect();
-        let order = bidi::reorder(&levels);
+        // Bordes de las cajas inline (CSS Writing Modes 3 §2.4.3): no son caracteres para
+        // UAX #9. Los de una caja con contenido en la línea se colocan después de reordenar: el
+        // borde start en el lado start (según el `direction` de la caja) del fragmento que
+        // tiene su primer contenido lógico, y el end en el lado end del que tiene el último.
+        // Los de una caja vacía se reordenan con el resto, con el menor nivel de sus vecinos
+        // (como un neutro entre ellos, N1–N2) y nunca menos que el suyo.
+        let inside = |owner: Option<usize>, b: usize| {
+            let mut p = owner;
+            while let Some(i) = p {
+                if i == b {
+                    return true;
+                }
+                p = ifc.boxes[i].parent;
+            }
+            false
+        };
+        let is_edge = |l: &Leaf| matches!(l.kind, LeafKind::Edge { .. });
+        // Por borde con contenido: ¿es el start? (hay contenido de la caja después de él).
+        let floating: Vec<Option<bool>> = (0..leaves.len())
+            .map(|k| {
+                let LeafKind::Edge { b, .. } = leaves[k].kind else {
+                    return None;
+                };
+                let mut own = leaves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !is_edge(l) && inside(l.owner, b))
+                    .map(|(j, _)| j);
+                own.next().map(|first| first > k)
+            })
+            .collect();
+        for k in 0..leaves.len() {
+            let LeafKind::Edge { b, .. } = leaves[k].kind else {
+                continue;
+            };
+            if floating[k].is_some() {
+                continue;
+            }
+            let content = |j: &usize| !is_edge(&leaves[*j]);
+            let next = (k + 1..leaves.len()).find(content);
+            let prev = (0..k).rev().find(content);
+            let level = match (prev, next) {
+                (Some(p), Some(n)) => leaves[p].level.min(leaves[n].level),
+                (Some(j), None) | (None, Some(j)) => leaves[j].level,
+                (None, None) => leaves[k].level,
+            };
+            leaves[k].level = level.max(ifc.boxes[b].level);
+        }
+        let fixed: Vec<usize> = (0..leaves.len())
+            .filter(|&k| floating[k].is_none())
+            .collect();
+        let levels: Vec<u8> = fixed.iter().map(|&k| leaves[k].level).collect();
+        let mut order: Vec<usize> = bidi::reorder(&levels)
+            .into_iter()
+            .map(|i| fixed[i])
+            .collect();
+        // Los bordes de las cajas más internas primero: el fragmento de la caja exterior
+        // incluye ya los bordes de las interiores.
+        let depth = |b: usize| {
+            let mut d = 0;
+            let mut p = ifc.boxes[b].parent;
+            while let Some(i) = p {
+                d += 1;
+                p = ifc.boxes[i].parent;
+            }
+            d
+        };
+        let mut edges: Vec<(usize, usize, bool)> = (0..leaves.len())
+            .filter_map(|k| match (leaves[k].kind, floating[k]) {
+                (LeafKind::Edge { b, .. }, Some(start)) => Some((k, b, start)),
+                _ => None,
+            })
+            .collect();
+        edges.sort_by_key(|&(k, b, _)| (std::cmp::Reverse(depth(b)), k));
+        for (k, b, start) in edges {
+            let within: Vec<usize> = (0..order.len())
+                .filter(|&p| inside(leaves[order[p]].owner, b))
+                .collect();
+            let anchor = if start {
+                within.iter().copied().min_by_key(|&p| order[p])
+            } else {
+                within.iter().copied().max_by_key(|&p| order[p])
+            };
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            let mut lo = anchor;
+            while lo > 0 && inside(leaves[order[lo - 1]].owner, b) {
+                lo -= 1;
+            }
+            let mut hi = anchor;
+            while hi + 1 < order.len() && inside(leaves[order[hi + 1]].owner, b) {
+                hi += 1;
+            }
+            let rtl_box = ifc.boxes[b].b.style.direction == Direction::Rtl;
+            // Start de una caja ltr o end de una rtl: a la izquierda del fragmento.
+            let pos = if start != rtl_box { lo } else { hi + 1 };
+            order.insert(pos, k);
+        }
 
         // Justificación (CSS Text 3 §7.3): oportunidades por hoja; la del último carácter de
         // la línea no cuenta.
         let used: f32 = leaves.iter().map(|l| l.width).sum::<f32>() + indent;
         let free = available - used;
-        let justify = root.text_align == TextAlign::Justify
-            && !last
+        // CSS Text 3 §6.3: la última línea (y la que acaba en un salto forzado) se alinea con
+        // `text-align-last`; `auto` es `text-align`, salvo `justify`, que alinea al inicio.
+        let align = if last {
+            match root.text_align_last {
+                TextAlignLast::Auto if root.text_align == TextAlign::Justify => TextAlign::Start,
+                TextAlignLast::Auto | TextAlignLast::MatchParent => root.text_align,
+                TextAlignLast::Start => TextAlign::Start,
+                TextAlignLast::End => TextAlign::End,
+                TextAlignLast::Left => TextAlign::Left,
+                TextAlignLast::Right => TextAlign::Right,
+                TextAlignLast::Center => TextAlign::Center,
+                TextAlignLast::Justify => TextAlign::Justify,
+            }
+        } else {
+            root.text_align
+        };
+        let justify = align == TextAlign::Justify
             && root.text_justify != TextJustify::None
             && free > 0.0;
         let mut last_text_char: Option<(usize, usize)> = None;
@@ -1365,7 +1522,7 @@ impl<'a> Layout<'a> {
         let shift = if free < 0.0 {
             if rtl { free } else { 0.0 }
         } else {
-            match root.text_align {
+            match align {
                 TextAlign::Left => 0.0,
                 TextAlign::Right => free,
                 TextAlign::Center => free / 2.0,

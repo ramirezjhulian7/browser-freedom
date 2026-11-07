@@ -472,6 +472,45 @@ impl PropValue for TextJustify {
     }
 }
 
+// E9: CSS Text 3 §6.3. `auto`: la de `text-align`, salvo `justify`, que alinea al inicio.
+keyword_enum!(TextAlignLast {
+    Auto = "auto",
+    Start = "start",
+    End = "end",
+    Left = "left",
+    Right = "right",
+    Center = "center",
+    Justify = "justify",
+    MatchParent = "match-parent",
+});
+
+impl PropValue for TextAlignLast {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        single_ident(input).and_then(TextAlignLast::from_ident)
+    }
+    /// `match-parent`, como en `text-align`: el valor del padre con `start`/`end` resueltos
+    /// según su `direction`.
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        if *self != TextAlignLast::MatchParent {
+            return *self;
+        }
+        let Some(parent) = ctx.parent else {
+            return TextAlignLast::Auto;
+        };
+        let rtl = parent.direction == Direction::Rtl;
+        match parent.text_align_last {
+            TextAlignLast::Start | TextAlignLast::MatchParent if rtl => TextAlignLast::Right,
+            TextAlignLast::Start | TextAlignLast::MatchParent => TextAlignLast::Left,
+            TextAlignLast::End if rtl => TextAlignLast::Left,
+            TextAlignLast::End => TextAlignLast::Right,
+            other => other,
+        }
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
 keyword_enum!(PointerEvents {
     Auto = "auto",
     None = "none",
