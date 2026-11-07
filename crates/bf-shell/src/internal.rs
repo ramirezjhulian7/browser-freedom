@@ -323,7 +323,10 @@ pub fn profile_action(url: &Url) -> Option<Outcome> {
 /// ([`crate::downloads::should_download`]), su cuerpo se guarda en la carpeta de descargas y
 /// el documento es una página interna que lo dice (con `Meta::download`); la ventana vuelve a
 /// la página anterior si la había.
-pub fn download_response(response: &bf_net::Response, net: &Arc<bf_net::NetLoader>) -> Option<Loaded> {
+pub fn download_response(
+    response: &bf_net::Response,
+    net: &std::sync::Arc<bf_net::NetLoader>,
+) -> Option<Loaded> {
     let content_type = response.headers.get("content-type");
     let disposition = response.headers.get("content-disposition");
     if !response.ok() || !crate::downloads::should_download(content_type, disposition) {

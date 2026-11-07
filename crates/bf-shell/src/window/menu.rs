@@ -23,6 +23,8 @@ pub enum MenuAction {
     CopyText(String),
     /// Guardar el recurso `url` (una imagen) con un diálogo de archivo.
     SaveResource(String),
+    /// Descargar `url` a la carpeta de descargas, con progreso en la barra (E11).
+    Download(String),
     SavePage,
     ViewSource,
     Inspect,

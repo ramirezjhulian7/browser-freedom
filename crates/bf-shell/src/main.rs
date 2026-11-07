@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 mod bookmarks;
+mod downloads;
 mod find;
 mod history;
 mod internal;

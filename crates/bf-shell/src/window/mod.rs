@@ -18,6 +18,7 @@
 
 mod chrome;
 mod dialog;
+mod downloadbar;
 mod edit;
 mod events;
 mod findbar;
@@ -180,6 +181,8 @@ struct App {
     menu: Option<Menu>,
     /// La barra de buscar en la página (`Ctrl+F`, E11).
     find: Option<findbar::FindBar>,
+    /// La barra de descargas abajo en el marco (E11).
+    downloads: Option<downloadbar::DownloadBar>,
     fonts: Arc<FontDb>,
     /// Los hilos de documento (uno por pestaña).
     worker: Documents,
@@ -637,6 +640,7 @@ impl App {
             last_click: None,
             menu: None,
             find: None,
+            downloads: None,
             fonts: fonts.clone(),
             worker,
             tab_key: 1,
@@ -1172,6 +1176,10 @@ impl App {
                 "Copiar dirección del enlace",
                 MenuAction::CopyText(l.clone()),
             ));
+            items.push(MenuItem::new(
+                "Descargar enlace",
+                MenuAction::Download(l.clone()),
+            ));
             items.push(MenuItem::separator());
         }
         if let Some(i) = &image {
@@ -1270,6 +1278,11 @@ impl App {
                 self.set_notice(message.to_owned());
             }
             MenuAction::SaveResource(u) => self.save_resource(&u),
+            MenuAction::Download(u) => {
+                if let Ok(u) = Url::parse(&u, None) {
+                    self.start_download(u, None);
+                }
+            }
             MenuAction::SavePage => self.save_page(),
             MenuAction::ViewSource => {
                 if let Some(c) = &self.current
@@ -1571,6 +1584,10 @@ impl App {
             self.scroll_to_fragment(&url);
             self.refresh_chrome();
             return;
+        }
+        // Un archivo por su extensión (`.zip`, `.pdf`…) se descarga sin dejar la página (E11).
+        if self.current.is_some() && crate::downloads::looks_like_download(&url) {
+            return self.start_download(url, None);
         }
         self.start_load(url, Navigation::Push);
     }
@@ -2107,10 +2124,19 @@ impl App {
         let (nav, started) = (loading.nav, loading.started);
         self.loading = None;
         self.load_time = Some(started.elapsed());
+        // Una respuesta guardada como descarga (E11): si había página, se vuelve a ella.
+        if let Some(saved) = loaded.meta.download.clone()
+            && self.downloaded(&saved)
+        {
+            return;
+        }
         let url = loaded.url.clone();
         let title = loaded.title().unwrap_or_else(|| url.href());
         // El historial global (E11): las navegaciones, no las recargas ni las páginas de error.
-        if !matches!(nav, Navigation::Reload) && loaded.meta.error.is_none() {
+        if !matches!(nav, Navigation::Reload)
+            && loaded.meta.error.is_none()
+            && loaded.meta.download.is_none()
+        {
             let shown = loaded.title().unwrap_or_default();
             crate::history::global().record(&url.href(), &shown, crate::profile::now());
         }
@@ -2421,6 +2447,10 @@ impl App {
             let layer = render(&list, size, dpi, Rgba::TRANSPARENT);
             blit(&mut frame, &layer, x * dpi, y * dpi);
         }
+        if let Some((list, (x, y), size)) = self.downloads_layer() {
+            let layer = render(&list, size, dpi, theme.frame);
+            blit(&mut frame, &layer, x * dpi, y * dpi);
+        }
         if let Some((list, (x, y), size)) = self.chrome.suggestions_layer() {
             let layer = render(&list, size, dpi, Rgba::TRANSPARENT);
             blit(&mut frame, &layer, x * dpi, y * dpi);
@@ -2449,6 +2479,7 @@ impl App {
         trace("redraw");
         self.sync_view();
         self.sync_find();
+        self.tick_downloads();
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -2520,7 +2551,7 @@ impl App {
             self.set_cursor(CursorIcon::Default);
             return;
         }
-        if self.find_hover(x, y) {
+        if self.find_hover(x, y) || self.downloads_hover(x, y) {
             return;
         }
         if self.chrome.suggestions_open() {
@@ -2602,7 +2633,7 @@ impl App {
             }
             return;
         }
-        if self.find_click(x, y) {
+        if self.find_click(x, y) || self.downloads_click(x, y) {
             return;
         }
         if self.chrome.suggestions_open() {
@@ -3198,6 +3229,15 @@ impl ApplicationHandler<Wake> for App {
             }
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        // Las descargas en curso (E11): el progreso se mira cada `downloadbar::TICK`.
+        if self.tick_downloads() {
+            let next = self.downloads_deadline();
+            let sooner = match event_loop.control_flow() {
+                ControlFlow::WaitUntil(t) => t.min(next),
+                _ => next,
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(sooner));
         }
     }
 

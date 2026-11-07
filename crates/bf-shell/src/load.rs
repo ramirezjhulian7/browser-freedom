@@ -119,6 +119,8 @@ pub struct Meta {
     pub internal: bool,
     /// Si es una página de error, el error.
     pub error: Option<LoadError>,
+    /// La respuesta no era para mostrar y se guardó como descarga (E11): la ruta del archivo.
+    pub download: Option<String>,
 }
 
 #[derive(Clone)]
@@ -301,6 +303,11 @@ pub fn fetch_document_with(
             response.url, response.status, response.status_text
         );
     }
+    // Lo que no se muestra (`Content-Disposition: attachment`, tipos que el motor no
+    // renderiza) se guarda como descarga (E11).
+    if let Some(saved) = crate::internal::download_response(&response, &net) {
+        return Ok(saved);
+    }
     let fetch = start.elapsed();
     let start = Instant::now();
     let loader = Arc::new(CachedLoader::new(net));
@@ -351,6 +358,7 @@ pub fn fetch_document_with(
         content_type: response.headers.get("content-type").map(str::to_owned),
         internal: false,
         error: None,
+        download: None,
     };
     Ok(Loaded {
         doc,
