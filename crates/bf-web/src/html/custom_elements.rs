@@ -15,7 +15,7 @@ use bf_dom::{DomString, Namespace, NodeData, NodeId};
 use bf_js::heap::Gc;
 use bf_js::host::{HostClass, HostClassId, HostHandle};
 use bf_js::object::Object;
-use bf_js::value::Value;
+use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId, Throw};
 
@@ -132,6 +132,9 @@ pub fn register(agent: &mut Agent) {
             .method("has", 1, states_has)
             .method("clear", 0, states_clear)
             .method("forEach", 1, states_for_each)
+            .method("values", 0, states_values)
+            .method("keys", 0, states_values)
+            .method("entries", 0, states_entries)
             .attribute("size", Some(states_size), None),
     );
     agent.set_embedder_data(CeClasses {
@@ -144,6 +147,14 @@ pub fn register(agent: &mut Agent) {
         window,
         HostClass::new("Window").attribute("customElements", Some(custom_elements), None),
     );
+    // `ARIAMixin` en `Element` (WAI-ARIA 1.3 §10.1): atributos *nullable DOMString* que
+    // reflejan `role` y `aria-*` (con `[CEReactions]` por la vía normal de los atributos).
+    let element = crate::dom::classes(agent).element;
+    let mut aria = HostClass::new("Element");
+    for name in ARIA_ATTRIBUTES {
+        aria = aria.attribute(name, Some(element_aria_get), Some(element_aria_set));
+    }
+    agent.host_extend_class(element, aria);
 }
 
 fn classes(agent: &Agent) -> CeClasses {
@@ -1157,7 +1168,23 @@ fn internals_states(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(pinned(agent, h));
     }
     let class = classes(agent).state_set;
-    let set = Value::Object(agent.host_create(class, Box::new(StateSetOf(target))));
+    // WebIDL §3.7.11: un setlike tiene un `Set` de respaldo; la iteración es la del `Set`
+    // (viva ante `add`/`delete`/`clear` durante el recorrido).
+    let r = realm(agent);
+    let ctor = agent.realms[r].intrinsics.set_ctor;
+    let backing = agent.construct(ctor, &[], None)?;
+    let backing = agent.host_pin(backing);
+    let proto = agent.host_class_objects(r, class).prototype;
+    let iter = PropertyKey::Symbol(agent.well_known.iterator);
+    if agent.heap[proto].props.get(&iter).is_none()
+        && let Some(values) = agent.heap[proto]
+            .props
+            .get(&PropertyKey::from("values"))
+            .and_then(|p| p.to_descriptor().value)
+    {
+        agent.put_data(proto, iter, values, true, false, true);
+    }
+    let set = Value::Object(agent.host_create(class, Box::new(StateSetOf(target, backing))));
     let h = agent.host_pin(set.clone());
     this_internals(agent, a)?.states_object = Some(h);
     Ok(set)
@@ -1291,6 +1318,41 @@ fn accessor_name(agent: &mut Agent, a: &CallArgs<'_>) -> Option<&'static str> {
     ARIA_ATTRIBUTES.iter().copied().find(|n| *n == name)
 }
 
+/// El atributo de contenido de un atributo IDL de `ARIAMixin`: `role` o `aria-` seguido del
+/// resto en minúsculas (`ariaColIndexText` → `aria-colindextext`).
+fn aria_content_name(idl: &str) -> String {
+    match idl.strip_prefix("aria") {
+        Some(rest) => format!("aria-{}", rest.to_ascii_lowercase()),
+        None => idl.to_owned(),
+    }
+}
+
+fn element_aria_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(name) = accessor_name(agent, a) else {
+        return Ok(Value::Null);
+    };
+    let n = this_node(agent, a)?;
+    let v = crate::html::elements::attr_value(agent, n, &aria_content_name(name));
+    Ok(v.map_or(Value::Null, |s| from_dom_string(&s)))
+}
+
+fn element_aria_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(name) = accessor_name(agent, a) else {
+        return Ok(Value::Undefined);
+    };
+    let n = this_node(agent, a)?;
+    let content = aria_content_name(name);
+    let v = a.arg(0);
+    if v.is_null() {
+        crate::html::elements::remove_attr(agent, n, &content);
+    } else {
+        let value = to_dom_string(agent, &v)?;
+        crate::html::elements::set_attr(agent, n, &content, value)?;
+    }
+    crate::dom::events::content_attribute_changed(agent, n, &DomString::from(content.as_str()));
+    Ok(Value::Undefined)
+}
+
 fn aria_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(name) = accessor_name(agent, a) else {
         return Ok(Value::Null);
@@ -1323,7 +1385,32 @@ fn aria_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- CustomStateSet ---
 
-struct StateSetOf(NodeRef);
+/// El elemento del `CustomStateSet` y su `Set` de respaldo.
+struct StateSetOf(NodeRef, HostHandle);
+
+/// Llama a `Set.prototype[method]` sobre el `Set` de respaldo.
+fn backing_call(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    method: &str,
+    args: &[Value],
+) -> JsResult<Value> {
+    let Some(h) = agent.host_unwrap::<StateSetOf>(&a.this).map(|s| s.1) else {
+        return agent.type_error("Illegal invocation");
+    };
+    let backing = pinned(agent, h);
+    let proto = agent.realms[realm(agent)].intrinsics.set_prototype;
+    let f = agent.get_str(proto, method)?;
+    agent.call(&f, backing, args)
+}
+
+fn states_values(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    backing_call(agent, a, "values", &[])
+}
+
+fn states_entries(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    backing_call(agent, a, "entries", &[])
+}
 
 fn with_states<R>(
     agent: &mut Agent,
@@ -1345,6 +1432,7 @@ fn with_states<R>(
 
 fn states_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = to_dom_string(agent, &a.arg(0))?.to_string();
+    backing_call(agent, a, "add", &[Value::str(&v)])?;
     with_states(agent, a, |s| {
         if !s.contains(&v) {
             s.push(v);
@@ -1355,6 +1443,7 @@ fn states_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn states_delete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = to_dom_string(agent, &a.arg(0))?.to_string();
+    backing_call(agent, a, "delete", &[Value::str(&v)])?;
     let had = with_states(agent, a, |s| {
         let had = s.contains(&v);
         s.retain(|x| *x != v);
@@ -1369,6 +1458,7 @@ fn states_has(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn states_clear(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    backing_call(agent, a, "clear", &[])?;
     with_states(agent, a, Vec::clear)?;
     Ok(Value::Undefined)
 }

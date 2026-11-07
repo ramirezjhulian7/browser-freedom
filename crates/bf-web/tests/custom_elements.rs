@@ -247,3 +247,37 @@ fn parser_creates_and_upgrades() {
     );
     assert_eq!(p.show("log.join(' ')"), "ctor conn script");
 }
+
+#[test]
+fn aria_mixin_reflection_enqueues_reactions() {
+    let mut p = Page::new("");
+    assert_eq!(
+        p.show(
+            "var log = []; class A extends HTMLElement { \
+               static get observedAttributes() { return ['aria-colindextext', 'role']; } \
+               attributeChangedCallback(n, o, v) { log.push(n + ':' + o + ':' + v); } }; \
+             customElements.define('x-aria', A); var e = document.createElement('x-aria'); \
+             var first = e.ariaColIndexText; e.ariaColIndexText = 'a'; e.role = 'button'; \
+             e.ariaColIndexText = null; \
+             [first, e.getAttribute('role'), e.ariaColIndexText, e.hasAttribute('aria-colindextext'), \
+              log.join('|')].join()"
+        ),
+        ",button,,false,aria-colindextext:null:a|role:null:button|aria-colindextext:a:null"
+    );
+}
+
+#[test]
+fn custom_state_set_is_setlike() {
+    let mut p = Page::new("");
+    assert_eq!(
+        p.show(
+            "class S extends HTMLElement { constructor() { super(); this.i = this.attachInternals(); } }; \
+             customElements.define('x-s', S); var s = new S().i.states; \
+             s.add('--a'); s.add('--b'); s.add('--a'); var it = s.values(); s.delete('--a'); \
+             var n = it.next().value; s.add('--c'); \
+             [[...s].join(' '), n, s.size, [...s.entries()][0].join('='), \
+              typeof s[Symbol.iterator]].join()"
+        ),
+        "--b --c,--b,2,--b=--b,function"
+    );
+}
