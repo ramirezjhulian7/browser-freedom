@@ -49,7 +49,7 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
             for n in d.inclusive_descendants(r) {
                 if let Some(e) = d.element(n)
                     && e.ns == Namespace::Html
-                    && matches!(&*e.name.to_string(), "script" | "img" | "link")
+                    && matches!(&*e.name.to_string(), "script" | "img" | "link" | "style")
                 {
                     work.push(n);
                 }
@@ -79,6 +79,11 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
                     // E2: la hoja se carga en una tarea y dispara `load`/`error`.
                     crate::cssom::sheets::schedule_link_load(agent, crate::NodeRef::new(doc, el));
                 }
+            }
+            // E2: la hoja de un `<style>` no tiene subrecursos que esperar: `load` en una
+            // tarea (HTML §4.2.6).
+            "style" => {
+                crate::cssom::sheets::schedule_style_load(agent, crate::NodeRef::new(doc, el))
             }
             _ => {}
         }

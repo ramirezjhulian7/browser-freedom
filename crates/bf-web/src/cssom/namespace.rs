@@ -27,7 +27,14 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     for &(name, len, f) in OPS {
         bf_js::builtins::method(agent, ns, name, len, f);
     }
-    agent.put_data(g, PropertyKey::from("CSS"), Value::Object(ns), true, false, true);
+    agent.put_data(
+        g,
+        PropertyKey::from("CSS"),
+        Value::Object(ns),
+        true,
+        false,
+        true,
+    );
     agent.current_realm = saved;
 }
 
@@ -65,7 +72,7 @@ pub fn install_indexed_iterators(agent: &mut Agent, realm: RealmId) {
 
 /// `CSS.escape(ident)`: "serialize an identifier" (CSSOM §2.1).
 fn escape(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    if a.len() == 0 {
+    if a.is_empty() {
         return agent.type_error("CSS.escape: 1 argument required, but only 0 present.");
     }
     let s = agent.to_string(&a.arg(0))?;
@@ -102,7 +109,7 @@ fn escape_units(s: &[u16]) -> Vec<u16> {
 
 /// `CSS.supports(property, value)` y `CSS.supports(conditionText)` (CSS Conditional 3 §8.1).
 fn supports(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    if a.len() == 0 {
+    if a.is_empty() {
         return agent.type_error("CSS.supports: 1 argument required, but only 0 present.");
     }
     let first = agent.to_string(&a.arg(0))?.to_string();

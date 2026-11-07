@@ -370,7 +370,7 @@ pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> 
     match r {
         Ok(()) => {
             mutated(agent);
-            crate::cssom::sheets::link_attribute_changed(agent, n, &name.as_lossy_str(), false);
+            crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), false);
             Ok(())
         }
         Err(e) => throw_dom(agent, e),
@@ -384,7 +384,7 @@ pub fn remove_attr(agent: &mut Agent, n: NodeRef, name: &str) {
     with_doc_mut(agent, n.doc, |d| d.remove_attribute(n.node, &name));
     mutated(agent);
     if had {
-        crate::cssom::sheets::link_attribute_changed(agent, n, &name.as_lossy_str(), true);
+        crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), true);
     }
 }
 

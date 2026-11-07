@@ -136,6 +136,12 @@ pub struct Sheet {
     pub constructed: bool,
     /// La hoja de un `<link>` que no se pudo cargar (su evento es `error`).
     pub failed: bool,
+    /// La hoja que la importa y su `@import` (CSSOM §6.1: parent CSS style sheet, owner
+    /// CSS rule).
+    pub parent: Option<SheetId>,
+    pub owner_rule: Option<RuleRef>,
+    /// El texto descargado de la hoja de un `<link>` (para la cascada).
+    pub fetched: Option<String>,
 }
 
 /// Las hojas de una ventana.
@@ -152,6 +158,10 @@ pub struct SheetStore {
     /// La última carga pedida de cada `<link>` (las anteriores ya no disparan eventos).
     link_loads: HashMap<NodeRef, u64>,
     next_load: u64,
+    /// Las hojas de cada `@import` (por la regla).
+    imports: HashMap<RuleId, SheetId>,
+    /// `document.adoptedStyleSheets`: el array (fijado) que ve el autor.
+    adopted: Option<bf_js::host::HostHandle>,
 }
 
 impl SheetStore {
@@ -581,6 +591,7 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                     rules,
                     disabled,
                     failed,
+                    fetched: fetched.map(str::to_owned),
                     ..Sheet::default()
                 });
                 if let Some(old) = st.by_owner.insert(f.owner, id)
@@ -633,6 +644,36 @@ pub fn schedule_link_load(agent: &mut Agent, n: NodeRef) {
             let saved = agent.current_realm;
             agent.current_realm = realm;
             link_loaded(agent, n, id);
+            agent.current_realm = saved;
+        }),
+    );
+}
+
+/// El evento `load` de un `<style>` conectado (HTML §4.2.6, "the style element"): en una
+/// tarea, si sigue en el documento.
+pub fn schedule_style_load(agent: &mut Agent, n: NodeRef) {
+    if n.doc != 0 {
+        return;
+    }
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        bf_js::host::TaskSource::Networking,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            let connected = with_doc(agent, n.doc, |d| {
+                d.element(n.node).is_some_and(|e| e.is_html("style")) && d.is_connected(n.node)
+            });
+            if connected {
+                crate::dom::events::fire_event(
+                    agent,
+                    n.doc,
+                    bf_dom::events::EventTarget::Node(n.node),
+                    "load",
+                    bf_dom::events::EventInit::default(),
+                    bf_dom::events::EventKind::Event,
+                );
+            }
             agent.current_realm = saved;
         }),
     );
@@ -705,7 +746,10 @@ fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).
 pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Vec<Stylesheet> {
-    let ids = sync(agent);
+    let mut ids = sync(agent);
+    // Las adoptadas van después de las del documento (CSSOM §6.6, "document or shadow root CSS
+    // style sheets").
+    ids.extend(adopted_ids(agent));
     let st = &state(agent).sheets;
     let mut out = Vec::new();
     for id in ids {
@@ -718,7 +762,7 @@ pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Vec<Styleshee
         }
         let text = if s.modified {
             sheet_text(s)
-        } else if let Some(src) = &s.source {
+        } else if let Some(src) = s.source.as_ref().or(s.fetched.as_ref()) {
             src.clone()
         } else {
             continue;
@@ -984,7 +1028,89 @@ pub fn register_classes(
 /// `partial interface Document { readonly attribute StyleSheetList styleSheets; }`
 /// (CSSOM §6.3, `DocumentOrShadowRoot`).
 pub fn document_partial() -> HostClass {
-    HostClass::new("Document").attribute("styleSheets", Some(document_style_sheets), None)
+    HostClass::new("Document")
+        .attribute("styleSheets", Some(document_style_sheets), None)
+        .attribute(
+            "adoptedStyleSheets",
+            Some(document_adopted_sheets),
+            Some(set_document_adopted_sheets),
+        )
+}
+
+/// El array de `adoptedStyleSheets` (CSSOM §6.6) del documento de la ventana.
+fn adopted_array(agent: &mut Agent) -> JsResult<Value> {
+    if let Some(h) = state(agent).sheets.adopted
+        && let Some(v) = agent.host_pinned(h)
+    {
+        return Ok(v);
+    }
+    let a = Value::Object(agent.create_array_from_list(&[])?);
+    let h = agent.host_pin(a.clone());
+    state(agent).sheets.adopted = Some(h);
+    Ok(a)
+}
+
+fn document_adopted_sheets(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    if n.doc != 0 {
+        return Ok(Value::Object(agent.create_array_from_list(&[])?));
+    }
+    adopted_array(agent)
+}
+
+/// El setter: solo hojas construidas (`NotAllowedError` si no, CSSOM §6.6).
+fn set_document_adopted_sheets(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let v = a.arg(0);
+    let Value::Object(o) = v else {
+        return agent.type_error("adoptedStyleSheets must be a sequence of CSSStyleSheet");
+    };
+    let len = agent.length_of_array_like(o)? as u32;
+    let mut items = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let item = agent.get(o, &bf_js::value::PropertyKey::from(i), v.clone())?;
+        let Some(id) = agent.host_unwrap::<SheetPayload>(&item).map(|s| s.0) else {
+            return agent.type_error("adoptedStyleSheets must be a sequence of CSSStyleSheet");
+        };
+        if !with_sheet(agent, id, |s| s.constructed).unwrap_or(false) {
+            return crate::net::dom_error(
+                agent,
+                "NotAllowedError",
+                "Can't adopt non-constructed stylesheets.",
+            );
+        }
+        items.push(item);
+    }
+    if n.doc != 0 {
+        return Ok(Value::Undefined);
+    }
+    let arr = Value::Object(agent.create_array_from_list(&items)?);
+    let h = agent.host_pin(arr);
+    if let Some(old) = state(agent).sheets.adopted.replace(h) {
+        agent.host_unpin(old);
+    }
+    sheets_changed(agent);
+    Ok(Value::Undefined)
+}
+
+/// Las hojas adoptadas del documento, en orden (las del array que ve el autor).
+fn adopted_ids(agent: &mut Agent) -> Vec<SheetId> {
+    let Some(h) = state(agent).sheets.adopted else {
+        return Vec::new();
+    };
+    let Some(Value::Object(o)) = agent.host_pinned(h) else {
+        return Vec::new();
+    };
+    let len = agent.length_of_array_like(o).unwrap_or(0.0) as u32;
+    let mut out = Vec::new();
+    for i in 0..len {
+        if let Ok(item) = agent.get(o, &bf_js::value::PropertyKey::from(i), Value::Object(o))
+            && let Some(p) = agent.host_unwrap::<SheetPayload>(&item)
+        {
+            out.push(p.0);
+        }
+    }
+    out
 }
 
 /// `LinkStyle.sheet` (CSSOM §6.3) para `<style>` y `<link>`.
@@ -1122,8 +1248,11 @@ fn sheet_owner_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn sheet_parent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_sheet(agent, a)?;
-    Ok(Value::Null)
+    let id = this_sheet(agent, a)?;
+    match with_sheet(agent, id, |s| s.parent).flatten() {
+        Some(p) => Ok(wrap_sheet(agent, p)),
+        None => Ok(Value::Null),
+    }
 }
 
 fn sheet_title(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1191,12 +1320,31 @@ fn sheet_constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut media = String::new();
     let mut disabled = false;
     if let Value::Object(o) = opts {
+        // Los miembros de CSSStyleSheetInit en orden (WebIDL §3.2.17): baseURL, disabled,
+        // media.
+        let b = agent.get(o, &"baseURL".into(), opts.clone())?;
+        let base_url = if b.is_undefined() {
+            None
+        } else {
+            Some(str_arg(agent, &b)?)
+        };
+        let d = agent.get(o, &"disabled".into(), opts.clone())?;
+        disabled = bf_js::host::webidl::to_boolean(agent, &d);
         let m = agent.get(o, &"media".into(), opts.clone())?;
         if !m.is_undefined() {
             media = media_text(&str_arg(agent, &m)?);
         }
-        let d = agent.get(o, &"disabled".into(), opts.clone())?;
-        disabled = bf_js::host::webidl::to_boolean(agent, &d);
+        // "Parse baseURL" contra la URL base del documento; si falla, NotAllowedError.
+        if let Some(b) = base_url {
+            let doc_base = WebContextHandle::current(agent).get(agent).base.clone();
+            if bf_infra::Url::parse(&b, Some(&doc_base)).is_err() {
+                return crate::net::dom_error(
+                    agent,
+                    "NotAllowedError",
+                    "The baseURL is not a valid URL.",
+                );
+            }
+        }
     } else if !opts.is_nullish() {
         return agent.type_error("CSSStyleSheetInit must be an object");
     }
@@ -1217,8 +1365,11 @@ fn sheet_constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn sheet_owner_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_sheet(agent, a)?;
-    Ok(Value::Null)
+    let id = this_sheet(agent, a)?;
+    match with_sheet(agent, id, |s| s.owner_rule).flatten() {
+        Some(r) => Ok(wrap_rule(agent, r)),
+        None => Ok(Value::Null),
+    }
 }
 
 fn sheet_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1254,6 +1405,12 @@ fn insert_rule(
         ListOwner::Sheet(s) => s,
         ListOwner::Rule(r) => r.sheet,
     };
+    // Paso 4: en una hoja construida, `@import` es un error de sintaxis.
+    if matches!(rule.kind, RuleKind::Import { .. })
+        && with_sheet(agent, sheet, |s| s.constructed).unwrap_or(false)
+    {
+        return throw_dom(agent, DomException::SyntaxError);
+    }
     let check = {
         let st = &state(agent).sheets;
         let Some(list) = st.list(owner) else {
@@ -1354,8 +1511,20 @@ fn index_arg(agent: &mut Agent, v: &Value) -> JsResult<usize> {
     Ok(bf_js::host::webidl::to_unsigned_long(agent, v)? as usize)
 }
 
+/// WebIDL §3.7.7 paso 2: faltan argumentos obligatorios → `TypeError`.
+fn require_args(agent: &mut Agent, a: &CallArgs<'_>, n: usize, what: &str) -> JsResult<()> {
+    if a.len() < n {
+        return agent.type_error(&format!(
+            "Failed to execute '{what}': {n} argument required, but only {} present.",
+            a.len()
+        ));
+    }
+    Ok(())
+}
+
 fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    require_args(agent, a, 1, "insertRule")?;
     let text = str_arg(agent, &a.arg(0))?;
     let index = index_arg(agent, &a.arg(1))?;
     insert_rule(agent, ListOwner::Sheet(id), &text, index, false)
@@ -1363,6 +1532,7 @@ fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn sheet_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Sheet(id), index)
 }
@@ -1759,6 +1929,7 @@ fn rule_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn rule_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "insertRule")?;
     let text = str_arg(agent, &a.arg(0))?;
     let index = index_arg(agent, &a.arg(1))?;
     insert_rule(agent, ListOwner::Rule(r), &text, index, true)
@@ -1766,6 +1937,7 @@ fn rule_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn rule_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Rule(r), index)
 }
@@ -1822,10 +1994,41 @@ fn import_supports_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     import_field(agent, a, 2)
 }
 
-/// Las hojas importadas no se cargan: `styleSheet` es `null`.
+/// `CSSImportRule.styleSheet` (CSSOM §6.4.4): la hoja importada, cargada la primera vez con
+/// el loader de la página (URL resuelta contra la de la hoja que importa o la base del
+/// documento). Si no se pudo cargar, una hoja vacía.
 fn import_style_sheet(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_rule(agent, a)?;
-    Ok(Value::Null)
+    let r = this_rule(agent, a)?;
+    if let Some(&id) = state(agent).sheets.imports.get(&r.rule) {
+        return Ok(wrap_sheet(agent, id));
+    }
+    let (href, media) = match state(agent).sheets.rule(r).map(|x| &x.kind) {
+        Some(RuleKind::Import { href, media, .. }) => (href.clone(), media.clone()),
+        _ => return Ok(Value::Null),
+    };
+    let doc_base = WebContextHandle::current(agent).get(agent).base.clone();
+    let parent_href = with_sheet(agent, r.sheet, |s| s.href.clone()).flatten();
+    let base = parent_href
+        .and_then(|h| bf_infra::Url::parse(&h, None).ok())
+        .unwrap_or(doc_base);
+    let Ok(url) = bf_infra::Url::parse(&href, Some(&base)) else {
+        return Ok(Value::Null);
+    };
+    let resolved = url.serialize(false);
+    let text = load_linked_sheet(agent, &resolved);
+    let st = &mut state(agent).sheets;
+    let rules = text.as_deref().map_or_else(Vec::new, |t| st.parse_rules(t));
+    let id = st.new_sheet(Sheet {
+        href: Some(resolved),
+        media: media_text(&media),
+        rules,
+        failed: text.is_none(),
+        parent: Some(r.sheet),
+        owner_rule: Some(r),
+        ..Sheet::default()
+    });
+    st.imports.insert(r.rule, id);
+    Ok(wrap_sheet(agent, id))
 }
 
 fn namespace_field(agent: &mut Agent, a: &CallArgs<'_>, uri: bool) -> JsResult<Value> {
@@ -1944,6 +2147,7 @@ fn keyframes_append_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value>
 
 fn keyframes_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let k = normalize_key(&str_arg(agent, &a.arg(0))?);
     let st = &mut state(agent).sheets;
     if let Some(list) = st.list_mut(ListOwner::Rule(r))
