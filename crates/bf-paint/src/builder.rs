@@ -26,7 +26,7 @@ use bf_layout::fragment::{Edges, Fragment, FragmentKind, FragmentTree, Rect, Tab
 use bf_layout::{FontProvider, Widget, font_request};
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BackgroundBox, BgSize, BorderStyle, Float, Image, Position, RepeatStyle, Visibility,
+    BackgroundBox, BgSize, BorderStyle, Direction, Float, Image, Position, RepeatStyle, Visibility,
 };
 
 use crate::images::PageImages;
@@ -65,6 +65,9 @@ struct Builder<'a> {
     list: DisplayList,
     /// Cadena de recortes activa en la lista emitida hasta ahora.
     emitted: ClipChain,
+    /// E4: cuántas cajas transformadas hay alrededor de lo que se pinta (una caja transformada
+    /// es el bloque contenedor de sus descendientes `fixed`, CSS Transforms 1 §3).
+    in_transform: usize,
     /// Orden de árbol (preorden) de cada nodo.
     order: HashMap<NodeId, usize>,
     /// Fragmento cuyo fondo se propagó al canvas.
@@ -255,6 +258,7 @@ impl<'a> Builder<'a> {
         let outer_emitted = if let Some(m) = matrix {
             self.set_clip(clip);
             self.list.push(DisplayItem::PushMatrix(m));
+            self.in_transform += 1;
             Some(std::mem::take(&mut self.emitted))
         } else {
             None
@@ -294,6 +298,7 @@ impl<'a> Builder<'a> {
             self.set_clip(&local);
             self.list.push(DisplayItem::PopTransform);
             self.emitted = outer;
+            self.in_transform -= 1;
         }
         if opacity < 1.0 {
             self.set_clip(outer_clip);
@@ -304,7 +309,8 @@ impl<'a> Builder<'a> {
     /// Un stacking context hijo. Los de `position: fixed` no se desplazan con el scroll ni los
     /// recortan los `overflow` de sus ancestros (su containing block es el viewport).
     fn child_context(&mut self, e: &Entry<'a>) {
-        if e.f.style.position != Position::Fixed {
+        // Dentro de una caja transformada, lo `fixed` se mueve con ella (E4).
+        if e.f.style.position != Position::Fixed || self.in_transform > 0 {
             self.stacking_context(e.f, &e.clip);
             return;
         }
@@ -1416,18 +1422,25 @@ impl Builder<'_> {
         };
         let before: f32 = parts[..i].iter().map(|r| r.width).sum();
         let after: f32 = parts[i + 1..].iter().map(|r| r.width).sum();
+        // E4: los fragmentos van en orden lógico; con `direction: rtl` el primero queda a la
+        // derecha (CSS Fragmentation 3 §5.4, `box-decoration-break: slice`: la caja entera
+        // partida en el sentido de la línea).
+        let rtl = f.style.direction == Direction::Rtl;
+        let left_of = if rtl { after } else { before };
         let full = Rect::new(
-            f.rect.x - before,
+            f.rect.x - left_of,
             f.rect.y,
             f.rect.width + before + after,
             f.rect.height,
         );
-        let l = if i > 0 { f.rect.x } else { -1e6 };
-        let r = if i + 1 < parts.len() {
-            f.rect.right()
+        let (first, last) = (i == 0, i + 1 == parts.len());
+        let (cut_left, cut_right) = if rtl {
+            (!last, !first)
         } else {
-            1e6
+            (!first, !last)
         };
+        let l = if cut_left { f.rect.x } else { -1e6 };
+        let r = if cut_right { f.rect.right() } else { 1e6 };
         (full, Some((l, r)))
     }
 
@@ -1673,6 +1686,7 @@ pub fn build_display_list_with_frames(
         images,
         list: DisplayList::default(),
         emitted: Vec::new(),
+        in_transform: 0,
         order: doc
             .inclusive_descendants(doc.root())
             .into_iter()
