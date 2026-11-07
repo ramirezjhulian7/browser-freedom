@@ -530,3 +530,47 @@ fn snapshot_from_the_shell_is_used() {
     assert_eq!(p.s("innerWidth + ' ' + devicePixelRatio"), "1000 2");
     assert_eq!(p.s("box.offsetWidth"), "114");
 }
+
+// --- Hojas de `<link>` (CSSOM §6.1) y cambios de `MediaQueryList` (CSSOM View §4.2) ---
+
+#[test]
+fn link_stylesheet_rules_are_loaded() {
+    let mut p = Page::new(
+        "<!DOCTYPE html><html><head><link rel=stylesheet href='data:text/css,p%7Bcolor:red%7D.x%7Bmargin:0%7D'></head><body><p>x</p></body></html>",
+    );
+    let realm = p.ctx.realm;
+    p.rt.agent.set_realm_data(
+        realm,
+        bf_web::html::scripting::PageResources::new(std::sync::Arc::new(
+            bf_infra::resource::FileLoader::new(),
+        )),
+    );
+    assert_eq!(
+        p.s("(function () { var r = document.styleSheets[0].cssRules; return r.length + ' ' + r[0].selectorText + ' ' + r[1].cssText; })()"),
+        "2 p .x { margin: 0px; }"
+    );
+}
+
+case!(
+    media_query_list_event_ctor,
+    "(function () { var e = new MediaQueryListEvent('change', {media: 'x', matches: true}); return [e.type, e.media, e.matches, e.isTrusted, e instanceof Event].join(); })()",
+    "change,x,true,false,true"
+);
+
+#[test]
+fn media_query_list_reports_changes() {
+    let mut p = page();
+    p.run(
+        "var log = []; var m = matchMedia('(min-width: 500px)');\
+         m.onchange = e => log.push('on ' + e.matches + ' ' + e.media + ' ' + (e instanceof MediaQueryListEvent) + ' ' + e.isTrusted);\
+         m.addListener(e => log.push('l ' + e.matches));\
+         var n = matchMedia('(min-width: 100px)'); n.addEventListener('change', () => log.push('n'));",
+    );
+    let realm = p.ctx.realm;
+    bf_web::cssom::set_viewport(&mut p.rt.agent, realm, 400.0, 300.0, 1.0);
+    let _ = p.rt.run_until_idle();
+    assert_eq!(
+        p.s("log.join('|') + ' ' + m.matches"),
+        "on false (min-width: 500px) true true|l false false"
+    );
+}

@@ -238,6 +238,11 @@ longhands! {
     GridRowEnd "grid-row-end" grid_row_end: GridLine = "auto", inherited: false, animatable: false;
     GridColumnStart "grid-column-start" grid_column_start: GridLine = "auto", inherited: false, animatable: false;
     GridColumnEnd "grid-column-end" grid_column_end: GridLine = "auto", inherited: false, animatable: false;
+    // E5: tamaño intrínseco (CSS Sizing 4 §5 y §7) y contención de tamaño (CSS Containment 2).
+    AspectRatio "aspect-ratio" aspect_ratio: AspectRatio = "auto", inherited: false, animatable: true;
+    Contain "contain" contain: Contain = "none", inherited: false, animatable: false;
+    ContainIntrinsicWidth "contain-intrinsic-width" contain_intrinsic_width: ContainIntrinsicSize = "none", inherited: false, animatable: true;
+    ContainIntrinsicHeight "contain-intrinsic-height" contain_intrinsic_height: ContainIntrinsicSize = "none", inherited: false, animatable: true;
     // E4: transformaciones (CSS Transforms 1 y 2).
     Transform "transform" transform: transform::Transform = "none", inherited: false, animatable: true;
     TransformOrigin "transform-origin" transform_origin: transform::TransformOrigin = "50% 50%", inherited: false, animatable: true;
