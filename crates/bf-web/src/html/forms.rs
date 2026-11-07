@@ -799,7 +799,11 @@ pub(super) fn is_face(agent: &Agent, n: NodeRef) -> bool {
 /// El *form owner*: el `form` del atributo `form` (si es un id de un `form` del mismo árbol)
 /// o el `form` ancestro más cercano.
 pub fn form_owner_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
-    if let Some(id) = attr_value(agent, n, "form") {
+    // "Reset the form owner" (HTML §4.10.17.3), paso 3: el atributo `form` solo cuenta si el
+    // elemento está conectado; si no, el `form` ancestro.
+    if let Some(id) = attr_value(agent, n, "form")
+        && with_doc(agent, n.doc, |d| d.is_connected(n.node))
+    {
         let f = with_doc(agent, n.doc, |d| {
             d.get_element_by_id(&id)
                 .filter(|f| d.element(*f).is_some_and(|e| e.is_html("form")))
@@ -1495,6 +1499,7 @@ fn form_owner_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> Option<bf_dom::Nod
         .element(n)
         .and_then(|e| e.attr("form"))
         .map(DomString::from)
+        && d.is_connected(n)
     {
         return d
             .get_element_by_id(&id)

@@ -161,11 +161,13 @@ fn upgrade_on_define_and_on_insert() {
     );
     assert_eq!(
         p.show(
-            "var d = document.createElement('div'); d.innerHTML = '<x-up></x-up>'; \
-             var antes = d.firstChild instanceof U; customElements.upgrade(d); \
-             [antes, d.firstChild instanceof U].join()"
+            "var d = document.createElement('div'); d.innerHTML = '<x-late></x-late>'; \
+             class L extends HTMLElement {}; customElements.define('x-late', L); \
+             var antes = d.firstChild instanceof L; customElements.upgrade(d); \
+             var e = document.createElement('div'); e.innerHTML = '<x-up></x-up>'; \
+             [antes, d.firstChild instanceof L, e.firstChild instanceof U].join()"
         ),
-        "false,true"
+        "false,true,true"
     );
 }
 

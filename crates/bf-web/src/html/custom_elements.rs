@@ -1352,7 +1352,7 @@ fn internals_set_form_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Val
     // 2-3: una copia de `value` (`File`, `FormData` o string); `state` no se usa (no hay
     // restauración de estado).
     let v = a.arg(0);
-    let value = if v.is_null() {
+    let value = if matches!(v, Value::Null | Value::Undefined) {
         None
     } else if let Some(list) = crate::net::formdata::entries_of(agent, &v) {
         Some(FaceValue::List(list))
@@ -1480,7 +1480,12 @@ fn internals_set_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value
     let anchor = if matches!(anchor_arg, Value::Undefined) {
         None
     } else {
-        match unwrap_node(agent, &anchor_arg) {
+        let html = unwrap_node(agent, &anchor_arg).filter(|n| {
+            with_doc(agent, n.doc, |d| {
+                d.element(n.node).is_some_and(|e| e.ns == Namespace::Html)
+            })
+        });
+        match html {
             Some(n) => Some(n),
             None => {
                 return agent.type_error(
@@ -1499,7 +1504,6 @@ fn internals_set_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value
     // 7.
     if let Some(an) = anchor {
         let ok = an.doc == t.doc
-            && an.node != t.node
             && with_doc(agent, t.doc, |d| {
                 d.shadow_including_inclusive_descendants(t.node)
                     .contains(&an.node)
