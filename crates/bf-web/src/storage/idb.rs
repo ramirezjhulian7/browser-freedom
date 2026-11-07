@@ -55,8 +55,9 @@ fn str_arg(agent: &mut Agent, v: &Value) -> JsResult<String> {
 }
 
 /// `fire(target, event)`: despacha `event` como evento de confianza en `target`; devuelve
-/// `1` si se canceló y `2` si algún listener lanzó (y luego corren los microtasks, como al
-/// volver de un callback).
+/// `1` si se canceló y `2` si algún listener lanzó. Los microtasks corren después de cada
+/// listener (IndexedDB §5.6 "fire a success event": el despacho lo hace el navegador con la
+/// pila vacía, así que cada callback termina con un checkpoint) y otra vez al final.
 fn fire(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let target = a.arg(0);
     let ev = a.arg(1);
@@ -78,7 +79,8 @@ fn fire(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         e.listeners_threw = false;
     }
     let pin = agent.host_pin(Value::Object(evo));
-    let r = dispatch_js_event(agent, doc, t, evo, false);
+    let r =
+        crate::dom::events::with_checkpoint_each(|| dispatch_js_event(agent, doc, t, evo, false));
     agent.host_unpin(pin);
     let not_canceled = matches!(r, Ok(Ok(true)));
     let threw = cell.borrow().listeners_threw;
