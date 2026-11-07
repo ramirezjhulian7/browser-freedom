@@ -55,6 +55,8 @@ impl Namespace {
 }
 
 pub mod encoding;
+mod encoding_codec;
+mod encoding_mb_tables;
 mod encoding_tables;
 pub mod identity;
 pub mod resource;

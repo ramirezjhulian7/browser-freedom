@@ -7,8 +7,8 @@ use std::io::{self, BufRead, BufReader};
 use bf_url::{Host, Url};
 
 use super::{
-    FetchError, Headers, MAX_REDIRECTS, RedirectMode, RequestOptions, USER_AGENT, accept_language,
-    connect, http,
+    CookieJar, FetchError, Headers, MAX_REDIRECTS, RedirectMode, RequestOptions, USER_AGENT,
+    accept_language, connect, http,
 };
 
 /// La cabecera de una respuesta por partes.
@@ -28,18 +28,20 @@ pub trait StreamSink {
 }
 
 /// Una petición `http(s)` con el cuerpo entregado por partes a `sink`. Sigue las
-/// redirecciones según `req.redirect`. `cookie` es la cabecera `Cookie` a mandar; los
-/// `Set-Cookie` quedan en `StreamHead::headers`.
+/// redirecciones según `req.redirect` (Fetch §4.4). Con `jar` y `req.credentials`, cada salto
+/// manda sus cookies y guarda sus `Set-Cookie` (que además quedan en `StreamHead::headers`).
 pub fn fetch_streaming(
     url: &Url,
     req: &RequestOptions,
-    cookie: Option<&str>,
+    jar: Option<&CookieJar>,
     sink: &mut dyn StreamSink,
 ) -> Result<(), FetchError> {
     let mut url = url.clone();
     let mut list = vec![url.clone()];
     let mut method = req.method.clone();
     let mut body = req.body.clone();
+    let mut extra = req.headers.clone();
+    let mut referrer = req.referrer.clone();
     for _ in 0..=MAX_REDIRECTS {
         if !matches!(url.scheme.as_str(), "http" | "https") {
             return Err(FetchError::UnsupportedScheme(url.scheme.clone()));
@@ -66,11 +68,16 @@ pub fn fetch_streaming(
         headers.push("Accept-Encoding", "identity");
         headers.push("Connection", "close");
         if req.credentials
-            && let Some(c) = cookie
+            && let Some(c) = jar.and_then(|j| j.cookie_header(&url))
         {
-            headers.push("Cookie", c);
+            headers.push("Cookie", &c);
         }
-        for (n, v) in &req.headers.0 {
+        if let Some(r) = &referrer
+            && let Some(v) = referer_value(r, &url)
+        {
+            headers.push("Referer", &v);
+        }
+        for (n, v) in &extra.0 {
             headers.push(n, v);
         }
         let mut target = url.path_string();
@@ -86,18 +93,40 @@ pub fn fetch_streaming(
         while (100..200).contains(&head.status) && head.status != 101 {
             head = http::read_head(&mut conn)?;
         }
+        if req.credentials
+            && let Some(j) = jar
+        {
+            for c in head.headers.get_all("set-cookie") {
+                j.set_cookie(&url, c);
+            }
+        }
         if matches!(head.status, 301 | 302 | 303 | 307 | 308)
             && req.redirect == RedirectMode::Follow
             && let Some(loc) = head.headers.get("location")
-            && let Ok(next) = Url::parse(loc, Some(&url))
+            && let Ok(mut next) = Url::parse(loc, Some(&url))
         {
+            if next.fragment.is_none() {
+                next.fragment.clone_from(&url.fragment);
+            }
+            // Fetch §4.4 paso 12: 301/302 con POST y 303 (salvo GET/HEAD) pasan a GET sin
+            // cuerpo ni cabeceras de contenido.
             let post = method.eq_ignore_ascii_case("POST");
-            if (matches!(head.status, 301 | 302) && post)
-                || (head.status == 303 && !method.eq_ignore_ascii_case("HEAD"))
-            {
+            let get_or_head =
+                method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+            if (matches!(head.status, 301 | 302) && post) || (head.status == 303 && !get_or_head) {
                 method = "GET".into();
                 body = None;
+                extra.0.retain(|(n, _)| {
+                    !matches!(
+                        n.to_ascii_lowercase().as_str(),
+                        "content-encoding"
+                            | "content-language"
+                            | "content-location"
+                            | "content-type"
+                    )
+                });
             }
+            referrer = Some(url.clone());
             url = next;
             list.push(url.clone());
             continue;
@@ -123,6 +152,24 @@ pub fn fetch_streaming(
         return read_parts(&mut conn, kind, sink);
     }
     Err(FetchError::TooManyRedirects)
+}
+
+/// La cabecera `Referer` (política por defecto `strict-origin-when-cross-origin`,
+/// Referrer Policy §3): sin fragmento ni credenciales, solo el origen entre orígenes y nada de
+/// https → http.
+fn referer_value(r: &Url, url: &Url) -> Option<String> {
+    if r.scheme == "https" && url.scheme != "https" {
+        return None;
+    }
+    let mut r = r.clone();
+    r.username.clear();
+    r.password.clear();
+    r.fragment = None;
+    if r.origin() != url.origin() {
+        r.path = bf_url::Path::List(vec![String::new()]);
+        r.query = None;
+    }
+    Some(r.href())
 }
 
 /// Lee el cuerpo según `kind` y entrega cada trozo en cuanto llega.
