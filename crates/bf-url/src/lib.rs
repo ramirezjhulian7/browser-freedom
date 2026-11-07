@@ -15,6 +15,7 @@ mod tables;
 use std::fmt;
 
 pub use host::{Host, domain_to_ascii};
+pub use parser::QueryEncoder;
 use parser::{State, basic_parse};
 
 /// Path de una URL: opaco (`mailto:x`) o lista de segmentos.
@@ -95,11 +96,11 @@ impl Url {
 
     /// Como [`Url::parse`] con el encoding del documento para el query: `encode` codifica el
     /// query entero en trozos de bytes, cada uno seguido del code point no representable que
-    /// lo cortó (ver [`parser::QueryEncoder`]).
+    /// lo cortó (ver [`QueryEncoder`]).
     pub fn parse_with_encoding(
         input: &str,
         base: Option<&Url>,
-        encode: &dyn Fn(&str) -> Vec<(Vec<u8>, Option<u32>)>,
+        encode: QueryEncoder<'_>,
     ) -> Result<Url, ParseError> {
         basic_parse(input, base, None, None, Some(encode))
             .ok()
