@@ -136,7 +136,7 @@ Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-10-28; 52017 archivos en 307 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-11-07; 52017 archivos en 2872 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -152,7 +152,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
   - `import-text`: stage 3: módulos de texto (`with { type: "text" }`).
   - `import-bytes`: stage 2.7: módulos de bytes (`with { type: "bytes" }`, sobre immutable ArrayBuffer).
 - Detalle por test: `target/test262/results.tsv`.
-- `language/` (referencia de regresión de `tests/test262_run.rs`): 99.82%
+- `language/` (referencia de regresión de `tests/test262_run.rs`): 99.95%
 
 | Directorio | passed | failed | skipped | timeout | % |
 |---|---:|---:|---:|---:|---:|
@@ -160,7 +160,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | annexB/language | 845 | 0 | 0 | 0 | 100.0% |
 | built-ins/AbstractModuleSource | 0 | 0 | 8 | 0 | 100.0% |
 | built-ins/AggregateError | 25 | 0 | 0 | 0 | 100.0% |
-| built-ins/Array | 2988 | 95 | 0 | 0 | 96.9% |
+| built-ins/Array | 3083 | 0 | 0 | 0 | 100.0% |
 | built-ins/ArrayBuffer | 192 | 0 | 29 | 0 | 100.0% |
 | built-ins/ArrayIteratorPrototype | 27 | 0 | 0 | 0 | 100.0% |
 | built-ins/AsyncDisposableStack | 104 | 0 | 0 | 0 | 100.0% |
@@ -207,7 +207,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/ThrowTypeError | 14 | 0 | 0 | 0 | 100.0% |
 | built-ins/TypedArray | 1444 | 1 | 8 | 0 | 99.9% |
 | built-ins/TypedArrayConstructors | 736 | 0 | 2 | 0 | 100.0% |
-| built-ins/Uint8Array | 8 | 60 | 2 | 0 | 11.8% |
+| built-ins/Uint8Array | 68 | 0 | 2 | 0 | 100.0% |
 | built-ins/WeakMap | 102 | 0 | 39 | 0 | 100.0% |
 | built-ins/WeakRef | 29 | 0 | 0 | 0 | 100.0% |
 | built-ins/WeakSet | 85 | 0 | 0 | 0 | 100.0% |
@@ -231,13 +231,13 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | intl402/DisplayNames | 4 | 53 | 0 | 0 | 7.0% |
 | intl402/DurationFormat | 0 | 110 | 0 | 0 | 0.0% |
 | intl402/FallbackSymbol | 2 | 0 | 0 | 0 | 100.0% |
-| intl402/Intl | 56 | 10 | 0 | 0 | 84.8% |
-| intl402/ListFormat | 1 | 80 | 0 | 0 | 1.2% |
-| intl402/Locale | 0 | 190 | 0 | 0 | 0.0% |
+| intl402/Intl | 61 | 5 | 0 | 0 | 92.4% |
+| intl402/ListFormat | 80 | 1 | 0 | 0 | 98.8% |
+| intl402/Locale | 189 | 1 | 0 | 0 | 99.5% |
 | intl402/Number | 7 | 0 | 0 | 0 | 100.0% |
 | intl402/NumberFormat | 209 | 42 | 0 | 0 | 83.3% |
 | intl402/PluralRules | 51 | 2 | 0 | 0 | 96.2% |
-| intl402/RelativeTimeFormat | 0 | 80 | 0 | 0 | 0.0% |
+| intl402/RelativeTimeFormat | 73 | 7 | 0 | 0 | 91.2% |
 | intl402/Segmenter | 2 | 77 | 0 | 0 | 2.5% |
 | intl402/String | 15 | 4 | 0 | 0 | 78.9% |
 | intl402/Temporal | 72 | 1957 | 0 | 0 | 3.5% |
@@ -251,7 +251,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/directive-prologue | 62 | 0 | 0 | 0 | 100.0% |
 | language/eval-code | 347 | 0 | 0 | 0 | 100.0% |
 | language/export | 3 | 0 | 0 | 0 | 100.0% |
-| language/expressions | 10687 | 16 | 399 | 0 | 99.9% |
+| language/expressions | 10699 | 4 | 399 | 0 | 100.0% |
 | language/function-code | 217 | 0 | 0 | 0 | 100.0% |
 | language/future-reserved-words | 55 | 0 | 0 | 0 | 100.0% |
 | language/global-code | 42 | 0 | 0 | 0 | 100.0% |
@@ -267,11 +267,11 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/rest-parameters | 11 | 0 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 0 | 100.0% |
 | language/statementList | 80 | 0 | 0 | 0 | 100.0% |
-| language/statements | 9313 | 18 | 16 | 0 | 99.8% |
+| language/statements | 9331 | 0 | 16 | 0 | 100.0% |
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
 | language/white-space | 67 | 0 | 0 | 0 | 100.0% |
-| **language/ (total)** | 23153 | 41 | 532 | 0 | 99.8% |
-| **Total** | 48260 | 2960 | 797 | 0 | 94.2% |
+| **language/ (total)** | 23183 | 11 | 532 | 0 | 100.0% |
+| **Total** | 48791 | 2429 | 797 | 0 | 95.3% |
 
 ### Los 30 errores más frecuentes
 
@@ -280,30 +280,30 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | 1 | 263 | `RangeError: Unsupported calendar: gregory` |
 | 2 | 139 | `RangeError: Unsupported calendar: buddhist` |
 | 3 | 138 | `RangeError: Unsupported calendar: chinese` |
-| 4 | 137 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
-| 5 | 135 | `RangeError: Unsupported calendar: japanese` |
-| 6 | 131 | `RangeError: Unsupported calendar: hebrew` |
-| 7 | 120 | `RangeError: Unsupported calendar: dangi` |
-| 8 | 114 | `RangeError: Unsupported calendar: roc` |
-| 9 | 106 | `RangeError: Unsupported calendar: islamic-civil` |
-| 10 | 104 | `RangeError: Unsupported calendar: ethiopic` |
-| 11 | 93 | `RangeError: Unsupported calendar: islamic-tbla` |
-| 12 | 90 | `TypeError: Intl.Locale is not a constructor` |
-| 13 | 84 | `RangeError: Unsupported calendar: coptic` |
-| 14 | 84 | `RangeError: Unsupported calendar: ethioaa` |
-| 15 | 83 | `RangeError: Unsupported calendar: persian` |
-| 16 | 82 | `RangeError: Unsupported calendar: islamic-umalqura` |
-| 17 | 73 | `RangeError: Unsupported calendar: indian` |
-| 18 | 69 | `TypeError: Intl.DurationFormat is not a constructor` |
-| 19 | 66 | `TestN:AsyncTestFailure:TypeError: Array.fromAsync is not a function` |
-| 20 | 63 | `TestNError: Expected SameValue(«…», «…») to be true` |
-| 21 | 61 | `ReferenceError: ShadowRealm is not defined` |
-| 22 | 59 | `TypeError: Temporal objects cannot be converted to primitives; use compare() or equals()` |
-| 23 | 49 | `RangeError: Unknown time zone: America/Vancouver` |
-| 24 | 43 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
-| 25 | 43 | `TypeError: Intl.ListFormat is not a constructor` |
-| 26 | 39 | `TypeError: Intl.RelativeTimeFormat is not a constructor` |
-| 27 | 36 | `TypeError: Cannot convert undefined to object` |
-| 28 | 34 | `RangeError: Maximum call stack size exceeded` |
-| 29 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
-| 30 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
+| 4 | 135 | `RangeError: Unsupported calendar: japanese` |
+| 5 | 131 | `RangeError: Unsupported calendar: hebrew` |
+| 6 | 120 | `RangeError: Unsupported calendar: dangi` |
+| 7 | 114 | `RangeError: Unsupported calendar: roc` |
+| 8 | 106 | `RangeError: Unsupported calendar: islamic-civil` |
+| 9 | 104 | `RangeError: Unsupported calendar: ethiopic` |
+| 10 | 93 | `RangeError: Unsupported calendar: islamic-tbla` |
+| 11 | 84 | `RangeError: Unsupported calendar: coptic` |
+| 12 | 84 | `RangeError: Unsupported calendar: ethioaa` |
+| 13 | 83 | `RangeError: Unsupported calendar: persian` |
+| 14 | 82 | `RangeError: Unsupported calendar: islamic-umalqura` |
+| 15 | 73 | `RangeError: Unsupported calendar: indian` |
+| 16 | 72 | `TypeError: Intl.DurationFormat is not a constructor` |
+| 17 | 61 | `ReferenceError: ShadowRealm is not defined` |
+| 18 | 59 | `TypeError: Temporal objects cannot be converted to primitives; use compare() or equals()` |
+| 19 | 49 | `RangeError: Unknown time zone: America/Vancouver` |
+| 20 | 45 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 21 | 36 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
+| 22 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
+| 23 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
+| 24 | 21 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
+| 25 | 13 | `RangeError: Unsupported calendar: islamicc` |
+| 26 | 11 | `RangeError: Unknown time zone: America/Los_Angeles` |
+| 27 | 10 | `RangeError: Unknown time zone: Africa/Monrovia` |
+| 28 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
+| 29 | 10 | `TypeError: Cannot convert undefined to object` |
+| 30 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a RangeError` |
