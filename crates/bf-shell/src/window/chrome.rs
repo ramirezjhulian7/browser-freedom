@@ -113,6 +113,7 @@ impl UiDoc {
             loader: Arc::new(FileLoader::new()),
             fonts,
             extra: &[],
+            text_zoom: 1.0,
         };
         let page = prepare_page(&doc, &ctx, size);
         UiDoc { doc, page, size }

@@ -135,6 +135,9 @@ pub struct PageContext<'a> {
     pub fonts: Arc<FontDb>,
     /// Hojas adicionales del llamador (user o UA).
     pub extra: &'a [&'a Stylesheet],
+    /// Zoom de texto del navegador (1 = sin zoom; ver `MediaContext::text_zoom`). Los marcos
+    /// anidados heredan el del documento.
+    pub text_zoom: f32,
 }
 
 /// Estilo → layout → lista de visualización.
@@ -168,6 +171,7 @@ pub fn prepare_page_with_frames(
     let media = MediaContext {
         width: f64::from(viewport.width),
         height: f64::from(viewport.height),
+        text_zoom: f64::from(ctx.text_zoom),
         ..MediaContext::default()
     };
     let sheets = document_stylesheets(
@@ -263,6 +267,7 @@ fn prepare_frames(
                 loader: ctx.loader.clone(),
                 fonts: ctx.fonts.clone(),
                 extra: &[],
+                text_zoom: ctx.text_zoom,
             };
             let size = Size {
                 width: rect.width,

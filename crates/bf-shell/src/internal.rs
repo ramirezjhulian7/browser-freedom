@@ -52,6 +52,7 @@ const HISTORY: &str = include_str!("../pages/history.html");
 const BOOKMARKS: &str = include_str!("../pages/bookmarks.html");
 const DOWNLOADS: &str = include_str!("../pages/downloads.html");
 const DOWNLOADED: &str = include_str!("../pages/downloaded.html");
+const SETTINGS: &str = include_str!("../pages/settings.html");
 pub const DLBAR: &str = include_str!("../pages/dlbar.html");
 pub const BAR: &str = include_str!("../pages/bar.html");
 pub const MENU: &str = include_str!("../pages/menu.html");
@@ -171,6 +172,7 @@ pub fn page(url: &Url, ctx: &LoadContext) -> Loaded {
         "history" => history(url, ctx),
         "bookmarks" => bookmarks(url, ctx),
         "downloads" => downloads_page(ctx),
+        "settings" => settings_page(ctx),
         "wpt" => wpt(&ctx.theme),
         "engine" => engine(url, ctx),
         "source" => source(url, ctx),
@@ -199,6 +201,8 @@ pub struct Outcome {
     pub go: Option<Url>,
     /// Un aviso para la línea de estado.
     pub notice: Option<String>,
+    /// Cambiaron las opciones ([`crate::settings`]): la ventana las aplica.
+    pub settings: bool,
 }
 
 impl Outcome {
@@ -313,6 +317,31 @@ pub fn profile_action(url: &Url) -> Option<Outcome> {
             crate::downloads::global().forget(id()?);
             Some(Outcome::reload())
         }
+        "setting-third-party-cookies" => {
+            let mut s = crate::settings::global();
+            s.block_third_party_cookies = !s.block_third_party_cookies;
+            s.save();
+            Some(Outcome {
+                reload: true,
+                settings: true,
+                ..Outcome::default()
+            })
+        }
+        "setting-text-zoom" => {
+            let mut s = crate::settings::global();
+            s.text_zoom = match url.query.as_deref().unwrap_or("") {
+                "in" => s.text_zoom_step(true),
+                "out" => s.text_zoom_step(false),
+                "reset" => 1.0,
+                _ => return Some(Outcome::default()),
+            };
+            s.save();
+            Some(Outcome {
+                reload: true,
+                settings: true,
+                ..Outcome::default()
+            })
+        }
         "download-clear" => {
             crate::downloads::global().clear_finished();
             Some(Outcome::reload())
@@ -405,6 +434,43 @@ pub fn image_document(
     loaded.meta.internal = false;
     loaded.meta.bytes = response.body.len();
     Some(loaded)
+}
+
+/// `freedom://settings`: las opciones del navegador ([`crate::settings`]).
+fn settings_page(ctx: &LoadContext) -> String {
+    let s = crate::settings::global().clone();
+    let profile = crate::profile::dir().map_or_else(
+        || "en memoria (no se guarda)".to_owned(),
+        |d| d.display().to_string(),
+    );
+    themed(
+        SETTINGS,
+        &ctx.theme,
+        &[
+            (
+                "cookies_on",
+                if s.block_third_party_cookies { " on" } else { "" }.to_owned(),
+            ),
+            (
+                "cookies_state",
+                if s.block_third_party_cookies {
+                    "Activado"
+                } else {
+                    "Desactivado"
+                }
+                .to_owned(),
+            ),
+            (
+                "text_zoom",
+                format!("{} %", (s.text_zoom * 100.0).round()),
+            ),
+            (
+                "downloads_dir",
+                escape(&crate::downloads::downloads_dir().display().to_string()),
+            ),
+            ("profile", escape(&profile)),
+        ],
+    )
 }
 
 /// `freedom://downloads`: las descargas con su estado, abrir la carpeta, cancelar y quitar.
@@ -935,6 +1001,7 @@ fn engine(url: &Url, ctx: &LoadContext) -> String {
         loader: loaded.loader.clone(),
         fonts: ctx.fonts.clone(),
         extra: &[],
+        text_zoom: 1.0,
     };
     let page = prepare_page(&loaded.doc, &pctx, ctx.viewport);
     themed(

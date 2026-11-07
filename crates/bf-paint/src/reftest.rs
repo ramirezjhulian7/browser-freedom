@@ -358,6 +358,7 @@ impl Harness {
             loader: self.loader.clone(),
             fonts: self.db.clone(),
             extra: &[],
+            text_zoom: 1.0,
         };
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
     }

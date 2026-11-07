@@ -1158,6 +1158,7 @@ mod tests {
             loader: loader(&env),
             fonts,
             extra: &[],
+            text_zoom: 1.0,
         };
         let viewport = bf_layout::Size {
             width: 640.0,

@@ -219,6 +219,9 @@ struct App {
     relayout: Option<u64>,
     chrome: Chrome,
     zoom: f32,
+    /// Zoom de texto (E11, `Ctrl+Shift` + rueda; opción `text_zoom` del perfil): escala las
+    /// fuentes de las páginas, no la página.
+    text_zoom: f32,
     modifiers: ModifiersState,
     /// Posición del puntero en px lógicos de la ventana.
     mouse: (f32, f32),
@@ -632,7 +635,14 @@ fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
 impl App {
     fn new(worker: Documents, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
         App {
-            net: Arc::new(NetLoader::new()),
+            net: {
+                // Las opciones del perfil que viven en la red (E4: cookies de terceros).
+                let net = NetLoader::new();
+                net.fetcher
+                    .cookies
+                    .set_block_third_party(crate::settings::global().block_third_party_cookies);
+                Arc::new(net)
+            },
             tabs: vec![None],
             active: 0,
             focus: None,
@@ -662,6 +672,7 @@ impl App {
             relayout: None,
             chrome: Chrome::new(fonts, theme),
             zoom: 1.0,
+            text_zoom: crate::settings::global().text_zoom,
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
             hover_link: None,
@@ -1423,6 +1434,9 @@ impl App {
             format!("Zoom {:.0} %", self.zoom * 100.0),
             format!("{:.0} × {:.0} px", vp.width, vp.height),
         ];
+        if (self.text_zoom - 1.0).abs() > 0.001 {
+            right.insert(1, format!("Texto {:.0} %", self.text_zoom * 100.0));
+        }
         if let Some(t) = self.load_time {
             right.push(format!("{:.2} s", t.as_secs_f64()).replace('.', ","));
         }
@@ -1491,6 +1505,7 @@ impl App {
         }
         let viewport = self.viewport();
         self.worker.set_viewport(self.tab_key, viewport);
+        self.worker.set_text_zoom(self.tab_key, self.text_zoom);
         let len = self.history.len() as u32;
         let index = self.index as u32;
         let session_history = match nav {
@@ -1548,6 +1563,9 @@ impl App {
             {
                 if let Some(message) = outcome.notice {
                     self.set_notice(message);
+                }
+                if outcome.settings {
+                    self.apply_settings();
                 }
                 if let Some(go) = outcome.go {
                     self.start_load(go, Navigation::Replace);
@@ -1681,6 +1699,11 @@ impl App {
             "toggle-third-party-cookies" => {
                 let cookies = &self.net.fetcher.cookies;
                 cookies.set_block_third_party(!cookies.block_third_party());
+                // E11: la opción se guarda en el perfil (`freedom://settings`).
+                let mut s = crate::settings::global();
+                s.block_third_party_cookies = cookies.block_third_party();
+                s.save();
+                drop(s);
                 self.refresh_panel();
             }
             _ => {}
@@ -1846,6 +1869,14 @@ impl App {
     fn sync_view(&mut self) {
         let dpr = self.dpi() * self.zoom;
         self.worker.set_scroll(self.tab_key, self.scroll, dpr);
+        // Otra pestaña cambió el zoom de texto: esta se maqueta de nuevo al mostrarse.
+        if self.worker.text_zoom(self.tab_key) != self.text_zoom
+            && self.loading.is_none()
+            && self.relayout.is_none()
+            && self.current.is_some()
+        {
+            self.request_relayout();
+        }
         // El foco de los campos de la página (`focus`/`blur` en el documento).
         let focus = self.focus.as_ref().map(|f| f.node);
         if self.focus_sent != (self.tab_key, focus) {
@@ -2259,6 +2290,7 @@ impl App {
         let viewport = self.viewport();
         trace(&format!("request_relayout id={id} viewport={viewport:?}"));
         self.worker.set_viewport(self.tab_key, viewport);
+        self.worker.set_text_zoom(self.tab_key, self.text_zoom);
         self.last_layout_request = Some(viewport);
         // Si la interfaz cambió el documento (un campo editado), el hilo adopta esa versión.
         let loaded = std::mem::take(&mut self.edited).then_some(loaded);
@@ -2282,6 +2314,7 @@ impl App {
             // terminar).
             let viewport = self.viewport();
             self.worker.set_viewport(self.tab_key, viewport);
+            self.worker.set_text_zoom(self.tab_key, self.text_zoom);
         } else {
             self.request_relayout();
         }
@@ -2335,6 +2368,45 @@ impl App {
         self.zoom = zoom;
         self.scroll = (self.scroll.0 * k, self.scroll.1 * k);
         self.resized();
+    }
+
+    /// Cambia el zoom de texto (todas las pestañas; se guarda en las opciones).
+    fn set_text_zoom(&mut self, zoom: f32) {
+        let zoom = crate::settings::clamp_text_zoom(zoom);
+        {
+            let mut s = crate::settings::global();
+            if (s.text_zoom - zoom).abs() > 0.001 {
+                s.text_zoom = zoom;
+                s.save();
+            }
+        }
+        if (zoom - self.text_zoom).abs() < 0.001 {
+            return;
+        }
+        self.text_zoom = zoom;
+        self.set_notice(format!("Texto {:.0} %", zoom * 100.0));
+        if self.loading.is_some() {
+            self.worker.set_text_zoom(self.tab_key, zoom);
+        } else {
+            self.request_relayout();
+        }
+        self.refresh_chrome();
+    }
+
+    fn text_zoom_step(&mut self, up: bool) {
+        let next = crate::settings::global().text_zoom_step(up);
+        self.set_text_zoom(next);
+    }
+
+    /// Aplica las opciones del perfil después de cambiarlas en `freedom://settings`.
+    fn apply_settings(&mut self) {
+        let s = crate::settings::global().clone();
+        self.net
+            .fetcher
+            .cookies
+            .set_block_third_party(s.block_third_party_cookies);
+        self.set_text_zoom(s.text_zoom);
+        self.refresh_panel();
     }
 
     fn zoom_step(&mut self, up: bool) {
@@ -3366,6 +3438,15 @@ impl ApplicationHandler<Wake> for App {
                 ..
             } => self.release(),
             WindowEvent::MouseWheel { delta, .. } => {
+                // `Ctrl+Shift` + rueda: zoom de texto (E11); `Ctrl` + rueda: zoom de página.
+                if self.modifiers.control_key() && self.modifiers.shift_key() {
+                    let up = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+                        MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                    };
+                    self.text_zoom_step(up);
+                    return;
+                }
                 if self.modifiers.control_key() {
                     let up = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y > 0.0,
@@ -3548,6 +3629,13 @@ impl App {
                 self.settle();
             }
             "newtab" => self.new_tab(None, false),
+            // `textzoom:in|out|reset`: lo que hace `Ctrl+Shift` + rueda (E11).
+            "textzoom" => match arg {
+                "in" => self.text_zoom_step(true),
+                "out" => self.text_zoom_step(false),
+                "reset" => self.set_text_zoom(1.0),
+                _ => return Err(bad()),
+            },
             "field" => {
                 let Some(cur) = self.current.clone() else {
                     return Err(bad());
