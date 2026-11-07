@@ -46,6 +46,20 @@
     if (Number.isNaN(n) || n < 0) throw new RangeError("Invalid highWaterMark");
     return n;
   }
+  // El diccionario QueuingStrategy se convierte en la capa IDL (antes que el underlying
+  // source, que se lee en el cuerpo del constructor): `highWaterMark` y luego `size`.
+  function convertStrategy(strategy) {
+    if (strategy == null) return {};
+    const out = {};
+    const hwm = strategy.highWaterMark;
+    if (hwm !== undefined) out.highWaterMark = Number(hwm);
+    const size = strategy.size;
+    if (size !== undefined) {
+      if (typeof size !== "function") throw new TypeError("size must be a function");
+      out.size = size;
+    }
+    return out;
+  }
   function extractSize(strategy) {
     const size = strategy.size;
     if (size === undefined) return () => 1;
@@ -63,7 +77,7 @@
         throw new TypeError("underlyingSource must be an object");
       if (strategy !== undefined && strategy !== null && typeof strategy !== "object")
         throw new TypeError("strategy must be an object");
-      strategy = strategy == null ? {} : strategy;
+      strategy = convertStrategy(strategy);
       // Los miembros de UnderlyingSource en orden (WebIDL §3.2.17).
       let autoAllocate = src.autoAllocateChunkSize;
       if (autoAllocate !== undefined) autoAllocate = enforceRangeULL(autoAllocate, "autoAllocateChunkSize");
@@ -1424,16 +1438,22 @@
     ist.ongoing = ist.ongoing ? then.call(ist.ongoing, step, step) : step();
     return ist.ongoing;
   });
+  // WebIDL §3.7.10.2: `next` y `return` son enumerables.
+  enumerable(ReadableStreamAsyncIteratorPrototype, ["next", "return"]);
   tag(ReadableStreamAsyncIteratorPrototype, "ReadableStream AsyncIterator");
 
   // ReadableStream.from (§4.2.6, ReadableStreamFromIterable)
   function streamFrom(iterable) {
-    let method = iterable == null ? undefined : iterable[Symbol.asyncIterator];
+    // `async_iterable<any>` (WebIDL §3.2.21): solo objetos; el iterador también lo es.
+    const isObject = (v) => (typeof v === "object" && v !== null) || typeof v === "function";
+    if (!isObject(iterable)) throw new TypeError("ReadableStream.from requires an async iterable object");
+    let method = iterable[Symbol.asyncIterator];
     let iterator;
     if (method == null) {
-      const sync = iterable == null ? undefined : iterable[Symbol.iterator];
+      const sync = iterable[Symbol.iterator];
       if (typeof sync !== "function") throw new TypeError("ReadableStream.from requires an iterable");
       const syncIt = sync.call(iterable);
+      if (!isObject(syncIt)) throw new TypeError("not an iterator");
       iterator = {
         next: () => {
           const r = syncIt.next();
@@ -1444,7 +1464,7 @@
     } else {
       if (typeof method !== "function") throw new TypeError("@@asyncIterator is not a function");
       iterator = method.call(iterable);
-      if (iterator === null || typeof iterator !== "object") throw new TypeError("not an iterator");
+      if (!isObject(iterator)) throw new TypeError("not an iterator");
     }
     let stream;
     const pull = () => {
@@ -2426,12 +2446,17 @@
   }
 
   // --- Estrategias de cola (§7) ---
-  const countSize = function size() {
-    return 1;
-  };
-  const byteSize = function size(chunk) {
-    return chunk.byteLength;
-  };
+  // Métodos: sin `prototype` y sin [[Construct]] (§7.2, "size should not be a constructor").
+  const countSize = {
+    size() {
+      return 1;
+    },
+  }.size;
+  const byteSize = {
+    size(chunk) {
+      return chunk.byteLength;
+    },
+  }.size;
   const QS = new WeakMap();
   function strategyInit(o, init, name) {
     if (init === null || typeof init !== "object")

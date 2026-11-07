@@ -22,6 +22,7 @@
 pub mod computed;
 pub mod declaration;
 pub mod media;
+pub mod namespace;
 pub mod sheets;
 pub mod style_decl;
 pub mod value;
@@ -195,6 +196,8 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
         agent.set_realm_data(realm, CssomState::default());
     }
     style_decl::define_property_accessors(agent, realm);
+    namespace::install(agent, realm);
+    namespace::install_indexed_iterators(agent, realm);
 }
 
 // --- Estado ---

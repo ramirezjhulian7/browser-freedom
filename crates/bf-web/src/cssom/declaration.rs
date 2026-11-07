@@ -11,6 +11,7 @@ use bf_css::syntax::{
 use bf_style::is_supported;
 use bf_style::properties::shorthands::{SHORTHANDS, ShorthandDef};
 use bf_style::properties::{CssWide, LonghandId};
+use bf_style::values::color::parse_color;
 use bf_style::values::trim;
 
 use super::value::{Property, is_alias_shorthand, property, serialize_raw, serialize_value};
@@ -109,9 +110,23 @@ fn expand_shorthand(sh: &ShorthandDef, values: &[ComponentValue]) -> Vec<(String
         .iter()
         .map(|l| (l.name().to_owned(), initial_text(*l)))
         .collect();
+    // Un color con nombre del shorthand se serializa como la palabra clave en el longhand
+    // (valor especificado, CSS Color 4 §15.1), no como el `rgb()` del valor tipado.
+    let named: Vec<(String, String)> = values
+        .iter()
+        .filter_map(|v| match (v.token(), parse_color(v)) {
+            (Some(TokenKind::Ident(name)), Some(bf_style::values::Color::Rgba(c))) => {
+                Some((c.to_string(), name.to_ascii_lowercase()))
+            }
+            _ => None,
+        })
+        .collect();
     for v in expanded {
         let id = v.id();
-        let text = (id.def().to_css)(&v);
+        let mut text = (id.def().to_css)(&v);
+        if let Some((_, keyword)) = named.iter().find(|(css, _)| *css == text) {
+            text.clone_from(keyword);
+        }
         match out.iter_mut().find(|(n, _)| n == id.name()) {
             Some(slot) => slot.1 = text,
             None => out.push((id.name().to_owned(), text)),
