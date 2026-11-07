@@ -23,7 +23,10 @@ use bf_layout::{FragmentTree, Size};
 use bf_style::values::color::Rgba;
 use bf_style::{Resources, document_stylesheets, font_face_rules, style_document_with_sheets};
 
-pub use builder::{build_display_list, build_display_list_with_images, document_extent};
+pub use builder::{
+    build_display_list, build_display_list_with_frames, build_display_list_with_images,
+    document_extent,
+};
 pub use display_list::{DisplayItem, DisplayList, GlyphInstance, PathOp, Radii};
 pub use images::{PageImages, load_images};
 pub use raster::{raster_color, render, render_scrolled};
@@ -39,6 +42,44 @@ pub struct Page {
     pub images: PageImages,
     pub timings: PageTimings,
     pub report: EngineReport,
+    /// Los documentos de los `<iframe>` maquetados con el tamaño de su caja (E4).
+    pub frames: Vec<FramePage>,
+}
+
+/// El documento de un `<iframe>` (HTML §4.8.5) que se pinta dentro de su caja (E4).
+#[derive(Clone)]
+pub struct FrameDoc {
+    /// El `<iframe>` en el documento que lo contiene.
+    pub node: bf_dom::NodeId,
+    pub doc: Document,
+    /// URL base del documento del marco.
+    pub base: Url,
+    pub encoding: Encoding,
+    /// Desplazamiento del marco (px CSS).
+    pub scroll: (f32, f32),
+    /// Sus propios marcos.
+    pub frames: Vec<FrameDoc>,
+}
+
+/// Un marco ya maquetado (E4).
+pub struct FramePage {
+    /// El `<iframe>`.
+    pub node: bf_dom::NodeId,
+    /// Su content box en coordenadas de la página que lo contiene: el viewport del marco.
+    pub rect: bf_layout::fragment::Rect,
+    pub scroll: (f32, f32),
+    pub page: Box<Page>,
+}
+
+impl FramePage {
+    /// El marco (y su página) bajo `point` (coordenadas de la página que lo contiene), con
+    /// el punto en coordenadas del viewport del marco.
+    pub fn locate(frames: &[FramePage], point: (f32, f32)) -> Option<(&FramePage, (f32, f32))> {
+        frames.iter().rev().find_map(|f| {
+            let (x, y) = (point.0 - f.rect.x, point.1 - f.rect.y);
+            (x >= 0.0 && y >= 0.0 && x < f.rect.width && y < f.rect.height).then_some((f, (x, y)))
+        })
+    }
 }
 
 /// Qué hizo el motor con un documento y qué ignoró. Cada contador sale del subsistema que lo
@@ -109,6 +150,19 @@ pub fn prepare_page_with_canvases(
     viewport: Size,
     canvases: &[(bf_dom::NodeId, std::sync::Arc<tiny_skia::Pixmap>)],
 ) -> Page {
+    prepare_page_with_frames(doc, ctx, viewport, canvases, &[])
+}
+
+/// [`prepare_page_with_canvases`] con los documentos de los `<iframe>` (E4): cada uno se
+/// maqueta con el tamaño del content box de su `<iframe>` (su viewport, HTML §4.8.5) y su lista
+/// de visualización se pinta dentro, recortada y desplazada.
+pub fn prepare_page_with_frames(
+    doc: &Document,
+    ctx: &PageContext<'_>,
+    viewport: Size,
+    canvases: &[(bf_dom::NodeId, std::sync::Arc<tiny_skia::Pixmap>)],
+    frames: &[FrameDoc],
+) -> Page {
     let (base, extra, loader, db) = (ctx.base, ctx.extra, ctx.loader.clone(), ctx.fonts.clone());
     let start = Instant::now();
     let media = MediaContext {
@@ -144,8 +198,13 @@ pub fn prepare_page_with_canvases(
     let tree =
         bf_layout::layout_document_with_images(doc, &styles, viewport, &fonts, &images.sizes);
     let layout = start.elapsed();
+    let frames = prepare_frames(&tree, ctx, frames);
     let start = Instant::now();
-    let display_list = build_display_list_with_images(doc, &tree, &fonts, &images);
+    let lists: std::collections::HashMap<_, _> = frames
+        .iter()
+        .map(|f| (f.node, (&f.page.display_list, f.scroll)))
+        .collect();
+    let display_list = build_display_list_with_frames(doc, &tree, &fonts, &images, &lists);
     let nodes = doc.inclusive_descendants(doc.root());
     let report = EngineReport {
         style: bf_style::style_report(doc, &sheets),
@@ -168,12 +227,70 @@ pub fn prepare_page_with_canvases(
         display_list,
         images,
         report,
+        frames,
         timings: PageTimings {
             style,
             images: images_time,
             layout,
             paint: start.elapsed(),
         },
+    }
+}
+
+/// Maqueta los marcos de `frames` que tienen caja en `tree`.
+fn prepare_frames(
+    tree: &FragmentTree,
+    ctx: &PageContext<'_>,
+    frames: &[FrameDoc],
+) -> Vec<FramePage> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let mut boxes = std::collections::HashMap::new();
+    if let Some(root) = &tree.root {
+        replaced_boxes(root, &mut boxes);
+    }
+    frames
+        .iter()
+        .filter_map(|fd| {
+            let rect = *boxes.get(&fd.node)?;
+            if rect.width <= 0.0 || rect.height <= 0.0 {
+                return None;
+            }
+            let child = PageContext {
+                base: &fd.base,
+                encoding: fd.encoding,
+                loader: ctx.loader.clone(),
+                fonts: ctx.fonts.clone(),
+                extra: &[],
+            };
+            let size = Size {
+                width: rect.width,
+                height: rect.height,
+            };
+            let page = prepare_page_with_frames(&fd.doc, &child, size, &[], &fd.frames);
+            Some(FramePage {
+                node: fd.node,
+                rect,
+                scroll: fd.scroll,
+                page: Box::new(page),
+            })
+        })
+        .collect()
+}
+
+/// Content box de cada caja reemplazada del árbol.
+fn replaced_boxes(
+    f: &bf_layout::fragment::Fragment,
+    out: &mut std::collections::HashMap<bf_dom::NodeId, bf_layout::fragment::Rect>,
+) {
+    if f.kind == bf_layout::fragment::FragmentKind::Replaced
+        && let Some(n) = f.node
+    {
+        out.entry(n).or_insert_with(|| f.content_rect());
+    }
+    for c in &f.children {
+        replaced_boxes(c, out);
     }
 }
 

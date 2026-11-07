@@ -78,19 +78,19 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | dom/observable | 29 | 25 | 251 | 0 | 242 | 4 | 5 | 0.0% |
 | dom/ranges | 68 | 61 | 41823 | 37394 | 253 | 0 | 4176 | 89.4% |
 | dom/traversal | 18 | 17 | 1607 | 1573 | 33 | 0 | 1 | 97.9% |
-| encoding | 45 | 38 | 12003 | 11299 | 190 | 511 | 3 | 94.1% |
-| encoding/legacy-mb-japanese | 51 | 12 | 333515 | 0 | 129825 | 1 | 203689 | 0.0% |
-| encoding/legacy-mb-korean | 26 | 3 | 239960 | 0 | 43264 | 0 | 196696 | 0.0% |
-| encoding/legacy-mb-schinese | 4 | 4 | 660 | 4 | 656 | 0 | 0 | 0.6% |
-| encoding/legacy-mb-tchinese | 23 | 5 | 193181 | 123 | 43390 | 0 | 149668 | 0.1% |
-| encoding/streams | 13 | 12 | 111 | 0 | 111 | 0 | 0 | 0.0% |
+| encoding | 82 | 73 | 23441 | 22700 | 227 | 511 | 3 | 96.8% |
+| encoding/legacy-mb-japanese | 51 | 15 | 333544 | 129825 | 29 | 1 | 203689 | 38.9% |
+| encoding/legacy-mb-korean | 26 | 4 | 239968 | 43264 | 8 | 0 | 196696 | 18.0% |
+| encoding/legacy-mb-schinese | 6 | 6 | 1017 | 1017 | 0 | 0 | 0 | 100.0% |
+| encoding/legacy-mb-tchinese | 23 | 6 | 193189 | 43513 | 8 | 0 | 149668 | 22.5% |
+| encoding/streams | 35 | 31 | 325 | 325 | 0 | 0 | 0 | 100.0% |
 | html/dom | 223 | 158 | 64260 | 62278 | 1883 | 46 | 53 | 96.9% |
 | html/semantics/forms | 514 | 393 | 4689 | 1978 | 1862 | 85 | 764 | 42.2% |
 | html/semantics/interactive-elements | 114 | 68 | 418 | 49 | 171 | 33 | 165 | 11.7% |
 | html/semantics/scripting-1 | 491 | 332 | 2711 | 1441 | 959 | 24 | 287 | 53.2% |
 | html/webappapis | 321 | 198 | 1131 | 608 | 293 | 176 | 54 | 53.8% |
 | url | 41 | 39 | 8699 | 8489 | 193 | 17 | 0 | 97.6% |
-| **Total** | 2563 | 1798 | 915961 | 134094 | 224499 | 1042 | 556326 | 14.6% |
+| **Total** | 2624 | 1859 | 928015 | 363312 | 7335 | 1042 | 556326 | 39.1% |
 
 Las causas más frecuentes de los archivos sin estado OK:
 
@@ -105,12 +105,15 @@ Las causas más frecuentes de los archivos sin estado OK:
 
 ## Notas de testharness
 
-- Sin `encoding/legacy-mb-*`: 84553 / 90353 subtests (93.6%).
+- Sin `encoding/legacy-mb-*`: 145693 / 160297 subtests (90.9%).
+- Las filas `encoding*` son de una medición del 2026-11-07 (rama `army/e10`, runner actual con
+  las variantes en workers de los `.any.js`, de ahí más archivos); el resto, de la tabla anterior.
 - `html/dom/reflection-*.html`: 61266 / 61302 subtests (99.9%); fallan solo `link.nonce` y
   `style.nonce` (36): el IDL `nonce` de HTMLOrSVGElement no refleja el atributo (guarda
   `[[CryptographicNonce]]`), y el test lo trata como string reflejado.
-- `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
-  casi completo); dominan el total de subtests.
+- `encoding/legacy-mb-*`: los decodificadores y encoders están todos (GBK/gb18030, Big5,
+  EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR); lo que no pasa son los tests que decodifican por
+  `<iframe>` o leen un envío de formulario a un iframe (sin navegación de iframes: `notrun`).
 - Los tests que usan `test_driver` (WebDriver) terminan en `TIMEOUT`.
 - `html/semantics/forms`: la *activation behavior* (envío con `submit`/`formdata`/`invalid`,
   reset, `label`) está; la mayoría de `form-submission-0` y `form-submission-target` leen el

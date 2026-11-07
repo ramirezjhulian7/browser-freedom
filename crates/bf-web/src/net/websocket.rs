@@ -127,7 +127,8 @@ fn ws_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             "Failed to construct 'WebSocket': The URL contains a fragment identifier.",
         );
     }
-    // Los subprotocolos: un string o una secuencia, sin repetidos y con la sintaxis de token.
+    // Los subprotocolos: un string o una secuencia, sin repetidos (sin distinguir mayúsculas,
+    // como los tokens de HTTP) y con la sintaxis de token.
     let mut protocols = Vec::new();
     let p = a.arg(1);
     if !p.is_undefined() {
@@ -145,7 +146,11 @@ fn ws_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         };
         for it in items {
             let v = agent.to_string(&it)?.to_string();
-            if !super::headers::is_token(&v) || protocols.contains(&v) {
+            if !super::headers::is_token(&v)
+                || protocols
+                    .iter()
+                    .any(|p: &String| p.eq_ignore_ascii_case(&v))
+            {
                 return dom_error(
                     agent,
                     "SyntaxError",

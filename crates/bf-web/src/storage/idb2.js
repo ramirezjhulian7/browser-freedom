@@ -720,6 +720,107 @@
     if (!Number.isFinite(n) || n < 0 || n > 4294967295) throw new TypeError("Value is outside the 'unsigned long' value range.");
     return Math.trunc(n);
   }
+  // --- getAll / getAllKeys / getAllRecords (IndexedDB 3.0, "create a request to retrieve
+  // multiple items") ---
+
+  // "Is a potentially valid key range": un IDBKeyRange o algo que la conversión a clave no
+  // rechaza por tipo (un número NaN o una fecha inválida sí lo son: dan DataError después).
+  function potentiallyValidRange(v) {
+    return (
+      KR.has(v) ||
+      typeof v === "number" ||
+      typeof v === "string" ||
+      isDateObj(v) ||
+      isBufferSource(v) ||
+      Array.isArray(v)
+    );
+  }
+
+  // `queryOrOptions` y `count` → { r, n, dir }: una clave o rango (con `count` aparte), o un
+  // diccionario IDBGetAllOptions { count, direction, query } (miembros en orden alfabético).
+  function getAllArgs(queryOrOptions, count, optionsOnly) {
+    if (!optionsOnly && potentiallyValidRange(queryOrOptions)) {
+      return { r: toRange(queryOrOptions, false), n: toCount(count), dir: "next" };
+    }
+    if (queryOrOptions === undefined || queryOrOptions === null) {
+      return { r: UNBOUNDED, n: optionsOnly ? 0 : toCount(count), dir: "next" };
+    }
+    if (typeof queryOrOptions !== "object" && typeof queryOrOptions !== "function")
+      throw new TypeError("The provided value is not of type 'IDBGetAllOptions'.");
+    const o = queryOrOptions;
+    const n = toCount(o.count);
+    const dir = toDirection(o.direction);
+    const r = toRange(o.query, false);
+    return { r, n, dir };
+  }
+
+  // Los registros en rango según la dirección (los "unique" se quedan con el primero de cada
+  // clave en orden ascendente) y como mucho `n` (0 = todos).
+  function selectRecords(records, a) {
+    let out = records.filter((x) => inRange(a.r, x.key));
+    if (a.dir === "nextunique" || a.dir === "prevunique") {
+      const uniq = [];
+      for (const x of out) {
+        if (uniq.length === 0 || cmp(uniq[uniq.length - 1].key, x.key) !== 0) uniq.push(x);
+      }
+      out = uniq;
+    }
+    if (a.dir === "prev" || a.dir === "prevunique") out.reverse();
+    if (a.n) out = out.slice(0, a.n);
+    return out;
+  }
+
+  const REC = new WeakMap();
+  // IDBRecord (IndexedDB 3.0): lo que devuelve getAllRecords().
+  class IDBRecord {
+    constructor(token, key, primaryKey, value) {
+      if (token !== TOKEN) throw new TypeError("Illegal constructor");
+      REC.set(this, { key, primaryKey, value });
+    }
+    get key() {
+      return recOf(this).key;
+    }
+    get primaryKey() {
+      return recOf(this).primaryKey;
+    }
+    get value() {
+      return recOf(this).value;
+    }
+  }
+  function recOf(r) {
+    const x = REC.get(r);
+    if (!x) throw new TypeError("Illegal invocation");
+    return x;
+  }
+  enumerable(IDBRecord.prototype);
+  tag(IDBRecord.prototype, "IDBRecord");
+
+  function storeGetAll(handle, kind, queryOrOptions, count, optionsOnly) {
+    const s = sh(handle);
+    checkStore(s, false);
+    const a = getAllArgs(queryOrOptions, count, optionsOnly);
+    return enqueue(s.transaction, handle, () =>
+      selectRecords(s.store.records, a).map((rec) => {
+        if (kind === "key") return keyValue(rec.key);
+        if (kind === "value") return deserialize(rec.value);
+        return new IDBRecord(TOKEN, keyValue(rec.key), keyValue(rec.key), deserialize(rec.value));
+      }),
+    );
+  }
+
+  function indexGetAll(handle, kind, queryOrOptions, count, optionsOnly) {
+    const x = ih(handle);
+    const s = checkIndex(x);
+    const a = getAllArgs(queryOrOptions, count, optionsOnly);
+    return enqueue(s.transaction, handle, () =>
+      selectRecords(x.index.records, a).map((ir) => {
+        if (kind === "key") return keyValue(ir.pk);
+        if (kind === "value") return storeValueOf(s.store, ir.pk);
+        return new IDBRecord(TOKEN, keyValue(ir.key), keyValue(ir.pk), storeValueOf(s.store, ir.pk));
+      }),
+    );
+  }
+
   function toDirection(d) {
     d = d === undefined ? "next" : String(d);
     if (!["next", "nextunique", "prev", "prevunique"].includes(d))
@@ -825,35 +926,14 @@
         return rec ? keyValue(rec.key) : undefined;
       });
     }
-    getAll(query, count) {
-      const s = sh(this);
-      checkStore(s, false);
-      const r = toRange(query, false);
-      const n = toCount(count);
-      return enqueue(s.transaction, this, () => {
-        const out = [];
-        for (const rec of s.store.records) {
-          if (!inRange(r, rec.key)) continue;
-          out.push(deserialize(rec.value));
-          if (n && out.length >= n) break;
-        }
-        return out;
-      });
+    getAll(queryOrOptions, count) {
+      return storeGetAll(this, "value", queryOrOptions, count, false);
     }
-    getAllKeys(query, count) {
-      const s = sh(this);
-      checkStore(s, false);
-      const r = toRange(query, false);
-      const n = toCount(count);
-      return enqueue(s.transaction, this, () => {
-        const out = [];
-        for (const rec of s.store.records) {
-          if (!inRange(r, rec.key)) continue;
-          out.push(keyValue(rec.key));
-          if (n && out.length >= n) break;
-        }
-        return out;
-      });
+    getAllKeys(queryOrOptions, count) {
+      return storeGetAll(this, "key", queryOrOptions, count, false);
+    }
+    getAllRecords(options) {
+      return storeGetAll(this, "record", options, undefined, true);
     }
     count(query) {
       const s = sh(this);
@@ -1054,35 +1134,14 @@
         return rec ? keyValue(rec.pk) : undefined;
       });
     }
-    getAll(query, count) {
-      const x = ih(this);
-      const s = checkIndex(x);
-      const r = toRange(query, false);
-      const n = toCount(count);
-      return enqueue(s.transaction, this, () => {
-        const out = [];
-        for (const ir of x.index.records) {
-          if (!inRange(r, ir.key)) continue;
-          out.push(storeValueOf(s.store, ir.pk));
-          if (n && out.length >= n) break;
-        }
-        return out;
-      });
+    getAll(queryOrOptions, count) {
+      return indexGetAll(this, "value", queryOrOptions, count, false);
     }
-    getAllKeys(query, count) {
-      const x = ih(this);
-      const s = checkIndex(x);
-      const r = toRange(query, false);
-      const n = toCount(count);
-      return enqueue(s.transaction, this, () => {
-        const out = [];
-        for (const ir of x.index.records) {
-          if (!inRange(r, ir.key)) continue;
-          out.push(keyValue(ir.pk));
-          if (n && out.length >= n) break;
-        }
-        return out;
-      });
+    getAllKeys(queryOrOptions, count) {
+      return indexGetAll(this, "key", queryOrOptions, count, false);
+    }
+    getAllRecords(options) {
+      return indexGetAll(this, "record", options, undefined, true);
     }
     count(query) {
       const x = ih(this);
@@ -1609,6 +1668,7 @@
     ["IDBKeyRange", IDBKeyRange],
     ["IDBCursor", IDBCursor],
     ["IDBCursorWithValue", IDBCursorWithValue],
+    ["IDBRecord", IDBRecord],
     ["IDBVersionChangeEvent", IDBVersionChangeEvent],
     ["StorageManager", StorageManager],
   ]) {

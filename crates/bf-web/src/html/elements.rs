@@ -385,8 +385,14 @@ pub fn remove_attr(agent: &mut Agent, n: NodeRef, name: &str) {
 
 /// Parsea `s` contra la base del documento de `n` ("encoding-parsing-and-serializing a URL").
 pub fn parse_url(agent: &Agent, n: NodeRef, s: &str) -> Option<Url> {
-    let base = with_doc(agent, n.doc, |d| d.base_url());
-    Url::parse(s, Some(&base)).ok()
+    let (base, charset) = with_doc(agent, n.doc, |d| (d.base_url(), d.character_set.clone()));
+    // E10: "encoding-parse a URL" (HTML §2.4.2): el query va con el encoding del documento.
+    match bf_infra::encoding::Encoding::for_label(charset.as_lossy_str()) {
+        Some(e) if e.output_encoding() != bf_infra::encoding::Encoding::Utf8 => {
+            Url::parse_with_encoding(s, Some(&base), &|q| e.encode_segments(q)).ok()
+        }
+        _ => Url::parse(s, Some(&base)).ok(),
+    }
 }
 
 fn js_str(s: &str) -> Value {
