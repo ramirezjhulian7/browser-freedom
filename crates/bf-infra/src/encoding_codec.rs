@@ -392,7 +392,8 @@ impl Decoder {
                     *first = 0;
                     let offset = if byte < 0x7F { 0x40 } else { 0x41 };
                     let cp = if (0x40..=0x7E).contains(&byte) || (0x80..=0xFE).contains(&byte) {
-                        let pointer = (usize::from(lead) - 0x81) * 190 + (usize::from(byte) - offset);
+                        let pointer =
+                            (usize::from(lead) - 0x81) * 190 + (usize::from(byte) - offset);
                         index_u16(&GB18030, pointer)
                     } else {
                         None
@@ -1105,7 +1106,10 @@ impl Encoder {
                         let lead_offset = if lead < 0x1F { 0x81 } else { 0xC1 };
                         let trail = pointer % 188;
                         let offset = if trail < 0x3F { 0x40 } else { 0x41 };
-                        out.extend_from_slice(&[(lead + lead_offset) as u8, (trail + offset) as u8]);
+                        out.extend_from_slice(&[
+                            (lead + lead_offset) as u8,
+                            (trail + offset) as u8,
+                        ]);
                     }
                 }
                 EncStep::Done
@@ -1119,7 +1123,10 @@ impl Encoder {
                 let Some(pointer) = euc_kr_pointer(cp) else {
                     return EncStep::Error(cp);
                 };
-                out.extend_from_slice(&[(pointer / 190 + 0x81) as u8, (pointer % 190 + 0x41) as u8]);
+                out.extend_from_slice(&[
+                    (pointer / 190 + 0x81) as u8,
+                    (pointer % 190 + 0x41) as u8,
+                ]);
                 EncStep::Done
             }
         }

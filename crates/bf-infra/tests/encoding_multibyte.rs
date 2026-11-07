@@ -132,7 +132,10 @@ fn gb18030_matches_index_and_ranges() {
     assert_eq!(gb.decode_without_bom(b"\x84\x31\xA4\x39"), "\u{FFFF}");
     assert_eq!(gb.decode_without_bom(b"\x84\x31\xA5\x30"), "\u{FFFD}");
     // Secuencias cortadas: los bytes se reprocesan.
-    assert_eq!(gb.decode_without_bom(b"\x81\x30\x81\x7F"), "\u{FFFD}0\u{FFFD}\u{7F}");
+    assert_eq!(
+        gb.decode_without_bom(b"\x81\x30\x81\x7F"),
+        "\u{FFFD}0\u{FFFD}\u{7F}"
+    );
     assert_eq!(gb.decode_without_bom(b"\x81\x30a"), "\u{FFFD}0a");
     assert_eq!(gb.decode_without_bom(b"\x81a"), "\u{4E64}");
     assert_eq!(gb.decode_without_bom(b"\x81\x7F"), "\u{FFFD}\u{7F}");
@@ -273,11 +276,20 @@ fn jis_encodings_match_index() {
     }
     // Shift_JIS: área de uso privado (§12.3.1, paso 3.5) y bytes sueltos.
     assert_eq!(sjis.decode_without_bom(b"\xF0\x40"), "\u{E000}");
-    assert_eq!(sjis.decode_without_bom(b"\x80\xA1\xDF"), "\u{80}\u{FF61}\u{FF9F}");
-    assert_eq!(fatal(sjis, "\u{A5}\u{203E}\u{2212}"), Ok(b"\x5C\x7E\x81\x7C".to_vec()));
+    assert_eq!(
+        sjis.decode_without_bom(b"\x80\xA1\xDF"),
+        "\u{80}\u{FF61}\u{FF9F}"
+    );
+    assert_eq!(
+        fatal(sjis, "\u{A5}\u{203E}\u{2212}"),
+        Ok(b"\x5C\x7E\x81\x7C".to_vec())
+    );
     assert_eq!(fatal(sjis, "\u{E000}"), Err(0xE000));
     // EUC-JP: katakana de media anchura.
-    assert_eq!(euc.decode_without_bom(b"\x8E\xA1\x8E\xE0"), "\u{FF61}\u{FFFD}");
+    assert_eq!(
+        euc.decode_without_bom(b"\x8E\xA1\x8E\xE0"),
+        "\u{FF61}\u{FFFD}"
+    );
     assert_eq!(fatal(euc, "\u{FF61}\u{A5}"), Ok(b"\x8E\xA1\x5C".to_vec()));
 }
 
@@ -285,7 +297,10 @@ fn jis_encodings_match_index() {
 fn iso_2022_jp_states() {
     let e = enc("iso-2022-jp");
     // §12.2.1.
-    assert_eq!(e.decode_without_bom(b"a\x1B(J\x5C\x7E\x1B(Bb"), "a\u{A5}\u{203E}b");
+    assert_eq!(
+        e.decode_without_bom(b"a\x1B(J\x5C\x7E\x1B(Bb"),
+        "a\u{A5}\u{203E}b"
+    );
     assert_eq!(e.decode_without_bom(b"\x1B(I\x21\x5F"), "\u{FF61}\u{FF9F}");
     assert_eq!(e.decode_without_bom(b"\x1B$B\x30\x21\x1B(B"), "\u{4E9C}");
     // Dos escapes seguidos sin salida entre ellos: error.
@@ -298,15 +313,12 @@ fn iso_2022_jp_states() {
     assert_eq!(e.decode_without_bom(b"\x1B$B\x30"), "\u{FFFD}");
     assert_eq!(e.decode_without_bom(b"\x0E"), "\u{FFFD}");
     // §12.2.2.
+    assert_eq!(fatal(e, "\u{4E9C}a"), Ok(b"\x1B$B\x30\x21\x1B(Ba".to_vec()));
     assert_eq!(
-        fatal(e, "\u{4E9C}a"),
-        Ok(b"\x1B$B\x30\x21\x1B(Ba".to_vec())
+        fatal(e, "\u{A5}a\u{A5}"),
+        Ok(b"\x1B(J\x5Ca\x5C\x1B(B".to_vec())
     );
-    assert_eq!(fatal(e, "\u{A5}a\u{A5}"), Ok(b"\x1B(J\x5Ca\x5C\x1B(B".to_vec()));
-    assert_eq!(
-        fatal(e, "\u{FF61}"),
-        Ok(b"\x1B$B\x21\x23\x1B(B".to_vec())
-    );
+    assert_eq!(fatal(e, "\u{FF61}"), Ok(b"\x1B$B\x21\x23\x1B(B".to_vec()));
     assert_eq!(fatal(e, "\u{0E}"), Err(0xFFFD));
     assert_eq!(fatal(e, "\u{E000}"), Err(0xE000));
     assert_eq!(

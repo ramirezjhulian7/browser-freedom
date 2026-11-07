@@ -198,7 +198,10 @@ impl Encoding {
     /// incluye sus secuencias de escape), o `None` si no es representable.
     pub fn encode_char(&self, c: char) -> Option<Vec<u8>> {
         let mut out = Vec::new();
-        match self.new_encoder().encode_or_fail(&mut std::iter::once(c), &mut out) {
+        match self
+            .new_encoder()
+            .encode_or_fail(&mut std::iter::once(c), &mut out)
+        {
             None => Some(out),
             Some(_) => None,
         }
