@@ -1378,7 +1378,11 @@ impl App {
             .current
             .as_ref()
             .filter(|_| self.loading.is_none())
-            .and_then(|l| crate::bookmarks::global().find_url(&l.url.href()).map(|_| ()))
+            .and_then(|l| {
+                crate::bookmarks::global()
+                    .find_url(&l.url.href())
+                    .map(|_| ())
+            })
             .is_some();
         c.engine_alert = self
             .page

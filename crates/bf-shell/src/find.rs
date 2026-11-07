@@ -200,10 +200,7 @@ mod tests {
         let r: Vec<Run> = chars
             .iter()
             .zip(&lines)
-            .map(|(c, &line)| Run {
-                chars: c,
-                line,
-            })
+            .map(|(c, &line)| Run { chars: c, line })
             .collect();
         find_all(&r, q)
     }

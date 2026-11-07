@@ -135,7 +135,7 @@ impl History {
 
     /// Deja las [`MAX_ENTRIES`] más recientes.
     fn trim(&mut self) {
-        self.entries.sort_by(|a, b| b.last.cmp(&a.last));
+        self.entries.sort_by_key(|v| std::cmp::Reverse(v.last));
         self.entries.truncate(MAX_ENTRIES);
         self.reindex();
     }
@@ -148,13 +148,16 @@ impl History {
         let mut out = String::from(HEADER);
         out.push('\n');
         let mut sorted: Vec<&Visit> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| a.last.cmp(&b.last));
+        sorted.sort_by_key(|v| v.last);
         for v in sorted {
             out.push_str(&v.line());
             out.push('\n');
         }
         if let Err(e) = profile::write_atomic(path, &out) {
-            eprintln!("aviso: no se pudo guardar el historial en {}: {e}", path.display());
+            eprintln!(
+                "aviso: no se pudo guardar el historial en {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -194,7 +197,10 @@ impl History {
                 visit.line()
             };
             if let Err(e) = profile::append_line(path, &line) {
-                eprintln!("aviso: no se pudo guardar el historial en {}: {e}", path.display());
+                eprintln!(
+                    "aviso: no se pudo guardar el historial en {}: {e}",
+                    path.display()
+                );
             }
         }
         self.put(visit);
@@ -256,7 +262,9 @@ impl History {
         let mut scored: Vec<(u8, f64, &Visit)> = Vec::new();
         for v in &self.entries {
             let url: String = find::fold(&v.url, true).into_iter().collect();
-            let title: String = find::fold(&v.title, find::has_marks(input)).into_iter().collect();
+            let title: String = find::fold(&v.title, find::has_marks(input))
+                .into_iter()
+                .collect();
             let bare = strip_url_prefix(&url);
             let rank = if url.starts_with(&q) || bare.starts_with(q_bare) {
                 3
@@ -288,9 +296,10 @@ impl History {
 
 /// La URL sin esquema ni `www.` (para que "wiki" sugiera `https://es.wikipedia.org/`).
 fn strip_url_prefix(s: &str) -> &str {
-    let s = s
-        .split_once("://")
-        .map_or(s, |(scheme, rest)| if scheme.contains('/') { s } else { rest });
+    let s = s.split_once("://").map_or(
+        s,
+        |(scheme, rest)| if scheme.contains('/') { s } else { rest },
+    );
     s.strip_prefix("www.").unwrap_or(s)
 }
 
@@ -331,7 +340,11 @@ mod tests {
     #[test]
     fn suggest_ranks_prefix_then_words() {
         let mut h = History::memory();
-        h.record("https://es.wikipedia.org/wiki/Navegador_web", "Navegador web", 100);
+        h.record(
+            "https://es.wikipedia.org/wiki/Navegador_web",
+            "Navegador web",
+            100,
+        );
         h.record("https://example.com/wiki", "Un ejemplo", 100);
         h.record("https://news.ycombinator.com/", "Hacker News", 100);
         let urls = |q: &str| -> Vec<String> {

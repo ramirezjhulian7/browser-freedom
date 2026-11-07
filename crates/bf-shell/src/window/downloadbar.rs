@@ -233,7 +233,9 @@ impl App {
         let running = downloads::global().running() > 0;
         let area = self.page_area();
         if let Some(bar) = &self.downloads
-            && (bar.visible() != bar.shown || bar.width != area.width || bar.origin.1 != area.bottom() - HEIGHT)
+            && (bar.visible() != bar.shown
+                || bar.width != area.width
+                || bar.origin.1 != area.bottom() - HEIGHT)
         {
             self.layout_downloads();
         }

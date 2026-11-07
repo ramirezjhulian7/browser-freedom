@@ -75,7 +75,10 @@ fn what_downloads() {
     assert!(dl(Some("text/html"), Some("attachment")));
     assert!(dl(None, Some("Attachment; filename=a.txt")));
     assert!(!dl(Some("text/html"), Some("inline")));
-    assert!(!dl(Some("text/html"), Some("inline; filename=\"attachment\"")));
+    assert!(!dl(
+        Some("text/html"),
+        Some("inline; filename=\"attachment\"")
+    ));
     // Tipos que el motor no muestra como documento.
     assert!(dl(Some("application/zip"), None));
     assert!(dl(Some("application/octet-stream"), None));
@@ -115,7 +118,10 @@ fn disposition_names() {
         name("attachment; filename=\"informe final.pdf\"").as_deref(),
         Some("informe final.pdf")
     );
-    assert_eq!(name("attachment; filename=plano.txt").as_deref(), Some("plano.txt"));
+    assert_eq!(
+        name("attachment; filename=plano.txt").as_deref(),
+        Some("plano.txt")
+    );
     // RFC 6266 §4.3: `filename*` (RFC 8187) gana sobre `filename`, en cualquier orden.
     assert_eq!(
         name("attachment; filename=\"a.pdf\"; filename*=UTF-8''informe%20a%C3%B1o.pdf").as_deref(),
@@ -139,7 +145,10 @@ fn disposition_names() {
         name("attachment; filename=\"../../Windows/win.ini\"").as_deref(),
         Some("win.ini")
     );
-    assert_eq!(name("attachment; filename=\"..\\\\x\\\\y.bat\"").as_deref(), Some("y.bat"));
+    assert_eq!(
+        name("attachment; filename=\"..\\\\x\\\\y.bat\"").as_deref(),
+        Some("y.bat")
+    );
     assert_eq!(name("attachment").as_deref(), None);
     assert_eq!(name("attachment; filename=\"\"").as_deref(), None);
 }
@@ -163,11 +172,19 @@ fn safe_names() {
 fn names_for_responses() {
     use downloads::filename_for as name;
     assert_eq!(
-        name(&url("https://e.com/d/informe"), None, Some("application/pdf")),
+        name(
+            &url("https://e.com/d/informe"),
+            None,
+            Some("application/pdf")
+        ),
         "informe.pdf"
     );
     assert_eq!(
-        name(&url("https://e.com/d/caf%C3%A9.zip"), None, Some("application/zip")),
+        name(
+            &url("https://e.com/d/caf%C3%A9.zip"),
+            None,
+            Some("application/zip")
+        ),
         "café.zip"
     );
     assert_eq!(
@@ -180,7 +197,11 @@ fn names_for_responses() {
     );
     assert_eq!(name(&url("https://e.com/"), None, None), "descarga");
     assert_eq!(
-        name(&url("https://e.com/"), None, Some("text/plain; charset=utf-8")),
+        name(
+            &url("https://e.com/"),
+            None,
+            Some("text/plain; charset=utf-8")
+        ),
         "descarga.txt"
     );
 }
@@ -222,7 +243,10 @@ fn record_survives_reopen() {
     let list = again.list();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].url, "https://e.com/b\tc.zip");
-    assert_eq!(list[0].state, State::Failed("HTTP 404 Not Found".to_owned()));
+    assert_eq!(
+        list[0].state,
+        State::Failed("HTTP 404 Not Found".to_owned())
+    );
     assert_eq!(list[1].state, State::Done);
     assert_eq!(list[1].received, 40);
     assert_eq!(list[1].name(), "a.zip");
@@ -339,10 +363,15 @@ fn download_over_http() {
 #[test]
 fn http_error_fails() {
     let dir = global_setup();
-    let head = "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno"
-        .to_owned();
+    let head =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno".to_owned();
     let base = serve_once(head, Vec::new(), Duration::ZERO);
-    let id = downloads::start(&url(&format!("{base}/falta.zip")), None, net(), Arc::new(|| {}));
+    let id = downloads::start(
+        &url(&format!("{base}/falta.zip")),
+        None,
+        net(),
+        Arc::new(|| {}),
+    );
     let d = wait(id);
     assert_eq!(d.state, State::Failed("HTTP 404 Not Found".to_owned()));
     assert!(!dir.join("falta.zip").exists());
@@ -355,7 +384,12 @@ fn cancel_stops_and_removes_part() {
     let head = "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n".to_owned();
     let chunks = vec![vec![b'x'; 1000]; 100];
     let base = serve_once(head, chunks, Duration::from_millis(50));
-    let id = downloads::start(&url(&format!("{base}/grande.iso")), None, net(), Arc::new(|| {}));
+    let id = downloads::start(
+        &url(&format!("{base}/grande.iso")),
+        None,
+        net(),
+        Arc::new(|| {}),
+    );
     let until = Instant::now() + Duration::from_secs(20);
     while downloads::global().get(id).unwrap().received == 0 && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(5));

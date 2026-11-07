@@ -297,7 +297,9 @@ pub fn profile_action(url: &Url) -> Option<Outcome> {
             })
         }
         "download-show" => {
-            let path = crate::downloads::global().get(id()?).map(|d| d.path.clone());
+            let path = crate::downloads::global()
+                .get(id()?)
+                .map(|d| d.path.clone());
             if let Some(p) = path {
                 crate::downloads::reveal(&p);
             }
@@ -338,7 +340,11 @@ pub fn download_response(
         match crate::downloads::save_bytes(&response.url.href(), &name, &response.body) {
             Ok(path) => (
                 "Descarga terminada".to_owned(),
-                format!("Se guardó {} ({}).", path.display(), crate::downloads::human_size(response.body.len() as u64)),
+                format!(
+                    "Se guardó {} ({}).",
+                    path.display(),
+                    crate::downloads::human_size(response.body.len() as u64)
+                ),
                 path.display().to_string(),
             ),
             Err(e) => (
@@ -690,7 +696,10 @@ fn history(url: &Url, ctx: &LoadContext) -> String {
             ("tab", tab),
             ("days", days),
             ("path", escape(&path)),
-            ("links", " · <a href=\"freedom://bookmarks\">Marcadores</a>".to_owned()),
+            (
+                "links",
+                " · <a href=\"freedom://bookmarks\">Marcadores</a>".to_owned(),
+            ),
         ],
     )
 }
@@ -1316,7 +1325,17 @@ mod tests {
     #[test]
     fn templates_fill_every_placeholder() {
         let ctx = LoadContext::cli();
-        for name in ["", "home", "wpt", "error?dns", "engine", "nope", "history", "bookmarks", "bookmarks?edit=1"] {
+        for name in [
+            "",
+            "home",
+            "wpt",
+            "error?dns",
+            "engine",
+            "nope",
+            "history",
+            "bookmarks",
+            "bookmarks?edit=1",
+        ] {
             let url = Url::parse(&format!("about:{name}"), None).unwrap();
             let loaded = page(&url, &ctx);
             let html = bf_dom::test_serialize(&loaded.doc, loaded.doc.root());
@@ -1333,7 +1352,15 @@ mod tests {
     fn internal_pages_use_only_supported_css() {
         let ctx = LoadContext::cli();
         let media = bf_css::media::MediaContext::default();
-        for name in ["", "home", "wpt", "error?tls", "engine", "history", "bookmarks"] {
+        for name in [
+            "",
+            "home",
+            "wpt",
+            "error?tls",
+            "engine",
+            "history",
+            "bookmarks",
+        ] {
             let url = Url::parse(&format!("about:{name}"), None).unwrap();
             let loaded = page(&url, &ctx);
             let sheets = bf_style::document_stylesheets(&loaded.doc, &media, None);

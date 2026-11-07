@@ -46,20 +46,17 @@ fn canonical_equivalence() {
 #[test]
 fn positions_map_back() {
     let a = chars("Árbol, árbol y ARBOL");
-    let runs = [Run {
-        chars: &a,
-        line: 0,
-    }];
+    let runs = [Run { chars: &a, line: 0 }];
     let m = find_all(&runs, "arbol");
-    assert_eq!(m, vec![((0, 0), (0, 5)), ((0, 7), (0, 12)), ((0, 15), (0, 20))]);
+    assert_eq!(
+        m,
+        vec![((0, 0), (0, 5)), ((0, 7), (0, 12)), ((0, 15), (0, 20))]
+    );
     let m = find_all(&runs, "árbol");
     assert_eq!(m, vec![((0, 0), (0, 5)), ((0, 7), (0, 12))]);
     // Un carácter descompuesto de la página (n + U+0303) entra entero en la coincidencia.
     let b = chars("pin\u{303}a");
-    let runs = [Run {
-        chars: &b,
-        line: 0,
-    }];
+    let runs = [Run { chars: &b, line: 0 }];
     assert_eq!(find_all(&runs, "piña"), vec![((0, 0), (0, 5))]);
     assert_eq!(find_all(&runs, "pina"), vec![((0, 0), (0, 5))]);
 }
@@ -71,18 +68,9 @@ fn across_fragments_and_lines() {
     let c = chars("de cuna");
     // `a` y `b` en la misma línea (un `<b>` en medio de la palabra); `c` en la siguiente.
     let runs = [
-        Run {
-            chars: &a,
-            line: 0,
-        },
-        Run {
-            chars: &b,
-            line: 0,
-        },
-        Run {
-            chars: &c,
-            line: 1,
-        },
+        Run { chars: &a, line: 0 },
+        Run { chars: &b, line: 0 },
+        Run { chars: &c, line: 1 },
     ];
     assert_eq!(find_all(&runs, "cancion"), vec![((0, 3), (1, 4))]);
     // El salto de línea suave cuenta como un espacio.
@@ -93,10 +81,7 @@ fn across_fragments_and_lines() {
 #[test]
 fn state_counter_and_steps() {
     let a = chars("uno dos uno dos uno");
-    let runs = [Run {
-        chars: &a,
-        line: 0,
-    }];
+    let runs = [Run { chars: &a, line: 0 }];
     let mut s = FindState {
         query: "uno".to_owned(),
         ..FindState::default()

@@ -296,9 +296,18 @@ impl Bookmarks {
             if !clean_folder(into).is_empty() {
                 path.push(clean_folder(into));
             }
-            path.extend(folders.iter().map(|f| clean_folder(f)).filter(|f| !f.is_empty()));
+            path.extend(
+                folders
+                    .iter()
+                    .map(|f| clean_folder(f))
+                    .filter(|f| !f.is_empty()),
+            );
             let folder = path.join(" / ");
-            if self.items.iter().any(|b| b.url == url && b.folder == folder) {
+            if self
+                .items
+                .iter()
+                .any(|b| b.url == url && b.folder == folder)
+            {
                 continue;
             }
             self.add_unsaved(&url, &title, &folder, date.unwrap_or(now));
@@ -395,7 +404,12 @@ fn parse_netscape(html: &str) -> Vec<(String, String, Vec<String>, Option<u64>)>
                 let title = decode_entities(&strip_tags(&after[..end]));
                 if let Some(href) = attr(tag, "href") {
                     let date = attr(tag, "add_date").and_then(|d| d.trim().parse().ok());
-                    out.push((decode_entities(&href), title.trim().to_owned(), stack.clone(), date));
+                    out.push((
+                        decode_entities(&href),
+                        title.trim().to_owned(),
+                        stack.clone(),
+                        date,
+                    ));
                 }
                 rest = &after[end..];
                 continue;

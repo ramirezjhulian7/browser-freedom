@@ -47,7 +47,10 @@ fn survives_close_and_open() {
     assert_eq!(recent[0].url, "https://example.com/");
     assert_eq!(recent[0].count, 2);
     assert_eq!(recent[0].last, 3_000);
-    assert_eq!(recent[1].title, "Navegador web - Wikipedia, la enciclopedia libre");
+    assert_eq!(
+        recent[1].title,
+        "Navegador web - Wikipedia, la enciclopedia libre"
+    );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# Freedom: historial v1\n"), "{text}");
 }
@@ -55,7 +58,11 @@ fn survives_close_and_open() {
 #[test]
 fn search_ignores_case_and_unasked_diacritics() {
     let mut h = History::memory();
-    h.record("https://es.wikipedia.org/wiki/Canci%C3%B3n", "Canción - Wikipedia", 10);
+    h.record(
+        "https://es.wikipedia.org/wiki/Canci%C3%B3n",
+        "Canción - Wikipedia",
+        10,
+    );
     h.record("https://example.com/", "Example Domain", 20);
     let found = |q: &str| -> Vec<String> { h.search(q).iter().map(|v| v.url.clone()).collect() };
     assert_eq!(found("CANCION").len(), 1);
@@ -139,9 +146,17 @@ fn suggestions_prefer_typed_prefix_and_frequent_pages() {
     h.record("https://www.example.com/", "Example Domain", 10 * day);
     h.record("https://news.ycombinator.com/", "Hacker News", 10 * day);
     for _ in 0..5 {
-        h.record("https://es.wikipedia.org/wiki/Rust", "Rust - Wikipedia", 10 * day);
+        h.record(
+            "https://es.wikipedia.org/wiki/Rust",
+            "Rust - Wikipedia",
+            10 * day,
+        );
     }
-    h.record("https://es.wikipedia.org/wiki/Navegador_web", "Navegador web", 10 * day);
+    h.record(
+        "https://es.wikipedia.org/wiki/Navegador_web",
+        "Navegador web",
+        10 * day,
+    );
     let urls = |q: &str| -> Vec<String> {
         h.suggest(q, 6, 10 * day)
             .iter()
@@ -159,6 +174,9 @@ fn suggestions_prefer_typed_prefix_and_frequent_pages() {
         ]
     );
     // Una palabra del título.
-    assert_eq!(urls("navegador")[0], "https://es.wikipedia.org/wiki/Navegador_web");
+    assert_eq!(
+        urls("navegador")[0],
+        "https://es.wikipedia.org/wiki/Navegador_web"
+    );
     assert!(urls("zzz").is_empty());
 }

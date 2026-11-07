@@ -177,10 +177,10 @@ pub fn should_download(content_type: Option<&str>, disposition: Option<&str>) ->
 /// Extensiones de archivo que nunca son una página: un enlace `http(s)` que termina así se
 /// descarga directamente (con progreso, sin dejar la página actual).
 const DOWNLOAD_EXTENSIONS: &[&str] = &[
-    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "exe", "msi", "msix", "dmg",
-    "pkg", "deb", "rpm", "apk", "appimage", "iso", "img", "bin", "pdf", "epub", "doc", "docx",
-    "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "mp3", "flac", "wav", "ogg", "m4a",
-    "mp4", "mkv", "avi", "mov", "webm", "torrent", "ttf", "otf", "woff", "woff2",
+    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "exe", "msi", "msix", "dmg", "pkg",
+    "deb", "rpm", "apk", "appimage", "iso", "img", "bin", "pdf", "epub", "doc", "docx", "xls",
+    "xlsx", "ppt", "pptx", "odt", "ods", "odp", "mp3", "flac", "wav", "ogg", "m4a", "mp4", "mkv",
+    "avi", "mov", "webm", "torrent", "ttf", "otf", "woff", "woff2",
 ];
 
 /// ¿`url` es un archivo para descargar por su extensión ([`DOWNLOAD_EXTENSIONS`])?
@@ -211,7 +211,10 @@ pub fn reveal(path: &Path) {
         .spawn()
     };
     if let Err(e) = result {
-        eprintln!("aviso: no se pudo abrir la carpeta de {}: {e}", path.display());
+        eprintln!(
+            "aviso: no se pudo abrir la carpeta de {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -243,7 +246,10 @@ pub fn disposition_filename(header: &str) -> Option<String> {
             let v = value
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
-                .map_or_else(|| value.to_owned(), |q| q.replace("\\\"", "\"").replace("\\\\", "\\"));
+                .map_or_else(
+                    || value.to_owned(),
+                    |q| q.replace("\\\"", "\"").replace("\\\\", "\\"),
+                );
             plain = Some(v);
         }
     }
@@ -296,7 +302,9 @@ pub fn sanitize(name: &str) -> String {
             }
         })
         .collect();
-    out = out.trim_matches(|c: char| c == '.' || c.is_whitespace()).to_owned();
+    out = out
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_owned();
     let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))
@@ -312,8 +320,14 @@ pub fn sanitize(name: &str) -> String {
 /// la URL, o `descarga`; con extensión según el tipo si no tiene.
 pub fn filename_for(url: &Url, disposition: Option<&str>, content_type: Option<&str>) -> String {
     let from_url = || {
-        let last = url.path_string().rsplit('/').next().unwrap_or("").to_owned();
-        let decoded = String::from_utf8_lossy(&bf_url::percent::decode(last.as_bytes())).into_owned();
+        let last = url
+            .path_string()
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        let decoded =
+            String::from_utf8_lossy(&bf_url::percent::decode(last.as_bytes())).into_owned();
         Some(sanitize(&decoded)).filter(|n| !n.is_empty())
     };
     let name = disposition
@@ -400,7 +414,8 @@ pub fn downloads_dir() -> PathBuf {
             .lines()
             .find_map(|l| l.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?;
         Some(PathBuf::from(
-            line.trim_matches('"').replace("$HOME", &h.to_string_lossy()),
+            line.trim_matches('"')
+                .replace("$HOME", &h.to_string_lossy()),
         ))
     });
     xdg.into_iter()
@@ -455,7 +470,10 @@ impl Downloads {
             .iter()
             .filter(|d| d.state != State::Running)
             .collect();
-        for d in finished.iter().skip(finished.len().saturating_sub(MAX_KEPT)) {
+        for d in finished
+            .iter()
+            .skip(finished.len().saturating_sub(MAX_KEPT))
+        {
             out.push_str(&d.line());
             out.push('\n');
         }
@@ -709,7 +727,8 @@ fn run(
 pub fn save_bytes(url: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let path = unique_path(&downloads_dir(), name);
     let (id, _) = global().begin(url, path.clone(), profile::now());
-    let result = std::fs::create_dir_all(downloads_dir()).and_then(|()| std::fs::write(&path, bytes));
+    let result =
+        std::fs::create_dir_all(downloads_dir()).and_then(|()| std::fs::write(&path, bytes));
     let mut g = global();
     g.progress(id, bytes.len() as u64, Some(bytes.len() as u64));
     match result {
