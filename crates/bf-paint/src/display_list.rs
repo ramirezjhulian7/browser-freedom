@@ -180,6 +180,10 @@ pub enum DisplayItem {
         dx: f32,
         dy: f32,
     },
+    /// E4: una transformación afín 2D (CSS Transforms 1 §6), `[a, b, c, d, e, f]` como en
+    /// `matrix()`: lo que sigue hasta [`DisplayItem::PopTransform`] se pinta con ella
+    /// (multiplicada por la actual).
+    PushMatrix([f32; 6]),
     PopTransform,
     /// Contenido de una caja con `position: fixed`: se pinta respecto del viewport, sin el
     /// desplazamiento del scroll.

@@ -24,7 +24,7 @@ const USAGE: &str = "uso: freedom [<url|archivo>
                        | dump-css <archivo.css>
                        | dump-style <url|archivo> [--selector <css>]
                        | dump-layout <url|archivo> [--width <px>] [--height <px>] [--system-fonts]
-                       | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>]
+                       | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>] [--wait <ms>]
                        | open [<url|archivo>]
                        | session <url|archivo> <paso>... -o <prefijo>]
 (<url> puede ser http(s)://, file://, data: o about:; sin argumentos, o open sin argumento,
@@ -252,8 +252,59 @@ fn ms(d: std::time::Duration) -> String {
     format!("{:.1} ms", d.as_secs_f64() * 1000.0)
 }
 
+/// E4: declara `url` como el documento de nivel superior de este hilo para las cookies
+/// `SameSite` (RFC 6265bis §5.2, "site for cookies").
+fn set_cookie_site(url: &bf_infra::Url) {
+    bf_net::cookies::set_thread_context(Some(bf_net::cookies::CookieContext {
+        site_for_cookies: bf_net::cookies::site_of(url),
+        top_level_navigation: false,
+    }));
+}
+
+/// E4: como [`load::load`], pero conserva el motor: después de cargar corre el bucle de
+/// eventos (temporizadores, tareas, red) hasta que no queda nada pendiente o pasa `wait`, y
+/// devuelve el documento de ese momento con los de sus marcos.
+fn load_live(
+    arg: &str,
+    wait: std::time::Duration,
+) -> Result<(load::Loaded, Vec<bf_paint::FrameDoc>), String> {
+    let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
+    if url.scheme == "about" {
+        return load::load(arg).map(|l| (l, Vec::new()));
+    }
+    set_cookie_site(&url);
+    let mut engine = script::Engine::stderr();
+    let net = std::sync::Arc::new(bf_net::NetLoader::new());
+    let env = script::PageEnv::cli(net.clone());
+    let mut loaded = load::fetch_document_with(&url, net, None, Some((&mut engine, &env)))
+        .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
+    set_cookie_site(&loaded.url);
+    let start = std::time::Instant::now();
+    loop {
+        engine.run_due_tasks();
+        let Some(next) = engine.next_wake() else {
+            break;
+        };
+        if start.elapsed() + next > wait {
+            break;
+        }
+        std::thread::sleep(next);
+    }
+    let (executed, failed) = engine.counts();
+    if executed > 0 {
+        eprintln!("scripts: {executed} ejecutados, {failed} con error");
+    }
+    engine.sync_frames();
+    if let Some(doc) = engine.render_copy() {
+        loaded.doc = doc;
+    }
+    let frames = engine.frame_docs(&std::collections::HashMap::new());
+    Ok((loaded, frames))
+}
+
 /// Rasteriza el documento a PNG con las fuentes del sistema, `@font-face` y la red. Imprime en
-/// stderr el tiempo de cada fase.
+/// stderr el tiempo de cada fase. Antes, los scripts corren hasta `--wait` ms (5000 por
+/// defecto; 0: solo el parseo).
 fn render(arg: &str, args: &[String]) -> Result<(), String> {
     let out = option(args, "-o")?.ok_or("falta -o <salida.png>")?;
     let viewport = bf_layout::Size {
@@ -261,7 +312,14 @@ fn render(arg: &str, args: &[String]) -> Result<(), String> {
         height: px_option(args, "--height", 600.0)?,
     };
     let scale = px_option(args, "--scale", 1.0)?;
-    let loaded = load::load(arg)?;
+    let wait = match option(args, "--wait")? {
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|_| format!("valor inválido para --wait: {v}"))?,
+        None => 5000,
+    };
+    let wait = std::time::Duration::from_millis(wait);
+    let (loaded, frames) = load_live(arg, wait)?;
     let start = std::time::Instant::now();
     let fonts = bf_font::FontDb::system();
     let font_scan = start.elapsed();
@@ -272,7 +330,7 @@ fn render(arg: &str, args: &[String]) -> Result<(), String> {
         fonts,
         extra: &[],
     };
-    let page = bf_paint::prepare_page(&loaded.doc, &ctx, viewport);
+    let page = bf_paint::prepare_page_with_frames(&loaded.doc, &ctx, viewport, &[], &frames);
     let start = std::time::Instant::now();
     let pixmap = bf_paint::render(&page.display_list, viewport, scale, Rgba::WHITE);
     let raster = start.elapsed();
