@@ -23,13 +23,13 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/CSS2/colors | 19 | 0 | 3 | 0 | 22 | 100.0% |
 | css/CSS2/borders | 498 | 6 | 258 | 0 | 762 | 98.8% |
 | css/css-backgrounds | 321 | 295 | 334 | 1 | 951 | 52.0% |
-| css/css-flexbox | 603 | 346 | 478 | 0 | 1427 | 63.5% |
+| css/css-flexbox | 633 | 316 | 478 | 0 | 1427 | 66.7% |
 | css/selectors | 107 | 13 | 404 | 0 | 524 | 89.2% |
 | css/CSS2/tables | 246 | 4 | 889 | 0 | 1139 | 98.4% |
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
-| css/css-grid | 562 | 992 | 913 | 13 | 2480 | 35.9% |
+| css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| **Total** | 5162 | 1957 | 5173 | 15 | 12307 | 72.4% |
+| **Total** | 5265 | 1865 | 5173 | 4 | 12307 | 73.8% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
@@ -50,8 +50,10 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 - Namespaces arbitrarios en el DOM (`Namespace::Other` con la URI): hoy el parser XML mapea
   los namespaces desconocidos o ausentes a HTML, así que `css/selectors/of-type-selectors.xhtml`
   no puede pasar.
-- `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
-  que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
+- E5, 2026-11-06 (filas `css/css-grid` y `css/css-flexbox` medidas ese día en `army/e5`):
+  851 de los 1567 tests ejecutables de `css/css-grid` son de `grid-lanes` (masonry, 101 pasan);
+  sin ellos pasan 534 de 716 (74.6%), y `css/css-grid/subgrid` 56 de 88. `css/css-sizing` (no
+  está en `GROUPS`): 338 pass, 188 fail, 237 needs-js (64.3%).
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.

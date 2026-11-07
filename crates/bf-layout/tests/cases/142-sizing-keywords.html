@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!-- CSS Sizing 3 §3.2 (fit-content(), keywords en min-*/max-*), CSS Sizing 4 §5.1 (aspect-ratio),
+     §6.1 (stretch) y §7.1 (contain-intrinsic-size con contain: size). -->
+<style>
+body{margin:0}
+#a{width:fit-content(100px)}
+#b{width:stretch;margin:0 auto;height:4px}
+#c{width:10px;min-width:max-content}
+#d{height:20px;aspect-ratio:2;float:left}
+#e{width:100px;aspect-ratio:4/1;clear:left}
+#f{contain:size;contain-intrinsic-size:30px 40px;float:left}
+#g{height:100px;max-height:min-content;clear:left}
+#h{width:100px;aspect-ratio:10;box-sizing:border-box;padding:5px}
+</style>
+<div id=a>aaaa aaaa aaaa aaaa</div><div id=b></div><div id=c>aaaa aaaa</div><div id=d></div><div id=e></div><div id=f>aaaa aaaa aaaa</div><div id=g>a</div><div id=h></div>
+<!-- expect
+Block <html> 0,0 800×163
+  Block <body> 0,0 800×163
+    Block <div#a> 0,0 100×32
+      Line 0,0 100×16
+        Text "aaaa aaaa" 0,0 72×16
+      Line 0,16 100×16
+        Text "aaaa aaaa" 0,16 72×16
+    Block <div#b> 0,32 800×4
+    Block <div#c> 0,36 72×16
+      Line 0,36 72×16
+        Text "aaaa aaaa" 0,36 72×16
+    Block <div#d> 0,52 40×20
+    Block <div#e> 0,72 100×25
+    Block <div#f> 0,97 30×40
+      Line 0,97 30×16
+        Text "aaaa" 0,97 32×16
+      Line 0,113 30×16
+        Text "aaaa" 0,113 32×16
+      Line 0,129 30×16
+        Text "aaaa" 0,129 32×16
+    Block <div#g> 0,137 800×16
+      Line 0,137 800×16
+        Text "a" 0,137 8×16
+    Block <div#h> 0,153 100×10
+-->
