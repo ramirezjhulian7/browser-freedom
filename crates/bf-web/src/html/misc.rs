@@ -390,6 +390,10 @@ fn template_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// ¿Es un control de formulario deshabilitado? ("click()" no hace nada.)
 fn is_disabled_control(agent: &Agent, n: NodeRef) -> bool {
+    // E1: un *form-associated custom element* deshabilitado (atributo o `fieldset`).
+    if super::forms::is_face(agent, n) {
+        return with_doc(agent, n.doc, |d| d.is_disabled(n.node));
+    }
     matches!(
         html_local_name(agent, n).as_deref(),
         Some("button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset")

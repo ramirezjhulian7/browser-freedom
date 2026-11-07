@@ -789,6 +789,13 @@ fn is_form_associated(name: &str) -> bool {
     )
 }
 
+/// ¿Es un *form-associated custom element* (E1)?
+pub(super) fn is_face(agent: &Agent, n: NodeRef) -> bool {
+    with_doc(agent, n.doc, |d| {
+        d.is_form_associated_custom_element(n.node)
+    })
+}
+
 /// El *form owner*: el `form` del atributo `form` (si es un id de un `form` del mismo árbol)
 /// o el `form` ancestro más cercano.
 pub fn form_owner_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
@@ -844,11 +851,12 @@ fn listed_elements(agent: &Agent, form: NodeRef) -> Vec<NodeRef> {
         .into_iter()
         .map(|c| NodeRef::new(form.doc, c))
         .filter(|c| {
-            html_local_name(agent, *c).is_some_and(|name| {
+            (html_local_name(agent, *c).is_some_and(|name| {
                 is_form_associated(&name)
                     && name != "img"
                     && !(name == "input" && input_type(agent, *c) == "image")
-            }) && form_owner_of(agent, *c) == Some(form)
+            }) || is_face(agent, *c))
+                && form_owner_of(agent, *c) == Some(form)
         })
         .collect()
 }
@@ -946,6 +954,10 @@ pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
                 Some("select") => {
                     with_doc_mut(agent, c.doc, |d| d.reset_form_control(c.node));
                 }
+                // E1: el "reset algorithm" de un FACE encola `formResetCallback`.
+                _ if is_face(agent, c) => {
+                    super::custom_elements::enqueue_form_reset(agent, c);
+                }
                 _ => {}
             }
         }
@@ -971,7 +983,8 @@ fn will_validate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// ¿Es candidato a la validación de restricciones (§4.10.20.1)?
 pub(super) fn will_validate_node(agent: &Agent, n: NodeRef) -> bool {
     let name = html_local_name(agent, n).unwrap_or_default();
-    if !matches!(name.as_str(), "input" | "textarea" | "select" | "button") {
+    let face = is_face(agent, n);
+    if !face && !matches!(name.as_str(), "input" | "textarea" | "select" | "button") {
         return false;
     }
     let in_datalist = with_doc(agent, n.doc, |d| {
@@ -990,7 +1003,7 @@ pub(super) fn will_validate_node(agent: &Agent, n: NodeRef) -> bool {
                     "reset" | "button"
                 )
             }))
-        || (matches!(name.as_str(), "input" | "textarea")
+        || ((face || matches!(name.as_str(), "input" | "textarea"))
             && attr_value(agent, n, "readonly").is_some());
     !barred
 }
@@ -1002,7 +1015,7 @@ fn check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Boolean(check_node(agent, n)))
 }
 
-fn check_node(agent: &mut Agent, n: NodeRef) -> bool {
+pub(super) fn check_node(agent: &mut Agent, n: NodeRef) -> bool {
     if !will_validate_node(agent, n) || satisfies_constraints(agent, n) {
         return true;
     }
@@ -1028,6 +1041,9 @@ fn form_check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// ¿Satisface sus restricciones? (Los estados `valueMissing` y `customError`.)
 pub(super) fn satisfies_constraints(agent: &Agent, n: NodeRef) -> bool {
+    if is_face(agent, n) {
+        return super::custom_elements::face_is_valid(agent, n);
+    }
     let st = state(agent, n);
     if !st.custom_validity.is_empty() {
         return false;
@@ -1286,7 +1302,10 @@ fn option_form(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- HTMLLabelElement (§4.10.4) ---
 
-fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
+pub(super) fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
+    if is_face(agent, n) {
+        return true;
+    }
     match html_local_name(agent, n).as_deref() {
         Some("button" | "meter" | "output" | "progress" | "select" | "textarea") => true,
         Some("input") => input_type(agent, n) != "hidden",
@@ -1294,7 +1313,7 @@ fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
     }
 }
 
-fn label_control_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
+pub(super) fn label_control_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
     if let Some(id) = attr_value(agent, n, "for") {
         let e = with_doc(agent, n.doc, |d| d.get_element_by_id(&id))?;
         let e = NodeRef::new(n.doc, e);
@@ -1453,6 +1472,10 @@ fn is_html_el(d: &bf_dom::Document, n: bf_dom::NodeId, name: &str) -> bool {
 
 /// ¿Es un *listed element* (§4.10.2)? (`input type=image` no entra en `elements`.)
 fn is_listed_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> bool {
+    // E1: los *form-associated custom elements* (HTML §4.13.7).
+    if d.is_form_associated_custom_element(n) {
+        return true;
+    }
     let Some(e) = d.element(n) else { return false };
     if e.ns != Namespace::Html {
         return false;

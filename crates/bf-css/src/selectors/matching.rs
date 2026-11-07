@@ -623,10 +623,11 @@ impl Matcher<'_> {
             }
             PseudoClass::Disabled => self.is_disabled(node, el),
             PseudoClass::Enabled => {
-                html && matches!(
+                html && (matches!(
                     el.name.as_lossy_str(),
                     "button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset"
-                ) && !self.is_disabled(node, el)
+                ) || self.doc.is_form_associated_custom_element(node))
+                    && !self.is_disabled(node, el)
             }
             PseudoClass::Required => {
                 (is("input") || is("select") || is("textarea")) && el.attr("required").is_some()
@@ -688,6 +689,10 @@ impl Matcher<'_> {
     fn is_disabled(&self, node: NodeId, el: &Element) -> bool {
         if el.ns != Namespace::Html {
             return false;
+        }
+        // E1: los *form-associated custom elements* también (HTML §4.16.3).
+        if self.doc.is_form_associated_custom_element(node) {
+            return el.attr("disabled").is_some() || self.in_disabled_fieldset(node);
         }
         match el.name.as_lossy_str() {
             "button" | "input" | "select" | "textarea" | "fieldset" => {

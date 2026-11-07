@@ -281,3 +281,54 @@ fn custom_state_set_is_setlike() {
         "--b --c,--b,2,--b=--b,function"
     );
 }
+
+#[test]
+fn form_associated_custom_elements() {
+    let mut p = Page::new(
+        "<form id=f><fieldset id=fs><my-ctl name=a></my-ctl></fieldset></form>\
+         <label id=l for=c></label><my-ctl id=c></my-ctl>",
+    );
+    assert_eq!(
+        p.show(
+            "var log = []; class C extends HTMLElement { static formAssociated = true; \
+               constructor() { super(); this.i = this.attachInternals(); } \
+               formAssociatedCallback(f) { log.push('assoc:' + (f && f.id)); } \
+               formDisabledCallback(d) { log.push('disabled:' + d); } \
+               formResetCallback() { log.push('reset'); } }; \
+             customElements.define('my-ctl', C); \
+             var f = document.getElementById('f'), e = f.querySelector('my-ctl'); \
+             document.getElementById('fs').disabled = true; \
+             var dis = e.matches(':disabled'); \
+             document.getElementById('fs').disabled = false; \
+             f.reset(); \
+             e.i.setFormValue('v'); \
+             var fd = [...new FormData(f)].join(); \
+             [f.elements.length, f.elements[1] === e, e.i.form === f, dis, fd, log.join(' ')].join('|')"
+        ),
+        "2|true|true|true|a,v|assoc:f disabled:true disabled:false reset"
+    );
+    assert_eq!(
+        p.show(
+            "var c = document.getElementById('c'); \
+             [c.i.labels.length, c.i.labels[0].id, document.getElementById('l').control === c, \
+              c.i.willValidate, c.i.validity.valid].join()"
+        ),
+        "1,l,true,true,true"
+    );
+    assert_eq!(
+        p.show(
+            "var inv = 0; c.addEventListener('invalid', () => inv++); \
+             c.i.setValidity({customError: true}, 'a\\r\\nb'); \
+             var r = [c.i.validity.customError, c.i.validity.valid, \
+                      JSON.stringify(c.i.validationMessage), c.i.checkValidity(), inv]; \
+             c.i.setValidity({}); r.push(c.i.validity.valid, c.i.validationMessage === ''); \
+             var t; try { c.i.setValidity({valueMissing: true}); } catch (x) { t = x.name; } \
+             r.push(t); \
+             class N extends HTMLElement { constructor() { super(); this.i = this.attachInternals(); } }; \
+             customElements.define('n-fa', N); var n = new N(); \
+             try { n.i.willValidate; } catch (x) { r.push(x.name); } \
+             r.join()"
+        ),
+        "true,false,\"a\\nb\",false,1,true,true,TypeError,NotSupportedError"
+    );
+}

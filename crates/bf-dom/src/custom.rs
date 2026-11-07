@@ -2,7 +2,7 @@
 //! state* y el *is value* de cada elemento, y los eventos que generan reacciones (conexión,
 //! desconexión, cambio de atributo) para que el motor los procese. **E1.**
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{Document, DomString, Namespace, NodeId};
 
@@ -40,6 +40,8 @@ pub(crate) struct CustomState {
     /// custom element o tiene *is value*).
     states: HashMap<NodeId, CustomElementState>,
     is_values: HashMap<NodeId, DomString>,
+    /// Los elementos cuya definición es *form-associated* (HTML §4.13.7).
+    form_associated: HashSet<NodeId>,
     /// ¿El motor quiere los eventos? (desde la primera definición).
     enabled: bool,
     events: Vec<CustomElementEvent>,
@@ -80,6 +82,22 @@ impl Document {
     /// ¿Es un *custom element* (estado "custom")?
     pub fn is_custom_element(&self, n: NodeId) -> bool {
         self.custom_element_state(n) == CustomElementState::Custom
+    }
+
+    /// ¿Es un *form-associated custom element* (HTML §4.13.7: custom, con una definición
+    /// *form-associated*)? Es *listed*, *labelable*, *submittable* y *resettable*.
+    pub fn is_form_associated_custom_element(&self, n: NodeId) -> bool {
+        self.custom.form_associated.contains(&n) && self.is_custom_element(n)
+    }
+
+    /// Marca (o desmarca) que la definición de `n` es *form-associated*.
+    pub fn set_form_associated(&mut self, n: NodeId, value: bool) {
+        if value {
+            self.custom.form_associated.insert(n);
+        } else {
+            self.custom.form_associated.remove(&n);
+        }
+        self.bump_version();
     }
 
     /// El *is value* de `n`.
@@ -184,6 +202,9 @@ impl Document {
         }
         if let Some(v) = other.custom.is_values.get(&node) {
             self.custom.is_values.insert(copy, v.clone());
+        }
+        if other.custom.form_associated.contains(&node) {
+            self.custom.form_associated.insert(copy);
         }
         if other.custom.enabled {
             self.custom.enabled = true;

@@ -35,6 +35,9 @@ struct Definition {
     adopted: Option<HostHandle>,
     attribute_changed: Option<HostHandle>,
     form_associated: bool,
+    /// `formAssociatedCallback`, `formResetCallback`, `formDisabledCallback` y
+    /// `formStateRestoreCallback` (solo si es *form-associated*).
+    form_callbacks: [Option<HostHandle>; 4],
     disable_internals: bool,
     disable_shadow: bool,
     /// La *construction stack*: `None` es el *already constructed marker*.
@@ -54,6 +57,12 @@ enum Reaction {
         new: Option<DomString>,
         namespace: Option<Namespace>,
     },
+    /// `formAssociatedCallback(form)` (HTML §4.13.7).
+    FormAssociated(Option<NodeRef>),
+    /// `formDisabledCallback(disabled)`.
+    FormDisabled(bool),
+    /// `formResetCallback()`.
+    FormReset,
 }
 
 /// El `CustomElementRegistry` de una ventana.
@@ -72,6 +81,9 @@ struct Registry {
     object: Option<HostHandle>,
     /// Los `ElementInternals` ya creados.
     internals: HashMap<NodeRef, HostHandle>,
+    /// Los *form-associated custom elements*: el form owner y el estado *disabled* que
+    /// vieron sus callbacks por última vez.
+    face: HashMap<NodeRef, (Option<NodeRef>, bool)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +91,7 @@ struct CeClasses {
     registry: HostClassId,
     internals: HostClassId,
     state_set: HostClassId,
+    validity: HostClassId,
 }
 
 fn realm(agent: &Agent) -> RealmId {
@@ -114,17 +127,27 @@ pub fn register(agent: &mut Agent) {
         .attribute("shadowRoot", Some(internals_shadow_root), None)
         .attribute("states", Some(internals_states), None)
         .attribute("form", Some(internals_form), None)
-        .attribute("willValidate", Some(internals_false), None)
-        .attribute("validationMessage", Some(internals_empty), None)
+        .attribute("willValidate", Some(internals_will_validate), None)
+        .attribute("validity", Some(internals_validity), None)
+        .attribute(
+            "validationMessage",
+            Some(internals_validation_message),
+            None,
+        )
         .attribute("labels", Some(internals_labels), None)
         .method("setFormValue", 1, internals_set_form_value)
-        .method("setValidity", 0, internals_noop)
-        .method("checkValidity", 0, internals_true)
-        .method("reportValidity", 0, internals_true);
+        .method("setValidity", 0, internals_set_validity)
+        .method("checkValidity", 0, internals_check_validity)
+        .method("reportValidity", 0, internals_check_validity);
     for name in ARIA_ATTRIBUTES {
         internals = internals.attribute(name, Some(aria_get), Some(aria_set));
     }
     let internals = agent.register_host_class(internals);
+    let mut validity = HostClass::new("ValidityState");
+    for name in VALIDITY_FLAGS.iter().chain(&["valid"]) {
+        validity = validity.attribute(name, Some(validity_get), None);
+    }
+    let validity = agent.register_host_class(validity);
     let state_set = agent.register_host_class(
         HostClass::new("CustomStateSet")
             .method("add", 1, states_add)
@@ -141,6 +164,7 @@ pub fn register(agent: &mut Agent) {
         registry,
         internals,
         state_set,
+        validity,
     });
     let window = crate::dom::classes(agent).window;
     agent.host_extend_class(
@@ -363,16 +387,18 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let disabled = string_sequence(agent, &disabled)?;
         let form_associated = agent.get_str(ctor, "formAssociated")?;
         let form_associated = bf_js::host::webidl::to_boolean(agent, &form_associated);
+        let mut form_callbacks = [None; 4];
         if form_associated {
-            for cb in [
+            for (i, cb) in [
                 "formAssociatedCallback",
                 "formResetCallback",
                 "formDisabledCallback",
                 "formStateRestoreCallback",
-            ] {
-                if let Some(h) = get_callback(agent, proto, cb)? {
-                    agent.host_unpin(h);
-                }
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                form_callbacks[i] = get_callback(agent, proto, cb)?;
             }
         }
         Ok((
@@ -382,12 +408,19 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             attribute_changed,
             observed,
             disabled,
-            form_associated,
+            (form_associated, form_callbacks),
         ))
     })();
     registry(agent).running = false;
-    let (connected, disconnected, adopted, attribute_changed, observed, disabled, form_associated) =
-        parts?;
+    let (
+        connected,
+        disconnected,
+        adopted,
+        attribute_changed,
+        observed,
+        disabled,
+        (form_associated, form_callbacks),
+    ) = parts?;
     // 13-14.
     let ctor_handle = agent.host_pin(constructor.clone());
     let index = {
@@ -402,6 +435,7 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             adopted,
             attribute_changed,
             form_associated,
+            form_callbacks,
             disable_internals: disabled.iter().any(|f| f == "internals"),
             disable_shadow: disabled.iter().any(|f| f == "shadow"),
             construction_stack: Vec::new(),
@@ -556,6 +590,9 @@ fn enqueue_callback(agent: &mut Agent, el: NodeRef, reaction: Reaction) {
                     && d.observed.iter().any(|o| *name == o.as_str()))
         }
         Reaction::Upgrade(_) => true,
+        Reaction::FormAssociated(_) => d.form_callbacks[0].is_some(),
+        Reaction::FormReset => d.form_callbacks[1].is_some(),
+        Reaction::FormDisabled(_) => d.form_callbacks[2].is_some(),
     };
     if has {
         enqueue(agent, el, reaction);
@@ -631,6 +668,7 @@ pub fn process_reactions(agent: &mut Agent) {
             }
         }
     }
+    face_sync(agent);
     invoke_reactions(agent);
 }
 
@@ -668,6 +706,7 @@ fn invoke_reactions(agent: &mut Agent) {
                     requeue_event(agent, doc, ev);
                 }
             }
+            face_sync(agent);
         }
     }
 }
@@ -724,6 +763,9 @@ fn invoke_callback(agent: &mut Agent, el: NodeRef, reaction: Reaction) -> JsResu
             Reaction::Adopted(..) => (d.adopted, Vec::new()),
             Reaction::AttributeChanged { .. } => (d.attribute_changed, Vec::new()),
             Reaction::Upgrade(_) => (None, Vec::new()),
+            Reaction::FormAssociated(_) => (d.form_callbacks[0], Vec::new()),
+            Reaction::FormReset => (d.form_callbacks[1], Vec::new()),
+            Reaction::FormDisabled(_) => (d.form_callbacks[2], Vec::new()),
         }
     };
     let Some(cb) = cb else {
@@ -748,6 +790,10 @@ fn invoke_callback(agent: &mut Agent, el: NodeRef, reaction: Reaction) -> JsResu
             args.push(opt_string(&new));
             args.push(namespace.map_or(Value::Null, |n| Value::str(n.uri())));
         }
+        Reaction::FormAssociated(form) => {
+            args.push(form.map_or(Value::Null, |f| wrap_node(agent, f)));
+        }
+        Reaction::FormDisabled(disabled) => args.push(Value::Boolean(disabled)),
         _ => {}
     }
     let f = pinned(agent, cb);
@@ -769,7 +815,7 @@ fn upgrade(agent: &mut Agent, el: NodeRef, def: usize) -> JsResult<()> {
         return Ok(());
     }
     // 2-3.
-    registry(agent).element_defs.insert(el, def);
+    bind_definition(agent, el, def);
     with_doc_mut(agent, el.doc, |d| {
         d.set_custom_element_state(el.node, CustomElementState::Failed)
     });
@@ -838,6 +884,7 @@ fn upgrade(agent: &mut Agent, el: NodeRef, def: usize) -> JsResult<()> {
     if let Err(e) = result {
         let reg = registry(agent);
         reg.element_defs.remove(&el);
+        reg.face.remove(&el);
         reg.reactions.remove(&el);
         reg.queue.retain(|x| *x != el);
         return Err(e);
@@ -846,7 +893,60 @@ fn upgrade(agent: &mut Agent, el: NodeRef, def: usize) -> JsResult<()> {
     with_doc_mut(agent, el.doc, |d| {
         d.set_custom_element_state(el.node, CustomElementState::Custom)
     });
+    // 14 (HTML §4.13.5): un FACE recalcula su form owner (`formAssociatedCallback`) y, si
+    // está deshabilitado, `formDisabledCallback(true)`.
+    face_sync_one(agent, el);
     Ok(())
+}
+
+/// Asocia `el` con la definición `def` (y lo marca *form-associated* si corresponde).
+fn bind_definition(agent: &mut Agent, el: NodeRef, def: usize) {
+    let reg = registry(agent);
+    reg.element_defs.insert(el, def);
+    let fa = reg.defs[def].form_associated;
+    if fa {
+        reg.face.entry(el).or_insert((None, false));
+    }
+    with_doc_mut(agent, el.doc, |d| d.set_form_associated(el.node, fa));
+}
+
+/// "Reset the form owner" y el estado *disabled* de un FACE (HTML §4.10.17.3, §4.13.7): si
+/// cambiaron desde la última vez, encola `formAssociatedCallback` / `formDisabledCallback`.
+fn face_sync_one(agent: &mut Agent, el: NodeRef) {
+    let Some(&(old_form, old_disabled)) = registry_ref(agent).and_then(|r| r.face.get(&el)) else {
+        return;
+    };
+    if !with_doc(agent, el.doc, |d| {
+        d.is_form_associated_custom_element(el.node)
+    }) {
+        return;
+    }
+    let form = super::forms::form_owner_of(agent, el);
+    let disabled = with_doc(agent, el.doc, |d| d.is_disabled(el.node));
+    registry(agent).face.insert(el, (form, disabled));
+    if form != old_form {
+        enqueue_callback(agent, el, Reaction::FormAssociated(form));
+    }
+    if disabled != old_disabled {
+        enqueue_callback(agent, el, Reaction::FormDisabled(disabled));
+    }
+}
+
+/// [`face_sync_one`] para todos los FACE, en orden de creación.
+fn face_sync(agent: &mut Agent) {
+    let mut els: Vec<NodeRef> = match registry_ref(agent) {
+        Some(r) if !r.face.is_empty() => r.face.keys().copied().collect(),
+        _ => return,
+    };
+    els.sort_by_key(|n| (n.doc, n.node.index()));
+    for el in els {
+        face_sync_one(agent, el);
+    }
+}
+
+/// El "reset algorithm" de un FACE (HTML §4.13.7): encola `formResetCallback`.
+pub fn enqueue_form_reset(agent: &mut Agent, el: NodeRef) {
+    enqueue_callback(agent, el, Reaction::FormReset);
 }
 
 // --- Los constructores HTML (§3.2.3 "HTML element constructors") ---
@@ -914,7 +1014,7 @@ pub fn html_constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
                 d.set_is_value(node, is_value.map(DomString::from));
                 d.set_custom_element_state(node, CustomElementState::Custom);
             });
-            registry(agent).element_defs.insert(el, def);
+            bind_definition(agent, el, def);
             let w = wrap_node(agent, el);
             if let Value::Object(o) = w {
                 agent.heap[o].proto = Some(proto);
@@ -1040,6 +1140,9 @@ pub fn adopted(agent: &mut Agent, old: NodeRef, new: NodeRef) {
     if let Some(h) = reg.internals.remove(&old) {
         reg.internals.insert(new, h);
     }
+    if let Some(f) = reg.face.remove(&old) {
+        reg.face.insert(new, f);
+    }
     if with_doc(agent, new.doc, |d| d.is_custom_element(new.node)) {
         enqueue_callback(agent, new, Reaction::Adopted(old.doc, new.doc));
     }
@@ -1077,8 +1180,36 @@ struct Internals {
     /// El `CustomStateSet` (el mismo objeto en cada acceso).
     states_object: Option<HostHandle>,
     aria: HashMap<&'static str, String>,
-    value: Option<String>,
+    /// El *submission value* (`setFormValue`).
+    submission: Option<FaceValue>,
+    /// Los *validity flags* (en el orden de [`VALIDITY_FLAGS`]), el *validation message* y
+    /// el *validation anchor* (HTML §4.13.7.4).
+    flags: [bool; 10],
+    message: String,
+    anchor: Option<NodeRef>,
+    /// El `ValidityState` (el mismo objeto en cada acceso).
+    validity_object: Option<HostHandle>,
 }
+
+/// El *submission value* de un FACE.
+enum FaceValue {
+    Single(crate::net::formdata::Entry),
+    List(Vec<(String, crate::net::formdata::Entry)>),
+}
+
+/// Los *validity flags* de `ValidityStateFlags` / `ValidityState` (HTML §4.10.20.3).
+const VALIDITY_FLAGS: [&str; 10] = [
+    "valueMissing",
+    "typeMismatch",
+    "patternMismatch",
+    "tooLong",
+    "tooShort",
+    "rangeUnderflow",
+    "rangeOverflow",
+    "stepMismatch",
+    "badInput",
+    "customError",
+];
 
 /// `attachInternals()`.
 pub fn attach_internals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1131,7 +1262,11 @@ pub fn attach_internals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
             states: Vec::new(),
             states_object: None,
             aria: HashMap::new(),
-            value: None,
+            submission: None,
+            flags: [false; 10],
+            message: String::new(),
+            anchor: None,
+            validity_object: None,
         }),
     ));
     let h = agent.host_pin(o.clone());
@@ -1214,14 +1349,199 @@ fn internals_set_form_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Val
             "The target element is not a form-associated custom element.",
         );
     }
+    // 2-3: una copia de `value` (`File`, `FormData` o string); `state` no se usa (no hay
+    // restauración de estado).
     let v = a.arg(0);
     let value = if v.is_null() {
         None
+    } else if let Some(list) = crate::net::formdata::entries_of(agent, &v) {
+        Some(FaceValue::List(list))
+    } else if let Some(b) = crate::net::blob::data(agent, &v).filter(|b| b.file.is_some()) {
+        Some(FaceValue::Single(crate::net::formdata::Entry::File(b)))
     } else {
-        Some(to_dom_string(agent, &v)?.to_string())
+        let s = bf_js::host::webidl::to_rust_string(agent, &v)?;
+        Some(FaceValue::Single(crate::net::formdata::Entry::String(s)))
     };
-    this_internals(agent, a)?.value = value;
+    this_internals(agent, a)?.submission = value;
     Ok(Value::Undefined)
+}
+
+/// Las entradas de un FACE para "constructing the entry list" (HTML §4.10.21.4, paso 5.11:
+/// "entry construction algorithm for a form-associated custom element").
+pub fn face_entries(agent: &Agent, n: NodeRef) -> Vec<(String, crate::net::formdata::Entry)> {
+    let Some(i) = internals_of(agent, n) else {
+        return Vec::new();
+    };
+    match &i.submission {
+        None => Vec::new(),
+        Some(FaceValue::List(list)) => list.clone(),
+        Some(FaceValue::Single(e)) => {
+            let name = super::elements::attr_value(agent, n, "name")
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.is_empty() {
+                Vec::new()
+            } else {
+                vec![(name, e.clone())]
+            }
+        }
+    }
+}
+
+/// Los `ElementInternals` de `n`, si se crearon.
+fn internals_of(agent: &Agent, n: NodeRef) -> Option<&Internals> {
+    let h = *registry_ref(agent)?.internals.get(&n)?;
+    let v = agent.host_pinned(h)?;
+    agent.host_unwrap::<Internals>(&v)
+}
+
+/// ¿Satisface sus restricciones? (Ningún *validity flag*.)
+pub fn face_is_valid(agent: &Agent, n: NodeRef) -> bool {
+    internals_of(agent, n).is_none_or(|i| !i.flags.iter().any(|f| *f))
+}
+
+/// El *target element*, o `NotSupportedError` si no es un FACE.
+fn face_target(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
+    let target = this_internals(agent, a)?.target;
+    if !is_form_associated(agent, target) {
+        return crate::net::dom_error(
+            agent,
+            "NotSupportedError",
+            "The target element is not a form-associated custom element.",
+        );
+    }
+    Ok(target)
+}
+
+fn internals_will_validate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = face_target(agent, a)?;
+    Ok(Value::Boolean(super::forms::will_validate_node(agent, t)))
+}
+
+fn internals_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = face_target(agent, a)?;
+    if let Some(h) = this_internals(agent, a)?.validity_object {
+        return Ok(pinned(agent, h));
+    }
+    let class = classes(agent).validity;
+    let o = Value::Object(agent.host_create(class, Box::new(ValidityOf(t))));
+    let h = agent.host_pin(o.clone());
+    this_internals(agent, a)?.validity_object = Some(h);
+    Ok(o)
+}
+
+/// `validationMessage`: vacío si no es candidato o satisface sus restricciones.
+fn internals_validation_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = face_target(agent, a)?;
+    if !super::forms::will_validate_node(agent, t) || face_is_valid(agent, t) {
+        return Ok(Value::str(""));
+    }
+    let m = this_internals(agent, a)?.message.clone();
+    Ok(Value::str(&m))
+}
+
+/// `setValidity(flags, message, anchor)` (HTML §4.13.7.4).
+fn internals_set_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    // 1-2.
+    let t = face_target(agent, a)?;
+    // `ValidityStateFlags` (WebIDL: los miembros en orden lexicográfico).
+    let mut flags = [false; 10];
+    match a.arg(0) {
+        Value::Undefined | Value::Null => {}
+        Value::Object(o) => {
+            let mut order: Vec<(usize, &str)> =
+                VALIDITY_FLAGS.iter().copied().enumerate().collect();
+            order.sort_by_key(|(_, n)| *n);
+            for (i, name) in order {
+                let v = agent.get_str(o, name)?;
+                flags[i] = bf_js::host::webidl::to_boolean(agent, &v);
+            }
+        }
+        _ => {
+            return agent.type_error(
+                "Failed to execute 'setValidity' on 'ElementInternals': The provided value is                  not of type 'ValidityStateFlags'.",
+            );
+        }
+    }
+    let given = a.args.len() > 1 && !matches!(a.arg(1), Value::Undefined);
+    let message = if given {
+        to_dom_string(agent, &a.arg(1))?.to_string()
+    } else {
+        String::new()
+    };
+    let any = flags.iter().any(|f| *f);
+    // 3.
+    if any && message.is_empty() {
+        return agent.type_error(
+            "Failed to execute 'setValidity' on 'ElementInternals': The second argument              should not be empty if one or more flags are true.",
+        );
+    }
+    let anchor_arg = a.arg(2);
+    let anchor = if matches!(anchor_arg, Value::Undefined) {
+        None
+    } else {
+        match unwrap_node(agent, &anchor_arg) {
+            Some(n) => Some(n),
+            None => {
+                return agent.type_error(
+                    "Failed to execute 'setValidity' on 'ElementInternals': parameter 3 is not                      of type 'HTMLElement'.",
+                );
+            }
+        }
+    };
+    // 4-6 (el mensaje con los saltos de línea normalizados).
+    let message = message.replace("\r\n", "\n").replace('\r', "\n");
+    {
+        let i = this_internals(agent, a)?;
+        i.flags = flags;
+        i.message = if any { message } else { String::new() };
+    }
+    // 7.
+    if let Some(an) = anchor {
+        let ok = an.doc == t.doc
+            && an.node != t.node
+            && with_doc(agent, t.doc, |d| {
+                d.shadow_including_inclusive_descendants(t.node)
+                    .contains(&an.node)
+            });
+        if !ok {
+            return crate::net::dom_error(
+                agent,
+                "NotFoundError",
+                "The validation anchor is not a shadow-including descendant of the element.",
+            );
+        }
+    }
+    this_internals(agent, a)?.anchor = anchor;
+    Ok(Value::Undefined)
+}
+
+/// `checkValidity()` / `reportValidity()` (sin interfaz de usuario).
+fn internals_check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let t = face_target(agent, a)?;
+    Ok(Value::Boolean(super::forms::check_node(agent, t)))
+}
+
+// --- ValidityState ---
+
+struct ValidityOf(NodeRef);
+
+fn validity_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(t) = agent.host_unwrap::<ValidityOf>(&a.this).map(|v| v.0) else {
+        return agent.type_error("Illegal invocation");
+    };
+    let name = agent
+        .get_str(a.callee, "name")?
+        .as_string()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let name = name.strip_prefix("get ").unwrap_or(&name);
+    let flags = internals_of(agent, t).map_or([false; 10], |i| i.flags);
+    let v = match VALIDITY_FLAGS.iter().position(|f| *f == name) {
+        Some(i) => flags[i],
+        None => !flags.iter().any(|f| *f),
+    };
+    Ok(Value::Boolean(v))
 }
 
 fn internals_labels(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1233,27 +1553,26 @@ fn internals_labels(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             "The target element is not a form-associated custom element.",
         );
     }
-    Ok(Value::Object(agent.create_array_from_list(&[])?))
-}
-
-fn internals_noop(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_internals(agent, a)?;
-    Ok(Value::Undefined)
-}
-
-fn internals_true(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_internals(agent, a)?;
-    Ok(Value::Boolean(true))
-}
-
-fn internals_false(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_internals(agent, a)?;
-    Ok(Value::Boolean(false))
-}
-
-fn internals_empty(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_internals(agent, a)?;
-    Ok(Value::str(""))
+    // Los `label` del árbol cuyo *labeled control* es el elemento, en orden de árbol.
+    let candidates = with_doc(agent, target.doc, |d| {
+        let root = *d
+            .inclusive_ancestors(target.node)
+            .last()
+            .unwrap_or(&target.node);
+        d.descendants(root)
+            .into_iter()
+            .filter(|c| d.element(*c).is_some_and(|e| e.is_html("label")))
+            .collect::<Vec<_>>()
+    });
+    let labels: Vec<NodeId> = candidates
+        .into_iter()
+        .filter(|l| {
+            super::forms::label_control_of(agent, NodeRef::new(target.doc, *l)) == Some(target)
+        })
+        .collect();
+    Ok(crate::dom::collections::static_node_list(
+        agent, target.doc, labels,
+    ))
 }
 
 /// Los atributos de `ARIAMixin` en `ElementInternals` (WAI-ARIA 1.2 §10.1).
