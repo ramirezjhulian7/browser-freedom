@@ -308,6 +308,8 @@ pub struct Image {
     pub height: Option<f32>,
     /// `preserveAspectRatio` sin parsear (vacío = `xMidYMid meet`).
     pub par: String,
+    /// `overflow: visible` en un `foreignObject`: su contenido no se recorta a la caja.
+    pub overflow_visible: bool,
     pub transform: Transform,
 }
 

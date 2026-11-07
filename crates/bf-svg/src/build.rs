@@ -1028,6 +1028,11 @@ impl<'a> Builder<'a> {
                     width: Some(w),
                     height: Some(h),
                     par: "none".into(),
+                    overflow_visible: n
+                        .props
+                        .get("overflow")
+                        .and_then(|v| ident(v))
+                        .is_some_and(|o| o == "visible"),
                     transform: Transform::IDENTITY,
                 }));
             }
@@ -1051,6 +1056,7 @@ impl<'a> Builder<'a> {
                     width,
                     height,
                     par: n.attr("preserveAspectRatio").unwrap_or("").to_owned(),
+                    overflow_visible: false,
                     transform: Transform::IDENTITY,
                 }));
             }

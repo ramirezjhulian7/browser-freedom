@@ -3,7 +3,7 @@
 //! opacidad y su máscara (`clipPath` y `mask`); los `pattern` se pintan en una tesela que se
 //! repite; el texto usa las fuentes de `bf-font` (vía [`FontProvider`]).
 
-use super::{SVG_IMAGE_DEPTH, SvgImage, SvgResources};
+use super::{SVG_IMAGE_DEPTH, SVG_OVERSAMPLE, SvgImage, SvgResources};
 use bf_layout::{FontProvider, FontRequest, PathCommand};
 use bf_style::properties::types::{FamilyName, FontFamily};
 use bf_svg::{
@@ -353,6 +353,10 @@ impl Raster<'_> {
         let (nw, nh) = match &res {
             SvgImage::Bitmap(p) => (p.width() as f32, p.height() as f32),
             SvgImage::Svg(s) => s.default_size(),
+            SvgImage::Foreign(p) => (
+                p.width() as f32 / SVG_OVERSAMPLE,
+                p.height() as f32 / SVG_OVERSAMPLE,
+            ),
         };
         if !(nw > 0.0 && nh > 0.0) {
             return;
@@ -368,6 +372,31 @@ impl Raster<'_> {
             return;
         }
         match res {
+            SvgImage::Foreign(p) => {
+                // A su tamaño, desde la esquina de la caja; recortado a ella salvo con
+                // `overflow: visible`.
+                let (rw, rh) = if im.overflow_visible {
+                    (nw, nh)
+                } else {
+                    (w.min(nw), h.min(nh))
+                };
+                let Some(rect) = Rect::from_xywh(im.x, im.y, rw, rh) else {
+                    return;
+                };
+                let k = 1.0 / SVG_OVERSAMPLE;
+                let paint = tiny_skia::Paint {
+                    shader: tiny_skia::Pattern::new(
+                        p.as_ref().as_ref(),
+                        SpreadMode::Pad,
+                        FilterQuality::Bilinear,
+                        1.0,
+                        Transform::from_translate(im.x, im.y).pre_scale(k, k),
+                    ),
+                    anti_alias: true,
+                    ..tiny_skia::Paint::default()
+                };
+                canvas.fill_rect(rect, &paint, ts, None);
+            }
             SvgImage::Bitmap(p) => {
                 let place = bf_svg::aspect_transform((0.0, 0.0, nw, nh), &im.par, (w, h));
                 let to_user = Transform::from_translate(im.x, im.y).pre_concat(sk(&place));

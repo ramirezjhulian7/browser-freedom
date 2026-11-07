@@ -30,6 +30,9 @@ const SVG_IMAGE_DEPTH: u32 = 4;
 pub enum SvgImage {
     Bitmap(Arc<Pixmap>),
     Svg(Arc<bf_svg::Svg>),
+    /// El contenido de un `foreignObject`, pintado a [`SVG_OVERSAMPLE`] px por px CSS desde
+    /// la esquina de su caja (puede ser más grande que ella: lo que desborda).
+    Foreign(Arc<Pixmap>),
 }
 
 /// Los recursos de los elementos `image` de los SVG, por `href` tal como está escrito. Un
@@ -112,7 +115,7 @@ impl SvgResources {
 
 /// Sobremuestreo de los SVG: se rasterizan al doble del tamaño CSS para que se vean nítidos
 /// también con DPR 2 (el rasterizador reduce con filtro bilineal).
-const SVG_OVERSAMPLE: f32 = 2.0;
+pub(crate) const SVG_OVERSAMPLE: f32 = 2.0;
 
 /// Entradas máximas de la caché de rasterizados SVG.
 const SVG_CACHE: usize = 256;
@@ -575,6 +578,20 @@ const FOREIGN_OBJECT_CSS: &str = "html, body { margin: 0 !important; padding: 0 
      border: 0 !important; background: none !important; transform: none !important; \
      width: auto !important; height: auto !important; }";
 
+/// Lado máximo, en px CSS, de lo que se pinta del contenido de un `foreignObject`.
+const FOREIGN_OBJECT_MAX: f32 = 2048.0;
+
+/// Esquina inferior derecha de todo lo maquetado bajo `f` (coordenadas absolutas).
+fn extent(f: &bf_layout::fragment::Fragment, right: &mut f32, bottom: &mut f32) {
+    if f.rect.width > 0.0 && f.rect.height > 0.0 {
+        *right = right.max(f.rect.x + f.rect.width);
+        *bottom = bottom.max(f.rect.y + f.rect.height);
+    }
+    for c in &f.children {
+        extent(c, right, bottom);
+    }
+}
+
 /// Longitud en px de un atributo de geometría (`10`, `10px`); los porcentajes y las unidades
 /// relativas no se resuelven aquí.
 fn px_attr(el: &bf_dom::Element, name: &str) -> Option<f32> {
@@ -641,15 +658,25 @@ pub(crate) fn foreign_objects(
             extra: &extra,
         };
         let page = crate::prepare_page(&child, &child_ctx, size);
+        // Se pinta todo lo maquetado (con `overflow: visible` se ve lo que desborda); el
+        // recorte a la caja lo hace el rasterizador del SVG.
+        let (mut right, mut bottom) = (w, h);
+        if let Some(root) = &page.tree.root {
+            extent(root, &mut right, &mut bottom);
+        }
+        let canvas = Size {
+            width: right.min(FOREIGN_OBJECT_MAX),
+            height: bottom.min(FOREIGN_OBJECT_MAX),
+        };
         let pixmap = crate::render(
             &page.display_list,
-            size,
+            canvas,
             SVG_OVERSAMPLE,
             bf_style::values::color::Rgba::TRANSPARENT,
         );
         res.insert(
             format!("{}{}", bf_svg::FOREIGN_OBJECT_SCHEME, node.index()),
-            SvgImage::Bitmap(Arc::new(pixmap)),
+            SvgImage::Foreign(Arc::new(pixmap)),
         );
     }
 }
