@@ -4,7 +4,9 @@
 //! formulario, abrir el menú contextual del navegador).
 //!
 //! La ventana sigue haciendo lo inmediato (caret, selección, scroll); lo que JavaScript puede
-//! cancelar lo decide el hilo después del dispatch.
+//! cancelar lo decide el hilo después del dispatch. E4: el `keydown` sobre un campo es la
+//! excepción: la ventana espera la respuesta ([`Reply`]) antes de editar. Los eventos del
+//! puntero sobre un `<iframe>` van al documento del marco (`frame`: el camino de `<iframe>`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use bf_dom::events::{
 };
 use bf_dom::{Document, NodeId};
 use bf_infra::Url;
+use bf_js::vm::RealmId;
 
 use super::edit::{self, Editable};
 use crate::load::Loaded;
@@ -57,6 +60,9 @@ pub enum UserInput {
         /// Cantidad de clics seguidos (`detail`).
         detail: i32,
         target: Option<NodeId>,
+        /// E4: el marco (camino de `<iframe>` desde la pestaña; vacío: la pestaña). `client`
+        /// y `target` son del documento del marco.
+        frame: Vec<NodeId>,
     },
     /// La rueda (`wheel`), con el desplazamiento pedido en px CSS.
     Wheel {
@@ -64,6 +70,12 @@ pub enum UserInput {
         delta: (f32, f32),
         mods: Mods,
         target: Option<NodeId>,
+        frame: Vec<NodeId>,
+    },
+    /// E4: el marco `frame` quedó desplazado a `scroll` (la rueda sobre él).
+    FrameScroll {
+        frame: Vec<NodeId>,
+        scroll: (f32, f32),
     },
     /// Una tecla en el elemento con el foco (o el `body`).
     Key {
@@ -74,6 +86,8 @@ pub enum UserInput {
         repeat: bool,
         /// Lo que escribe, si escribe algo (`keypress`).
         text: Option<String>,
+        /// E4: por dónde avisar si el `keydown` se canceló.
+        reply: Reply,
     },
     /// El usuario cambió el valor de un campo.
     SetValue {
@@ -96,11 +110,25 @@ pub enum UserInput {
     },
 }
 
+/// E4: el canal por el que el hilo responde a la ventana si el `keydown` se canceló (la
+/// ventana no edita el campo si se canceló, UI Events §5.6.2: la acción por defecto de
+/// `keydown` es la entrada de texto).
+#[derive(Debug, Clone, Default)]
+pub struct Reply(pub Option<std::sync::mpsc::Sender<bool>>);
+
+impl PartialEq for Reply {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// El estado de los eventos de una pestaña.
 #[derive(Debug, Default)]
 pub struct InputState {
     /// El elemento bajo el puntero (`mouseover`/`mouseout`).
     hover: Option<NodeId>,
+    /// E4: el marco de `hover`.
+    hover_frame: Vec<NodeId>,
     /// El elemento con el foco.
     focus: Option<NodeId>,
     /// Campos cambiados desde que tomaron el foco (`change` al perderlo).
@@ -114,30 +142,50 @@ impl InputState {
     }
 }
 
-/// El documento de la pestaña: el del motor o, sin motor (páginas internas), el cargado.
+/// El documento de la pestaña: el del motor o, sin motor (páginas internas), el cargado. E4:
+/// con `realm`, el documento de ese marco.
 struct Target<'a> {
     engine: Option<&'a mut Engine>,
     loaded: &'a mut Arc<Loaded>,
+    realm: Option<RealmId>,
 }
 
 impl Target<'_> {
     fn doc(&self) -> &Document {
-        match &self.engine {
-            Some(e) => e.document().unwrap_or(&self.loaded.doc),
-            None => &self.loaded.doc,
+        match (&self.engine, self.realm) {
+            (Some(e), Some(r)) => e.document_in(r).unwrap_or(&self.loaded.doc),
+            (Some(e), None) => e.document().unwrap_or(&self.loaded.doc),
+            (None, _) => &self.loaded.doc,
         }
     }
 
     fn doc_mut(&mut self) -> &mut Document {
-        match &mut self.engine {
-            Some(e) if e.document().is_some() => e.document_mut().expect("documento"),
-            _ => &mut Arc::make_mut(self.loaded).doc,
+        let realm = self.realm;
+        let in_frame = matches!((&self.engine, realm),
+            (Some(e), Some(r)) if e.document_in(r).is_some());
+        let in_tab = self.engine.as_ref().is_some_and(|e| e.document().is_some());
+        if in_frame {
+            return self
+                .engine
+                .as_mut()
+                .and_then(|e| e.document_mut_in(realm.expect("marco")))
+                .expect("documento");
         }
+        if in_tab {
+            return self
+                .engine
+                .as_mut()
+                .and_then(|e| e.document_mut())
+                .expect("documento");
+        }
+        &mut Arc::make_mut(self.loaded).doc
     }
 
     /// Despacha `event` (de confianza) en `target`; `false` si se canceló.
     fn dispatch(&mut self, target: EventTarget, mut event: Event) -> bool {
+        let realm = self.realm;
         match &mut self.engine {
+            Some(e) if realm.is_some() => e.dispatch_in(realm.expect("marco"), target, &mut event),
             Some(e) if e.document().is_some() => e.dispatch(target, &mut event),
             _ => {
                 event.is_trusted = true;
@@ -148,12 +196,33 @@ impl Target<'_> {
         }
     }
 
+    /// E4: un `WheelEvent` con sus deltas (sin motor no hay quien lo escuche).
+    fn dispatch_wheel(&mut self, target: EventTarget, event: Event, delta: (f32, f32)) -> bool {
+        let realm = self.realm;
+        match &mut self.engine {
+            Some(e) => {
+                let r = realm.unwrap_or(e.realm);
+                e.dispatch_wheel(r, target, event, delta)
+            }
+            None => true,
+        }
+    }
+
     /// El documento con los valores que escribió el usuario (para enviar formularios).
     fn form_doc(&self) -> Document {
         match &self.engine {
+            Some(_) if self.realm.is_some() => self.doc().clone(),
             Some(e) => e.render_copy().unwrap_or_else(|| self.loaded.doc.clone()),
             None => self.loaded.doc.clone(),
         }
+    }
+
+    /// La ventana del marco `path` (`None` para la pestaña o si el marco ya no está).
+    fn frame(&self, path: &[NodeId]) -> Option<RealmId> {
+        if path.is_empty() {
+            return None;
+        }
+        self.engine.as_ref()?.frame_realm(path)
     }
 }
 
@@ -237,7 +306,11 @@ pub fn handle(
     state: &mut InputState,
     input: UserInput,
 ) -> Vec<PageRequest> {
-    let mut t = Target { engine, loaded };
+    let mut t = Target {
+        engine,
+        loaded,
+        realm: None,
+    };
     let mut out = Vec::new();
     match input {
         UserInput::Mouse {
@@ -249,7 +322,29 @@ pub fn handle(
             mods,
             detail,
             target,
+            frame,
         } => {
+            let realm = t.frame(&frame);
+            if !frame.is_empty() && realm.is_none() {
+                return out;
+            }
+            // E4: el puntero pasó a otro documento: `mouseout`/`mouseleave` en el anterior.
+            if state.hover_frame != frame {
+                let old = t.frame(&state.hover_frame);
+                if state.hover_frame.is_empty() || old.is_some() {
+                    t.realm = old;
+                    let ev = |type_: &str, bubbles: bool, cancelable: bool, related| {
+                        mouse_event(
+                            type_, bubbles, cancelable, client, screen, button, buttons, mods,
+                            detail, related,
+                        )
+                    };
+                    hover(&mut t, state, None, &ev);
+                }
+                state.hover = None;
+                state.hover_frame.clone_from(&frame);
+            }
+            t.realm = realm;
             let target = element_of(t.doc(), target);
             let tgt = node_target(t.doc(), target);
             let ev = |type_: &str, bubbles: bool, cancelable: bool, related| {
@@ -289,16 +384,22 @@ pub fn handle(
             delta,
             mods,
             target,
+            frame,
         } => {
+            t.realm = t.frame(&frame);
+            if !frame.is_empty() && t.realm.is_none() {
+                return out;
+            }
             let target = element_of(t.doc(), target);
             let tgt = node_target(t.doc(), target);
-            // `WheelEvent` como `MouseEvent` (sin `deltaX`/`deltaY` todavía).
-            let _ = delta;
-            t.dispatch(
+            // `WheelEvent` (UI Events §5.4) con `deltaX`/`deltaY` en px.
+            t.dispatch_wheel(
                 tgt,
                 mouse_event("wheel", true, true, client, client, 0, 0, mods, 0, None),
+                delta,
             );
         }
+        UserInput::FrameScroll { .. } => {}
         UserInput::Key {
             down,
             key,
@@ -306,6 +407,7 @@ pub fn handle(
             mods,
             repeat,
             text,
+            reply,
         } => {
             let tgt = node_target(t.doc(), state.focus);
             let data = KeyboardEventData {
@@ -324,6 +426,9 @@ pub fn handle(
                 tgt,
                 Event::with_kind(type_, init(true, true), EventKind::Keyboard(data.clone())),
             );
+            if let Some(tx) = reply.0 {
+                let _ = tx.send(!ok);
+            }
             // `keypress` (en desuso) para las teclas que escriben.
             if down && ok && text.is_some() && !mods.ctrl && !mods.meta {
                 t.dispatch(
@@ -473,12 +578,18 @@ fn activations(t: &mut Target<'_>, mods: Mods, out: &mut Vec<PageRequest>) {
                 let Ok(url) = Url::parse(href.trim(), Some(&base)) else {
                     continue;
                 };
-                let blank = doc
+                let target = doc
                     .element(n)
                     .and_then(|e| e.attr("target"))
-                    .is_some_and(|t| t.eq_ignore_ascii_case("_blank"));
-                if mods.ctrl || blank {
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                if mods.ctrl || target == "_blank" {
                     out.push(PageRequest::Open(url.href()));
+                } else if let Some(r) = t.realm.filter(|_| target != "_top" && target != "_parent")
+                    && let Some(e) = &mut t.engine
+                {
+                    // E4: un enlace dentro de un marco navega el marco (HTML §7.4.2.2).
+                    e.navigate_frame(r, url);
                 } else {
                     out.push(PageRequest::Navigate {
                         url,
@@ -514,6 +625,14 @@ fn submit(t: &mut Target<'_>, form: NodeId, submitter: Option<NodeId>, out: &mut
     let base = doc.base_url();
     let url = doc.url.clone();
     let (target, post) = super::form_submission(&doc, &base, &url, form, submitter);
+    // E4: un formulario `GET` de un marco navega el marco.
+    if let Some(r) = t.realm
+        && post.is_none()
+        && let Some(e) = &mut t.engine
+    {
+        e.navigate_frame(r, target);
+        return;
+    }
     out.push(PageRequest::Navigate {
         url: target,
         replace: false,
@@ -584,6 +703,7 @@ mod tests {
                 mods,
                 detail: 1,
                 target: Some(t),
+                frame: Vec::new(),
             })
         }
 
@@ -732,6 +852,7 @@ mod tests {
                 mods: Mods::default(),
                 repeat: false,
                 text: Some("q".into()),
+                reply: Reply::default(),
             });
         }
         assert_eq!(

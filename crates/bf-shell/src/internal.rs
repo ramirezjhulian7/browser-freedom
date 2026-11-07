@@ -655,6 +655,25 @@ pub fn engine_body(
     }
     out.push_str("</div>");
 
+    // E4: privacidad (RFC 6265bis §7.1: el navegador decide sobre las cookies de terceros).
+    if actions {
+        let blocked = loaded.net().fetcher.cookies.block_third_party();
+        out.push_str("<div class=\"section\"><h3>Privacidad</h3>");
+        kv(
+            &mut out,
+            "Cookies de terceros",
+            if blocked { "bloqueadas" } else { "permitidas" },
+        );
+        out.push_str(&format!(
+            "<div class=\"actions\"><a class=\"action\" href=\"bf:toggle-third-party-cookies\">{}</a></div></div>",
+            if blocked {
+                "Permitir cookies de terceros"
+            } else {
+                "Bloquear cookies de terceros"
+            }
+        ));
+    }
+
     if actions {
         out.push_str(
             "<div class=\"section\"><h3>Acciones</h3><div class=\"actions\">\

@@ -81,6 +81,8 @@ const CONSOLE_PER_LEVEL: usize = 200;
 const NOTICE: Duration = Duration::from_secs(4);
 /// Ventana para contar un clic como doble o triple.
 const MULTI_CLICK: Duration = Duration::from_millis(500);
+/// E4: cuánto espera la ventana la respuesta de un `keydown` sobre un campo antes de editar.
+const KEY_REPLY_WAIT: Duration = Duration::from_millis(100);
 
 /// Lo que mueve el puntero con el botón apretado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1618,6 +1620,12 @@ impl App {
                     self.navigate(u);
                 }
             }
+            // E4: la opción `block_third_party_cookies` (por defecto `false`).
+            "toggle-third-party-cookies" => {
+                let cookies = &self.net.fetcher.cookies;
+                cookies.set_block_third_party(!cookies.block_third_party());
+                self.refresh_panel();
+            }
             _ => {}
         }
     }
@@ -1824,31 +1832,65 @@ impl App {
         }
     }
 
-    /// El nodo de la página bajo el puntero.
-    fn node_under_mouse(&self) -> Option<NodeId> {
+    /// E4: el documento (la página o un marco) y el nodo bajo el puntero.
+    fn frame_under_mouse(&self) -> hit::FrameHit {
         let (px, py) = self.page_point(self.mouse.0, self.mouse.1);
-        let page = self.page.as_ref()?;
-        hit::hit_test(&page.tree, px, py, self.scroll)?.node
+        match &self.page {
+            Some(page) => hit::frame_hit(page, px, py, self.scroll),
+            None => hit::FrameHit {
+                client: (px, py),
+                ..hit::FrameHit::default()
+            },
+        }
     }
 
-    /// Un evento del puntero en la página para el documento.
+    /// Un evento del puntero en la página para el documento (o el marco bajo el puntero).
     fn send_mouse(&mut self, kind: events::MouseKind, button: i16, detail: i32) {
-        let client = self.page_point(self.mouse.0, self.mouse.1);
         let buttons = match kind {
             events::MouseKind::Down => 1 << button.clamp(0, 4),
             _ => 0,
         };
+        let hit = self.frame_under_mouse();
         let input = events::UserInput::Mouse {
             kind,
-            client,
+            client: hit.client,
             screen: (self.mouse.0 / self.zoom, self.mouse.1 / self.zoom),
             button,
             buttons,
             mods: self.mods(),
             detail,
-            target: self.node_under_mouse(),
+            target: hit.node,
+            frame: hit.frame,
         };
         self.send_input(input);
+    }
+
+    /// E4: manda un `keydown` y espera (poco) si el documento lo canceló: la acción por
+    /// defecto (editar el campo, desplazar) no ocurre si se canceló (UI Events §5.6.2).
+    fn send_key_and_wait(&mut self, input: events::UserInput) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let input = match input {
+            events::UserInput::Key {
+                down,
+                key,
+                code,
+                mods,
+                repeat,
+                text,
+                ..
+            } => events::UserInput::Key {
+                down,
+                key,
+                code,
+                mods,
+                repeat,
+                text,
+                reply: events::Reply(Some(tx)),
+            },
+            other => other,
+        };
+        self.send_input(input);
+        rx.recv_timeout(KEY_REPLY_WAIT).unwrap_or(false)
     }
 
     /// La pantalla en la que está la ventana (`window.screen`), en px CSS.
@@ -2873,15 +2915,34 @@ impl App {
             return;
         }
         if self.area_at(x, y) == Area::Page {
-            let target = self.node_under_mouse();
+            let hit = self.frame_under_mouse();
             let input = events::UserInput::Wheel {
-                client: self.page_point(x, y),
+                client: hit.client,
                 delta: (dx, dy),
                 mods: self.mods(),
-                target,
+                target: hit.node,
+                frame: hit.frame.clone(),
             };
             self.send_input(input);
-            if self.wheel_element(target, (dx, dy)) {
+            // E4: la rueda desplaza primero el marco más interior que pueda desplazarse.
+            let (px, py) = self.page_point(x, y);
+            let scroll = self.scroll;
+            let target = self
+                .page
+                .as_ref()
+                .and_then(|p| hit::scrollable_frame(p, px, py, scroll, (dx, dy)));
+            if let Some((frame, to)) = target {
+                if let Some(p) = &mut self.page {
+                    hit::set_frame_scroll(p, &frame, to);
+                }
+                self.send_input(events::UserInput::FrameScroll { frame, scroll: to });
+                self.mouse_moved();
+                return;
+            }
+            // E12: luego el scroll container más interno de la página (sobre un marco que no
+            // puede moverse, los contenedores que rodean a su `<iframe>`).
+            let element = hit.frame.first().copied().or(hit.node);
+            if self.wheel_element(element, (dx, dy)) {
                 self.mouse_moved();
                 return;
             }
@@ -2966,18 +3027,46 @@ impl App {
                 winit::keyboard::PhysicalKey::Code(c) => format!("{c:?}"),
                 _ => String::new(),
             };
+            let down = event.state == ElementState::Pressed;
             let input = events::UserInput::Key {
-                down: event.state == ElementState::Pressed,
+                down,
                 key,
                 code,
                 mods: self.mods(),
                 repeat: event.repeat,
                 text: event.text.as_ref().map(ToString::to_string),
+                reply: events::Reply::default(),
             };
-            self.send_input(input);
+            if down && self.focus.is_some() {
+                // E4: con un campo de la página en edición, el documento decide antes.
+                if self.send_key_and_wait(input) {
+                    self.key_press_prevented(&event.logical_key);
+                    return;
+                }
+            } else {
+                self.send_input(input);
+            }
         }
         if event.state == ElementState::Pressed {
             self.key_press(&event.logical_key, event.text.as_deref());
+        }
+    }
+
+    /// E4: un `keydown` cancelado por el documento: solo los atajos del navegador (que no son
+    /// acciones por defecto del documento) siguen funcionando.
+    fn key_press_prevented(&mut self, key: &Key) {
+        let ctrl = self.modifiers.control_key();
+        let browser_shortcut = match key {
+            Key::Character(c) => {
+                ctrl && ["t", "w", "l", "i", "r", "h"]
+                    .iter()
+                    .any(|k| c.eq_ignore_ascii_case(k))
+            }
+            Key::Named(n) => matches!(n, NamedKey::F5 | NamedKey::F6 | NamedKey::F12),
+            _ => false,
+        };
+        if browser_shortcut {
+            self.key_press(key, None);
         }
     }
 
