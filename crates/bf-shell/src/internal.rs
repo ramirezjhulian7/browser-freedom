@@ -360,6 +360,47 @@ pub fn download_response(
     Some(Loaded::generated(&response.url, &html, net.clone(), meta))
 }
 
+/// Una imagen abierta como documento (HTML §7.4.6, "Page load processing model for media"):
+/// un documento HTML con un `<img>` cuyo `src` es la URL. SVG se trata como XML en `load.rs`.
+pub fn image_document(
+    response: &bf_net::Response,
+    net: &std::sync::Arc<bf_net::NetLoader>,
+) -> Option<Loaded> {
+    let essence = response
+        .headers
+        .get("content-type")?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    if !response.ok() || !essence.starts_with("image/") || essence == "image/svg+xml" {
+        return None;
+    }
+    let href = response.url.href();
+    let name = response
+        .url
+        .path_string()
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| response.url.host_string(), str::to_owned);
+    let html = format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title></head>         <body style=\"margin:0\"><img src=\"{}\" alt=\"\"></body></html>",
+        escape(&name),
+        escape(&href)
+    );
+    let meta = Meta {
+        status: Some((response.status, response.status_text.clone())),
+        content_type: Some(essence),
+        ..Meta::default()
+    };
+    let mut loaded = Loaded::generated(&response.url, &html, net.clone(), meta);
+    // No es una página del navegador: no puede disparar acciones `bf:`.
+    loaded.meta.internal = false;
+    loaded.meta.bytes = response.body.len();
+    Some(loaded)
+}
+
 /// `freedom://downloads`: las descargas con su estado, abrir la carpeta, cancelar y quitar.
 fn downloads_page(ctx: &LoadContext) -> String {
     let g = crate::downloads::global();

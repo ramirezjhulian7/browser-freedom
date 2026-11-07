@@ -3357,6 +3357,7 @@ impl App {
                 self.request_relayout();
             }
         }
+        self.settle_downloads();
         // Un primer cuadro para que el panel conozca el tiempo de raster.
         if self.chrome.panel_open && self.panel_raster.is_none() {
             let _ = self.frame();
@@ -3437,6 +3438,7 @@ impl App {
             self.chrome.panel_open,
             self.overlay,
         ) + &self.find_line()
+            + &self.downloads_line()
     }
 
     /// Un paso de una sesión sin ventana.
@@ -3619,6 +3621,10 @@ pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     // Sin `FREEDOM_PROFILE`, una sesión de prueba no toca el historial ni los marcadores.
     crate::profile::set_ephemeral();
+    // …ni la carpeta de descargas del usuario (salvo `FREEDOM_DOWNLOADS`).
+    if std::env::var_os("FREEDOM_DOWNLOADS").is_none() {
+        crate::downloads::set_dir(std::env::temp_dir().join("freedom-session-descargas"));
+    }
     let fonts = FontDb::system();
     let worker = Documents::new(fonts.clone(), || {});
     let mut app = App::new(worker, fonts, None, Theme::for_system(None));

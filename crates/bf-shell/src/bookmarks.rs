@@ -151,6 +151,7 @@ impl Bookmarks {
         self.items.is_empty()
     }
 
+    #[allow(dead_code, reason = "lo usan las pruebas (tests/bookmarks.rs)")]
     pub fn all(&self) -> &[Bookmark] {
         &self.items
     }

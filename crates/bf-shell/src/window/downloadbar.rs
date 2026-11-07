@@ -318,6 +318,31 @@ impl App {
         Some((list, bar.origin, doc.size))
     }
 
+    /// Sesiones sin ventana: espera (hasta 2 min) a que terminen las descargas en curso y
+    /// deja la barra al día.
+    pub(super) fn settle_downloads(&mut self) {
+        let until = Instant::now() + Duration::from_secs(120);
+        while downloads::global().running() > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.tick_downloads();
+    }
+
+    /// Las descargas de la barra para la línea de estado de `freedom session`.
+    pub(super) fn downloads_line(&self) -> String {
+        let Some(bar) = &self.downloads else {
+            return String::new();
+        };
+        let g = downloads::global();
+        let items: Vec<String> = bar
+            .shown
+            .iter()
+            .filter_map(|(id, _, _)| g.get(*id))
+            .map(|d| format!("{} ({})", d.name(), d.status()))
+            .collect();
+        format!(" descargas={items:?}")
+    }
+
     /// Cuándo volver a mirar el progreso.
     pub(super) fn downloads_deadline(&self) -> Instant {
         Instant::now() + TICK

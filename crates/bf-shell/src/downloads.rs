@@ -369,9 +369,24 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
-/// La carpeta de descargas: la de XDG en Linux, `Downloads` de la carpeta personal, o la
-/// personal. `FREEDOM_DOWNLOADS` la cambia (pruebas).
+static DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Fija la carpeta de descargas (sesiones sin ventana y pruebas: no escriben en la del
+/// usuario).
+pub fn set_dir(dir: PathBuf) {
+    *DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+}
+
+/// La carpeta de descargas: la fijada con [`set_dir`], `FREEDOM_DOWNLOADS`, la de XDG en
+/// Linux, `Downloads` de la carpeta personal, o la personal.
 pub fn downloads_dir() -> PathBuf {
+    if let Some(d) = DIR_OVERRIDE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return d;
+    }
     if let Some(d) = std::env::var_os("FREEDOM_DOWNLOADS").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }

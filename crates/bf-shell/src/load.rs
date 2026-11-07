@@ -308,6 +308,9 @@ pub fn fetch_document_with(
     if let Some(saved) = crate::internal::download_response(&response, &net) {
         return Ok(saved);
     }
+    if let Some(image) = crate::internal::image_document(&response, &net) {
+        return Ok(image);
+    }
     let fetch = start.elapsed();
     let start = Instant::now();
     let loader = Arc::new(CachedLoader::new(net));
