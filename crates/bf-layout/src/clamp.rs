@@ -138,17 +138,38 @@ fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
     false
 }
 
-/// El extremo derecho del contenido de la línea.
+/// El extremo derecho del contenido de la línea: la última hoja o, si las cajas inline que la
+/// contienen terminan en esta línea, su borde del final (con su padding y borde).
 fn content_end(line: &Fragment) -> Option<f32> {
     let mut path = Vec::new();
     if !last_leaf(line, &mut path) {
         return None;
     }
     let mut f = line;
+    let mut end = f32::NEG_INFINITY;
+    for &i in &path {
+        f = &f.children[i];
+        end = end.max(f.rect.right());
+    }
+    Some(end)
+}
+
+/// ¿La línea termina en una oportunidad de corte suave (tras un espacio en texto que se
+/// ajusta)? La elipsis va tras la última que la deja caber (§5.4).
+fn ends_at_wrap(line: &Fragment) -> bool {
+    let mut path = Vec::new();
+    if !last_leaf(line, &mut path) {
+        return true;
+    }
+    let mut f = line;
     for &i in &path {
         f = &f.children[i];
     }
-    Some(f.rect.right())
+    f.kind == FragmentKind::Text
+        && f.style.white_space.wraps()
+        && f.text
+            .as_ref()
+            .is_some_and(|(t, _)| t.ends_with([' ', '\t', '\u{3000}']))
 }
 
 /// Quita el último clúster (o la última caja atómica) de la línea. `false` si ya no queda.
@@ -229,20 +250,30 @@ impl Layout<'_> {
             return None;
         }
         if let Some(text) = ellipsis.text() {
-            self.block_ellipsis(line_mut(children, &point), text, style);
+            // Con el estilo de la root inline box de la línea: el block container que la
+            // contiene (no necesariamente el del clamp).
+            let line = line_mut(children, &point);
+            let root_inline = line.style.clone();
+            self.block_ellipsis(line, text, &root_inline);
         }
         Some((bottom - content_top).max(0.0))
     }
 
-    /// Pone `text` al final de la línea con el estilo del block container (§5.4: va en una
-    /// caja inline anónima hija suya), quitando contenido del final hasta que quepa.
+    /// Pone `text` al final de la línea con el estilo `style` de su block container (§5.4: va
+    /// en una caja inline anónima hija suya), quitando contenido del final hasta que quepa.
     fn block_ellipsis(&self, line: &mut Fragment, text: &str, style: &Arc<ComputedStyle>) {
         let glyphs = self.shape(text, style);
         let width: f32 = glyphs.iter().map(|g| g.advance).sum();
         let limit = line.rect.right();
-        while content_end(line).is_some_and(|end| end + width > limit + 0.01) {
-            if !pop_last(line) {
-                break;
+        let fits =
+            |line: &Fragment| content_end(line).is_none_or(|end| end + width <= limit + 0.01);
+        if !fits(line) {
+            // Se quita contenido hasta la última oportunidad de corte con la que cabe; si no
+            // hay ninguna, la línea queda vacía.
+            while !(fits(line) && ends_at_wrap(line)) {
+                if !pop_last(line) {
+                    break;
+                }
             }
         }
         let m = self.metrics(style);

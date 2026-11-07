@@ -31,6 +31,16 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
 | **Total** | 5162 | 1957 | 5173 | 15 | 12307 | 72.4% |
 
+Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
+total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`
+(`onload="…"`) cuentan como script (`needs-js`), igual que `<script>`:
+
+| Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
+|---|---:|---:|---:|---:|---:|---:|
+| css/css-overflow | 254 | 250 | 402 | 1 | 907 | 50.3% |
+| css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
+| css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
+
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
 ## Tests con expectativa dudosa
@@ -52,6 +62,12 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
   no puede pasar.
 - `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
   que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
+- `css/css-overflow`: falta `text-overflow` (60 fallos, con los de `line-clamp` que lo
+  combinan), `::scroll-marker`/`::scroll-button` (44), `overflow-clip-margin` (20), el
+  `line-clamp` que depende de `transform` (containing block de los fijos, 13) y ocultar las
+  absolutas tras el clamp point.
+  `css/css-position/sticky`: casi todo es testharness o desplaza con script; falla
+  `position-sticky-rtl` (scroll containers RTL, con el origen a la derecha).
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.

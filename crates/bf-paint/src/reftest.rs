@@ -762,7 +762,10 @@ mod tests {
     #[test]
     fn group_filter() {
         assert!(group_may_match("css/css-position", "sticky"));
-        assert!(group_may_match("css/css-position", "css/css-position/sticky"));
+        assert!(group_may_match(
+            "css/css-position",
+            "css/css-position/sticky"
+        ));
         assert!(group_may_match("css/css-position", "css-position/sticky"));
         assert!(group_may_match("css/CSS2/positioning", "css/CSS2"));
         assert!(!group_may_match("css/CSS2/positioning", "css/css-position"));
