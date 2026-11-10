@@ -694,6 +694,9 @@ impl<'a> Layout<'a> {
             );
             // Posición de apilado y tamaño exterior de cada fragmento.
             let mut stack: Vec<(f32, f32)> = Vec::new();
+            // E5: pistas finales y datos para volver a maquetar (estirado en el apilado).
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let mut relayout: Vec<(Cb, f32, f32, Edges, f32)> = Vec::new();
             for (i, (b, p)) in setup.items.iter().enumerate() {
                 let b = *b;
                 let s = &b.style;
@@ -761,6 +764,8 @@ impl<'a> Layout<'a> {
                     f.kind = FragmentKind::InlineBlock;
                 }
                 let outer = f.rect.height + mt + mb;
+                let mut hole_dx = 0.0;
+                let mut span = (c0, c1);
                 let y = match run.find_hole(c1 - c0, outer).filter(|_| auto) {
                     Some((t, start)) => {
                         // Hueco anterior (§4.3): el ítem va en esa pista.
@@ -771,11 +776,15 @@ impl<'a> Layout<'a> {
                         } else {
                             x1
                         };
-                        f.translate(x1 - x0, 0.0);
+                        hole_dx = x1 - x0;
+                        f.translate(hole_dx, 0.0);
+                        span = (t, t + (c1 - c0));
                         start
                     }
                     None => run.commit(c0, c1, outer, auto),
                 };
+                spans.push(span);
+                relayout.push((item_cb, x, w, margins, hole_dx));
                 f.translate(0.0, y);
                 let key = (y, c0, i);
                 if first.is_none_or(|k| key.0 < k.0 || (key.0 == k.0 && key.1 < k.1)) {
@@ -785,6 +794,48 @@ impl<'a> Layout<'a> {
                 out.push(f);
             }
             let range = run.range_end();
+            // E5: alineación del último ítem de cada pista en el eje de apilado.
+            let frees = stacking_free_space(&spans, &stack, n, range);
+            for (i, free) in frees.into_iter().enumerate() {
+                if free <= 0.0 {
+                    continue;
+                }
+                let b = setup.items[i].0;
+                let s = &b.style;
+                let a = match block_axis(s.align_self) {
+                    ItemAlign::Auto => block_axis(cs.align_items),
+                    a => a,
+                };
+                let (item_cb, x, w, margins, hole_dx) = relayout[i];
+                let auto_m = margin_value(&s.margin_top, item_cb.width).is_none()
+                    || margin_value(&s.margin_bottom, item_cb.width).is_none();
+                if a == ItemAlign::Stretch && s.height == Size::Auto && !auto_m {
+                    let bp_v = border_edges(s).vertical() + padding_edges(s, item_cb.width).vertical();
+                    let h = (stack[i].1 + free - margins.top - margins.bottom - bp_v).max(0.0);
+                    let (hlo, hhi) = height_limits(s, item_cb.height, bp_v);
+                    let h = h.min(hhi).max(hlo);
+                    let mut f = self.grid_item_fragment(
+                        b,
+                        item_cb,
+                        (x, cb.y + margins.top),
+                        w,
+                        Some(h),
+                        margins,
+                    );
+                    if f.kind == FragmentKind::Block {
+                        f.kind = FragmentKind::InlineBlock;
+                    }
+                    f.translate(hole_dx, stack[i].0);
+                    stack[i].1 = f.rect.height + margins.top + margins.bottom;
+                    out[i] = f;
+                    continue;
+                }
+                let shift = stacking_shift(a, free, fill_reverse);
+                if shift != 0.0 {
+                    out[i].translate(0.0, shift);
+                    stack[i].0 += shift;
+                }
+            }
             content_h = cb.height.unwrap_or_else(|| range.min(hmax).max(hmin));
             let off = stacking_offset(cs.align_content, content_h, range, fill_reverse);
             for (f, (y, outer)) in out.iter_mut().zip(&stack) {
@@ -898,6 +949,8 @@ impl<'a> Layout<'a> {
                 dense(cs),
             );
             let mut stack: Vec<(f32, f32)> = Vec::new();
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let mut relayout: Vec<(Cb, f32, f32, Option<f32>, Edges)> = Vec::new();
             for (i, (b, p)) in setup.items.iter().enumerate() {
                 let b = *b;
                 let s = &b.style;
@@ -993,6 +1046,8 @@ impl<'a> Layout<'a> {
                 if f.kind == FragmentKind::Block {
                     f.kind = FragmentKind::InlineBlock;
                 }
+                spans.push((r0, r1));
+                relayout.push((item_cb, x, y, forced, margins));
                 let free_v = ah - f.rect.height - mt.unwrap_or(0.0) - mb.unwrap_or(0.0);
                 let (dy, mt_used, mb_used) = place_in_area(free_v, mt, mb, align);
                 let shift = dy + mt_used - mt.unwrap_or(0.0);
@@ -1009,6 +1064,49 @@ impl<'a> Layout<'a> {
                 out.push(f);
             }
             let range = run.range_end();
+            // E5: alineación del último ítem de cada pista en el eje de apilado (inline).
+            let frees = stacking_free_space(&spans, &stack, n, range);
+            for (i, free) in frees.into_iter().enumerate() {
+                if free <= 0.0 {
+                    continue;
+                }
+                let b = setup.items[i].0;
+                let s = &b.style;
+                let a = match s.justify_self {
+                    ItemAlign::Auto => cs.justify_items,
+                    a => a,
+                };
+                // `left`/`right` son físicos: con el flujo de derecha a izquierda se invierten.
+                let a = match a {
+                    ItemAlign::Left => ItemAlign::Start,
+                    ItemAlign::Right => ItemAlign::End,
+                    a => a,
+                };
+                let mirrored = rtl != fill_reverse;
+                let (item_cb, x, y, forced, margins) = relayout[i];
+                let auto_m = margin_value(&s.margin_left, cb.width).is_none()
+                    || margin_value(&s.margin_right, cb.width).is_none();
+                if a == ItemAlign::Stretch && s.width == Size::Auto && !auto_m {
+                    let w = widths[i].0 + free;
+                    let bp_h = border_edges(s).horizontal() + padding_edges(s, cb.width).horizontal();
+                    let (wlo, whi) = width_limits(s, cb.width, bp_h);
+                    let w = w.min(whi).max(wlo);
+                    let mut f = self.grid_item_fragment(b, item_cb, (x, y), w, forced, margins);
+                    if f.kind == FragmentKind::Block {
+                        f.kind = FragmentKind::InlineBlock;
+                    }
+                    let dy = out[i].rect.y - f.rect.y;
+                    f.translate(0.0, dy);
+                    stack[i].1 = w + bp_h + margins.left + margins.right;
+                    out[i] = f;
+                    continue;
+                }
+                let shift = stacking_shift(a, free, mirrored);
+                if shift != 0.0 {
+                    out[i].translate(shift, 0.0);
+                    stack[i].0 += shift;
+                }
+            }
             let off = stacking_offset(cs.justify_content, cb.width, range, fill_reverse);
             for (f, (x, outer)) in out.iter_mut().zip(&stack) {
                 // En rtl el flujo va de derecha a izquierda; `fill-reverse` lo invierte.
@@ -1211,5 +1309,53 @@ impl<'a> Layout<'a> {
             *size = run.range_end();
         }
         (sizes[0], sizes[1].max(sizes[0]))
+    }
+}
+
+/// E5: alineación propia en el eje de apilado (CSS Grid 3, "alignment in the stacking axis"):
+/// el último ítem de cada pista se alinea en el espacio que queda hasta el final del rango de
+/// apilado. `spans` son las pistas de cada ítem y `stack` su posición de apilado y su tamaño
+/// exterior. Devuelve, por ítem, el espacio libre de su contenedor de alineación (0 si no es
+/// el último de todas sus pistas).
+fn stacking_free_space(spans: &[(usize, usize)], stack: &[(f32, f32)], n: usize, range: f32) -> Vec<f32> {
+    let mut last: Vec<Option<(f32, usize)>> = vec![None; n];
+    for (i, (&(y, outer), &(t0, t1))) in stack.iter().zip(spans).enumerate() {
+        for l in last.iter_mut().take(t1.min(n)).skip(t0) {
+            if l.is_none_or(|(e, _)| y + outer >= e) {
+                *l = Some((y + outer, i));
+            }
+        }
+    }
+    spans
+        .iter()
+        .enumerate()
+        .map(|(i, &(t0, t1))| {
+            let is_last = t0 < t1.min(n)
+                && last[t0..t1.min(n)]
+                    .iter()
+                    .all(|l| l.is_some_and(|(_, j)| j == i));
+            if is_last {
+                (range - stack[i].0 - stack[i].1).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// E5: desplazamiento en el eje de apilado (en el sentido del flujo) de un ítem con alineación
+/// `a` y espacio libre `free`; con el flujo invertido el inicio físico es el final del flujo.
+fn stacking_shift(a: ItemAlign, free: f32, flow_reversed: bool) -> f32 {
+    match a {
+        ItemAlign::Center => free / 2.0,
+        ItemAlign::End | ItemAlign::FlexEnd | ItemAlign::SelfEnd | ItemAlign::LastBaseline => {
+            if flow_reversed {
+                0.0
+            } else {
+                free
+            }
+        }
+        ItemAlign::Start | ItemAlign::FlexStart | ItemAlign::SelfStart if flow_reversed => free,
+        _ => 0.0,
     }
 }
