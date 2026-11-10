@@ -13,10 +13,13 @@
 pub mod blob; // E2: el almacén de URLs blob:
 pub mod cache;
 pub mod cookies;
+mod eyeballs;
 pub mod hpack;
+pub mod hsts;
 pub mod http;
 pub mod http2;
 pub mod psl;
+pub mod referrer;
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
 pub mod websocket; // E2: cliente WebSocket (RFC 6455)
@@ -33,7 +36,9 @@ use bf_url::{Host, Url};
 
 pub use cache::{CacheMode, CacheUse, HttpCache};
 pub use cookies::CookieJar;
+pub use hsts::HstsStore;
 pub use http::Headers;
+pub use referrer::ReferrerPolicy;
 pub use sniff::{EncodingSource, MimeType, html_encoding, html_encoding_with_source};
 
 /// El `User-Agent` de Freedom (ver [`bf_infra::identity`]): los datos de Chrome, con Freedom
@@ -108,6 +113,8 @@ pub struct FetchOptions {
     /// Cuerpo y su `Content-Type` (para POST).
     pub body: Option<(Vec<u8>, String)>,
     pub referrer: Option<Url>,
+    /// La política con la que se calcula `Referer` desde `referrer` (Referrer Policy §8.3).
+    pub referrer_policy: ReferrerPolicy,
     pub accept: String,
     /// El *cache mode* de Fetch (si el `Fetcher` tiene caché).
     pub cache: CacheMode,
@@ -119,6 +126,7 @@ impl Default for FetchOptions {
             method: Method::Get,
             body: None,
             referrer: None,
+            referrer_policy: ReferrerPolicy::Default,
             accept: "*/*".into(),
             cache: CacheMode::Default,
         }
@@ -267,23 +275,17 @@ fn server_name(host: &str) -> Result<rustls_pki_types::ServerName<'static>, Fetc
     .map_err(|e| FetchError::Tls(e.to_string()))
 }
 
+/// Conexión TCP con Happy Eyeballs (RFC 8305, [`eyeballs`]): las direcciones de las dos
+/// familias se intercalan y los intentos se escalonan cada 250 ms en paralelo.
 fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, FetchError> {
     let addrs: Vec<_> = (host.trim_start_matches('[').trim_end_matches(']'), port)
         .to_socket_addrs()
         .map_err(FetchError::Dns)?
         .collect();
-    let mut last = io::Error::new(io::ErrorKind::NotFound, "sin direcciones");
-    let mut tcp = None;
-    for addr in addrs {
-        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-            Ok(s) => {
-                tcp = Some(s);
-                break;
-            }
-            Err(e) => last = e,
-        }
-    }
-    let tcp = tcp.ok_or_else(|| FetchError::from(last))?;
+    let addrs = eyeballs::interleave(addrs);
+    let tcp = eyeballs::race(&addrs, eyeballs::ATTEMPT_DELAY, CONNECT_TIMEOUT, |a| {
+        TcpStream::connect_timeout(&a, CONNECT_TIMEOUT)
+    })?;
     tcp.set_read_timeout(Some(READ_TIMEOUT))?;
     tcp.set_write_timeout(Some(READ_TIMEOUT))?;
     let _ = tcp.set_nodelay(true);
@@ -362,6 +364,8 @@ pub struct Fetcher {
     log: Mutex<Vec<LogEntry>>,
     /// La caché HTTP (RFC 9111); `None`: sin caché.
     pub cache: Option<HttpCache>,
+    /// Los *Known HSTS Hosts* (RFC 6797).
+    pub hsts: HstsStore,
 }
 
 /// Una petición del registro de red de un [`Fetcher`].
@@ -478,6 +482,10 @@ impl Fetcher {
                 self.cookies.set_cookie(url, c);
             }
         }
+        // RFC 6797 §8.1: solo la primera `Strict-Transport-Security`, y solo sobre TLS.
+        if let Some(sts) = headers.get("strict-transport-security") {
+            self.hsts.note(url, sts);
+        }
         let body = http::decode_content(raw, &headers.list("content-encoding"))?;
         Ok(Response {
             url: url.clone(),
@@ -530,10 +538,17 @@ impl Fetcher {
         let mut url = url.clone();
         let mut method = opts.method;
         let mut body = opts.body.clone();
-        let mut referrer = opts.referrer.clone();
+        // Fetch §2.2.5: el referente de la petición no cambia con las redirecciones; la
+        // política sí, si la respuesta trae `Referrer-Policy` (§4.4 paso 14).
+        let referrer = opts.referrer.as_ref();
+        let mut policy = opts.referrer_policy;
         for redirects in 0..=MAX_REDIRECTS {
             if url.scheme == "blob" {
                 return blob_response(&url, redirects);
+            }
+            // RFC 6797 §8.3 (Fetch §4.1 "main fetch" paso 7): a `https:` si el host es HSTS.
+            if let Some(up) = self.hsts.upgrade(&url) {
+                url = up;
             }
             if !matches!(url.scheme.as_str(), "http" | "https") {
                 let res = load_local(&url, &[]).ok_or(
@@ -567,8 +582,9 @@ impl Fetcher {
                 headers: &no_headers,
                 credentials: true,
                 cache: opts.cache,
+                referrer_policy: policy,
             };
-            let mut response = self.http(&url, &extra, referrer.as_ref(), &opts.accept)?;
+            let mut response = self.http(&url, &extra, referrer, &opts.accept)?;
             response.redirects = redirects;
             if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(response);
@@ -590,7 +606,13 @@ impl Fetcher {
                 method = Method::Get;
                 body = None;
             }
-            referrer = Some(url.clone());
+            if let Some(p) = response
+                .headers
+                .get("referrer-policy")
+                .and_then(ReferrerPolicy::from_header)
+            {
+                policy = p;
+            }
             url = next;
         }
         Err(FetchError::TooManyRedirects)
@@ -635,20 +657,9 @@ impl Fetcher {
         {
             headers.push("Cookie", &c);
         }
-        if let Some(r) = referrer {
-            // Política por defecto (strict-origin-when-cross-origin), simplificada: sin
-            // fragmento ni credenciales, y nada de https → http.
-            if !(r.scheme == "https" && !tls) {
-                let mut r = r.clone();
-                r.username.clear();
-                r.password.clear();
-                r.fragment = None;
-                if r.origin() != url.origin() {
-                    r.path = bf_url::Path::List(vec![String::new()]);
-                    r.query = None;
-                }
-                headers.push("Referer", &r.href());
-            }
+        // Referrer Policy §8.3 "determine request's referrer" (Fetch §4.5 paso 8.10).
+        if let Some(r) = referrer.and_then(|r| referrer::determine(r, url, extra.referrer_policy)) {
+            headers.push("Referer", &r.href());
         }
         if let Some((_, Some(ct))) = body
             && !has("content-type")
@@ -890,6 +901,7 @@ struct HttpExtra<'a> {
     headers: &'a Headers,
     credentials: bool,
     cache: CacheMode,
+    referrer_policy: ReferrerPolicy,
 }
 
 /// El modo de redirección de una petición (Fetch §2.2.5, "redirect mode").
@@ -913,6 +925,9 @@ pub struct RequestOptions {
     /// ¿Se mandan y guardan cookies? (credentials mode `include`/`same-origin`).
     pub credentials: bool,
     pub referrer: Option<Url>,
+    /// La política con la que se calcula `Referer` desde `referrer` (Referrer Policy §8.3);
+    /// aplicarla a un referente ya calculado con la misma política no lo cambia.
+    pub referrer_policy: ReferrerPolicy,
     /// El *cache mode* (Fetch §2.2.5, `RequestInit.cache`).
     pub cache: CacheMode,
 }
@@ -926,6 +941,7 @@ impl Default for RequestOptions {
             redirect: RedirectMode::Follow,
             credentials: true,
             referrer: None,
+            referrer_policy: ReferrerPolicy::Default,
             cache: CacheMode::Default,
         }
     }
@@ -1032,9 +1048,19 @@ impl Fetcher {
         let mut method = req.method.clone();
         let mut body = req.body.clone();
         let mut headers = req.headers.clone();
-        let mut referrer = req.referrer.clone();
+        // Fetch §2.2.5: el referente no cambia con las redirecciones; la política sí (§4.4
+        // paso 14).
+        let referrer = req.referrer.as_ref();
+        let mut policy = req.referrer_policy;
         let mut list = vec![url.clone()];
         for redirects in 0..=MAX_REDIRECTS {
+            // RFC 6797 §8.3 (Fetch §4.1 "main fetch" paso 7): la URL actual pasa a `https:`.
+            if let Some(up) = self.hsts.upgrade(&url) {
+                url = up;
+                if let Some(last) = list.last_mut() {
+                    *last = url.clone();
+                }
+            }
             if url.scheme == "blob" {
                 if !method.eq_ignore_ascii_case("GET") {
                     return Err(FetchError::NotFound);
@@ -1066,8 +1092,9 @@ impl Fetcher {
                 headers: &headers,
                 credentials: req.credentials,
                 cache,
+                referrer_policy: policy,
             };
-            let mut response = self.http(&url, &extra, referrer.as_ref(), "*/*")?;
+            let mut response = self.http(&url, &extra, referrer, "*/*")?;
             response.redirects = redirects;
             if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok((response, list));
@@ -1108,12 +1135,36 @@ impl Fetcher {
                     )
                 });
             }
-            referrer = Some(url.clone());
+            if let Some(p) = response
+                .headers
+                .get("referrer-policy")
+                .and_then(ReferrerPolicy::from_header)
+            {
+                policy = p;
+            }
             url = next;
             list.push(url.clone());
         }
         Err(FetchError::TooManyRedirects)
     }
+}
+
+/// Dónde guarda Freedom sus datos (HSTS, cookies): `%LOCALAPPDATA%\Freedom` en Windows y
+/// `$XDG_DATA_HOME/freedom` (o `~/.local/share/freedom`) en el resto.
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return Some(PathBuf::from(local).join("Freedom"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(xdg).join("freedom"));
+    }
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".local")
+            .join("share")
+            .join("freedom")
+    })
 }
 
 /// `ResourceLoader` con red: `http(s)` por el [`Fetcher`], `data:` y `file:` locales.
@@ -1132,11 +1183,18 @@ impl NetLoader {
 
     /// Con la caché HTTP en memoria y en disco, en [`cache::default_dir`]
     /// (`%LOCALAPPDATA%\Freedom\cache` en Windows).
+    /// El perfil en disco: la caché HTTP en [`cache::default_dir`] y, en [`data_dir`], la
+    /// lista HSTS (`hsts.txt`) y las cookies persistentes (`cookies.txt`).
     pub fn with_disk_cache() -> NetLoader {
-        match cache::default_dir() {
+        let mut net = match cache::default_dir() {
             Some(dir) => NetLoader::with_cache(HttpCache::on_disk(dir)),
             None => NetLoader::new(),
+        };
+        if let Some(dir) = data_dir() {
+            net.fetcher.hsts = HstsStore::on_disk(dir.join("hsts.txt"));
+            net.fetcher.cookies = CookieJar::on_disk(dir.join("cookies.txt"));
         }
+        net
     }
 
     pub fn with_cache(cache: HttpCache) -> NetLoader {

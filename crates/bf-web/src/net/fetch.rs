@@ -1657,6 +1657,7 @@ fn send_beacon(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             credentials: true,
             referrer: Some(base),
             cache: bf_net::CacheMode::Default,
+            ..Default::default() // E6: `referrer_policy` por defecto.
         },
     };
     super::start(agent, req, Box::new(|_, _| {}));
