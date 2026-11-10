@@ -788,7 +788,12 @@ impl<'a> Styler<'a> {
         let flex_item = parent.is_some_and(|p| {
             matches!(
                 p.display,
-                Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+                Display::Flex
+                    | Display::InlineFlex
+                    | Display::Grid
+                    | Display::InlineGrid
+                    | Display::GridLanes
+                    | Display::InlineGridLanes
             )
         });
         if is_root
