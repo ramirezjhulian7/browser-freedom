@@ -1173,6 +1173,9 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
     },
     // Alias legado (CSS UI 4 §7.2).
     alias!("-webkit-appearance" => Appearance),
+    // E5: nombres de `flow-tolerance` en otras versiones de CSS Grid 3 (§4.2).
+    alias!("fit-tolerance" => FlowTolerance),
+    alias!("item-tolerance" => FlowTolerance),
     alias!("margin-block-start" => MarginTop),
     alias!("margin-block-end" => MarginBottom),
     alias!("margin-inline-start" => MarginLeft),

@@ -223,9 +223,11 @@ pub fn parse_track_list(input: &[ComponentValue]) -> Option<Vec<TrackListItem>> 
         } else if let Some(r) = parse_repeat(v) {
             if let TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, inner) = &r {
                 autos += 1;
-                // Dentro de un repeat automático solo caben tamaños fijos (§7.2.3.2).
+                // Dentro de un repeat automático caben tamaños fijos (Grid 2 §7.2.3.2) y, desde
+                // CSS Grid 3 §3.1.1, también intrínsecos (`<intrinsic-or-fixed-size>`): todo
+                // menos `fr`.
                 if inner.iter().any(|i| match i {
-                    TrackListItem::Track(t) => !is_fixed(t),
+                    TrackListItem::Track(t) => !is_fixed(t) && has_flex(t),
                     _ => false,
                 }) {
                     return None;
@@ -268,6 +270,26 @@ fn is_fixed(t: &TrackSize) -> bool {
         TrackSize::MinMax(a, b) => fixed(a) || (fixed(b) && !matches!(a, TrackBreadth::Flex(_))),
         TrackSize::FitContent(_) => false,
     }
+}
+
+/// E5: ¿usa `fr` alguna de las funciones de dimensionado?
+fn has_flex(t: &TrackSize) -> bool {
+    let flex = |b: &TrackBreadth| matches!(b, TrackBreadth::Flex(_));
+    match t {
+        TrackSize::Breadth(b) => flex(b),
+        TrackSize::MinMax(a, b) => flex(a) || flex(b),
+        TrackSize::FitContent(_) => false,
+    }
+}
+
+/// E5: ¿es intrínseca alguna pista de `repeat(auto-fill|auto-fit)` (CSS Grid 3 §3.1.1)?
+pub fn has_intrinsic_auto_repeat(items: &[TrackListItem]) -> bool {
+    items.iter().any(|i| match i {
+        TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, inner) => inner
+            .iter()
+            .any(|i| matches!(i, TrackListItem::Track(t) if !is_fixed(t))),
+        _ => false,
+    })
 }
 
 fn items_compute(items: &[TrackListItem], ctx: &ComputeContext<'_>) -> Vec<TrackListItem> {
