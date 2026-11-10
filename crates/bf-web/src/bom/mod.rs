@@ -319,6 +319,14 @@ fn install_window(agent: &mut Agent, realm: RealmId) {
     accessor(agent, g, "frameElement", frames::frame_element, None);
     accessor(agent, g, "origin", get_origin, None);
     accessor(agent, g, "isSecureContext", get_secure_context, None);
+    // E3: HTML §8.1.3.6 (`WindowOrWorkerGlobalScope`), de COOP/COEP (`workers::isolation`).
+    accessor(
+        agent,
+        g,
+        "crossOriginIsolated",
+        get_cross_origin_isolated,
+        None,
+    );
     // `location` es `[LegacyUnforgeable]` y `[PutForwards=href]`.
     let lg = agent.create_builtin_function(get_location, 0, "get location", false);
     let ls = agent.create_builtin_function(set_location, 1, "set location", false);
@@ -503,6 +511,13 @@ fn get_secure_context(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
         || host == "127.0.0.1"
         || host == "[::1]";
     Ok(Value::Boolean(secure))
+}
+
+/// `crossOriginIsolated`: el *cross-origin isolated capability* del documento (E3).
+fn get_cross_origin_isolated(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Boolean(
+        crate::workers::dedicated::cross_origin_isolated(agent),
+    ))
 }
 
 /// El mensaje de un diálogo: `undefined` es el string vacío.

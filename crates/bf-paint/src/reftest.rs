@@ -4,8 +4,8 @@
 //! pinta el test y cada referencia con la misma tubería y se comparan píxel a píxel (con la
 //! tolerancia de `<meta name="fuzzy">`). Pasa si coincide con todas las `match` y difiere de
 //! todas las `mismatch`. Los archivos sin referencias son tests de testharness.js o manuales,
-//! y los que tienen `<script>` dependen de JS: ambos cuentan como `needs-js`. Un pánico o una
-//! referencia que no existe cuentan como `error`.
+//! y los que tienen `<script>` o atributos manejadores de eventos `on*` dependen de JS: ambos
+//! cuentan como `needs-js`. Un pánico o una referencia que no existe cuentan como `error`.
 //!
 //! Condiciones: viewport 800×600, DPR 1, fondo blanco, `/` resuelto contra la raíz de WPT
 //! (para `/fonts/ahem.css` y `/css/support/*`), fuentes del sistema más las de `@font-face`.
@@ -692,8 +692,8 @@ pub fn run_and_report(workspace: &Path, filter: Option<&str>, docs: bool) -> Vec
              (`tests/wpt/fonts/Ahem.ttf`, como si estuviera instalada) y `@font-face`."
                 .to_owned(),
             "- `.xht`/`.xhtml` se parsean como XML; el resto, como HTML.".to_owned(),
-            "- `needs-js`: tests de testharness.js, manuales o con `<script>` (en el test o en \
-             la referencia)."
+            "- `needs-js`: tests de testharness.js, manuales o con `<script>` o atributos \
+             manejadores de eventos `on*` (en el test o en la referencia)."
                 .to_owned(),
             "- `error`: pánico o recurso faltante.".to_owned(),
             "- El porcentaje se calcula sobre pass + fail + error.".to_owned(),

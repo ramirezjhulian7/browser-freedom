@@ -35,6 +35,14 @@ impl NetBackend for Files {
             "text/plain"
         };
         headers.append("Content-Type", ct);
+        // Como los `.headers` de WPT: `<ruta>.headers` con líneas `Nombre: valor`.
+        if let Some(extra) = self.0.get(&format!("{path}.headers")) {
+            for line in extra.lines() {
+                if let Some((n, v)) = line.split_once(':') {
+                    headers.append(n.trim(), v.trim());
+                }
+            }
+        }
         Ok(NetResponse {
             url_list: vec![req.url.clone()],
             status: 200,
@@ -73,26 +81,54 @@ impl Page {
     }
 
     fn with_isolation(files: &[(&str, &str)], isolated: bool) -> Page {
+        Page::build(
+            files,
+            "http://workers.test/dir/page.html",
+            |agent, realm, _| {
+                if isolated {
+                    agent.set_realm_data(realm, bf_web::workers::Isolation(true));
+                }
+            },
+        )
+    }
+
+    /// Una página en `url` cargada con esas cabeceras COOP y COEP
+    /// (`workers::isolation::set_document_policies`, como hace el embebedor).
+    fn with_policies(
+        files: &[(&str, &str)],
+        url: &str,
+        coop: Option<&str>,
+        coep: Option<&str>,
+    ) -> Page {
+        Page::build(files, url, |agent, realm, url| {
+            bf_web::workers::isolation::set_document_policies(agent, realm, url, coop, coep);
+        })
+    }
+
+    fn build(
+        files: &[(&str, &str)],
+        url: &str,
+        setup: impl FnOnce(&mut bf_js::vm::Agent, bf_js::vm::RealmId, &Url),
+    ) -> Page {
         let console = Arc::new(Mutex::new(Vec::new()));
         let mut rt = Runtime::new(Box::new(Hooks(console.clone())));
         let (doc, _) =
             bf_html::parse_document("<!DOCTYPE html><p>x", &bf_html::ParseOptions::default());
         let realm = rt.main_realm();
-        let url = Url::parse("http://workers.test/dir/page.html", None).expect("url");
+        let url = Url::parse(url, None).expect("url");
         let ctx = bf_web::install(
             &mut rt.agent,
             realm,
-            WebContext::new(DocumentOwner::Document(Box::new(doc)), url),
+            WebContext::new(DocumentOwner::Document(Box::new(doc)), url.clone()),
         );
         let map = files
             .iter()
             .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
             .collect();
         bf_web::net::set_backend(&mut rt.agent, realm, Arc::new(Files(map)), false);
-        if isolated {
-            rt.agent
-                .set_realm_data(realm, bf_web::workers::Isolation(true));
-        }
+        setup(&mut rt.agent, realm, &url);
+        // Los tests corren en paralelo con el mismo origen: cada página, su partición.
+        bf_web::workers::set_partition(&mut rt.agent, bf_web::workers::new_partition());
         let mut p = Page { rt, ctx, console };
         p.exec(PRELUDE);
         p
@@ -593,6 +629,34 @@ w!(
     "DataCloneError"
 );
 
+// --- ImageData (HTML §4.12.5.1.15: `[Serializable]`, `[Exposed=(Window,Worker)]`) ---
+
+w!(
+    image_data_in_worker,
+    ["/dir/id.js" => "var d = new ImageData(2, 1); d.data[0] = 7; \
+      postMessage([typeof ImageData, typeof CanvasGradient, typeof TextMetrics, typeof CanvasRenderingContext2D, d.width, d.data.length, d.data[0]].join());"],
+    "new Worker('id.js').onmessage = e => finish(e.data);",
+    "function,function,function,undefined,2,8,7"
+);
+
+w!(
+    image_data_clones_to_and_from_worker,
+    ["/dir/id2.js" => "onmessage = e => { var d = e.data; d.data[1] = 99; \
+      postMessage({ok: d instanceof ImageData, back: d}); };"],
+    "var d = new ImageData(new Uint8ClampedArray([1, 2, 3, 4, 5, 6, 7, 8]), 1); var w = new Worker('id2.js'); \
+     w.onmessage = e => { var b = e.data.back; finish([e.data.ok, b instanceof ImageData, b.width, b.height, b.colorSpace, Array.from(b.data).join(' '), d.data[1]].join()); }; \
+     w.postMessage(d);",
+    "true,true,1,2,srgb,1 99 3 4 5 6 7 8,2"
+);
+
+w!(
+    structured_clone_image_data,
+    [],
+    "var d = new ImageData(1, 1); d.data[3] = 255; var c = structuredClone(d); \
+     finish([c !== d, c instanceof ImageData, c.data !== d.data, c.data[3]].join());",
+    "true,true,true,255"
+);
+
 // --- SharedWorker ---
 
 w!(
@@ -622,3 +686,221 @@ w!(
     "var s = new SharedWorker('sw4.js'); s.port.onmessage = e => finish(e.data); s.port.postMessage('hola');",
     "HOLA"
 );
+
+/// La partición forma parte de la clave del `SharedWorker` (hace de *storage key*, HTML
+/// §10.2.6.4 paso 11.2): en otra partición se crea un worker nuevo; en la misma, se comparte.
+#[test]
+fn shared_worker_partitions() {
+    let files = [(
+        "/dir/swp.js",
+        "var n = 0; onconnect = e => { n++; e.ports[0].postMessage(n); };",
+    )];
+    let mut a = Page::new(&files);
+    let mut b = Page::new(&files);
+    let mut c = Page::new(&files);
+    let shared = bf_web::workers::new_partition();
+    bf_web::workers::set_partition(&mut a.rt.agent, shared);
+    bf_web::workers::set_partition(&mut c.rt.agent, shared);
+    let src = "var s = new SharedWorker('swp.js'); s.port.onmessage = e => finish(e.data);";
+    assert_eq!(a.run(src), "1");
+    assert_eq!(b.run(src), "1", "otra partición: worker nuevo");
+    assert_eq!(c.run(src), "2", "misma partición: el worker de `a`");
+}
+
+// --- BroadcastChannel entre agentes (HTML §9.5) ---
+
+w!(
+    broadcast_channel_page_and_worker,
+    ["/dir/bc.js" => "var c = new BroadcastChannel('bc'); var got = []; \
+      c.onmessage = e => { got.push(e.data + '@' + e.origin); if (e.data == 'fin') postMessage(got.join()); }; \
+      c.postMessage('del worker');"],
+    "var a = new BroadcastChannel('bc'), b = new BroadcastChannel('bc'), ev = []; \
+     a.onmessage = e => ev.push('a:' + e.data); \
+     b.onmessage = e => { ev.push('b:' + e.data + ':' + (e.origin == location.origin) + ':' + (e.source === null)); \
+       if (e.data == 'del worker') { b.postMessage('hola'); a.postMessage('fin'); } }; \
+     new Worker('bc.js').onmessage = e => finish(ev.join() + ' | ' + e.data);",
+    "a:del worker,b:del worker:true:true,a:hola,b:fin:true:true | hola@http://workers.test,fin@http://workers.test"
+);
+
+w!(
+    broadcast_channel_between_workers,
+    ["/dir/bc1.js" => "var c = new BroadcastChannel('ww'); c.onmessage = e => postMessage('1 recibe ' + e.data); postMessage('listo');",
+     "/dir/bc2.js" => "new BroadcastChannel('ww').postMessage('de 2'); postMessage('mandé');"],
+    "var w1 = new Worker('bc1.js'); w1.onmessage = e => { if (e.data == 'listo') new Worker('bc2.js'); else finish(e.data); };",
+    "1 recibe de 2"
+);
+
+w!(
+    broadcast_channel_closed_receiver_in_worker,
+    ["/dir/bc3.js" => "var c = new BroadcastChannel('cerrado'); var d = new BroadcastChannel('abierto'); \
+      c.onmessage = () => postMessage('no debía'); d.onmessage = e => postMessage('abierto ' + e.data); \
+      c.close(); postMessage('listo');"],
+    "var w = new Worker('bc3.js'); w.onmessage = e => { if (e.data == 'listo') { \
+       new BroadcastChannel('cerrado').postMessage(1); new BroadcastChannel('abierto').postMessage(2); } else finish(e.data); };",
+    "abierto 2"
+);
+
+w!(
+    broadcast_channel_closing_worker_does_not_send,
+    ["/dir/bc4.js" => "var n = self.name; if (n == 'cierra') close(); \
+      new BroadcastChannel('cierre').postMessage(n); postMessage('listo');"],
+    "var c = new BroadcastChannel('cierre'); c.onmessage = e => finish(e.data); \
+     new Worker('bc4.js', {name: 'cierra'}).onmessage = () => new Worker('bc4.js', {name: 'sigue'});",
+    "sigue"
+);
+
+w!(
+    broadcast_channel_data_clone_error_without_destinations,
+    [],
+    "try { new BroadcastChannel('solo').postMessage(() => 1); finish('sin error'); } \
+     catch (e) { finish(e.name + ' ' + (e instanceof DOMException)); }",
+    "DataCloneError true"
+);
+
+w!(
+    broadcast_channel_opaque_origin_does_not_cross,
+    [],
+    "var c = new BroadcastChannel('opaco'); c.onmessage = e => finish('cruzó ' + e.origin); \
+     var w = new Worker('data:text/javascript,' + encodeURIComponent(\"new BroadcastChannel('opaco').postMessage(self.origin); postMessage('listo');\")); \
+     w.onmessage = () => setTimeout(() => finish('no cruzó'), 50);",
+    "no cruzó"
+);
+
+/// Dos páginas en particiones distintas (como dos documentos del runner de WPT) no se oyen;
+/// en la misma partición (como dos pestañas del shell), sí.
+#[test]
+fn broadcast_channel_partitions() {
+    let mut a = Page::new(&[]);
+    let mut b = Page::new(&[]);
+    let mut c = Page::new(&[]);
+    let shared = bf_web::workers::new_partition();
+    bf_web::workers::set_partition(&mut a.rt.agent, shared);
+    bf_web::workers::set_partition(&mut c.rt.agent, shared);
+    a.exec("var got = []; new BroadcastChannel('part').onmessage = e => got.push(e.data);");
+    b.exec("new BroadcastChannel('part').postMessage('otra partición');");
+    c.exec("new BroadcastChannel('part').postMessage('misma partición');");
+    let r = a.run("setTimeout(() => finish(got.join()), 50);");
+    assert_eq!(r, "misma partición");
+}
+
+// --- terminate() durante Atomics.wait ---
+
+/// HTML §10.2.4 "terminate a worker": un worker dormido en `Atomics.wait` sin límite
+/// despierta con la interrupción y su waiter sale de la lista, así que un `notify` posterior
+/// no despierta a nadie (sin la interrupción, el hilo seguiría en la lista).
+#[test]
+fn terminate_interrupts_atomics_wait() {
+    let mut p = Page::with_isolation(
+        &[(
+            "/dir/t.js",
+            "onmessage = e => { var ia = new Int32Array(e.data); postMessage('esperando'); \
+             Atomics.wait(ia, 0, 0); postMessage('despertó'); };",
+        )],
+        true,
+    );
+    let r = p.run(
+        "var ia = new Int32Array(new SharedArrayBuffer(8)); var w = new Worker('t.js'); \
+         w.onmessage = e => { if (e.data != 'esperando') return finish('no debía: ' + e.data); \
+           setTimeout(() => { w.terminate(); setTimeout(() => finish('despiertos ' + Atomics.notify(ia, 0)), 100); }, 20); }; \
+         w.postMessage(ia.buffer);",
+    );
+    assert_eq!(r, "despiertos 0");
+}
+
+// --- crossOriginIsolated desde COOP/COEP (HTML §7.1.3, §7.1.4, §10.2.4) ---
+
+const COEP: &str = "Cross-Origin-Embedder-Policy: require-corp";
+const HTTPS: &str = "https://workers.test/dir/page.html";
+const ISO_WORKER: &str = "onmessage = e => postMessage([self.crossOriginIsolated, \
+     e.data instanceof SharedArrayBuffer].join());";
+
+/// COOP `same-origin` + COEP `require-corp` en un contexto seguro: la ventana y sus workers
+/// dedicados (con un script `require-corp`) están aislados y comparten memoria.
+#[test]
+fn cross_origin_isolated_from_headers() {
+    let mut p = Page::with_policies(
+        &[("/dir/iso.js", ISO_WORKER), ("/dir/iso.js.headers", COEP)],
+        HTTPS,
+        Some("same-origin"),
+        Some("require-corp"),
+    );
+    let r = p.run(
+        "var w = new Worker('iso.js'); w.onmessage = e => finish(self.crossOriginIsolated + ' ' + e.data); \
+         w.postMessage(new SharedArrayBuffer(8));",
+    );
+    assert_eq!(r, "true true,true");
+}
+
+/// Sin COOP, o fuera de un contexto seguro, no hay aislamiento: los `SharedArrayBuffer` no
+/// cruzan (`DataCloneError`).
+#[test]
+fn no_isolation_without_coop_or_secure_context() {
+    for (url, coop) in [
+        (HTTPS, None),
+        ("http://workers.test/dir/page.html", Some("same-origin")),
+    ] {
+        let mut p = Page::with_policies(
+            &[("/dir/iso.js", ISO_WORKER), ("/dir/iso.js.headers", COEP)],
+            url,
+            coop,
+            Some("require-corp"),
+        );
+        let r = p.run(
+            "var w = new Worker('iso.js'); \
+             try { w.postMessage(new SharedArrayBuffer(8)); finish('cruzó'); } \
+             catch (e) { finish(self.crossOriginIsolated + ' ' + e.name); }",
+        );
+        assert_eq!(r, "false DataCloneError", "{url} {coop:?}");
+    }
+}
+
+/// HTML §7.1.4.6: con un dueño `require-corp`, el script de un worker dedicado sin COEP
+/// compatible es un error de red (`error` en el objeto `Worker`).
+#[test]
+fn dedicated_worker_without_coep_is_blocked() {
+    let mut p = Page::with_policies(
+        &[("/dir/sin.js", "postMessage('cargó');")],
+        HTTPS,
+        Some("same-origin"),
+        Some("require-corp"),
+    );
+    let r = p.run(
+        "var w = new Worker('sin.js'); w.onmessage = e => finish(e.data); \
+         w.onerror = e => finish('error ' + (e instanceof ErrorEvent ? 'ErrorEvent' : e.type));",
+    );
+    assert_eq!(r, "error error");
+}
+
+/// Un worker `data:` nunca está aislado (§10.2.4 paso 10); uno `blob:` hereda del dueño.
+#[test]
+fn data_worker_is_not_isolated_blob_is() {
+    let mut p = Page::with_policies(&[], HTTPS, Some("same-origin"), Some("require-corp"));
+    let r = p.run(
+        "var src = 'postMessage(self.crossOriginIsolated);'; var got = []; \
+         function f(tag) { return e => { got.push(tag + ':' + e.data); if (got.length == 2) finish(got.sort().join()); }; } \
+         new Worker('data:text/javascript,' + encodeURIComponent(src)).onmessage = f('data'); \
+         new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'}))).onmessage = f('blob');",
+    );
+    assert_eq!(r, "blob:true,data:false");
+}
+
+/// Un `SharedWorker` se aísla por su propia respuesta, no por la del documento.
+#[test]
+fn shared_worker_isolation_from_its_own_coep() {
+    let src = "onconnect = e => e.ports[0].postMessage(self.crossOriginIsolated);";
+    let mut p = Page::with_policies(
+        &[
+            ("/dir/si.js", src),
+            ("/dir/si.js.headers", COEP),
+            ("/dir/sn.js", src),
+        ],
+        HTTPS,
+        None,
+        None,
+    );
+    let r = p.run(
+        "var got = []; function f(tag) { return e => { got.push(tag + ':' + e.data); if (got.length == 2) finish(got.sort().join()); }; } \
+         new SharedWorker('si.js').port.onmessage = f('con'); new SharedWorker('sn.js').port.onmessage = f('sin');",
+    );
+    assert_eq!(r, "con:true,sin:false");
+}

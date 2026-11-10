@@ -240,6 +240,8 @@ pub fn set_viewport(agent: &mut Agent, realm: RealmId, width: f32, height: f32, 
     s.device_pixel_ratio = dpr;
     s.styles = None;
     s.layout = None;
+    // CSSOM View §4.2: las `MediaQueryList` que cambiaron disparan `change`.
+    media::queue_report(agent, realm);
 }
 
 /// El desplazamiento pedido desde JavaScript (`scrollTo`…) que el shell debe aplicar.

@@ -6,7 +6,7 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 - Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`
 - Condiciones: viewport 800×600, DPR 1, fondo blanco, fuentes del sistema más Ahem (`tests/wpt/fonts/Ahem.ttf`, como si estuviera instalada) y `@font-face`.
 - `.xht`/`.xhtml` se parsean como XML; el resto, como HTML.
-- `needs-js`: tests de testharness.js, manuales o con `<script>` (en el test o en la referencia).
+- `needs-js`: tests de testharness.js, manuales o con `<script>` o atributos manejadores de eventos `on*` (en el test o en la referencia).
 - `error`: pánico o recurso faltante.
 - El porcentaje se calcula sobre pass + fail + error.
 
@@ -23,13 +23,13 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/CSS2/colors | 19 | 0 | 3 | 0 | 22 | 100.0% |
 | css/CSS2/borders | 498 | 6 | 258 | 0 | 762 | 98.8% |
 | css/css-backgrounds | 321 | 295 | 334 | 1 | 951 | 52.0% |
-| css/css-flexbox | 603 | 346 | 478 | 0 | 1427 | 63.5% |
+| css/css-flexbox | 633 | 316 | 478 | 0 | 1427 | 66.7% |
 | css/selectors | 107 | 13 | 404 | 0 | 524 | 89.2% |
 | css/CSS2/tables | 246 | 4 | 889 | 0 | 1139 | 98.4% |
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
-| css/css-grid | 562 | 992 | 913 | 13 | 2480 | 35.9% |
+| css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| **Total** | 5162 | 1957 | 5173 | 15 | 12307 | 72.4% |
+| **Total** | 5265 | 1865 | 5173 | 4 | 12307 | 73.8% |
 
 Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
 total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`
@@ -60,8 +60,10 @@ Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y e
 - Namespaces arbitrarios en el DOM (`Namespace::Other` con la URI): hoy el parser XML mapea
   los namespaces desconocidos o ausentes a HTML, así que `css/selectors/of-type-selectors.xhtml`
   no puede pasar.
-- `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
-  que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
+- E5, 2026-11-06 (filas `css/css-grid` y `css/css-flexbox` medidas ese día en `army/e5`):
+  851 de los 1567 tests ejecutables de `css/css-grid` son de `grid-lanes` (masonry, 101 pasan);
+  sin ellos pasan 534 de 716 (74.6%), y `css/css-grid/subgrid` 56 de 88. `css/css-sizing` (no
+  está en `GROUPS`): 338 pass, 188 fail, 237 needs-js (64.3%).
 - `css/css-overflow`: falta `text-overflow` (60 fallos, con los de `line-clamp` que lo
   combinan), `::scroll-marker`/`::scroll-button` (44), `overflow-clip-margin` (20), el
   `line-clamp` que depende de `transform` (containing block de los fijos, 13) y ocultar las
@@ -92,19 +94,19 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | dom/observable | 29 | 25 | 251 | 0 | 242 | 4 | 5 | 0.0% |
 | dom/ranges | 68 | 61 | 41823 | 37394 | 253 | 0 | 4176 | 89.4% |
 | dom/traversal | 18 | 17 | 1607 | 1573 | 33 | 0 | 1 | 97.9% |
-| encoding | 45 | 38 | 12003 | 11299 | 190 | 511 | 3 | 94.1% |
-| encoding/legacy-mb-japanese | 51 | 12 | 333515 | 0 | 129825 | 1 | 203689 | 0.0% |
-| encoding/legacy-mb-korean | 26 | 3 | 239960 | 0 | 43264 | 0 | 196696 | 0.0% |
-| encoding/legacy-mb-schinese | 4 | 4 | 660 | 4 | 656 | 0 | 0 | 0.6% |
-| encoding/legacy-mb-tchinese | 23 | 5 | 193181 | 123 | 43390 | 0 | 149668 | 0.1% |
-| encoding/streams | 13 | 12 | 111 | 0 | 111 | 0 | 0 | 0.0% |
+| encoding | 82 | 73 | 23441 | 22700 | 227 | 511 | 3 | 96.8% |
+| encoding/legacy-mb-japanese | 51 | 15 | 333544 | 129825 | 29 | 1 | 203689 | 38.9% |
+| encoding/legacy-mb-korean | 26 | 4 | 239968 | 43264 | 8 | 0 | 196696 | 18.0% |
+| encoding/legacy-mb-schinese | 6 | 6 | 1017 | 1017 | 0 | 0 | 0 | 100.0% |
+| encoding/legacy-mb-tchinese | 23 | 6 | 193189 | 43513 | 8 | 0 | 149668 | 22.5% |
+| encoding/streams | 35 | 31 | 325 | 325 | 0 | 0 | 0 | 100.0% |
 | html/dom | 223 | 158 | 64260 | 62278 | 1883 | 46 | 53 | 96.9% |
 | html/semantics/forms | 514 | 393 | 4689 | 1978 | 1862 | 85 | 764 | 42.2% |
 | html/semantics/interactive-elements | 114 | 68 | 418 | 49 | 171 | 33 | 165 | 11.7% |
 | html/semantics/scripting-1 | 491 | 332 | 2711 | 1441 | 959 | 24 | 287 | 53.2% |
 | html/webappapis | 321 | 198 | 1131 | 608 | 293 | 176 | 54 | 53.8% |
 | url | 41 | 39 | 8699 | 8489 | 193 | 17 | 0 | 97.6% |
-| **Total** | 2563 | 1798 | 915961 | 134094 | 224499 | 1042 | 556326 | 14.6% |
+| **Total** | 2624 | 1859 | 928015 | 363312 | 7335 | 1042 | 556326 | 39.1% |
 
 Las causas más frecuentes de los archivos sin estado OK:
 
@@ -119,13 +121,21 @@ Las causas más frecuentes de los archivos sin estado OK:
 
 ## Notas de testharness
 
-- Sin `encoding/legacy-mb-*`: 84553 / 90353 subtests (93.6%).
+- Sin `encoding/legacy-mb-*`: 145693 / 160297 subtests (90.9%).
+- Las filas `encoding*` son de una medición del 2026-11-07 (rama `army/e10`, runner actual con
+  las variantes en workers de los `.any.js`, de ahí más archivos); el resto, de la tabla anterior.
 - `html/dom/reflection-*.html`: 61266 / 61302 subtests (99.9%); fallan solo `link.nonce` y
   `style.nonce` (36): el IDL `nonce` de HTMLOrSVGElement no refleja el atributo (guarda
   `[[CryptographicNonce]]`), y el test lo trata como string reflejado.
-- `encoding/legacy-mb-*`: los tests decodifican por iframes y envíos de formulario (`notrun`
-  casi completo); dominan el total de subtests.
+- `encoding/legacy-mb-*`: los decodificadores y encoders están todos (GBK/gb18030, Big5,
+  EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR); lo que no pasa son los tests que decodifican por
+  `<iframe>` o leen un envío de formulario a un iframe (sin navegación de iframes: `notrun`).
 - Los tests que usan `test_driver` (WebDriver) terminan en `TIMEOUT`.
+- `webmessaging/broadcastchannel` (corrida aparte, 2026-11-07, mismo commit de WPT, con
+  `service-workers/service-worker/resources` en el sparse): 12 documentos, 52 / 66 subtests
+  (78.8%). Los 14 restantes (`cross-origin`, `detached-iframe`, `opaque-origin`, `ordering`,
+  `origin.window`, `sandbox`) crean `<iframe>` y esperan su `load`: el runner no carga
+  marcos (`TIMEOUT`).
 - `html/semantics/forms`: la *activation behavior* (envío con `submit`/`formdata`/`invalid`,
   reset, `label`) está; la mayoría de `form-submission-0` y `form-submission-target` leen el
   resultado del envío en un `<iframe>` con `target` (sin navegación de iframes: `notrun`).

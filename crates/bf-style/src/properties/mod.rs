@@ -242,6 +242,15 @@ longhands! {
     LineClampP "line-clamp" line_clamp: LineClamp = "none", inherited: false, animatable: false;
     WebkitLineClampP "-webkit-line-clamp" webkit_line_clamp: WebkitLineClamp = "none", inherited: false, animatable: false;
     WebkitBoxOrient "-webkit-box-orient" webkit_box_orient: BoxOrient = "horizontal", inherited: false, animatable: false;
+    // E5: tamaño intrínseco (CSS Sizing 4 §5 y §7) y contención de tamaño (CSS Containment 2).
+    AspectRatio "aspect-ratio" aspect_ratio: AspectRatio = "auto", inherited: false, animatable: true;
+    Contain "contain" contain: Contain = "none", inherited: false, animatable: false;
+    ContainIntrinsicWidth "contain-intrinsic-width" contain_intrinsic_width: ContainIntrinsicSize = "none", inherited: false, animatable: true;
+    ContainIntrinsicHeight "contain-intrinsic-height" contain_intrinsic_height: ContainIntrinsicSize = "none", inherited: false, animatable: true;
+    // E5: grid lanes (CSS Grid 3 §2.3, §4.2 y §4.3).
+    GridLanesDirection "grid-lanes-direction" grid_lanes_direction: GridLanesDirection = "normal", inherited: false, animatable: false;
+    GridLanesPack "grid-lanes-pack" grid_lanes_pack: GridLanesPack = "normal", inherited: false, animatable: false;
+    FlowTolerance "flow-tolerance" flow_tolerance: FlowTolerance = "normal", inherited: false, animatable: true;
 }
 
 impl LonghandId {

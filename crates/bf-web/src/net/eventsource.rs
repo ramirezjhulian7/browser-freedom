@@ -14,7 +14,6 @@ use bf_js::vm::{Agent, JsResult};
 
 use super::body::usv_utf8;
 use super::channels::fire_message;
-use super::headers::HeaderList;
 use super::xhr::{fire_simple, new_target};
 use super::{EventSink, NetEvent, NetRequest, classes, dom_error, state};
 use crate::WebContextHandle;
@@ -164,11 +163,6 @@ fn connect(agent: &mut Agent, id: u64, sink: EventSink) {
         headers.push("Origin", &super::document_origin(agent));
     }
     let backend = super::current_backend(agent);
-    let cookie = if credentials {
-        backend.cookie_header(&url)
-    } else {
-        None
-    };
     let req = NetRequest {
         url: url.clone(),
         options: bf_net::RequestOptions {
@@ -184,57 +178,23 @@ fn connect(agent: &mut Agent, id: u64, sink: EventSink) {
         sink.push(NetEvent::End(Err("bad port".into())));
         return;
     }
-    if !backend.network() || !matches!(url.scheme.as_str(), "http" | "https") {
-        // Sin red por partes (runner, data:): la respuesta entera de una vez.
-        let r = backend.fetch(&req);
-        match r {
-            Ok(res) => {
-                sink.push(NetEvent::Head {
-                    url: res.url_list.last().cloned().unwrap_or(url),
-                    status: res.status,
-                    headers: res.headers,
-                });
-                sink.push(NetEvent::Chunk(res.body));
-                sink.push(NetEvent::End(Ok(())));
-            }
-            Err(e) => sink.push(NetEvent::End(Err(e))),
-        }
-        return;
-    }
-    struct Sink {
-        out: EventSink,
-        cancel: Arc<AtomicBool>,
-    }
-    impl bf_net::streaming::StreamSink for Sink {
-        fn head(&mut self, h: &bf_net::streaming::StreamHead) -> bool {
-            self.out.push(NetEvent::Head {
-                url: h.url.clone(),
-                status: h.status,
-                headers: HeaderList(h.headers.0.clone()),
-            });
-            !self.cancel.load(Ordering::Relaxed)
-        }
-        fn chunk(&mut self, bytes: &[u8]) -> bool {
-            if self.cancel.load(Ordering::Relaxed) {
-                return false;
-            }
-            self.out.push(NetEvent::Chunk(bytes.to_vec()));
-            true
-        }
-    }
-    let backend2 = backend.clone();
-    std::thread::spawn(move || {
-        let mut s = Sink {
+    // Con red, en un hilo y por partes; sin red (runner, `data:`), la respuesta entera ahora.
+    let threaded = backend.network() && matches!(url.scheme.as_str(), "http" | "https");
+    let run = move || {
+        let mut s = super::PartSink {
             out: sink.clone(),
             cancel: cancel.clone(),
         };
-        let r =
-            bf_net::streaming::fetch_streaming(&req.url, &req.options, cookie.as_deref(), &mut s);
-        let _ = backend2;
+        let r = backend.fetch_streaming(&req, &mut s);
         if !cancel.load(Ordering::Relaxed) {
-            sink.push(NetEvent::End(r.map_err(|e| e.to_string())));
+            sink.push(NetEvent::End(r));
         }
-    });
+    };
+    if threaded {
+        std::thread::spawn(run);
+    } else {
+        run();
+    }
 }
 
 fn on_event(agent: &mut Agent, t: TargetRef, e: NetEvent) {
@@ -248,16 +208,8 @@ fn on_event(agent: &mut Agent, t: TargetRef, e: NetEvent) {
             url,
             status,
             headers,
+            ..
         } => {
-            let set_cookies: Vec<String> = headers
-                .0
-                .iter()
-                .filter(|(n, _)| n.eq_ignore_ascii_case("set-cookie"))
-                .map(|(_, v)| v.clone())
-                .collect();
-            if !set_cookies.is_empty() {
-                super::current_backend(agent).store_cookies(&url, &set_cookies);
-            }
             let ok_type = headers
                 .get("content-type")
                 .and_then(|c| super::body::mime_essence(&c))
