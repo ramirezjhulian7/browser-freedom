@@ -28,10 +28,12 @@
 //!   workers vivos.
 //! - **El propio worker**: su bucle (en [`scope`]) vacía su bandeja antes de cada tarea.
 
+pub mod cache;
 pub mod dedicated;
 pub mod isolation;
 pub mod ports;
 pub mod scope;
+pub mod service;
 pub mod shared;
 
 use std::collections::{HashMap, VecDeque};
@@ -64,6 +66,9 @@ pub enum Envelope {
         origin: String,
         message: Serialized,
     },
+    /// Service Workers: un aviso del registro, del ciclo de vida o un mensaje
+    /// ([`service::Msg`]).
+    Service(Box<service::Msg>),
 }
 
 /// Un evento de un worker para su dueño.
@@ -215,6 +220,7 @@ pub fn inbox(agent: &mut Agent) -> Arc<AgentInbox> {
 /// partición propia ([`new_partition`]) para que no se crucen sus mensajes.
 pub fn set_partition(agent: &mut Agent, p: u64) {
     host(agent).partition = p;
+    service::repartition(agent, p);
 }
 
 /// Una partición nueva (nunca la 0).
@@ -246,6 +252,7 @@ pub fn busy(agent: &Agent) -> bool {
             .values()
             .any(|w| !w.control.closed.load(Ordering::SeqCst) && !w.inbox.is_idle())
         || h.shared.values().any(|s| s.busy())
+        || service::busy(agent)
 }
 
 /// Espera (en tiempo real) un sobre o un aviso hasta `until`; `true` si llegó algo.
@@ -289,6 +296,7 @@ fn handle(agent: &mut Agent, e: Envelope) {
             origin,
             message,
         } => ports::deliver_broadcast(agent, local, origin, message),
+        Envelope::Service(m) => service::deliver(agent, *m),
     }
 }
 
@@ -325,7 +333,8 @@ fn poll_tick(agent: &mut Agent, _: &bf_js::vm::function::CallArgs<'_>) -> JsResu
         .values()
         .any(|w| !w.control.closed.load(Ordering::SeqCst))
         || !h.shared.is_empty()
-        || ports::has_remote_ports(agent);
+        || ports::has_remote_ports(agent)
+        || service::keeps_polling(agent);
     if !alive && let Some((_, t)) = host(agent).poll.take() {
         agent.clear_timer(t);
     }
@@ -342,6 +351,7 @@ impl Drop for WorkerHost {
         for e in self.shared.values() {
             e.release();
         }
+        service::agent_gone(&self.inbox);
     }
 }
 
@@ -381,4 +391,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &crate::WebContextHandl
     let g = agent.realms[realm].global_object;
     bf_js::builtins::method(agent, g, "structuredClone", 1, ports::structured_clone);
     agent.current_realm = saved;
+    // Una ventana (no el global de un worker): cliente de los service workers y sus
+    // interfaces (solo en contexto seguro).
+    if host(agent).scope.is_none() {
+        service::window_created(agent, realm);
+        cache::install(agent, realm);
+    }
 }

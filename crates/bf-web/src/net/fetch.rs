@@ -198,7 +198,7 @@ fn normalize_method(m: &str) -> String {
 }
 
 /// Un `AbortSignal` que nunca se aborta (`new AbortController().signal`).
-fn new_signal(agent: &mut Agent) -> JsResult<Value> {
+pub(crate) fn new_signal(agent: &mut Agent) -> JsResult<Value> {
     let realm = agent.current_realm;
     let g = agent.realms[realm].global_object;
     let ctor = agent.get(g, &PropertyKey::from("AbortController"), Value::Object(g))?;
@@ -222,7 +222,7 @@ fn is_signal(agent: &Agent, v: &Value) -> bool {
 }
 
 /// Crea el wrapper de un `Request` con sus `Headers` y su señal.
-fn make_request(
+pub(crate) fn make_request(
     agent: &mut Agent,
     nt: Option<bf_js::heap::Gc<bf_js::object::Object>>,
     d: RequestData,
@@ -1348,6 +1348,50 @@ fn body_failed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// Manda la petición de un `fetch()` (main fetch con CORS, [`cors::main_fetch`]) y resuelve
 /// su promesa con la respuesta. Con red real, la respuesta llega por partes.
 fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, from_stream: bool) {
+    // E3: si la página está controlada por un service worker, la petición pasa primero por
+    // su evento `fetch` (SW §4.6 "Handle Fetch"; Fetch §4.3 "HTTP fetch" paso 5). Sin
+    // `respondWith`, vuelve aquí y sale a la red.
+    let (rd, l) = (r.clone(), list.clone());
+    let done: crate::workers::service::FetchDone = Box::new(move |agent: &mut Agent, outcome| {
+        match outcome {
+            None => start_network_direct(agent, id, rd, &l, from_stream),
+            Some(result) => deliver_response(agent, id, result),
+        }
+    });
+    if crate::workers::service::handle_fetch(agent, &r, list, done).is_ok() {
+        return;
+    }
+    start_network_direct(agent, id, r, list, from_stream);
+}
+
+/// Resuelve (o rechaza) la promesa del `fetch()` `id` con una respuesta ya filtrada.
+fn deliver_response(agent: &mut Agent, id: u64, result: Result<(ResponseData, HeaderList), String>) {
+    let Some(p) = finish_call(agent, id) else {
+        return;
+    };
+    match result {
+        Ok((d, list)) => match make_response(agent, None, d, list, Guard::Immutable, None) {
+            Ok(v) => {
+                let _ = agent.resolve_promise(p, v);
+            }
+            Err(Throw::Value(e)) => reject(agent, p, e),
+            Err(_) => {}
+        },
+        Err(msg) => {
+            let e = type_error_value(agent, &format!("Failed to fetch: {msg}"));
+            reject(agent, p, e);
+        }
+    }
+}
+
+/// [`start_network`] sin service worker: a la red.
+fn start_network_direct(
+    agent: &mut Agent,
+    id: u64,
+    r: RequestData,
+    list: &HeaderList,
+    from_stream: bool,
+) {
     let params = fetch_params(agent, &r, list, from_stream);
     let backend = super::current_backend(agent);
     if backend.network() && matches!(params.url.scheme.as_str(), "http" | "https") {
@@ -1359,24 +1403,7 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, 
         agent,
         params,
         Box::new(move |agent: &mut Agent, result| {
-            let Some(p) = finish_call(agent, id) else {
-                return;
-            };
-            match to_response(&rd, result) {
-                Ok((d, list)) => {
-                    match make_response(agent, None, d, list, Guard::Immutable, None) {
-                        Ok(v) => {
-                            let _ = agent.resolve_promise(p, v);
-                        }
-                        Err(Throw::Value(e)) => reject(agent, p, e),
-                        Err(_) => {}
-                    }
-                }
-                Err(msg) => {
-                    let e = type_error_value(agent, &format!("Failed to fetch: {msg}"));
-                    reject(agent, p, e);
-                }
-            }
+            deliver_response(agent, id, to_response(&rd, result));
         }),
     );
     CALLS.with(|c| {
