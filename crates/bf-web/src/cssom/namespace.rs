@@ -5,6 +5,7 @@
 
 use bf_css::stylesheet::{Origin, Rule, Stylesheet};
 use bf_js::builtins::{FnEntry, methods};
+use bf_js::string::JsString;
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
@@ -79,7 +80,9 @@ pub fn supports_condition(text: &str) -> bool {
 /// `CSS.escape(ident)`: "serialize an identifier" (CSSOM §2.1).
 fn escape(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let ident = to_dom_string(agent, &a.arg(0))?.to_string();
-    Ok(Value::from(serialize_identifier(&ident).as_str()))
+    Ok(Value::from(JsString::from(
+        serialize_identifier(&ident).as_str(),
+    )))
 }
 
 pub fn serialize_identifier(ident: &str) -> String {
