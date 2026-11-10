@@ -332,7 +332,13 @@ fn dynamic_state_and_scope() {
 #[test]
 fn custom_state_pseudo_class() {
     let ns = NamespaceMap::default();
-    for selector in [":state()", ":state(a b)", ":state(\"a\")", ":state(1)", ":state(a, b)"] {
+    for selector in [
+        ":state()",
+        ":state(a b)",
+        ":state(\"a\")",
+        ":state(1)",
+        ":state(a, b)",
+    ] {
         assert!(
             parse_selector_list(selector, &ns).is_err(),
             "debería ser inválido: {selector:?}"
@@ -353,7 +359,10 @@ fn custom_state_pseudo_class() {
     assert!(d.add_custom_state(custom, "open"));
     assert!(!d.add_custom_state(custom, "open"));
     assert!(d.add_custom_state(custom, "Busy"));
-    assert!(d.version() > v, "un cambio del states set invalida el estilo");
+    assert!(
+        d.version() > v,
+        "un cambio del states set invalida el estilo"
+    );
     assert_eq!(d.custom_states(custom), ["open", "Busy"]);
     let ctx = MatchContext::for_document(&d);
     assert_eq!(select_in(&d, ":state(open)", &ctx, &ns), ["custom"]);
@@ -363,7 +372,10 @@ fn custom_state_pseudo_class() {
         select_in(&d, ":state(busy)", &ctx, &ns),
         Vec::<String>::new()
     );
-    assert_eq!(select_in(&d, ":not(:state(open))#custom", &ctx, &ns), Vec::<String>::new());
+    assert_eq!(
+        select_in(&d, ":not(:state(open))#custom", &ctx, &ns),
+        Vec::<String>::new()
+    );
     assert!(d.delete_custom_state(custom, "open"));
     assert!(!d.delete_custom_state(custom, "open"));
     assert_eq!(

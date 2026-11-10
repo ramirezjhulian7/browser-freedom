@@ -280,7 +280,7 @@ impl Document {
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
-            custom_states: HashMap::new(), // E10
+            custom_states: HashMap::new(),
         };
         doc.push(NodeData::Document);
         doc
