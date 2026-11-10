@@ -498,6 +498,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     rt.agent.set_realm_data(realm, resources);
     // E3: el runner vacía la bandeja de los workers y los espera en tiempo real.
     crate::workers::set_manual_pump(&mut rt.agent);
+    // Los documentos corren en paralelo con el mismo origen: los `BroadcastChannel` de cada
+    // uno (y de sus workers) no deben oír a los de los otros.
+    crate::workers::set_partition(&mut rt.agent, crate::workers::new_partition());
 
     with_parser(&mut rt.agent, realm, |p, host| {
         p.feed(&doc.html, host);
