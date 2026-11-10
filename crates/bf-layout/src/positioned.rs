@@ -70,6 +70,24 @@ impl<'a> Layout<'a> {
             width: cb_rect.width,
             height: Some(cb_rect.height),
         };
+        // E9: una absoluta de otro modo de escritura es la raíz de un flujo ortogonal: se
+        // maqueta en su marco y se coloca con sus insets (o en su posición estática).
+        if self.is_orthogonal(b) {
+            let mut f = self.orthogonal_fragment(b, cb);
+            let outer = f.margin_rect();
+            let x = match (inset(&s.left, Some(cb.width)), inset(&s.right, Some(cb.width))) {
+                (Some(l), _) => l,
+                (None, Some(r)) => cb.width - r - outer.width,
+                (None, None) => p.static_x - cb.x,
+            };
+            let y = match (inset(&s.top, cb.height), inset(&s.bottom, cb.height)) {
+                (Some(t), _) => t,
+                (None, Some(bm)) => cb_rect.height - bm - outer.height,
+                (None, None) => p.static_y - cb.y,
+            };
+            f.translate(cb.x + x - outer.x, cb.y + y - outer.y);
+            return f;
+        }
         let border = border_edges(s);
         let padding = padding_edges(s, cb.width);
         let edges_h = border.horizontal() + padding.horizontal();

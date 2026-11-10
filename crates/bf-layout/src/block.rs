@@ -94,6 +94,9 @@ pub(crate) struct Layout<'a> {
     pub pct_height_basis: Option<f32>,
     /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
     pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
+    /// E9: marco (modo de escritura) del flujo en curso; una caja de otro modo es la raíz de
+    /// un flujo ortogonal (`writing_mode.rs`).
+    pub frame: crate::writing_mode::Frame,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -325,6 +328,7 @@ impl<'a> Layout<'a> {
             bfc_items: Vec::new(), // E4 grid
             subgrids: std::collections::HashMap::new(),
             pct_height_basis: None,
+            frame: crate::writing_mode::Frame::Horizontal,
         }
     }
 
@@ -703,7 +707,7 @@ impl<'a> Layout<'a> {
     }
 
     /// [`Self::block`] con el espacio horizontal disponible `avail` (dentro de `cb`).
-    fn block_in(
+    pub(crate) fn block_in(
         &mut self,
         b: &'a LayoutBox,
         cb: Cb,
@@ -712,6 +716,10 @@ impl<'a> Layout<'a> {
         floats: &mut FloatContext,
         is_root: bool,
     ) -> (Fragment, CollapsedMargin) {
+        // E9: raíz de un flujo de otro modo de escritura.
+        if self.is_orthogonal(b) {
+            return self.orthogonal_block(b, cb, avail, top);
+        }
         let style = &b.style;
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);
@@ -1336,8 +1344,13 @@ impl<'a> Layout<'a> {
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
         let pending = self.pending_abs_marks(); // E4 grid
-        let (mut f, _) =
-            self.box_contents(b, cb, 0.0, 0.0, content_w, margins, &mut scratch, false);
+        // E9: un float de otro modo de escritura es la raíz de un flujo ortogonal.
+        let mut f = if self.is_orthogonal(b) {
+            self.orthogonal_fragment(b, cb)
+        } else {
+            self.box_contents(b, cb, 0.0, 0.0, content_w, margins, &mut scratch, false)
+                .0
+        };
         let outer = f.margin_rect();
         let left = b.style.float == bf_style::properties::types::Float::Left;
         // `clear` en un float (§9.5.2): su margin box queda debajo de los floats anteriores
@@ -1360,6 +1373,10 @@ impl<'a> Layout<'a> {
 
     /// Anchos intrínsecos (min-content, max-content) del contenido de `b`.
     pub(crate) fn intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        // E9: la contribución de un flujo ortogonal es su tamaño en el eje inline del padre.
+        if self.is_orthogonal(b) {
+            return self.orthogonal_intrinsic(b);
+        }
         // E5: los porcentajes de altura de los descendientes se resuelven contra el alto de
         // `b` si es definido respecto a `pct_height_basis` (CSS Sizing 3 §5.2.1).
         if matches!(b.kind, BoxKind::Replaced { .. }) {

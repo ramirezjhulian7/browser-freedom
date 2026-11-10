@@ -880,16 +880,22 @@ impl<'a> Layout<'a> {
         let margins = margin_edges(&b.style, cb.width);
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
-        let (fragment, _) = self.box_contents(
-            b,
-            cb,
-            margins.left,
-            margins.top,
-            content_w,
-            margins,
-            &mut scratch,
-            false,
-        );
+        // E9: una inline-block de otro modo de escritura es la raíz de un flujo ortogonal.
+        let fragment = if self.is_orthogonal(b) {
+            self.orthogonal_fragment(b, cb)
+        } else {
+            self.box_contents(
+                b,
+                cb,
+                margins.left,
+                margins.top,
+                content_w,
+                margins,
+                &mut scratch,
+                false,
+            )
+            .0
+        };
         let outer = fragment.margin_rect();
         let visible =
             b.style.overflow_x == Overflow::Visible && b.style.overflow_y == Overflow::Visible;
