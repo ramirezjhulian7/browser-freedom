@@ -325,11 +325,9 @@ impl<'a> Layout<'a> {
         children.sort_by_key(|c| c.style.order.0);
         // E5: un ítem subgrid de un contenedor grid lanes solo hereda el eje de rejilla (CSS
         // Grid 3, "subgrids"): en el de apilado `subgrid` cuenta como sin pistas heredadas.
-        if !rows {
-            for c in &children {
-                self.subgrid_mask
-                    .insert(*c as *const LayoutBox as usize, (true, false));
-            }
+        for c in &children {
+            self.subgrid_mask
+                .insert(*c as *const LayoutBox as usize, (!rows, rows));
         }
         let axis = explicit_axis(template, &cs.grid_template_areas, !rows, space, gap);
         let hyp = self.lanes_hypothetical_sizes(
@@ -824,7 +822,33 @@ impl<'a> Layout<'a> {
                     area_w: None,
                     empty: false,
                 };
-                let (c, _) = self.row_contrib(&it, cs, &tracks, row_gap, w + bp_h + ml + mr);
+                let outer_w = w + bp_h + ml + mr;
+                // E5: un subgrid en las filas recibe los nombres de línea de esta posición y
+                // lo sustituyen sus ítems (con sus columnas propias en su ancho).
+                if self.sub_axes(b).1 {
+                    let entry = SubgridParent {
+                        cols: None,
+                        rows: Some(SubgridAxis {
+                            names: span_line_names(&setup.axis, setup.before, span),
+                            sizes: Vec::new(),
+                            gap: row_gap,
+                        }),
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                    let it = GridItem {
+                        area_w: Some(outer_w),
+                        ..it
+                    };
+                    let mut expanded = Vec::new();
+                    self.push_axis_item(it, false, None, cb.width, &mut expanded, 0);
+                    for e in &expanded {
+                        let aw = e.area_w.unwrap_or(outer_w);
+                        let (c, _) = self.row_contrib(e, cs, &tracks, row_gap, aw);
+                        contribs.push(c);
+                    }
+                    continue;
+                }
+                let (c, _) = self.row_contrib(&it, cs, &tracks, row_gap, outer_w);
                 contribs.push(c);
             }
             let stretch = matches!(
@@ -910,8 +934,34 @@ impl<'a> Layout<'a> {
                     block_axis(cs.align_items),
                     has_ratio(b),
                 );
-                let forced = if align == ItemAlign::Stretch
-                    && matches!(s.height, Size::Auto)
+                // E5: un subgrid en las filas recibe los tamaños de las pistas que ocupa y se
+                // estira siempre, con los márgenes `auto` a 0 (§9 de Grid 2).
+                let sub_rows = self.sub_axes(b).1;
+                let (mt, mb) = if sub_rows {
+                    let sizes = subgrid_track_sizes(
+                        s,
+                        (r0, r1),
+                        (&starts, &ends),
+                        row_gap,
+                        cb.width,
+                        false,
+                    )
+                    .unwrap_or_default();
+                    let entry = SubgridParent {
+                        cols: None,
+                        rows: Some(SubgridAxis {
+                            names: span_line_names(&setup.axis, setup.before, (r0, r1)),
+                            sizes,
+                            gap: row_gap,
+                        }),
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                    (mt.or(Some(0.0)), mb.or(Some(0.0)))
+                } else {
+                    (mt, mb)
+                };
+                let forced = if (align == ItemAlign::Stretch || sub_rows)
+                    && (matches!(s.height, Size::Auto) || sub_rows)
                     && mt.is_some()
                     && mb.is_some()
                 {
