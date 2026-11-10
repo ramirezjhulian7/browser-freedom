@@ -77,6 +77,43 @@ pub fn from_bytes(agent: &mut Agent, bytes: Vec<u8>) -> JsResult<Value> {
     call(agent, "fromBytes", &[u8])
 }
 
+/// Un stream que llena la red: `(stream, ops)`. `on_cancel` se llama si el autor lo cancela;
+/// `ops` se usa con [`push_chunk`], [`push_close`] y [`push_error`].
+pub fn pushed(agent: &mut Agent, on_cancel: Value) -> JsResult<(Value, Value)> {
+    let arr = call(agent, "pushed", &[on_cancel])?;
+    let Value::Object(a) = arr else {
+        return agent.type_error("pushed");
+    };
+    let s = agent.get(a, &PropertyKey::from(0u32), arr.clone())?;
+    let ops = agent.get(a, &PropertyKey::from(1u32), arr.clone())?;
+    Ok((s, ops))
+}
+
+fn op(agent: &mut Agent, ops: &Value, name: &str, args: &[Value]) {
+    let Value::Object(o) = ops else {
+        return;
+    };
+    if let Ok(f) = agent.get(*o, &PropertyKey::from(name), ops.clone()) {
+        let _ = agent.call(&f, Value::Undefined, args);
+    }
+}
+
+/// Encola `bytes` (un `Uint8Array`) en un stream de [`pushed`].
+pub fn push_chunk(agent: &mut Agent, ops: &Value, bytes: Vec<u8>) {
+    let u8 = Value::Object(new_uint8_array(agent, bytes));
+    op(agent, ops, "enqueue", &[u8]);
+}
+
+/// Cierra un stream de [`pushed`].
+pub fn push_close(agent: &mut Agent, ops: &Value) {
+    op(agent, ops, "close", &[]);
+}
+
+/// Da error a un stream de [`pushed`].
+pub fn push_error(agent: &mut Agent, ops: &Value, e: Value) {
+    op(agent, ops, "error", &[e]);
+}
+
 /// ReadableStreamTee (§4.9.1): las dos ramas.
 pub fn tee(agent: &mut Agent, s: &Value) -> JsResult<(Value, Value)> {
     let arr = call(agent, "tee", std::slice::from_ref(s))?;

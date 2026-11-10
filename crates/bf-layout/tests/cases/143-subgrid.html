@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- CSS Grid 2 §9: subgrid en columnas (pistas, nombres de línea y mbp en los bordes) y en filas. -->
+<style>
+body{margin:0}
+#g{display:grid;grid-template-columns:50px [m] auto 100px;column-gap:10px;justify-content:start}
+#s{display:grid;grid-column:1/4;grid-template-columns:subgrid [a] [b];padding:0 5px}
+#s>div{height:10px}
+#x{grid-column:m}
+#r{display:grid;grid-template-rows:20px auto;grid-template-columns:100px}
+#t{display:grid;grid-row:1/3;grid-template-rows:subgrid;border-top:3px solid}
+</style>
+<div id=g><div id=s><div>a</div><div>aaaaaaaa</div><div id=x></div></div></div>
+<div id=r><div id=t><div>a</div><div style="height:50px"></div></div></div>
+<!-- expect
+Block <html> 0,0 800×90
+  Block <body> 0,0 800×90
+    Block <div#g> 0,0 800×20
+      InlineBlock <div#s> 0,0 234×20
+        InlineBlock <div> 5,0 45×10
+          Line 5,0 45×16
+            Text "a" 5,0 8×16
+        InlineBlock <div> 60,0 64×10
+          Line 60,0 64×16
+            Text "aaaaaaaa" 60,0 64×16
+        InlineBlock <div#x> 60,10 64×10
+    Block <div#r> 0,20 800×70
+      InlineBlock <div#t> 0,20 100×70
+        InlineBlock <div> 0,23 100×17
+          Line 0,23 100×16
+            Text "a" 0,23 8×16
+        InlineBlock <div> 0,40 100×50
+-->

@@ -654,7 +654,12 @@ impl<'a> Builder<'a> {
         let items = fixup_table_parts(items, &style, false);
         let flex = matches!(
             style.display,
-            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+            Display::Flex
+                | Display::InlineFlex
+                | Display::Grid
+                | Display::InlineGrid
+                | Display::GridLanes
+                | Display::InlineGridLanes
         );
         container.children = if flex {
             flex_items(items, &style)

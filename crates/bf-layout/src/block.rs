@@ -89,6 +89,11 @@ pub(crate) struct Layout<'a> {
     pub table_paint: Option<crate::fragment::TablePaint>,
     pub grid_baseline: Option<f32>, // E4 grid: baseline del último contenedor grid maquetado
     pub bfc_items: Vec<usize>,      // E4 grid: ítems en curso (raíces de formato independientes)
+    /// E5: alto definido del containing block para los porcentajes de altura al calcular
+    /// tamaños intrínsecos (p. ej. el área de un ítem de grid con filas fijas).
+    pub pct_height_basis: Option<f32>,
+    /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
+    pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -180,6 +185,8 @@ pub(crate) fn establishes_bfc(b: &LayoutBox, is_root: bool) -> bool {
                 | Display::InlineFlex
                 | Display::Grid
                 | Display::InlineGrid
+                | Display::GridLanes
+                | Display::InlineGridLanes
                 | Display::Table
                 | Display::InlineTable
                 | Display::TableCell
@@ -268,6 +275,26 @@ pub(crate) fn width_limits(style: &ComputedStyle, cb_width: f32, edges_h: f32) -
     (min, max)
 }
 
+/// E5: ancho de contenido que corresponde al alto de contenido `h` con la relación `r` (ancho /
+/// alto), aplicada a la caja de `box-sizing` (CSS Sizing 4 §5.1).
+pub(crate) fn ratio_transfer(style: &ComputedStyle, h: f32, ev: f32, eh: f32, r: f32) -> f32 {
+    if style.box_sizing == BoxSizing::BorderBox {
+        ((h + ev) * r - eh).max(0.0)
+    } else {
+        h * r
+    }
+}
+
+/// E5: alto de contenido que corresponde al ancho de contenido `w` (inversa de
+/// [`ratio_transfer`]).
+pub(crate) fn ratio_transfer_h(style: &ComputedStyle, w: f32, eh: f32, ev: f32, r: f32) -> f32 {
+    if style.box_sizing == BoxSizing::BorderBox {
+        ((w + eh) / r - ev).max(0.0)
+    } else {
+        w / r
+    }
+}
+
 fn is_zero_or_auto_height(style: &ComputedStyle) -> bool {
     match &style.height {
         Size::LengthPercentage(lp) => !lp.has_percentage() && lp.resolve(0.0) == 0.0,
@@ -296,6 +323,8 @@ impl<'a> Layout<'a> {
             table_paint: None,
             grid_baseline: None,   // E4 grid
             bfc_items: Vec::new(), // E4 grid
+            subgrids: std::collections::HashMap::new(),
+            pct_height_basis: None,
         }
     }
 
@@ -373,7 +402,10 @@ impl<'a> Layout<'a> {
             && border_edges(&b.style).bottom == 0.0
             && b.style.padding_bottom.0.resolve(0.0) == 0.0
             && !b.style.padding_bottom.0.has_percentage()
-            && matches!(b.style.height, Size::Auto)
+            // E5: las keywords intrínsecas y `stretch` (indefinido) se comportan como `auto`
+            // (CSS Sizing 3 §3.2 y CSS Sizing 4 §6.1).
+            && (matches!(b.style.height, Size::Auto | Size::Stretch)
+                || b.style.height.is_intrinsic())
             && min_height_is_zero(&b.style)
     }
 
@@ -446,6 +478,18 @@ impl<'a> Layout<'a> {
     /// Anchos de un bloque en flujo no reemplazado (CSS 2.2 §10.3.3, con min/max de §10.4):
     /// `(ancho del contenido, margin-left, margin-right)`.
     fn block_width(&self, style: &ComputedStyle, cb_width: f32, edges_h: f32) -> (f32, f32, f32) {
+        let limits = width_limits(style, cb_width, edges_h);
+        self.block_width_with(style, cb_width, edges_h, limits)
+    }
+
+    /// [`Self::block_width`] con `min-width`/`max-width` ya resueltos (E5: keywords).
+    fn block_width_with(
+        &self,
+        style: &ComputedStyle,
+        cb_width: f32,
+        edges_h: f32,
+        (min, max): (f32, f32),
+    ) -> (f32, f32, f32) {
         let ml = margin_value(&style.margin_left, cb_width);
         let mr = margin_value(&style.margin_right, cb_width);
         let solve = |w: Option<f32>| match w {
@@ -469,7 +513,6 @@ impl<'a> Layout<'a> {
                 }
             }
         };
-        let (min, max) = width_limits(style, cb_width, edges_h);
         let mut result = solve(specified_width(style, cb_width, edges_h));
         if result.0 > max {
             result = solve(Some(max));
@@ -496,6 +539,59 @@ impl<'a> Layout<'a> {
             border.horizontal() + padding.horizontal(),
             border.vertical() + padding.vertical(),
         );
+        // E5: `aspect-ratio` (CSS Sizing 4 §5.1): `<ratio>` sustituye a la relación natural;
+        // `auto <ratio>` solo se usa si no la hay.
+        // Con `<ratio>` (sin `auto`) la relación se aplica a la caja de `box-sizing`; la
+        // natural, al content box.
+        let bb = s.box_sizing == BoxSizing::BorderBox;
+        let (natural, ratio, ratio_bb) = match s.aspect_ratio.preferred() {
+            Some(r) if !s.aspect_ratio.auto || ratio.is_none() => {
+                let bb = bb && !s.aspect_ratio.auto;
+                let w_to_h = |w: f32| {
+                    if bb {
+                        ((w + eh) / r - ev).max(0.0)
+                    } else {
+                        w / r
+                    }
+                };
+                let h_to_w = |h: f32| {
+                    if bb {
+                        ((h + ev) * r - eh).max(0.0)
+                    } else {
+                        h * r
+                    }
+                };
+                let n = if natural.width > 0.0 {
+                    LayoutSize {
+                        width: natural.width,
+                        height: w_to_h(natural.width),
+                    }
+                } else if natural.height > 0.0 {
+                    LayoutSize {
+                        width: h_to_w(natural.height),
+                        height: natural.height,
+                    }
+                } else {
+                    natural
+                };
+                (n, Some(r), bb)
+            }
+            _ => (natural, ratio, false),
+        };
+        let w_to_h = |w: f32, r: f32| {
+            if ratio_bb {
+                ((w + eh) / r - ev).max(0.0)
+            } else {
+                w / r
+            }
+        };
+        let h_to_w = |h: f32, r: f32| {
+            if ratio_bb {
+                ((h + ev) * r - eh).max(0.0)
+            } else {
+                h * r
+            }
+        };
         let sw = specified_width(s, cb.width, eh);
         let sh = specified_height(s, cb.height, ev);
         let (wmin, wmax) = width_limits(s, cb.width, eh);
@@ -513,7 +609,7 @@ impl<'a> Layout<'a> {
             (None, Some(h), Some(r)) => {
                 let h = h.min(hmax).max(hmin);
                 LayoutSize {
-                    width: (h * r).min(wmax).max(wmin),
+                    width: h_to_w(h, r).min(wmax).max(wmin),
                     height: h,
                 }
             }
@@ -521,7 +617,7 @@ impl<'a> Layout<'a> {
                 let w = w.min(wmax).max(wmin);
                 LayoutSize {
                     width: w,
-                    height: (w / r).min(hmax).max(hmin),
+                    height: w_to_h(w, r).min(hmax).max(hmin),
                 }
             }
             _ => LayoutSize {
@@ -624,6 +720,9 @@ impl<'a> Layout<'a> {
         let margins_h = margin_value(&style.margin_left, cb.width).unwrap_or(0.0)
             + margin_value(&style.margin_right, cb.width).unwrap_or(0.0);
         let table_w = self.table_fixed_width(b, (avail.width - margins_h).max(0.0), cb.width);
+        // E5: los porcentajes de altura se resuelven contra el containing block al calcular los
+        // tamaños intrínsecos (CSS Sizing 3 §5.2.1).
+        let saved_basis = std::mem::replace(&mut self.pct_height_basis, cb.height);
         // Ancho fijo: el de un reemplazado o el intrínseco de un control con `width: auto`.
         let fixed_w = table_w
             .or(match &b.kind {
@@ -638,7 +737,8 @@ impl<'a> Layout<'a> {
                 }
                 _ => None,
             })
-            .or_else(|| self.keyword_width(b, avail.width - margins_h - edges_h, cb.width));
+            .or_else(|| self.keyword_width(b, avail.width - margins_h - edges_h, cb.width))
+            .or_else(|| self.ratio_width(b, cb));
         let (content_w, ml, mr) = match fixed_w {
             Some(width) => {
                 let rest = avail.width - width - edges_h;
@@ -652,8 +752,13 @@ impl<'a> Layout<'a> {
                 };
                 (width, l, r)
             }
-            None => self.block_width(style, avail.width, edges_h),
+            None => {
+                let available = (avail.width - margins_h - edges_h).max(0.0);
+                let limits = self.width_limits_for(b, avail.width, edges_h, available);
+                self.block_width_with(style, avail.width, edges_h, limits)
+            }
         };
+        self.pct_height_basis = saved_basis;
         let margins = Edges {
             top: margin_value(&style.margin_top, cb.width).unwrap_or(0.0),
             right: mr,
@@ -728,16 +833,48 @@ impl<'a> Layout<'a> {
         }
         let content_top = top + border.top + legend_extra + padding.top;
         let control_h = self.control_size(b).1;
+        // E5: `height: stretch` (CSS Sizing 4 §6.1) con el alto del containing block definido.
+        let stretch_h = match (&style.height, cb.height) {
+            (Size::Stretch, Some(h)) => Some((h - margins.top - margins.bottom - edges_v).max(0.0)),
+            _ => None,
+        };
+        // E5: alto preferido transferido desde el ancho por `aspect-ratio` (CSS Sizing 4 §5.1).
+        let ratio_h = match style.aspect_ratio.preferred() {
+            Some(r)
+                if !matches!(b.kind, BoxKind::Replaced { .. })
+                    && (style.height == Size::Auto || style.height.is_intrinsic()) =>
+            {
+                let eh = border.horizontal() + padding.horizontal();
+                let (lo, hi) = height_limits(style, cb.height, edges_v);
+                Some(
+                    ratio_transfer_h(style, content_w, eh, edges_v, r)
+                        .min(hi)
+                        .max(lo),
+                )
+            }
+            _ => None,
+        };
         let spec_h = forced
             .or_else(|| specified_height(style, cb.height, edges_v))
+            .or(stretch_h)
+            .or(ratio_h)
             .or(control_h);
         // Los porcentajes de los hijos se resuelven contra la altura usada (ya limitada por
         // min-height/max-height), no la especificada (§10.7).
+        // E5: el alto por `aspect-ratio` con mínimo automático puede crecer con el contenido:
+        // para los contenedores flex y grid no es un alto definido.
+        let ratio_min_auto = ratio_h.is_some()
+            && spec_h == ratio_h
+            && forced.is_none()
+            && style.min_height == Size::Auto
+            && matches!(style.overflow_y, Overflow::Visible | Overflow::Clip)
+            && (crate::flex::is_flex_container(b) || crate::grid::is_grid_container(b));
         let child_cb = Cb {
             x: content_x,
             y: content_top,
             width: content_w,
             height: spec_h
+                .filter(|_| !ratio_min_auto)
                 .map(|h| {
                     let (lo, hi) = height_limits(style, cb.height, edges_v);
                     h.min(hi).max(lo)
@@ -758,7 +895,25 @@ impl<'a> Layout<'a> {
         let (mut children, auto_h) = match &b.kind {
             BoxKind::Replaced { natural, ratio } => {
                 let size = self.replaced_size(b, *natural, *ratio, cb);
-                (Vec::new(), size.height)
+                // E5: con un ancho usado distinto (ítem flexionado o estirado) y alto `auto`, el
+                // alto sale de la relación de aspecto (CSS Sizing 4 §5.1).
+                let r = style
+                    .aspect_ratio
+                    .preferred()
+                    .filter(|_| !style.aspect_ratio.auto || ratio.is_none())
+                    .or(*ratio);
+                let h = match r {
+                    Some(r)
+                        if r > 0.0
+                            && (content_w - size.width).abs() > 0.01
+                            && specified_height(style, cb.height, edges_v).is_none() =>
+                    {
+                        let (lo, hi) = height_limits(style, cb.height, edges_v);
+                        (content_w / r).min(hi).max(lo)
+                    }
+                    _ => size.height,
+                };
+                (Vec::new(), h)
             }
             _ if crate::flex::is_flex_container(b) => self.flex_layout(b, child_cb),
             // E4: grid y tablas.
@@ -777,7 +932,25 @@ impl<'a> Layout<'a> {
             }
         };
         self.legend = outer_legend;
+        // E5: con contención de tamaño (CSS Containment 2 §3.2) el alto automático es el de una
+        // caja vacía o `contain-intrinsic-height` (CSS Sizing 4 §7.1).
+        let auto_h = if style.contain.size && !matches!(b.kind, BoxKind::Replaced { .. }) {
+            style.contain_intrinsic_height.px().unwrap_or(0.0)
+        } else {
+            auto_h
+        };
         let mut content_h = spec_h.unwrap_or(auto_h);
+        // E5: el alto por `aspect-ratio` con `min-height: auto` no baja del contenido (CSS
+        // Sizing 4 §5.2, mínimo automático).
+        if forced.is_none()
+            && specified_height(style, cb.height, edges_v).is_none()
+            && stretch_h.is_none()
+            && ratio_h.is_some()
+            && style.min_height == Size::Auto
+            && matches!(style.overflow_y, Overflow::Visible | Overflow::Clip)
+        {
+            content_h = content_h.max(auto_h);
+        }
         // E4: en tablas `height` es un mínimo; en celdas solo cuenta para la altura de la fila
         // (CSS 2.2 §17.5.3), así que la celda mide su contenido.
         if matches!(b.kind, BoxKind::Table) {
@@ -795,7 +968,23 @@ impl<'a> Layout<'a> {
         {
             content_h = content_h.max(bottom - content_top);
         }
-        let (hmin, hmax) = height_limits(style, cb.height, edges_v);
+        let (mut hmin, mut hmax) = height_limits(style, cb.height, edges_v);
+        // E5: keywords en `min-height`/`max-height` (CSS Sizing 3 §3.2): en el eje de bloque
+        // min-content, max-content y fit-content son el alto del contenido; `stretch` llena el
+        // containing block si es definido.
+        let stretch_cb = cb
+            .height
+            .map(|h| (h - margins.top - margins.bottom - edges_v).max(0.0));
+        match &style.min_height {
+            k if k.is_intrinsic() => hmin = hmin.max(auto_h),
+            Size::Stretch => hmin = stretch_cb.unwrap_or(hmin),
+            _ => {}
+        }
+        match style.max_height.as_size() {
+            k if k.is_intrinsic() => hmax = auto_h,
+            Size::Stretch => hmax = stretch_cb.unwrap_or(hmax),
+            _ => {}
+        }
         // CSS 2.2 §8.3.1: con altura computada `auto` el margen del último hijo es adyacente
         // al inferior de la caja aunque max-height la recorte (margin-collapse-038);
         // normal-flow/max-height-separates-margin espera lo contrario.
@@ -998,6 +1187,15 @@ impl<'a> Layout<'a> {
     /// Ancho de contenido de una caja que se dimensiona shrink-to-fit (floats, inline-blocks,
     /// absolutas con `width: auto`).
     pub(crate) fn fit_width(&mut self, b: &'a LayoutBox, cb: Cb, margins_h: f32) -> f32 {
+        // E5: los porcentajes de altura se resuelven contra el containing block al calcular los
+        // tamaños intrínsecos (CSS Sizing 3 §5.2.1).
+        let saved = std::mem::replace(&mut self.pct_height_basis, cb.height);
+        let w = self.fit_width_inner(b, cb, margins_h);
+        self.pct_height_basis = saved;
+        w
+    }
+
+    fn fit_width_inner(&mut self, b: &'a LayoutBox, cb: Cb, margins_h: f32) -> f32 {
         let style = &b.style;
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);
@@ -1012,41 +1210,117 @@ impl<'a> Layout<'a> {
         if let Some(w) = self.keyword_width(b, cb.width - margins_h - edges_h, cb.width) {
             return w;
         }
+        if let Some(w) = self.ratio_width(b, cb) {
+            return w;
+        }
+        let available = (cb.width - margins_h - edges_h).max(0.0);
         let w = match specified_width(style, cb.width, edges_h) {
             Some(w) => w,
             None => match self.control_size(b).0 {
                 Some(w) => w,
-                None => self.shrink_to_fit(b, (cb.width - margins_h - edges_h).max(0.0)),
+                None => self.shrink_to_fit(b, available),
             },
         };
-        let (min, max) = width_limits(style, cb.width, edges_h);
+        let (min, max) = self.width_limits_for(b, cb.width, edges_h, available);
         w.min(max).max(min)
     }
 
     /// E4: `width: min-content | max-content | fit-content` (CSS Sizing 3 §3.1 y §3.2): el
-    /// ancho de contenido, limitado por `min-width`/`max-width`.
+    /// ancho de contenido, limitado por `min-width`/`max-width`. E5: también `fit-content()` y
+    /// `stretch` (CSS Sizing 4 §6.1).
     pub(crate) fn keyword_width(
         &mut self,
         b: &'a LayoutBox,
         available: f32,
         cb_width: f32,
     ) -> Option<f32> {
-        if matches!(b.kind, BoxKind::Replaced { .. }) {
+        if matches!(b.kind, BoxKind::Replaced { .. }) && b.style.width != Size::Stretch {
             return None;
         }
         let kind = b.style.width.clone();
-        if !matches!(kind, Size::MinContent | Size::MaxContent | Size::FitContent) {
+        let w = self.width_for_keyword(b, &kind, available, cb_width)?;
+        let s = &b.style;
+        let edges_h = border_edges(s).horizontal() + padding_edges(s, cb_width).horizontal();
+        let (lo, hi) = self.width_limits_for(b, cb_width, edges_h, available);
+        Some(w.min(hi).max(lo))
+    }
+
+    /// E5: ancho de contenido de una keyword de tamaño (CSS Sizing 3 §3.2 y CSS Sizing 4 §6.1)
+    /// con espacio disponible `available` (sin márgenes, borde ni padding); `None` si `kw` no es
+    /// una keyword. `stretch` llena el espacio disponible (los márgenes `auto` cuentan como 0).
+    pub(crate) fn width_for_keyword(
+        &mut self,
+        b: &'a LayoutBox,
+        kw: &Size,
+        available: f32,
+        cb_width: f32,
+    ) -> Option<f32> {
+        if *kw == Size::Stretch {
+            return Some(available.max(0.0));
+        }
+        if !kw.is_intrinsic() {
             return None;
         }
         let (min, max) = self.intrinsic_widths(b);
-        let w = match kind {
+        Some(match kw {
             Size::MinContent => min,
             Size::MaxContent => max,
+            // `fit-content(<length-percentage>)`: la fórmula de fit-content con el argumento
+            // como espacio disponible (CSS Sizing 3 §3.2), según `box-sizing`.
+            Size::FitContentFn(lp) => {
+                let s = &b.style;
+                let mut v = lp.resolve(cb_width);
+                if s.box_sizing == BoxSizing::BorderBox {
+                    let edges_h =
+                        border_edges(s).horizontal() + padding_edges(s, cb_width).horizontal();
+                    v = (v - edges_h).max(0.0);
+                }
+                min.max(v).min(max)
+            }
             _ => min.max(available).min(max),
-        };
+        })
+    }
+
+    /// E5: `min-width`/`max-width` con las keywords de tamaño resueltas (CSS Sizing 3 §3.2).
+    pub(crate) fn width_limits_for(
+        &mut self,
+        b: &'a LayoutBox,
+        cb_width: f32,
+        edges_h: f32,
+        available: f32,
+    ) -> (f32, f32) {
         let s = &b.style;
-        let edges_h = border_edges(s).horizontal() + padding_edges(s, cb_width).horizontal();
-        let (lo, hi) = width_limits(s, cb_width, edges_h);
+        let (mut lo, mut hi) = width_limits(s, cb_width, edges_h);
+        let (min_kw, max_kw) = (s.min_width.clone(), s.max_width.as_size());
+        if let Some(v) = self.width_for_keyword(b, &min_kw, available, cb_width) {
+            lo = v;
+        }
+        if let Some(v) = self.width_for_keyword(b, &max_kw, available, cb_width) {
+            hi = v;
+        }
+        (lo, hi)
+    }
+
+    /// E5: ancho de contenido de una caja no reemplazada con `width: auto`, `aspect-ratio` y alto
+    /// definido: el alto transferido por la relación (CSS Sizing 4 §5.1), limitado por
+    /// `min-width`/`max-width`.
+    pub(crate) fn ratio_width(&mut self, b: &'a LayoutBox, cb: Cb) -> Option<f32> {
+        let s = &b.style;
+        if matches!(b.kind, BoxKind::Replaced { .. }) || s.width != Size::Auto {
+            return None;
+        }
+        let r = s.aspect_ratio.preferred()?;
+        let eh = border_edges(s).horizontal() + padding_edges(s, cb.width).horizontal();
+        let ev = border_edges(s).vertical() + padding_edges(s, cb.width).vertical();
+        let h = specified_height(s, cb.height, ev)?;
+        let (hmin, hmax) = height_limits(s, cb.height, ev);
+        let h = h.min(hmax).max(hmin);
+        let mut w = ratio_transfer(s, h, ev, eh, r);
+        // Mínimo automático (CSS Sizing 4 §5.2): no por debajo del min-content.
+        if s.min_width == Size::Auto && matches!(s.overflow_x, Overflow::Visible | Overflow::Clip) {
+            w = w.max(self.content_intrinsic_widths(b).0);
+        }
+        let (lo, hi) = width_limits(s, cb.width, eh);
         Some(w.min(hi).max(lo))
     }
 
@@ -1086,12 +1360,27 @@ impl<'a> Layout<'a> {
 
     /// Anchos intrínsecos (min-content, max-content) del contenido de `b`.
     pub(crate) fn intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        // E5: los porcentajes de altura de los descendientes se resuelven contra el alto de
+        // `b` si es definido respecto a `pct_height_basis` (CSS Sizing 3 §5.2.1).
+        if matches!(b.kind, BoxKind::Replaced { .. }) {
+            return self.intrinsic_widths_inner(b);
+        }
+        let st = &b.style;
+        let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
+        let inner = specified_height(st, self.pct_height_basis, ev);
+        let saved = std::mem::replace(&mut self.pct_height_basis, inner);
+        let r = self.intrinsic_widths_inner(b);
+        self.pct_height_basis = saved;
+        r
+    }
+
+    fn intrinsic_widths_inner(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         if let BoxKind::Replaced { natural, ratio } = &b.kind {
             let cb = Cb {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
-                height: None,
+                height: self.pct_height_basis,
             };
             let w = if matches!(&b.style.width, Size::LengthPercentage(lp) if lp.has_percentage()) {
                 natural.width
@@ -1103,6 +1392,42 @@ impl<'a> Layout<'a> {
         if let Some(w) = self.control_size(b).0 {
             return (w, w);
         }
+        // E5: contención de tamaño (CSS Containment 2 §3.2 y §3.3): como si estuviera vacía,
+        // con `contain-intrinsic-width` (CSS Sizing 4 §7.1).
+        let st = &b.style;
+        if st.contain.size || st.contain.inline_size {
+            let w = st.contain_intrinsic_width.px().unwrap_or(0.0);
+            return (w, w);
+        }
+        // E5: con `aspect-ratio` y un alto definido, el ancho transferido (CSS Sizing 4 §5.1).
+        // `self.pct_height_basis` ya es el alto de `b`: su propio alto se resuelve contra la
+        // base anterior, que [`Self::intrinsic_widths`] restaura después; aquí se usa el alto
+        // de contenido ya resuelto.
+        if let Some(r) = st.aspect_ratio.preferred()
+            && st.width == Size::Auto
+            && let Some(h) = self.pct_height_basis
+        {
+            let eh = border_edges(st).horizontal() + padding_edges(st, 0.0).horizontal();
+            let ev = border_edges(st).vertical() + padding_edges(st, 0.0).vertical();
+            let mut w = ratio_transfer(st, h, ev, eh, r);
+            if !matches!(st.overflow_x, Overflow::Visible | Overflow::Clip) {
+                // Un contenedor de scroll puede encogerse por debajo del tamaño transferido: su
+                // min-content es el de su contenido (como los navegadores).
+                let min = self.content_intrinsic_widths(b).0;
+                return (min.min(w), w);
+            }
+            // Mínimo automático (CSS Sizing 4 §5.2): no por debajo del min-content.
+            if st.min_width == Size::Auto {
+                w = w.max(self.content_intrinsic_widths(b).0);
+            }
+            return (w, w);
+        }
+        self.content_intrinsic_widths(b)
+    }
+
+    /// Anchos intrínsecos del contenido de `b` según su tipo de formato (sin contención ni
+    /// relación de aspecto).
+    fn content_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         if crate::flex::is_flex_container(b) {
             return self.flex_intrinsic_widths(b);
         }
@@ -1134,15 +1459,29 @@ impl<'a> Layout<'a> {
         let edges = border_edges(s).horizontal()
             + padding_edges(s, 0.0).horizontal()
             + margin_edges(s, 0.0).horizontal();
-        let inner = match specified_width(
-            s,
-            0.0,
-            border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal(),
-        ) {
+        let bp0 = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
+        let inner = match specified_width(s, 0.0, bp0) {
             Some(w) if !matches!(&s.width, Size::LengthPercentage(lp) if lp.has_percentage()) => {
                 (w, w)
             }
-            _ => self.intrinsic_widths(b),
+            // E5: keywords (CSS Sizing 3 §5.1: la contribución de una caja con tamaño
+            // intrínseco es ese tamaño).
+            _ => {
+                let (min, max) = self.intrinsic_widths(b);
+                match &s.width {
+                    Size::MinContent => (min, min),
+                    Size::MaxContent => (max, max),
+                    Size::FitContentFn(lp) if !lp.has_percentage() => {
+                        let mut v = lp.resolve(0.0);
+                        if s.box_sizing == BoxSizing::BorderBox {
+                            v = (v - bp0).max(0.0);
+                        }
+                        let v = min.max(v).min(max);
+                        (v, v)
+                    }
+                    _ => (min, max),
+                }
+            }
         };
         // min-width/max-width limitan la contribución (los porcentajes se ignoran: no hay
         // containing block todavía).
@@ -1154,8 +1493,31 @@ impl<'a> Layout<'a> {
             if pct_min { 0.0 } else { lo },
             if pct_max { f32::INFINITY } else { hi },
         );
-        let clamp = |v: f32| v.min(hi).max(lo);
-        (clamp(inner.0) + edges, clamp(inner.1) + edges)
+        // E5: keywords en `min-width`/`max-width`: bajo una restricción min-content (max-content)
+        // `fit-content` es el min-content (max-content).
+        let (min_kw, max_kw) = (s.min_width.clone(), s.max_width.as_size());
+        let mut out = [0.0f32; 2];
+        for (i, v) in [inner.0, inner.1].into_iter().enumerate() {
+            let lo = self.limit_keyword(b, &min_kw, i == 1).unwrap_or(lo);
+            let hi = self.limit_keyword(b, &max_kw, i == 1).unwrap_or(hi);
+            out[i] = v.min(hi).max(lo) + edges;
+        }
+        (out[0], out[1])
+    }
+
+    /// E5: valor de una keyword intrínseca de `min-width`/`max-width` bajo una restricción
+    /// min-content (`under_max` falso) o max-content.
+    fn limit_keyword(&mut self, b: &'a LayoutBox, k: &Size, under_max: bool) -> Option<f32> {
+        if !k.is_intrinsic() {
+            return None;
+        }
+        let (min, max) = self.intrinsic_widths(b);
+        Some(match k {
+            Size::MinContent => min,
+            Size::MaxContent => max,
+            _ if under_max => max,
+            _ => min,
+        })
     }
 
     /// Fragmento del marcador exterior de un list-item, a la izquierda de la primera línea

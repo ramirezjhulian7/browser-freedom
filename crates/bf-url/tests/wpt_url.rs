@@ -3,7 +3,7 @@
 //! `passed / stale / skipped / failed` (`-- --nocapture`).
 //!
 //! - `stale`: casos cuya expectativa contradice el spec vigente (lista `STALE`, con motivo).
-//! - `skipped`: casos de `percent-encoding.json` en encodings multibyte (roadmap).
+//! - `skipped`: casos de `percent-encoding.json` en encodings sin encoder (ninguno).
 
 use std::path::PathBuf;
 
@@ -216,7 +216,7 @@ fn percent_encoding(t: &mut Tally) {
                 continue;
             };
             let href = format!("https://doesnotmatter.invalid/?{input}#{input}");
-            let encode = |c: char| encoder.encode_char(c);
+            let encode = |s: &str| encoder.encode_segments(s);
             let url = Url::parse_with_encoding(&href, None, &encode);
             let ok = url.as_ref().is_ok_and(|u| {
                 u.hash() == format!("#{utf8}")
