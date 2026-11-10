@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<!-- CSS Grid 3: display grid-lanes con columnas como eje de rejilla; repeat(auto-fill, auto) con tamaño hipotético (§3.1.1, 3 pistas de 100px) y colocación en la pista más corta (§4.4, flow-tolerance 0). -->
+<style>body{margin:0} #g{display:grid-lanes;grid-template-columns:repeat(auto-fill,auto);flow-tolerance:0;width:300px} #g>div{width:100px}</style>
+<div id=g><div style="height:50px"></div><div style="height:30px"></div><div style="height:40px"></div><div style="height:20px"></div><div style="height:10px"></div></div>
+<!-- expect
+Block <html> 0,0 800×50
+  Block <body> 0,0 800×50
+    Block <div#g> 0,0 300×50
+      InlineBlock <div> 0,0 100×50
+      InlineBlock <div> 100,0 100×30
+      InlineBlock <div> 200,0 100×40
+      InlineBlock <div> 100,30 100×20
+      InlineBlock <div> 200,40 100×10
+-->

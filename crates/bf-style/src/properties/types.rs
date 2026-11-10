@@ -59,6 +59,9 @@ keyword_enum!(Display {
     InlineFlex = "inline-flex",
     Grid = "grid",
     InlineGrid = "inline-grid",
+    // E5: CSS Grid 3 §2.2.
+    GridLanes = "grid-lanes",
+    InlineGridLanes = "inline-grid-lanes",
     Table = "table",
     InlineTable = "inline-table",
     TableRowGroup = "table-row-group",
@@ -82,6 +85,7 @@ impl Display {
                 | Display::InlineBlock
                 | Display::InlineFlex
                 | Display::InlineGrid
+                | Display::InlineGridLanes
                 | Display::InlineTable
                 | Display::Ruby
                 | Display::RubyText
@@ -96,6 +100,7 @@ impl Display {
             }
             Display::InlineFlex => Display::Flex,
             Display::InlineGrid => Display::Grid,
+            Display::InlineGridLanes => Display::GridLanes,
             Display::InlineTable => Display::Table,
             Display::TableRowGroup
             | Display::TableHeaderGroup
@@ -128,6 +133,8 @@ impl PropValue for Display {
             ["inline", "flex"] | ["flex", "inline"] => Display::InlineFlex,
             ["block", "grid"] | ["grid", "block"] => Display::Grid,
             ["inline", "grid"] | ["grid", "inline"] => Display::InlineGrid,
+            ["block", "grid-lanes"] | ["grid-lanes", "block"] => Display::GridLanes,
+            ["inline", "grid-lanes"] | ["grid-lanes", "inline"] => Display::InlineGridLanes,
             ["block", "table"] | ["table", "block"] => Display::Table,
             ["inline", "table"] | ["table", "inline"] => Display::InlineTable,
             ["list-item", "block"]
@@ -558,6 +565,10 @@ keyword_enum!(
         FlexEnd = "flex-end",
         Center = "center",
         Baseline = "baseline",
+        // E5: `left`/`right` (`justify-self`, CSS Box Alignment 3 §6.1) y `last baseline`.
+        Left = "left",
+        Right = "right",
+        LastBaseline = "last-baseline",
     }
 );
 
@@ -565,6 +576,10 @@ impl PropValue for ItemAlign {
     fn parse(input: &[ComponentValue]) -> Option<Self> {
         let items = components(input);
         let last = match items.as_slice() {
+            [m, v] if is_ident(m, "last") && is_ident(v, "baseline") => {
+                return Some(ItemAlign::LastBaseline);
+            }
+            [v] if is_ident(v, "last-baseline") => return None,
             [v] => *v,
             [m, v] if is_ident(m, "safe") || is_ident(m, "unsafe") || is_ident(m, "first") => *v,
             _ => return None,
@@ -572,7 +587,10 @@ impl PropValue for ItemAlign {
         ItemAlign::from_ident(ident(last)?)
     }
     fn to_css(&self) -> String {
-        self.as_str().to_owned()
+        match self {
+            ItemAlign::LastBaseline => "last baseline".into(),
+            a => a.as_str().to_owned(),
+        }
     }
 }
 
@@ -643,8 +661,9 @@ impl PropValue for LengthPercentageAuto {
     }
 }
 
-/// `auto | <length-percentage [0,∞]> | min-content | max-content | fit-content`
-/// (`width`, `height`, `min-*`).
+/// `auto | <length-percentage [0,∞]> | min-content | max-content | fit-content |
+/// fit-content(<length-percentage [0,∞]>) | stretch` (`width`, `height`, `min-*`; CSS Sizing 3
+/// §3.2 y CSS Sizing 4 §6.1). `-webkit-fill-available` es un alias de `stretch`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Size {
     Auto,
@@ -652,16 +671,37 @@ pub enum Size {
     MinContent,
     MaxContent,
     FitContent,
+    /// `fit-content(<length-percentage>)`: `min(max-content, max(min-content, argumento))`.
+    FitContentFn(LengthPercentage),
+    Stretch,
+}
+
+impl Size {
+    /// ¿Es una keyword de tamaño intrínseco (`min-content`, `max-content`, `fit-content` o
+    /// `fit-content()`)?
+    pub fn is_intrinsic(&self) -> bool {
+        matches!(
+            self,
+            Size::MinContent | Size::MaxContent | Size::FitContent | Size::FitContentFn(_)
+        )
+    }
 }
 
 impl PropValue for Size {
     fn parse(input: &[ComponentValue]) -> Option<Self> {
         match trim(input) {
+            [ComponentValue::Function(f)] if f.name.eq_ignore_ascii_case("fit-content") => {
+                match trim(&f.value) {
+                    [v] => parse_non_negative_lp(v).map(Size::FitContentFn),
+                    _ => None,
+                }
+            }
             [v] => match ident(v).map(str::to_ascii_lowercase).as_deref() {
                 Some("auto") => Some(Size::Auto),
                 Some("min-content") => Some(Size::MinContent),
                 Some("max-content") => Some(Size::MaxContent),
                 Some("fit-content") => Some(Size::FitContent),
+                Some("stretch" | "-webkit-fill-available") => Some(Size::Stretch),
                 Some(_) => None,
                 None => parse_non_negative_lp(v).map(Size::LengthPercentage),
             },
@@ -671,6 +711,7 @@ impl PropValue for Size {
     fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
         match self {
             Size::LengthPercentage(lp) => Size::LengthPercentage(lp.compute(&ctx.len)),
+            Size::FitContentFn(lp) => Size::FitContentFn(lp.compute(&ctx.len)),
             other => other.clone(),
         }
     }
@@ -681,11 +722,14 @@ impl PropValue for Size {
             Size::MinContent => "min-content".into(),
             Size::MaxContent => "max-content".into(),
             Size::FitContent => "fit-content".into(),
+            Size::FitContentFn(lp) => format!("fit-content({lp})"),
+            Size::Stretch => "stretch".into(),
         }
     }
 }
 
-/// `none | <length-percentage [0,∞]> | min-content | max-content | fit-content` (`max-*`).
+/// `none | <length-percentage [0,∞]> | min-content | max-content | fit-content |
+/// fit-content(<length-percentage [0,∞]>) | stretch` (`max-*`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MaxSize {
     None,
@@ -693,6 +737,23 @@ pub enum MaxSize {
     MinContent,
     MaxContent,
     FitContent,
+    FitContentFn(LengthPercentage),
+    Stretch,
+}
+
+impl MaxSize {
+    /// El mismo valor como [`Size`] (`none` = `auto`).
+    pub fn as_size(&self) -> Size {
+        match self {
+            MaxSize::None => Size::Auto,
+            MaxSize::LengthPercentage(lp) => Size::LengthPercentage(lp.clone()),
+            MaxSize::MinContent => Size::MinContent,
+            MaxSize::MaxContent => Size::MaxContent,
+            MaxSize::FitContent => Size::FitContent,
+            MaxSize::FitContentFn(lp) => Size::FitContentFn(lp.clone()),
+            MaxSize::Stretch => Size::Stretch,
+        }
+    }
 }
 
 impl PropValue for MaxSize {
@@ -705,22 +766,22 @@ impl PropValue for MaxSize {
                 Size::MinContent => Some(MaxSize::MinContent),
                 Size::MaxContent => Some(MaxSize::MaxContent),
                 Size::FitContent => Some(MaxSize::FitContent),
+                Size::FitContentFn(lp) => Some(MaxSize::FitContentFn(lp)),
+                Size::Stretch => Some(MaxSize::Stretch),
             },
         }
     }
     fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
         match self {
             MaxSize::LengthPercentage(lp) => MaxSize::LengthPercentage(lp.compute(&ctx.len)),
+            MaxSize::FitContentFn(lp) => MaxSize::FitContentFn(lp.compute(&ctx.len)),
             other => other.clone(),
         }
     }
     fn to_css(&self) -> String {
         match self {
             MaxSize::None => "none".into(),
-            MaxSize::LengthPercentage(lp) => lp.to_string(),
-            MaxSize::MinContent => "min-content".into(),
-            MaxSize::MaxContent => "max-content".into(),
-            MaxSize::FitContent => "fit-content".into(),
+            other => other.as_size().to_css(),
         }
     }
 }
@@ -2346,5 +2407,296 @@ impl PropValue for TextShadow {
     }
 }
 
+// E5: relación de aspecto, contención de tamaño y tamaño intrínseco de contención.
+
+/// `aspect-ratio: auto || <ratio>` (CSS Sizing 4 §5.1). `ratio` es ancho/alto; una relación
+/// degenerada (`0` o infinita) se comporta como `auto`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AspectRatio {
+    pub auto: bool,
+    pub ratio: Option<f32>,
+}
+
+impl AspectRatio {
+    /// La relación preferida usada (§5.1): `None` si es `auto` o degenerada.
+    pub fn preferred(&self) -> Option<f32> {
+        self.ratio.filter(|r| r.is_finite() && *r > 0.0)
+    }
+}
+
+impl PropValue for AspectRatio {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let items = components(input);
+        let mut auto = false;
+        let mut ratio = None;
+        let mut i = 0;
+        while i < items.len() {
+            if is_ident(items[i], "auto") && !auto {
+                auto = true;
+                i += 1;
+                continue;
+            }
+            if ratio.is_some() {
+                return None;
+            }
+            // `<ratio> = <number [0,∞]> [ / <number [0,∞]> ]?` (CSS Values 4 §7.3).
+            let a = parse_number(items[i]).filter(|n| *n >= 0.0)?;
+            let mut b = 1.0;
+            if items
+                .get(i + 1)
+                .is_some_and(|v| v.token() == Some(&TokenKind::Delim('/')))
+            {
+                b = parse_number(items.get(i + 2)?).filter(|n| *n >= 0.0)?;
+                i += 2;
+            }
+            ratio = Some(if a == 0.0 && b == 0.0 { 0.0 } else { a / b });
+            i += 1;
+        }
+        (auto || ratio.is_some()).then_some(AspectRatio { auto, ratio })
+    }
+    fn to_css(&self) -> String {
+        match (self.auto, self.ratio) {
+            (true, Some(r)) => format!("auto {} / 1", fmt_number(r)),
+            (false, Some(r)) => format!("{} / 1", fmt_number(r)),
+            _ => "auto".into(),
+        }
+    }
+}
+
+/// `contain: none | strict | content | [ size || inline-size || layout || style || paint ]`
+/// (CSS Containment 2 §2). Solo la contención de tamaño afecta al layout aquí.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Contain {
+    pub size: bool,
+    pub inline_size: bool,
+    pub layout: bool,
+    pub style: bool,
+    pub paint: bool,
+}
+
+impl PropValue for Contain {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let items = components(input);
+        let mut c = Contain::default();
+        match items.as_slice() {
+            [v] if is_ident(v, "none") => return Some(c),
+            [v] if is_ident(v, "strict") => {
+                return Some(Contain {
+                    size: true,
+                    layout: true,
+                    style: true,
+                    paint: true,
+                    ..c
+                });
+            }
+            [v] if is_ident(v, "content") => {
+                return Some(Contain {
+                    layout: true,
+                    style: true,
+                    paint: true,
+                    ..c
+                });
+            }
+            [] => return None,
+            _ => {}
+        }
+        for v in items {
+            let flag = match ident(v)?.to_ascii_lowercase().as_str() {
+                "size" => &mut c.size,
+                "inline-size" => &mut c.inline_size,
+                "layout" => &mut c.layout,
+                "style" => &mut c.style,
+                "paint" => &mut c.paint,
+                _ => return None,
+            };
+            if *flag {
+                return None;
+            }
+            *flag = true;
+        }
+        // `size` e `inline-size` se excluyen.
+        (!(c.size && c.inline_size)).then_some(c)
+    }
+    fn to_css(&self) -> String {
+        let mut out = Vec::new();
+        for (on, name) in [
+            (self.size, "size"),
+            (self.inline_size, "inline-size"),
+            (self.layout, "layout"),
+            (self.style, "style"),
+            (self.paint, "paint"),
+        ] {
+            if on {
+                out.push(name);
+            }
+        }
+        if out.is_empty() {
+            "none".into()
+        } else {
+            out.join(" ")
+        }
+    }
+}
+
+/// `contain-intrinsic-width`/`-height: auto? [ none | <length [0,∞]> ]` (CSS Sizing 4 §7.1).
+/// `auto` (recordar el último tamaño) no cambia nada: sin `content-visibility` no hay tamaño
+/// recordado. Computado, la longitud está en px.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainIntrinsicSize {
+    pub auto: bool,
+    pub length: Option<LengthPercentage>,
+}
+
+impl ContainIntrinsicSize {
+    /// Tamaño intrínseco explícito en px (`None` = `none`).
+    pub fn px(&self) -> Option<f32> {
+        self.length.as_ref().map(|l| l.resolve(0.0))
+    }
+}
+
+impl PropValue for ContainIntrinsicSize {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let items = components(input);
+        let (auto, rest) = match items.as_slice() {
+            [a, rest @ ..] if is_ident(a, "auto") => (true, rest),
+            all => (false, all),
+        };
+        let length = match rest {
+            [v] if is_ident(v, "none") => None,
+            [v] => Some(LengthPercentage::Length(
+                parse_length(v).filter(|l| l.value >= 0.0)?,
+            )),
+            _ => return None,
+        };
+        Some(ContainIntrinsicSize { auto, length })
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        ContainIntrinsicSize {
+            auto: self.auto,
+            length: self.length.as_ref().map(|l| l.compute(&ctx.len)),
+        }
+    }
+    fn to_css(&self) -> String {
+        let l = self
+            .length
+            .as_ref()
+            .map_or("none".into(), |l| l.to_string());
+        if self.auto { format!("auto {l}") } else { l }
+    }
+}
+
 pub use super::gradient::*; // E4
 pub use super::grid::*; // E4
+
+// --- E5: grid lanes (CSS Grid 3) ---
+
+/// E5: eje de rejilla pedido por `grid-lanes-direction` (CSS Grid 3 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanesAxis {
+    Normal,
+    Row,
+    Column,
+}
+
+/// E5: `grid-lanes-direction: normal | [ row | column ] [ fill-reverse || track-reverse ]?`
+/// (CSS Grid 3 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridLanesDirection {
+    pub axis: LanesAxis,
+    pub fill_reverse: bool,
+    pub track_reverse: bool,
+}
+
+impl PropValue for GridLanesDirection {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let items = components(input);
+        let (first, rest) = items.split_first()?;
+        if is_ident(first, "normal") && rest.is_empty() {
+            return Some(GridLanesDirection {
+                axis: LanesAxis::Normal,
+                fill_reverse: false,
+                track_reverse: false,
+            });
+        }
+        let axis = if is_ident(first, "row") {
+            LanesAxis::Row
+        } else if is_ident(first, "column") {
+            LanesAxis::Column
+        } else {
+            return None;
+        };
+        let (mut fill_reverse, mut track_reverse) = (false, false);
+        for v in rest {
+            if !fill_reverse && is_ident(v, "fill-reverse") {
+                fill_reverse = true;
+            } else if !track_reverse && is_ident(v, "track-reverse") {
+                track_reverse = true;
+            } else {
+                return None;
+            }
+        }
+        Some(GridLanesDirection {
+            axis,
+            fill_reverse,
+            track_reverse,
+        })
+    }
+    fn to_css(&self) -> String {
+        let mut s = String::from(match self.axis {
+            LanesAxis::Normal => "normal",
+            LanesAxis::Row => "row",
+            LanesAxis::Column => "column",
+        });
+        if self.fill_reverse {
+            s.push_str(" fill-reverse");
+        }
+        if self.track_reverse {
+            s.push_str(" track-reverse");
+        }
+        s
+    }
+}
+
+keyword_enum!(
+    /// E5: `grid-lanes-pack: normal | dense` (CSS Grid 3 §4.3).
+    GridLanesPack {
+        Normal = "normal",
+        Dense = "dense",
+    }
+);
+keyword_prop!(GridLanesPack);
+
+/// E5: `flow-tolerance: normal | <length-percentage [0,inf]> | infinite` (CSS Grid 3 §4.2; el
+/// borrador actual la llama `fit-tolerance`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlowTolerance {
+    Normal,
+    LengthPercentage(LengthPercentage),
+    Infinite,
+}
+
+impl PropValue for FlowTolerance {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        match trim(input) {
+            [v] if is_ident(v, "normal") => Some(FlowTolerance::Normal),
+            [v] if is_ident(v, "infinite") => Some(FlowTolerance::Infinite),
+            [v] => parse_non_negative_lp(v).map(FlowTolerance::LengthPercentage),
+            _ => None,
+        }
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        match self {
+            FlowTolerance::LengthPercentage(lp) => {
+                FlowTolerance::LengthPercentage(lp.compute(&ctx.len))
+            }
+            v => v.clone(),
+        }
+    }
+    fn to_css(&self) -> String {
+        match self {
+            FlowTolerance::Normal => "normal".into(),
+            FlowTolerance::LengthPercentage(lp) => lp.to_string(),
+            FlowTolerance::Infinite => "infinite".into(),
+        }
+    }
+}

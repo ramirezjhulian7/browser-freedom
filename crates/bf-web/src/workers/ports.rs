@@ -332,6 +332,16 @@ impl HostRecord for BlobRecord {
     }
 }
 
+/// Un `ImageData` serializado (HTML §4.12.5.1.15): ancho, alto y los bytes RGBA.
+struct ImageDataRecord(u32, u32, Vec<u8>);
+
+impl HostRecord for ImageDataRecord {
+    fn deserialize(self: Box<Self>, agent: &mut Agent) -> JsResult<Value> {
+        crate::html::canvas::register(agent);
+        crate::html::canvas::image_data_from_parts(agent, self.0, self.1, self.2)
+    }
+}
+
 /// Un `MessagePort` transferido.
 pub struct PortRecord {
     gid: u64,
@@ -390,6 +400,9 @@ impl HostCloner for WebCloner {
         let v = Value::Object(o);
         if let Some(d) = crate::net::blob::data(agent, &v) {
             return Some(Ok(Box::new(BlobRecord(d))));
+        }
+        if let Some((w, h, bytes)) = crate::html::canvas::image_data_parts(agent, &v) {
+            return Some(Ok(Box::new(ImageDataRecord(w, h, bytes))));
         }
         if port_id(agent, &v).is_some() {
             return Some(crate::net::dom_error(
@@ -467,4 +480,180 @@ pub(crate) fn new_pair_for_transfer(agent: &mut Agent) -> JsResult<(Value, PortR
             queued: Vec::new(),
         },
     ))
+}
+
+// --- BroadcastChannel entre agentes (HTML §9.5) ---
+//
+// Los `BroadcastChannel` de `net::channels` se entregan en su propio agente. Para llegar a los
+// de otros agentes (workers y pestañas), cada canal abierto con origen tupla se apunta en un
+// registro del proceso, en orden de creación: (id global, partición, origen, nombre, bandeja
+// de su agente, id local). `postMessage` serializa (el `DataCloneError` corta todo, §9.5
+// paso 4) y deja un `Envelope::Broadcast` en la bandeja de cada destino de otro agente; los
+// del mismo agente siguen el camino local. Los orígenes opacos no se apuntan: un origen opaco
+// solo es igual a sí mismo y no cruza de agente.
+
+struct BroadcastEntry {
+    gid: u64,
+    /// La partición del agente (`workers::set_partition`).
+    partition: u64,
+    origin: String,
+    name: String,
+    inbox: Arc<AgentInbox>,
+    local: u64,
+}
+
+fn broadcast_registry() -> &'static Mutex<Vec<BroadcastEntry>> {
+    static R: OnceLock<Mutex<Vec<BroadcastEntry>>> = OnceLock::new();
+    R.get_or_init(Mutex::default)
+}
+
+/// Los `BroadcastChannel` de este agente apuntados en el registro (dato del embebedor):
+/// id local → id global. Cuando el agente se va, sus entradas salen del registro.
+#[derive(Default)]
+struct BroadcastHost {
+    open: HashMap<u64, u64>,
+}
+
+impl Drop for BroadcastHost {
+    fn drop(&mut self) {
+        if self.open.is_empty() {
+            return;
+        }
+        let gids: Vec<u64> = self.open.values().copied().collect();
+        broadcast_registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|b| !gids.contains(&b.gid));
+    }
+}
+
+fn broadcast_host(agent: &mut Agent) -> &mut BroadcastHost {
+    if agent.embedder_data::<BroadcastHost>().is_none() {
+        agent.set_embedder_data(BroadcastHost::default());
+    }
+    agent
+        .embedder_data_mut::<BroadcastHost>()
+        .expect("BroadcastHost")
+}
+
+/// El constructor de `BroadcastChannel` (§9.5): apunta el canal `local` en el registro.
+pub(crate) fn broadcast_open(agent: &mut Agent, local: u64, origin: &str, name: &str) {
+    if origin == "null" {
+        return;
+    }
+    let gid = next_gid();
+    let inbox = super::inbox(agent);
+    let partition = super::partition(agent);
+    broadcast_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(BroadcastEntry {
+            gid,
+            partition,
+            origin: origin.to_owned(),
+            name: name.to_owned(),
+            inbox,
+            local,
+        });
+    broadcast_host(agent).open.insert(local, gid);
+    // El waker de la pestaña (o el sondeo) para recibir lo de otros agentes.
+    let realm = agent.current_realm;
+    super::ensure_polling(agent, realm);
+}
+
+/// "Eligible for messaging" (§9.5): el global es una ventana o un `WorkerGlobalScope` sin el
+/// *closing flag*.
+fn eligible_for_messaging(agent: &Agent) -> bool {
+    !super::scope::closing(agent)
+}
+
+/// `postMessage(message)` de `BroadcastChannel` (§9.5), la parte entre agentes. `false` si
+/// el canal no es *eligible for messaging* (no se manda nada). Si no, serializa el mensaje
+/// (aunque no haya destinos: el `DataCloneError` sube antes de entregar nada) y lo deja en
+/// la bandeja de cada destino de otro agente, en orden de creación.
+pub(crate) fn broadcast_post(agent: &mut Agent, local: u64, message: &Value) -> JsResult<bool> {
+    if !eligible_for_messaging(agent) {
+        return Ok(false);
+    }
+    let allow_shared = super::dedicated::cross_origin_isolated(agent);
+    let first = serialize(agent, message, &[], allow_shared)?;
+    let Some(gid) = agent
+        .embedder_data::<BroadcastHost>()
+        .and_then(|b| b.open.get(&local).copied())
+    else {
+        return Ok(true);
+    };
+    let mine = super::inbox(agent);
+    let targets: Vec<(Arc<AgentInbox>, u64, String)> = {
+        let r = broadcast_registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(me) = r.iter().find(|b| b.gid == gid) else {
+            return Ok(true);
+        };
+        r.iter()
+            .filter(|b| {
+                b.gid != gid
+                    && b.partition == me.partition
+                    && b.origin == me.origin
+                    && b.name == me.name
+                    && !Arc::ptr_eq(&b.inbox, &mine)
+            })
+            .map(|b| (b.inbox.clone(), b.local, b.origin.clone()))
+            .collect()
+    };
+    // `Serialized` no se copia: cada destino lleva su serialización.
+    let mut first = Some(first);
+    for (inbox, to, origin) in targets {
+        let message = match first.take() {
+            Some(s) => s,
+            None => serialize(agent, message, &[], allow_shared)?,
+        };
+        inbox.push(Envelope::Broadcast {
+            local: to,
+            origin,
+            message,
+        });
+    }
+    Ok(true)
+}
+
+/// `close()` de `BroadcastChannel`: sale del registro (lo que esté en camino se descarta).
+pub(crate) fn broadcast_close(agent: &mut Agent, local: u64) {
+    let Some(gid) = agent
+        .embedder_data_mut::<BroadcastHost>()
+        .and_then(|b| b.open.remove(&local))
+    else {
+        return;
+    };
+    broadcast_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|b| b.gid != gid);
+}
+
+/// Un mensaje de otro agente para el `BroadcastChannel` local `local`: `message` (o
+/// `messageerror` si no se puede deserializar) con el origen del que lo mandó. Si el canal
+/// ya se cerró, o el worker está cerrando, se descarta.
+pub(crate) fn deliver_broadcast(
+    agent: &mut Agent,
+    local: u64,
+    origin: String,
+    message: Serialized,
+) {
+    let open = agent
+        .embedder_data::<BroadcastHost>()
+        .is_some_and(|b| b.open.contains_key(&local));
+    if !open || !eligible_for_messaging(agent) {
+        return;
+    }
+    let t = TargetRef {
+        doc: 0,
+        target: bf_dom::events::EventTarget::Object(local),
+    };
+    let (type_, data) = match serialize::deserialize_with_transfer(agent, message) {
+        Ok((data, _)) => ("message", data),
+        Err(_) => ("messageerror", Value::Null),
+    };
+    crate::net::channels::fire_message(agent, t, type_, data, &origin, "", Vec::new());
 }
