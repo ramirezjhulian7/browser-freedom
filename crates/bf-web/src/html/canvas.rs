@@ -2575,6 +2575,27 @@ fn new_image_data(agent: &mut Agent, width: u32, height: u32, bytes: Vec<u8>) ->
     Ok(Value::Object(o))
 }
 
+/// Los pasos de serialización de `ImageData` (HTML §4.12.5.1.15, `[Serializable]`): ancho,
+/// alto y una copia de los bytes de `data` (vacía si su buffer se separó). `None` si `v` no
+/// es un `ImageData`. Lo usa el serializador de los workers (E3).
+pub fn image_data_parts(agent: &mut Agent, v: &Value) -> Option<(u32, u32, Vec<u8>)> {
+    let info = agent.host_unwrap::<ImageDataInfo>(v).copied()?;
+    let (_, data) = image_data_info(agent, v).ok()?;
+    let bytes = clamped_bytes(agent, &data).unwrap_or_default();
+    Some((info.width, info.height, bytes))
+}
+
+/// Los pasos de deserialización de `ImageData`: uno nuevo en el realm en curso (el agente
+/// debe tener las clases del canvas registradas, [`register`]).
+pub fn image_data_from_parts(
+    agent: &mut Agent,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+) -> JsResult<Value> {
+    new_image_data(agent, width, height, bytes)
+}
+
 /// Las dimensiones válidas de un `ImageData` (IndexSizeError con 0; RangeError si es
 /// demasiado grande).
 fn image_dims(agent: &mut Agent, w: &Value, h: &Value) -> JsResult<(u32, u32)> {

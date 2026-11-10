@@ -263,6 +263,10 @@ longhands! {
     TransitionTimingFunction "transition-timing-function" transition_timing_function: animations::TimingFunctions = "ease", inherited: false, animatable: false;
     TransitionDelay "transition-delay" transition_delay: animations::Times = "0s", inherited: false, animatable: false;
     TransitionBehavior "transition-behavior" transition_behavior: animations::TransitionBehaviors = "normal", inherited: false, animatable: false;
+    // E5: grid lanes (CSS Grid 3 §2.3, §4.2 y §4.3).
+    GridLanesDirection "grid-lanes-direction" grid_lanes_direction: GridLanesDirection = "normal", inherited: false, animatable: false;
+    GridLanesPack "grid-lanes-pack" grid_lanes_pack: GridLanesPack = "normal", inherited: false, animatable: false;
+    FlowTolerance "flow-tolerance" flow_tolerance: FlowTolerance = "normal", inherited: false, animatable: true;
 }
 
 impl LonghandId {
