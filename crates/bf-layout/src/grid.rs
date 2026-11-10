@@ -34,7 +34,7 @@ use bf_style::ComputedStyle;
 use bf_style::properties::types::{
     BoxSizing, ContentAlign, Direction, Display, Gap, GridLine, GridTemplate, GridTemplateAreas,
     ItemAlign, MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth,
-    TrackListItem, TrackSize,
+    TrackListItem, TrackSize, has_intrinsic_auto_repeat,
 };
 
 use crate::block::{
@@ -48,9 +48,14 @@ use crate::fragment::{Edges, Fragment, FragmentKind, Rect};
 /// Línea más alejada admitida a cada lado de la rejilla explícita (§8.3.1, nota sobre límites).
 const MAX_LINE: i32 = 1000;
 
+// E5: grid lanes (CSS Grid 3).
+mod lanes;
+
 pub(crate) fn is_grid_container(b: &LayoutBox) -> bool {
-    matches!(b.style.display, Display::Grid | Display::InlineGrid)
-        && !matches!(b.kind, BoxKind::Replaced { .. })
+    matches!(
+        b.style.display,
+        Display::Grid | Display::InlineGrid | Display::GridLanes | Display::InlineGridLanes
+    ) && !matches!(b.kind, BoxKind::Replaced { .. })
 }
 
 /// Baseline de un contenedor grid (§10.7): la que calculó [`Layout::grid_layout`] y dejó en el
@@ -217,16 +222,55 @@ fn fixed_sum(items: &[TrackListItem], times: usize, basis: Option<f32>) -> (f32,
     (sum, n)
 }
 
-/// Número de repeticiones de `repeat(auto-fill|auto-fit)` (§7.2.3.2).
-fn auto_repeat_count(items: &[TrackListItem], space: RepeatSpace, gap: f32) -> usize {
-    let Some(inner) = items.iter().find_map(|i| match i {
-        TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, inner) => Some(inner),
-        _ => None,
-    }) else {
+/// E5: la lista de `repeat(auto-fill|auto-fit)` y el número de pistas que la preceden.
+fn auto_repeat_parts(items: &[TrackListItem]) -> Option<(usize, &[TrackListItem])> {
+    let i = items.iter().position(|i| {
+        matches!(
+            i,
+            TrackListItem::Repeat(RepeatCount::AutoFill | RepeatCount::AutoFit, _)
+        )
+    })?;
+    let TrackListItem::Repeat(_, inner) = &items[i] else {
+        return None;
+    };
+    Some((fixed_sum(&items[..i], 1, None).1, inner))
+}
+
+/// Número de repeticiones de `repeat(auto-fill|auto-fit)` (§7.2.3.2). E5: `hyp` son los tamaños
+/// hipotéticos de las pistas de la repetición (CSS Grid 3 §3.1.1), uno por pista; sin ellos,
+/// una repetición con pistas intrínsecas se hace una sola vez (la alternativa que deja abierta
+/// la cuestión de §3.1.1 para Grid).
+fn auto_repeat_count(
+    items: &[TrackListItem],
+    space: RepeatSpace,
+    gap: f32,
+    hyp: Option<&[f32]>,
+) -> usize {
+    let Some((_, inner)) = auto_repeat_parts(items) else {
         return 1;
     };
     let (other_sum, other_count) = fixed_sum(items, 1, space.basis);
-    let (rep_sum, rep_count) = fixed_sum(inner, 1, space.basis);
+    let (rep_sum, rep_count) = if has_intrinsic_auto_repeat(items) {
+        let Some(hyp) = hyp else {
+            return 1;
+        };
+        let tracks = inner.iter().filter_map(|i| match i {
+            TrackListItem::Track(t) => Some(t),
+            _ => None,
+        });
+        let (mut sum, mut n) = (0.0, 0);
+        for (k, t) in tracks.enumerate() {
+            sum += if is_fixed_size(t) {
+                repeat_track_size(t, space.basis)
+            } else {
+                hyp.get(k).copied().unwrap_or(0.0)
+            };
+            n += 1;
+        }
+        (sum, n)
+    } else {
+        fixed_sum(inner, 1, space.basis)
+    };
     if rep_count == 0 {
         return 1;
     }
@@ -243,6 +287,16 @@ fn auto_repeat_count(items: &[TrackListItem], space: RepeatSpace, gap: f32) -> u
     (n.max(1.0) as usize).min(MAX_LINE as usize)
 }
 
+/// E5: `<fixed-size>` (§7.2.1): alguna de las funciones es una longitud (sin `fr` mínimo).
+fn is_fixed_size(t: &TrackSize) -> bool {
+    let fixed = |b: &TrackBreadth| matches!(b, TrackBreadth::Length(_));
+    match t {
+        TrackSize::Breadth(b) => fixed(b),
+        TrackSize::MinMax(a, b) => fixed(a) || (fixed(b) && !matches!(a, TrackBreadth::Flex(_))),
+        TrackSize::FitContent(_) => false,
+    }
+}
+
 fn explicit_axis(
     template: &GridTemplate,
     areas: &GridTemplateAreas,
@@ -250,11 +304,24 @@ fn explicit_axis(
     space: RepeatSpace,
     gap: f32,
 ) -> ExplicitAxis {
+    explicit_axis_hyp(template, areas, columns, space, gap, None)
+}
+
+/// E5: `explicit_axis` con los tamaños hipotéticos de una repetición automática con pistas
+/// intrínsecas (CSS Grid 3 §3.1.1).
+fn explicit_axis_hyp(
+    template: &GridTemplate,
+    areas: &GridTemplateAreas,
+    columns: bool,
+    space: RepeatSpace,
+    gap: f32,
+    hyp: Option<&[f32]>,
+) -> ExplicitAxis {
     let mut sizes = Vec::new();
     let mut names = vec![Vec::new()];
     let mut auto_fit = None;
     if let GridTemplate::List(items) = template {
-        let n = auto_repeat_count(items, space, gap);
+        let n = auto_repeat_count(items, space, gap, hyp);
         expand_tracks(items, n, &mut sizes, &mut names, &mut auto_fit);
     }
     let mut count = sizes.len();
@@ -310,6 +377,7 @@ pub(crate) struct SubgridParent {
 fn subgrid_axes(b: &LayoutBox) -> (bool, bool) {
     let s = &b.style;
     if !is_grid_container(b)
+        || lanes::is_lanes_container(b)
         || b.is_absolutely_positioned()
         || s.contain.layout
         || s.contain.paint
@@ -2140,6 +2208,9 @@ impl<'a> Layout<'a> {
     /// por `order`) y altura del contenido. `cb` es el content box del contenedor (`height` si
     /// es definida).
     pub(crate) fn grid_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+        if lanes::is_lanes_container(container) {
+            return self.lanes_layout(container, cb);
+        }
         let cs = &container.style;
         let mut grid = self.grid_setup(container, Some(cb.width), cb.height);
         let col_gap = axis_gap(&cs.column_gap, Some(cb.width), grid.sub.cols.as_ref());
@@ -2732,6 +2803,9 @@ impl<'a> Layout<'a> {
     /// Anchos intrínsecos (min-content, max-content) de un contenedor grid: el algoritmo de
     /// §12.1 con el espacio disponible bajo una restricción min-content o max-content.
     pub(crate) fn grid_intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        if lanes::is_lanes_container(b) {
+            return self.lanes_intrinsic_widths(b);
+        }
         let cs = &b.style;
         let grid = self.grid_setup(b, None, None);
         let gap = axis_gap(&cs.column_gap, None, grid.sub.cols.as_ref());

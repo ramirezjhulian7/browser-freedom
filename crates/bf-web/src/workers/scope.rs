@@ -22,6 +22,7 @@ use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, AgentOptions, JsResult, RealmId, Throw};
 
+use super::isolation::EmbedderPolicy;
 use super::{AgentInbox, Envelope, WorkerControl, WorkerEvent, WorkerHost};
 use crate::dom::events::{GLOBAL_EVENT_HANDLERS_WORKER, TargetRef, with_event_handlers};
 use crate::net::{NetBackend, NetRequest};
@@ -62,8 +63,12 @@ pub struct WorkerSpec {
     pub control: Arc<WorkerControl>,
     /// ¿Pueden cruzar `SharedArrayBuffer`? (El agent cluster del dueño está aislado.)
     pub cross_origin_isolated: bool,
+    /// La política de inserción (COEP) del dueño (`workers::isolation`).
+    pub owner_coep: EmbedderPolicy,
     /// El User-Agent del dueño.
     pub user_agent: String,
+    /// La partición del dueño (`workers::set_partition`).
+    pub partition: u64,
 }
 
 /// El estado del lado worker (en el `WorkerHost` del agente del worker).
@@ -77,6 +82,8 @@ pub(crate) struct ScopeState {
     /// `close()`: el bucle termina después de la tarea en curso.
     pub closing: bool,
     pub cross_origin_isolated: bool,
+    /// La política de inserción del worker (la del dueño hasta que llega el script).
+    pub coep: EmbedderPolicy,
     pub user_agent: String,
 }
 
@@ -207,10 +214,12 @@ fn create_agent(spec: &WorkerSpec) -> Runtime {
             url: spec.url.clone(),
             closing: false,
             cross_origin_isolated: spec.cross_origin_isolated,
+            coep: spec.owner_coep,
             user_agent: spec.user_agent.clone(),
         }),
         shared: Default::default(),
         shared_errors: Default::default(),
+        partition: spec.partition,
     });
     install(agent, realm, &spec.url, &spec.kind, spec.backend.clone());
     rt
@@ -219,27 +228,28 @@ fn create_agent(spec: &WorkerSpec) -> Runtime {
 fn run_inner(spec: WorkerSpec) {
     let mut rt = create_agent(&spec);
     let agent = &mut rt.agent;
-    // "Fetch a classic/module worker script" (§10.2.4 paso 12) y su ejecución.
+    // "Fetch a classic/module worker script" (§10.2.4 paso 12), las políticas de la
+    // respuesta (COEP y `crossOriginIsolated`) y la ejecución.
+    let fetched = fetch_script_response(spec.backend.as_ref(), &spec.url, MimeCheck::WorkerScript)
+        .and_then(|(text, coep)| apply_policies(agent, &spec, coep.as_deref()).map(|()| text));
     let ok = match spec.script_type {
-        ScriptType::Classic => {
-            match fetch_script(spec.backend.as_ref(), &spec.url, MimeCheck::WorkerScript) {
-                Ok(text) => {
-                    let src = spec.url.serialize(false);
-                    match agent.eval_script(&text, &src) {
-                        Ok(_) => true,
-                        Err(Throw::Value(e)) => {
-                            crate::dom::events::report_exception(agent, &e);
-                            true
-                        }
-                        Err(Throw::Terminate(_)) => false,
+        ScriptType::Classic => match fetched {
+            Ok(text) => {
+                let src = spec.url.serialize(false);
+                match agent.eval_script(&text, &src) {
+                    Ok(_) => true,
+                    Err(Throw::Value(e)) => {
+                        crate::dom::events::report_exception(agent, &e);
+                        true
                     }
-                }
-                Err(_) => {
-                    load_error(&spec);
-                    false
+                    Err(Throw::Terminate(_)) => false,
                 }
             }
-        }
+            Err(_) => {
+                load_error(&spec);
+                false
+            }
+        },
         ScriptType::Module => {
             let loader = std::rc::Rc::new(ModuleFetcher {
                 backend: spec.backend.clone(),
@@ -247,7 +257,7 @@ fn run_inner(spec: WorkerSpec) {
             agent.set_module_loader(loader);
             // Un error al cargar el grafo es un error de carga; uno al evaluar, una
             // excepción del worker.
-            if fetch_script(spec.backend.as_ref(), &spec.url, MimeCheck::WorkerScript).is_err() {
+            if fetched.is_err() {
                 load_error(&spec);
                 false
             } else {
@@ -281,6 +291,28 @@ fn run_inner(spec: WorkerSpec) {
         return;
     }
     event_loop(agent, &spec.inbox, &spec.control);
+}
+
+/// HTML §10.2.4 "run a worker", *processResponseConsumeBody* pasos 4–10: la política de
+/// inserción del worker, el chequeo contra la del dueño (`Err`: error de red) y su
+/// *cross-origin isolated capability* (ver [`super::isolation::worker_policies`]).
+fn apply_policies(agent: &mut Agent, spec: &WorkerSpec, coep: Option<&str>) -> Result<(), String> {
+    let shared = matches!(spec.kind, ScopeKind::Shared(_));
+    let p = super::isolation::worker_policies(
+        &spec.url,
+        coep,
+        shared,
+        spec.owner_coep,
+        spec.cross_origin_isolated,
+    )
+    .ok_or_else(|| {
+        "Cross-Origin-Embedder-Policy del script incompatible con la del dueño".to_owned()
+    })?;
+    if let Some(s) = super::host(agent).scope.as_mut() {
+        s.cross_origin_isolated = p.cross_origin_isolated;
+        s.coep = p.embedder;
+    }
+    Ok(())
 }
 
 fn load_error(spec: &WorkerSpec) {
@@ -338,7 +370,8 @@ fn event_loop(agent: &mut Agent, inbox: &Arc<AgentInbox>, control: &Arc<WorkerCo
     }
 }
 
-fn closing(agent: &Agent) -> bool {
+/// ¿Es este agente un worker con el *closing flag* puesto (`close()`)?
+pub(crate) fn closing(agent: &Agent) -> bool {
     agent
         .embedder_data::<WorkerHost>()
         .and_then(|h| h.scope.as_ref())
@@ -399,6 +432,15 @@ pub(crate) fn fetch_script(
     url: &Url,
     check: MimeCheck,
 ) -> Result<String, String> {
+    fetch_script_response(backend, url, check).map(|(text, _)| text)
+}
+
+/// [`fetch_script`] y el valor de la cabecera `Cross-Origin-Embedder-Policy` de la respuesta.
+fn fetch_script_response(
+    backend: &dyn NetBackend,
+    url: &Url,
+    check: MimeCheck,
+) -> Result<(String, Option<String>), String> {
     let req = NetRequest {
         url: url.clone(),
         options: bf_net::RequestOptions::default(),
@@ -418,7 +460,8 @@ pub(crate) fn fetch_script(
             return Err(format!("tipo MIME no válido para un script: {ct:?}"));
         }
     }
-    Ok(String::from_utf8_lossy(&r.body).into_owned())
+    let coep = r.headers.get("cross-origin-embedder-policy");
+    Ok((String::from_utf8_lossy(&r.body).into_owned(), coep))
 }
 
 /// Los módulos de un worker de tipo `module`, por la red del worker.
@@ -505,6 +548,9 @@ const WINDOW_ONLY: &[&str] = &[
     "TreeWalker",
     "DOMImplementation",
     "SharedWorker",
+    // Del canvas, en el worker solo `ImageData`, `CanvasGradient`, `CanvasPattern` y
+    // `TextMetrics` (`[Exposed=(Window,Worker)]`, HTML §4.12.5).
+    "CanvasRenderingContext2D",
 ];
 
 /// Instala el global del worker en `realm`.
@@ -538,6 +584,8 @@ fn install(
     crate::dom::window::track_rejections(agent, realm);
     // IndexedDB (E2) también está expuesto en los workers.
     crate::storage::register(agent, realm, &h);
+    // `ImageData` (y lo demás del canvas expuesto en Worker), también para deserializarlo.
+    crate::html::canvas::register(agent);
     let saved = agent.current_realm;
     agent.current_realm = realm;
     for name in WINDOW_ONLY {
@@ -648,13 +696,9 @@ fn scope_name(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
 fn secure_context(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     // "Potentially trustworthy" (Secure Contexts §3.1).
     let url = WebContextHandle::current(agent).get(agent).url.clone();
-    let host = url.hostname();
-    let secure = matches!(url.scheme.as_str(), "https" | "wss" | "file" | "about")
-        || host == "localhost"
-        || host.ends_with(".localhost")
-        || host == "127.0.0.1"
-        || host == "[::1]";
-    Ok(Value::Boolean(secure))
+    Ok(Value::Boolean(
+        super::isolation::is_potentially_trustworthy(&url),
+    ))
 }
 
 fn cross_origin_isolated(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
