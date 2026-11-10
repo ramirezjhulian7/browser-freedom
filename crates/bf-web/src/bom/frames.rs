@@ -315,19 +315,46 @@ struct Fetched {
     url: Url,
     /// El tipo MIME XML con que se parsea (`None`: HTML).
     xml: Option<&'static str>,
+    /// El encoding con que se decodificó.
+    encoding: Encoding,
 }
 
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
     let loader = window_loader(agent, realm)?;
     let res = loader.load(url)?;
-    let (text, _) = encoding::decode(&res.bytes, Encoding::Utf8);
     let xml = xml_type(res.content_type.as_deref(), &res.url);
+    // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del
+    // `Content-Type`, prescan de `<meta>`; si no, el del documento que contiene al marco
+    // (paso 6: mismo origen y compatible con ASCII) o el de por omisión. XML: BOM o UTF-8.
+    let enc = if xml.is_some() {
+        Encoding::Utf8
+    } else {
+        let mime = res.content_type.as_deref().and_then(bf_net::MimeType::parse);
+        match bf_net::html_encoding_with_source(&res.bytes, mime.as_ref()) {
+            (e, bf_net::EncodingSource::Default) => {
+                parent_encoding(agent, realm, &res.url).unwrap_or(e)
+            }
+            (e, _) => e,
+        }
+    };
+    let (text, enc) = encoding::decode(&res.bytes, enc);
     Some(Fetched {
         text,
         url: res.url,
         xml,
+        encoding: enc,
     })
+}
+
+/// El encoding del documento de la ventana `realm` si es del mismo origen que `url` (para un
+/// marco sin declaración de encoding).
+fn parent_encoding(agent: &Agent, realm: RealmId, url: &Url) -> Option<Encoding> {
+    let ctx = agent.realm_data::<WebContext>(realm)?;
+    if super::origin_of(&ctx.url) != super::origin_of(url) {
+        return None;
+    }
+    Encoding::for_label(&ctx.document().character_set.to_string())
 }
 
 /// ¿Es un documento XML (HTML §7.4.1 "navigate": `text/xml`, `application/xml`, `+xml`)? Sin
@@ -405,13 +432,16 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
                 xml: Some(mime),
                 text,
                 url: final_url,
+                ..
             }) => load_xml_document(agent, realm, &final_url, &text, mime),
             Some(Fetched {
                 text,
                 url: final_url,
                 xml: None,
+                encoding,
             }) => {
                 load_document(agent, realm, &final_url, None, &text, scripts);
+                set_character_set(agent, realm, encoding);
             }
             None => {
                 agent.host.hooks.console(
@@ -438,6 +468,12 @@ fn load_xml_document(agent: &mut Agent, realm: RealmId, url: &Url, text: &str, m
     ctx.base = url.clone();
     ctx.documents[0] = DocumentOwner::Document(Box::new(doc));
     super::script::set_base(agent, realm, url);
+}
+
+/// `document.characterSet` del documento del marco `realm`.
+fn set_character_set(agent: &mut Agent, realm: RealmId, encoding: Encoding) {
+    let ctx = WebContextHandle { realm }.get_mut(agent);
+    ctx.doc_mut(0).character_set = encoding.name().into();
 }
 
 /// Parsea `text` como el documento del marco `realm` en `url`.
