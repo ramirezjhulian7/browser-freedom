@@ -1,8 +1,12 @@
 # Estado de test262
 
+Las dos secciones las generan herramientas: "Parsing", `test262_parse` solo con `BF_FULL=1`
+(sin la variable, `cargo test` parsea 1 de cada 50 archivos y no escribe aquí); "Ejecución", el
+runner `test262` en release.
+
 ## Parsing
 
-Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.
+Generado por `BF_FULL=1 cargo test -p bf-js --test test262_parse -- --nocapture` (sin `BF_FULL` el test parsea 1 de cada 50 archivos y no escribe aquí).
 
 - Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`
 - 51490 tests parseados (sin ejecutar): deben parsear, salvo los `negative: phase: parse`, que deben fallar. Sin flags, cada test se parsea en código no estricto y con `"use strict";` delante; con `module`, como módulo.

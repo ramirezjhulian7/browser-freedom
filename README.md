@@ -491,13 +491,14 @@ git submodule update --init                 # html5lib-tests, css-parsing-tests,
 sh tools/fetch-wpt.sh                       # o: powershell -File tools/fetch-wpt.ps1
 sh tools/fetch-test262.sh                   # o: powershell -File tools/fetch-test262.ps1
 
-cargo test --workspace                      # todas las pruebas (sin los reftests)
+cargo test --workspace                      # todas las pruebas (sin los reftests), con muestras
+BF_FULL=1 cargo test --workspace            # lo mismo, con las suites de test262 enteras
 cargo test -p bf-html --test html5lib_tokenizer -- --nocapture       # resumen por archivo
 cargo test -p bf-html --test wpt_tree_construction -- --nocapture
 cargo test -p bf-css --test css_parsing_tests -- --nocapture
 cargo test -p bf-url --test wpt_url -- --nocapture
 cargo test -p bf-js --test parser_tests -- --nocapture         # test262-parser-tests
-cargo test -p bf-js --test test262_parse -- --nocapture        # parsing de test262 (escribe docs/test262-status.md)
+BF_FULL=1 cargo test -p bf-js --test test262_parse -- --nocapture   # parsing de test262 (escribe docs/test262-status.md)
 cargo test -p bf-js --release --test fuzz -- --ignored --nocapture   # 1000 mutaciones sin pánico
 cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md   # ejecución de test262
 cargo test -p bf-js --release --test test262_run -- --ignored --nocapture   # regresión de language/
@@ -508,6 +509,13 @@ cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPEC
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture  # reftests (~1,5 min)
 cargo run --release -p bf-paint --bin wpt-reftests -- css/css-flexbox   # un subconjunto
 ```
+
+Sin la variable `BF_FULL`, los tests de `bf-js` que recorren corpus de test262
+(`test262_parse`, `parser_tests` y `regexp_property_escapes`) prueban una muestra determinista:
+1 de cada 50 archivos en orden de ruta, para que `cargo test --workspace` tarde minutos y no
+horas. Con `BF_FULL=1` recorren todo, y solo entonces `test262_parse` escribe su sección de
+[`docs/test262-status.md`](docs/test262-status.md). Los tests `#[ignore]` (reftests, fuzz,
+regresión de test262) siguen igual: se corren con `--ignored`.
 
 Los reftests no hacen fallar `cargo test`: escriben el resumen en
 [`docs/wpt-status.md`](docs/wpt-status.md) y dejan en `target/reftests/` las imágenes de cada

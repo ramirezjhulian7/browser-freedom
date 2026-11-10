@@ -4,7 +4,10 @@
 //! se parsea en código no estricto y con `"use strict";` delante, como hace el runner). Los
 //! `_FIXTURE.js` son módulos auxiliares y no se cuentan.
 //!
-//! Escribe el resumen por directorio en la sección "Parsing" de `docs/test262-status.md`.
+//! Sin `BF_FULL`, parsea una muestra determinista (1 de cada [`SAMPLE_STEP`] archivos en orden
+//! de ruta) para que `cargo test --workspace` tarde minutos; con `BF_FULL=1` parsea el árbol
+//! entero y solo entonces escribe el resumen por directorio en la sección "Parsing" de
+//! `docs/test262-status.md`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,6 +31,14 @@ const UNSUPPORTED_FEATURES: &[(&str, &str)] = &[
     ("import-defer", "stage 3: `import defer * as ns from`"),
     ("export-defer", "stage 2.7: `export defer`"),
 ];
+
+/// Sin `BF_FULL`, se parsea 1 de cada `SAMPLE_STEP` archivos.
+const SAMPLE_STEP: usize = 50;
+
+/// `BF_FULL=1` corre el árbol entero (y actualiza `docs/test262-status.md`).
+fn full() -> bool {
+    std::env::var_os("BF_FULL").is_some()
+}
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/test262")
@@ -197,6 +208,15 @@ fn test262_parse() {
     let mut files = Vec::new();
     collect(&test_dir, &mut files);
     files.sort();
+    let full = full();
+    if !full {
+        let total = files.len();
+        files = files.into_iter().step_by(SAMPLE_STEP).collect();
+        println!(
+            "muestra de {} de {total} archivos (1 de cada {SAMPLE_STEP}); BF_FULL=1 corre todos",
+            files.len()
+        );
+    }
     let results: Mutex<Vec<(String, Outcome)>> = Mutex::new(Vec::with_capacity(files.len()));
     let next = Mutex::new(0usize);
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -287,7 +307,10 @@ fn test262_parse() {
             println!("FALLO {f}");
         }
     }
-    write_status(&table, total.passed + total.failed);
+    // La muestra no reemplaza el resumen del árbol entero.
+    if full {
+        write_status(&table, total.passed + total.failed);
+    }
     assert!(
         pct(&total) >= 99.5,
         "parsing de test262 por debajo de 99.5%: {:.2}%",
@@ -306,7 +329,8 @@ fn write_status(table: &str, ran: usize) {
         .collect();
     let section = format!(
         "## Parsing\n\n\
-         Generado por `cargo test -p bf-js --test test262_parse -- --nocapture`.\n\n\
+         Generado por `BF_FULL=1 cargo test -p bf-js --test test262_parse -- --nocapture` \
+         (sin `BF_FULL` el test parsea 1 de cada {SAMPLE_STEP} archivos y no escribe aquí).\n\n\
          - Commit de test262: `{}`\n\
          - {ran} tests parseados (sin ejecutar): deben parsear, salvo los `negative: phase: parse`, \
          que deben fallar. Sin flags, cada test se parsea en código no estricto y con \
