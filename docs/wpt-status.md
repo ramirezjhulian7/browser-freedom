@@ -69,6 +69,14 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | Directorio | archivos | archivos OK | subtests | pass | fail | timeout | notrun | % pass |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | console | 12 | 12 | 29 | 12 | 17 | 0 | 0 | 41.4% |
+| custom-elements | 44 | 26 | 1037 | 778 | 164 | 12 | 83 | 75.0% |
+| custom-elements/form-associated | 22 | 16 | 114 | 49 | 8 | 3 | 54 | 43.0% |
+| custom-elements/htmlconstructor | 2 | 0 | 20 | 0 | 0 | 2 | 18 | 0.0% |
+| custom-elements/parser | 12 | 10 | 42 | 21 | 19 | 1 | 1 | 50.0% |
+| custom-elements/reactions | 57 | 45 | 538 | 455 | 35 | 12 | 36 | 84.6% |
+| custom-elements/registries | 39 | 28 | 2287 | 2068 | 212 | 4 | 3 | 90.4% |
+| custom-elements/state | 5 | 5 | 28 | 12 | 16 | 0 | 0 | 42.9% |
+| custom-elements/upgrading | 7 | 2 | 29 | 12 | 1 | 5 | 11 | 41.4% |
 | dom | 11 | 11 | 142 | 122 | 20 | 0 | 0 | 85.9% |
 | dom/abort | 6 | 5 | 37 | 26 | 10 | 1 | 0 | 70.3% |
 | dom/collections | 12 | 12 | 60 | 55 | 5 | 0 | 0 | 91.7% |
@@ -78,6 +86,8 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | dom/observable | 29 | 25 | 251 | 0 | 242 | 4 | 5 | 0.0% |
 | dom/ranges | 68 | 61 | 41823 | 37394 | 253 | 0 | 4176 | 89.4% |
 | dom/traversal | 18 | 17 | 1607 | 1573 | 33 | 0 | 1 | 97.9% |
+| domparsing | 46 | 35 | 1069 | 233 | 676 | 8 | 152 | 21.8% |
+| domparsing/tentative | 35 | 22 | 984 | 29 | 919 | 3 | 33 | 2.9% |
 | encoding | 82 | 73 | 23441 | 22700 | 227 | 511 | 3 | 96.8% |
 | encoding/legacy-mb-japanese | 51 | 15 | 333544 | 129825 | 29 | 1 | 203689 | 38.9% |
 | encoding/legacy-mb-korean | 26 | 4 | 239968 | 43264 | 8 | 0 | 196696 | 18.0% |
@@ -89,8 +99,15 @@ Generado por `cargo run --release -p bf-web --bin wpt-testharness -- --out docs/
 | html/semantics/interactive-elements | 114 | 68 | 418 | 49 | 171 | 33 | 165 | 11.7% |
 | html/semantics/scripting-1 | 491 | 332 | 2711 | 1441 | 959 | 24 | 287 | 53.2% |
 | html/webappapis | 321 | 198 | 1131 | 608 | 293 | 176 | 54 | 53.8% |
+| shadow-dom | 65 | 61 | 760 | 661 | 90 | 4 | 5 | 87.0% |
+| shadow-dom/declarative | 56 | 26 | 7762 | 7708 | 48 | 5 | 1 | 99.3% |
+| shadow-dom/focus | 37 | 14 | 109 | 37 | 27 | 23 | 22 | 33.9% |
+| shadow-dom/focus-navigation | 57 | 3 | 45 | 2 | 1 | 24 | 18 | 4.4% |
+| shadow-dom/leaktests | 4 | 3 | 16 | 13 | 2 | 1 | 0 | 81.2% |
+| shadow-dom/reference-target | 16 | 14 | 6081 | 5957 | 121 | 1 | 2 | 98.0% |
+| shadow-dom/untriaged | 54 | 47 | 240 | 223 | 14 | 3 | 0 | 92.9% |
 | url | 41 | 39 | 8699 | 8489 | 193 | 17 | 0 | 97.6% |
-| **Total** | 2624 | 1859 | 928015 | 363312 | 7335 | 1042 | 556326 | 39.1% |
+| **Total** | 3182 | 2216 | 949176 | 381570 | 9688 | 1153 | 556765 | 40.2% |
 
 Las causas más frecuentes de los archivos sin estado OK:
 
@@ -105,6 +122,10 @@ Las causas más frecuentes de los archivos sin estado OK:
 
 ## Notas de testharness
 
+- Filas `custom-elements*`, `domparsing*` y `shadow-dom*`: medición del 2026-11-10 (rama
+  `army/e1` sobre `master` `f61201f`, `wpt-testharness custom-elements shadow-dom domparsing`).
+  `custom-elements/` en total 3395 / 4095 (82.9%), `shadow-dom/` 14601 / 15013 (97.3%),
+  `domparsing/` sin `tentative/` 233 / 1069 (21.8%).
 - Sin `encoding/legacy-mb-*`: 145693 / 160297 subtests (90.9%).
 - Las filas `encoding*` son de una medición del 2026-11-07 (rama `army/e10`, runner actual con
   las variantes en workers de los `.any.js`, de ahí más archivos); el resto, de la tabla anterior.
