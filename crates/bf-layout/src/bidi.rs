@@ -221,8 +221,8 @@ pub fn resolve_paragraph(
     let mut overflow_isolates = 0usize;
     let mut overflow_embeddings = 0usize;
     let mut valid_isolates = 0usize;
-    let next_odd = |l: u8| if l % 2 == 0 { l + 1 } else { l + 2 };
-    let next_even = |l: u8| if l % 2 == 0 { l + 2 } else { l + 1 };
+    let next_odd = |l: u8| if l.is_multiple_of(2) { l + 1 } else { l + 2 };
+    let next_even = |l: u8| if l.is_multiple_of(2) { l + 2 } else { l + 1 };
     for i in 0..n {
         let top = *stack.last().expect("pila no vacía");
         match classes[i] {
@@ -380,7 +380,7 @@ pub fn resolve_paragraph(
         } else {
             para_level
         };
-        let dir = |l: u8| if l % 2 == 0 { L } else { R };
+        let dir = |l: u8| if l.is_multiple_of(2) { L } else { R };
         let sos = dir(level.max(before));
         let eos = dir(level.max(after));
         resolve_sequence(seq, &mut types, classes, chars, level, sos, eos);
@@ -389,7 +389,7 @@ pub fn resolve_paragraph(
     // I1–I2.
     for &i in &kept {
         let l = levels[i];
-        levels[i] = if l % 2 == 0 {
+        levels[i] = if l.is_multiple_of(2) {
             match types[i] {
                 R => l + 1,
                 AN | EN => l + 2,
@@ -498,7 +498,7 @@ fn resolve_sequence(
         }
     }
 
-    let e = if level % 2 == 0 { L } else { R };
+    let e = if level.is_multiple_of(2) { L } else { R };
 
     // N0: pares de corchetes (BD16).
     if let Some(chars) = chars {

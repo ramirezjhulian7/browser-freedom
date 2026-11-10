@@ -59,6 +59,10 @@ struct InlineBox<'a> {
     end_margin: f32,
     /// Nivel de incrustación explícito (UAX #9 X1–X8 con los controles de `unicode-bidi`).
     level: u8,
+    /// Cajas aislantes: niveles resueltos de su iniciador (LRI/RLI/FSI) y de su PDI. Son
+    /// caracteres del párrafo para UAX #9 (X9 no los quita) y separan en L2 lo de dentro de lo
+    /// de fuera.
+    iso: Option<(u8, u8)>,
 }
 
 /// Una inline-level atómica ya dimensionada (fragmento con su margin box en el origen).
@@ -378,6 +382,7 @@ impl<'a> Layout<'a> {
                         start_margin: if rtl { m.right } else { m.left },
                         end_margin: if rtl { m.left } else { m.right },
                         level: 0,
+                        iso: None,
                     });
                     let (start, end) = (ifc.boxes[idx].start, ifc.boxes[idx].end);
                     ifc.pieces
@@ -422,8 +427,12 @@ impl<'a> Layout<'a> {
         enum Origin {
             Text(usize, usize),
             Atomic(usize),
+            /// El iniciador de aislamiento / el PDI de una caja.
+            IsoStart(usize),
+            IsoEnd(usize),
             Other,
         }
+        let is_isolate = |c: char| ('\u{2066}'..='\u{2068}').contains(&c);
         fn push_other(chars: &mut Vec<char>, origin: &mut Vec<Origin>, cs: &[char]) {
             for &c in cs {
                 chars.push(c);
@@ -487,7 +496,14 @@ impl<'a> Layout<'a> {
                     SegKind::Start(b) => {
                         let style = &ifc.boxes[b].b.style;
                         let controls = bidi_controls(style);
-                        push_other(&mut chars, &mut origin, controls.0);
+                        match controls.0.split_first() {
+                            Some((&c, rest)) if is_isolate(c) => {
+                                chars.push(c);
+                                origin.push(Origin::IsoStart(b));
+                                push_other(&mut chars, &mut origin, rest);
+                            }
+                            _ => push_other(&mut chars, &mut origin, controls.0),
+                        }
                         open.push(controls);
                         let parent = level_stack.last().copied().unwrap_or(0);
                         let level = if style.unicode_bidi == UnicodeBidi::Normal {
@@ -508,9 +524,16 @@ impl<'a> Layout<'a> {
                         level_stack.push(level);
                         ifc.boxes[b].level = level;
                     }
-                    SegKind::End(_) => {
+                    SegKind::End(b) => {
                         if let Some((_, c)) = open.pop() {
-                            push_other(&mut chars, &mut origin, c);
+                            match c.split_last() {
+                                Some((&'\u{2069}', rest)) => {
+                                    push_other(&mut chars, &mut origin, rest);
+                                    chars.push('\u{2069}');
+                                    origin.push(Origin::IsoEnd(b));
+                                }
+                                _ => push_other(&mut chars, &mut origin, c),
+                            }
                         }
                         level_stack.pop();
                     }
@@ -542,6 +565,14 @@ impl<'a> Layout<'a> {
                     }
                 }
                 Origin::Atomic(a) => ifc.atomics[a].level = levels[k],
+                Origin::IsoStart(b) => {
+                    let iso = ifc.boxes[b].iso.get_or_insert((levels[k], levels[k]));
+                    iso.0 = levels[k];
+                }
+                Origin::IsoEnd(b) => {
+                    let iso = ifc.boxes[b].iso.get_or_insert((levels[k], levels[k]));
+                    iso.1 = levels[k];
+                }
                 Origin::Other => {}
             }
         }
@@ -1484,13 +1515,33 @@ impl<'a> Layout<'a> {
             };
             leaves[k].level = level.max(ifc.boxes[b].level);
         }
-        let fixed: Vec<usize> = (0..leaves.len())
-            .filter(|&k| floating[k].is_none())
+        // Los iniciadores de aislamiento y los PDI de las cajas con contenido en la línea entran
+        // en L2 como barreras sin ancho (con su nivel resuelto; L1 los devuelve al nivel del
+        // párrafo al final de la línea) y luego se descartan.
+        let last_content = (0..leaves.len()).rev().find(|&k| {
+            !is_edge(&leaves[k]) && !matches!(leaves[k].kind, LeafKind::Text { space: true, .. })
+        });
+        let fixed: Vec<(Option<usize>, u8)> = (0..leaves.len())
+            .filter_map(|k| match (leaves[k].kind, floating[k]) {
+                (_, None) => Some((Some(k), leaves[k].level)),
+                (LeafKind::Edge { b, .. }, Some(start)) => {
+                    let (open, close) = ifc.boxes[b].iso?;
+                    let level = if last_content.is_none_or(|c| k > c) {
+                        para_level
+                    } else if start {
+                        open
+                    } else {
+                        close
+                    };
+                    Some((None, level))
+                }
+                _ => None,
+            })
             .collect();
-        let levels: Vec<u8> = fixed.iter().map(|&k| leaves[k].level).collect();
+        let levels: Vec<u8> = fixed.iter().map(|&(_, l)| l).collect();
         let mut order: Vec<usize> = bidi::reorder(&levels)
             .into_iter()
-            .map(|i| fixed[i])
+            .filter_map(|i| fixed[i].0)
             .collect();
         // Los bordes de las cajas más internas primero: el fragmento de la caja exterior
         // incluye ya los bordes de las interiores.
