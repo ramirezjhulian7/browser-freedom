@@ -46,3 +46,34 @@ fn still_images_need_no_frames() {
     assert!(!images.has_animations());
     assert_eq!(images.next_frame_change(Duration::ZERO), None);
 }
+
+#[test]
+fn animate_swaps_frames_in_display_list() {
+    let images = images_for("<img src='anim/three.apng'>");
+    let url = images.by_url.keys().next().unwrap().clone();
+    let first = images.for_url(&url).unwrap().clone();
+    let rect = bf_layout::fragment::Rect::new(0.0, 0.0, 10.0, 10.0);
+    let mut list = bf_paint::DisplayList::default();
+    list.push(bf_paint::DisplayItem::Image {
+        rect,
+        image: first.clone(),
+    });
+    let image = |list: &bf_paint::DisplayList| match &list.items[0] {
+        bf_paint::DisplayItem::Image { image, .. } => image.clone(),
+        _ => unreachable!(),
+    };
+    // En t = 0 ya está el primer fotograma: nada que cambiar.
+    assert!(!images.animate(&mut list, Duration::ZERO));
+    assert!(images.animate(&mut list, Duration::from_millis(150)));
+    let f1 = image(&list);
+    assert_eq!(
+        f1.data(),
+        images
+            .frame_at(&url, Duration::from_millis(150))
+            .unwrap()
+            .data()
+    );
+    // El fotograma puesto se sigue reconociendo como de la animación: vuelve al primero.
+    assert!(images.animate(&mut list, Duration::from_millis(300)));
+    assert_eq!(image(&list).data(), first.data());
+}

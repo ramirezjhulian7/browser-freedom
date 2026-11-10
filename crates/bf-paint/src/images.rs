@@ -113,6 +113,51 @@ impl SvgResources {
     }
 }
 
+/// Niveles de documentos externos (`use href="otro.svg#id"` y demás) que se cargan.
+const SVG_EXTERNAL_DEPTH: u32 = 4;
+
+/// Carga los documentos externos a los que se refiere `svg` (SVG 2 §5.6.2: `use`, pinturas,
+/// marcadores, recortes, máscaras) y los une a él, con los suyos ya unidos. `base`: la URL del
+/// documento. Sin `loader` (SVG como imagen, modo seguro) solo se cargan URLs `data:`.
+pub fn load_svg_externals(
+    svg: &mut bf_svg::Svg,
+    base: Option<&Url>,
+    loader: Option<&dyn ResourceLoader>,
+) {
+    load_externals_depth(svg, base, loader, 0);
+}
+
+fn load_externals_depth(
+    svg: &mut bf_svg::Svg,
+    base: Option<&Url>,
+    loader: Option<&dyn ResourceLoader>,
+    depth: u32,
+) {
+    if depth >= SVG_EXTERNAL_DEPTH {
+        return;
+    }
+    for doc in svg.external_documents() {
+        let Ok(url) = Url::parse(&doc, base) else {
+            continue;
+        };
+        let res = if url.scheme == "data" {
+            bf_infra::resource::load_local(&url, &[])
+        } else {
+            loader.and_then(|l| l.load(&url))
+        };
+        let Some(res) = res else {
+            continue;
+        };
+        // Se parsea como XML sea cual sea su tipo y su raíz (como hacen los navegadores con
+        // un HTML bien formado que contiene un `<svg>`).
+        let Ok(mut ext) = bf_svg::Svg::parse_resource(&res.bytes) else {
+            continue;
+        };
+        load_externals_depth(&mut ext, Some(&url), loader, depth + 1);
+        svg.attach_external(&doc, &ext);
+    }
+}
+
 /// Sobremuestreo de los SVG: se rasterizan al doble del tamaño CSS para que se vean nítidos
 /// también con DPR 2 (el rasterizador reduce con filtro bilineal).
 pub(crate) const SVG_OVERSAMPLE: f32 = 2.0;
@@ -293,6 +338,37 @@ impl PageImages {
             .min()
     }
 
+    /// Pone en `list` el fotograma visible en `t` de cada imagen animada (`<img>`, fondos y
+    /// máscaras), sin rehacer layout ni lista: los bitmaps de una animación se reconocen por
+    /// identidad (el builder pinta el primero, `by_url`). Devuelve si cambió alguno. Lo usa
+    /// el bucle de cuadros de la ventana con `t` = tiempo desde que se mostró la página.
+    pub fn animate(&self, list: &mut crate::DisplayList, t: Duration) -> bool {
+        if self.animations.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for item in &mut list.items {
+            let image = match item {
+                crate::DisplayItem::Image { image, .. }
+                | crate::DisplayItem::BackgroundImage { image, .. } => image,
+                _ => continue,
+            };
+            let Some(a) = self
+                .animations
+                .values()
+                .find(|a| a.pixmaps.iter().any(|p| Arc::ptr_eq(p, image)))
+            else {
+                continue;
+            };
+            let frame = a.frame_at(t);
+            if !Arc::ptr_eq(&frame, image) {
+                *image = frame;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// El bitmap de un `<canvas>` como la imagen `canvas:<id>` del elemento (E1).
     pub fn insert_canvas(&mut self, node: NodeId, pixmap: Arc<Pixmap>) {
         let url = format!("canvas:{}", node.index());
@@ -383,7 +459,13 @@ fn document_css(doc: &Document) -> Vec<String> {
 
 /// Los `<svg>` en línea de un documento HTML (los de más afuera) se pintan como imágenes del
 /// elemento (`inline-svg:<id>`): el layout ya los trata como reemplazados.
-fn inline_svgs(doc: &Document, styles: &StyleMap, images: &mut PageImages) {
+fn inline_svgs(
+    doc: &Document,
+    styles: &StyleMap,
+    images: &mut PageImages,
+    base: &Url,
+    loader: &dyn ResourceLoader,
+) {
     let mut css: Option<Vec<String>> = None;
     for node in doc.inclusive_descendants(doc.root()) {
         let Some(el) = doc.element(node) else {
@@ -422,9 +504,11 @@ fn inline_svgs(doc: &Document, styles: &StyleMap, images: &mut PageImages) {
                 .as_ref()
                 .map_err(|e| bf_image::ImageError::Decode(e.to_string())),
         );
-        let Ok(svg) = result else {
+        let Ok(mut svg) = result else {
             continue;
         };
+        // Parte del documento: sus referencias externas se cargan como sus recursos.
+        load_svg_externals(&mut svg, Some(base), Some(loader));
         let (w, h) = svg.default_size();
         let Some(pixmap) = svg::rasterize(&svg.tree(w, h), w.ceil() as u32, h.ceil() as u32, None)
         else {
@@ -472,7 +556,7 @@ pub fn load_images(
             }
         }
     }
-    inline_svgs(doc, styles, &mut images);
+    inline_svgs(doc, styles, &mut images, base, loader);
     // Los SVG en línea son parte del documento: sus `image` se cargan como las del HTML.
     let inline: Vec<Arc<bf_svg::Svg>> = images.svgs.values().cloned().collect();
     for svg in inline {

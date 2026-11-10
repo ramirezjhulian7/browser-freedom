@@ -210,6 +210,94 @@ fn markers_on_vertices() {
     assert_eq!(px(&p, 20, 20).3, 0);
 }
 
+/// Pinta un SVG de 100×100 con Ahem (cada glifo, un cuadrado de 1em con 0,8em sobre la línea
+/// base); `None` sin `tests/wpt/fonts/Ahem.ttf`.
+fn raster_ahem(body: &str) -> Option<Pixmap> {
+    let ahem =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/fonts/Ahem.ttf");
+    if !ahem.is_file() {
+        eprintln!("aviso: falta {}; se salta", ahem.display());
+        return None;
+    }
+    let db = std::sync::Arc::new(bf_font::FontDb::scan_with(&[], &[ahem]));
+    let fonts = bf_font::Fonts::new(db);
+    let src = format!(
+        "<svg {SVG_NS} width='100' height='100' font-family='Ahem' font-size='20'>{body}</svg>"
+    );
+    let svg = Svg::parse(&src).expect("SVG válido");
+    rasterize_svg(&svg.tree(100.0, 100.0), 100, 100, Some(&fonts))
+}
+
+/// ¿Está pintado (opaco) el píxel?
+fn ink(p: &Pixmap, x: u32, y: u32) -> bool {
+    px(p, x, y).3 == 255
+}
+
+#[test]
+fn text_position_lists_rotate_and_spacing() {
+    // Listas de `x`: cada valor abre un chunk.
+    let Some(p) = raster_ahem("<text x='0 50' y='20'>XX</text>") else {
+        return;
+    };
+    assert!(ink(&p, 10, 10) && ink(&p, 60, 10));
+    assert!(!ink(&p, 30, 10));
+    // `dx`/`dy` por carácter.
+    let p = raster_ahem("<text y='20' dx='0 30' dy='0 40'>XX</text>").unwrap();
+    assert!(ink(&p, 10, 10) && ink(&p, 60, 50));
+    assert!(!ink(&p, 30, 10) && !ink(&p, 60, 10));
+    // `rotate` gira el glifo alrededor de su origen (90°: la línea base hacia abajo).
+    let p = raster_ahem("<text x='20' y='20' rotate='90'>X</text>").unwrap();
+    assert!(ink(&p, 30, 30) && !ink(&p, 30, 10));
+    // `letter-spacing` detrás de cada carácter.
+    let p = raster_ahem("<text y='20' letter-spacing='10'>XX</text>").unwrap();
+    assert!(ink(&p, 40, 10) && !ink(&p, 25, 10));
+}
+
+#[test]
+fn text_dominant_baseline() {
+    // `text-before-edge`: la posición es el borde del ascent; `text-after-edge`, el del
+    // descent; `central`, el centro de la caja.
+    let Some(p) = raster_ahem("<text y='0' dominant-baseline='text-before-edge'>X</text>") else {
+        return;
+    };
+    assert!(ink(&p, 10, 1) && ink(&p, 10, 19) && !ink(&p, 10, 21));
+    let p = raster_ahem("<text y='20' dominant-baseline='text-after-edge'>X</text>").unwrap();
+    assert!(ink(&p, 10, 1) && ink(&p, 10, 19) && !ink(&p, 10, 21));
+    let p = raster_ahem("<text y='10' dominant-baseline='central'>X</text>").unwrap();
+    assert!(ink(&p, 10, 1) && ink(&p, 10, 19) && !ink(&p, 10, 21));
+}
+
+#[test]
+fn text_on_a_path() {
+    // Un camino vertical hacia abajo: los glifos van girados 90° a lo largo de él.
+    let Some(p) =
+        raster_ahem("<path id='p' d='M10,0 V100'/><text><textPath href='#p'>XX</textPath></text>")
+    else {
+        return;
+    };
+    assert!(ink(&p, 16, 10) && ink(&p, 16, 30));
+    assert!(!ink(&p, 16, 50) && !ink(&p, 3, 10) && !ink(&p, 40, 10));
+    // El glifo cuyo punto medio cae fuera del camino no se pinta.
+    let p =
+        raster_ahem("<path id='p' d='M10,0 V25'/><text><textPath href='#p'>XX</textPath></text>")
+            .unwrap();
+    assert!(ink(&p, 16, 10) && !ink(&p, 16, 22));
+    // `startOffset`, `text-anchor` y lo que sigue al camino (empieza en su final).
+    let p = raster_ahem(
+        "<path id='p' d='M0,20 H100'/><text><textPath href='#p' startOffset='50%' \
+         text-anchor='middle'>XX</textPath><tspan fill='blue'>X</tspan></text>",
+    )
+    .unwrap();
+    assert!(ink(&p, 35, 10) && ink(&p, 65, 10) && !ink(&p, 25, 10) && !ink(&p, 75, 10));
+    assert!(!ink(&p, 95, 10));
+    // `side="right"`: el camino al revés (de derecha a izquierda, los glifos cabeza abajo).
+    let p = raster_ahem(
+        "<path id='p' d='M0,50 H100'/><text><textPath href='#p' side='right'>X</textPath></text>",
+    )
+    .unwrap();
+    assert!(ink(&p, 90, 55) && !ink(&p, 90, 45) && !ink(&p, 10, 55));
+}
+
 /// Todos los bytes en `%XX` (para meterlos en una URL `data:` dentro de un atributo).
 fn pct(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("%{b:02X}")).collect()
@@ -297,4 +385,125 @@ fn foreign_object_html_content() {
     // Recortado al alto del elemento (el `div` mide 30).
     assert_eq!(px(&p, 25, 25), (0, 255, 0, 255));
     assert_eq!(px(&p, 15, 15), (0, 255, 0, 255));
+}
+
+/// Filter Effects 1 §9.13: `feFlood` llena la región del filtro (por defecto, la caja con un
+/// 10 % de margen) y nada fuera de ella.
+#[test]
+fn filter_flood_fills_region() {
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <filter id='f'><feFlood flood-color='lime'/></filter>\
+             <rect x='10' y='10' width='50' height='50' fill='red' filter='url(#f)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    assert_eq!(px(&p, 6, 6), (0, 255, 0, 255));
+    assert_eq!(px(&p, 63, 63), (0, 255, 0, 255));
+    assert_eq!(px(&p, 3, 3).3, 0);
+    assert_eq!(px(&p, 67, 67).3, 0);
+    // Una referencia a un filtro que no existe se ignora (§5): el elemento se pinta tal cual.
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <rect x='10' y='10' width='50' height='50' fill='red' filter='url(#nada)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    assert_eq!(px(&p, 30, 30), (255, 0, 0, 255));
+}
+
+/// §9.18: `feOffset` desplaza en espacio de usuario (aquí escalado ×2 por el `viewBox`).
+#[test]
+fn filter_offset_moves_content() {
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} viewBox='0 0 50 50'>\
+             <filter id='f' filterUnits='userSpaceOnUse' x='0' y='0' width='50' height='50'>\
+             <feOffset dx='20' dy='5'/></filter>\
+             <rect width='10' height='10' fill='blue' filter='url(#f)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    assert_eq!(px(&p, 5, 5).3, 0);
+    assert_eq!(px(&p, 45, 15), (0, 0, 255, 255));
+    assert_eq!(px(&p, 61, 15).3, 0);
+}
+
+/// §9.14: el desenfoque suaviza el borde (alfa intermedio en el borde, opaco en el centro).
+#[test]
+fn filter_blur_softens_edges() {
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <filter id='f' filterUnits='userSpaceOnUse' x='0' y='0' width='100' height='100'>\
+             <feGaussianBlur stdDeviation='4'/></filter>\
+             <rect x='25' y='25' width='50' height='50' fill='black' filter='url(#f)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    let edge = px(&p, 25, 50).3;
+    assert!((100..=155).contains(&edge), "alfa en el borde: {edge}");
+    assert!(px(&p, 50, 50).3 >= 250);
+    let outside = px(&p, 20, 50).3;
+    assert!(outside > 0 && outside < edge, "alfa fuera: {outside}");
+    assert_eq!(px(&p, 5, 50).3, 0);
+}
+
+/// §9.6 y §10: `saturate` 0 en sRGB da la luminancia del rojo (0,213 · 255 ≈ 54); en
+/// linearRGB (el valor inicial), el mismo gris convertido de vuelta a sRGB (≈ 127).
+#[test]
+fn filter_color_matrix_and_color_space() {
+    let doc = |space: &str| {
+        format!(
+            "<svg {SVG_NS} width='20' height='20'>\
+             <filter id='f' color-interpolation-filters='{space}'>\
+             <feColorMatrix type='saturate' values='0'/></filter>\
+             <rect width='20' height='20' fill='red' filter='url(#f)'/></svg>"
+        )
+    };
+    let (r, g, b, a) = px(&raster(&doc("sRGB"), 20, 20), 10, 10);
+    assert_eq!(a, 255);
+    assert!(r.abs_diff(54) <= 2 && r == g && g == b, "{r} {g} {b}");
+    let (r, g, b, _) = px(&raster(&doc("linearRGB"), 20, 20), 10, 10);
+    assert!(r.abs_diff(127) <= 3 && r == g && g == b, "{r} {g} {b}");
+}
+
+/// `feMerge` con una sombra (`SourceAlpha` desplazada) bajo el gráfico, y `feComposite`
+/// `in` de un `feFlood` con la forma.
+#[test]
+fn filter_merge_and_composite() {
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <filter id='f' filterUnits='userSpaceOnUse' x='0' y='0' width='100' height='100'>\
+             <feOffset in='SourceAlpha' dx='10' dy='10' result='s'/>\
+             <feMerge><feMergeNode in='s'/><feMergeNode in='SourceGraphic'/></feMerge>\
+             </filter>\
+             <rect x='10' y='10' width='30' height='30' fill='lime' filter='url(#f)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    assert_eq!(px(&p, 20, 20), (0, 255, 0, 255));
+    assert_eq!(px(&p, 45, 45), (0, 0, 0, 255));
+    assert_eq!(px(&p, 55, 55).3, 0);
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <filter id='f' filterUnits='userSpaceOnUse' x='0' y='0' width='100' height='100'>\
+             <feFlood flood-color='blue'/><feComposite in2='SourceGraphic' operator='in'/>\
+             </filter>\
+             <circle cx='50' cy='50' r='20' fill='red' filter='url(#f)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    assert_eq!(px(&p, 50, 50), (0, 0, 255, 255));
+    assert_eq!(px(&p, 10, 10).3, 0);
 }

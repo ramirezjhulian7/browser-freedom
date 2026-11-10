@@ -4,7 +4,8 @@
 //! `bf-paint`.
 //!
 //! Soportado: `svg` (también anidados), `g`, `a`, `switch`, `defs`, `symbol`, `use`, las
-//! formas básicas, `path` completo (arcos incluidos), `text`/`tspan` básicos, `viewBox` y
+//! formas básicas, `path` completo (arcos incluidos), `text`/`tspan`/`textPath` (listas `x`,
+//! `y`, `dx`, `dy`, `rotate`, `letter-spacing`, `word-spacing`, líneas base), `viewBox` y
 //! `preserveAspectRatio`, `transform`, `fill`/`stroke` (ancho, extremos, uniones,
 //! `miterlimit`, guiones), gradientes lineales y radiales (con `href`, unidades y
 //! `gradientTransform`), `opacity`, `clipPath`, `display` y `visibility`.
@@ -19,12 +20,18 @@
 //! `foreignObject` en línea queda como una [`Image`] con `href`
 //! [`FOREIGN_OBJECT_SCHEME`]`<nodo>`: su HTML lo maqueta `bf-paint`.
 //!
-//! TODO(svg): `filter`, animación SMIL, `textPath` y el layout de texto
-//! completo (§11).
+//! Filtros (Filter Effects 1): `filter: url(#id)` con el elemento `filter` (`filterUnits`,
+//! `primitiveUnits`, región, `href`) y las primitivas `feGaussianBlur`, `feOffset`, `feFlood`,
+//! `feMerge`, `feColorMatrix`, `feComposite` y `feBlend` ([`Filter`]); las aplica `bf-paint`.
+//!
+//! TODO(svg): el resto de primitivas (`feImage`, `feTurbulence`, luces, …), las funciones de
+//! filtro de CSS (`blur()`, …), animación SMIL y del layout de texto (§11) `textLength`,
+//! `inline-size`/`shape-inside` (texto en varias líneas) y el texto vertical.
 
 #![forbid(unsafe_code)]
 
 mod build;
+mod external;
 pub mod geom;
 mod style;
 
@@ -44,6 +51,11 @@ pub struct Svg {
     pub(crate) shadows: HashMap<usize, usize>,
     /// Vista pedida por el fragmento de la URL.
     pub(crate) view: Option<View>,
+    /// Documentos externos unidos ([`Svg::attach_external`]), por la parte de documento de
+    /// la referencia (la escrita y la clave sintética).
+    pub(crate) externals: HashMap<String, external::ExtDoc>,
+    /// Documentos unidos hasta ahora (numera las claves sintéticas).
+    pub(crate) ext_count: usize,
 }
 
 /// Región `#xywh=` (Media Fragments URI 1.0 §4.2.2).
@@ -203,6 +215,13 @@ impl Svg {
         svg
     }
 
+    /// Un documento de recursos externo (SVG 2 §16.1.5): XML con cualquier elemento raíz (un
+    /// HTML bien formado, un XML sin `<svg>` arriba); sus elementos se referencian por `id`.
+    pub fn parse_resource(bytes: &[u8]) -> Result<Svg, SvgError> {
+        let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+        style::load_resource(&String::from_utf8_lossy(bytes))
+    }
+
     /// Parsea bytes (UTF-8, con o sin BOM).
     pub fn parse_bytes(bytes: &[u8]) -> Result<Svg, SvgError> {
         let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
@@ -322,6 +341,9 @@ pub struct Group {
     pub clip: Option<ClipPath>,
     /// Máscara (`mask`, CSS Masking 1 §7), también en el sistema del grupo.
     pub mask: Option<Box<Mask>>,
+    /// Filtro (`filter`, Filter Effects 1 §5), en el sistema del grupo. Se aplica antes que
+    /// el recorte, la máscara y la opacidad (CSS Masking 1 §3).
+    pub filter: Option<Box<Filter>>,
     /// Tras `transform`, una unidad del grupo mide un px del host (el viewport raíz): los
     /// marcadores con `markerUnits="strokeWidth"` de un trazo `non-scaling-stroke`, que se
     /// escalan por el ancho del trazo en el host (SVG 2 §13.7.2).
@@ -339,6 +361,108 @@ pub struct Mask {
     pub rect: (f32, f32, f32, f32),
     /// Contenido, con la transformación de `maskContentUnits` en el grupo.
     pub content: Group,
+}
+
+/// Elemento `filter` resuelto (Filter Effects 1 §9.2): la región del filtro y la cadena de
+/// primitivas, todo ya en el sistema de coordenadas del grupo filtrado (`filterUnits` y
+/// `primitiveUnits` aplicadas). El resultado de la última primitiva es lo que se pinta,
+/// recortado a la región.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filter {
+    /// Región del filtro (x, y, ancho, alto), §9.2.
+    pub region: (f32, f32, f32, f32),
+    /// Primitivas en orden de documento (al menos una).
+    pub primitives: Vec<FilterPrimitive>,
+}
+
+/// Entrada de una primitiva (`in`, `in2`, `feMergeNode`), Filter Effects 1 §9.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterInput {
+    /// `SourceGraphic`: el elemento pintado (RGBA premultiplicado).
+    SourceGraphic,
+    /// `SourceAlpha`: solo el canal alfa de `SourceGraphic`.
+    SourceAlpha,
+    /// El resultado de la primitiva con ese índice (anterior a la que lo usa).
+    Primitive(usize),
+    /// Entradas que no soportamos (`BackgroundImage`, `FillPaint`, …): negro transparente.
+    Transparent,
+}
+
+/// `edgeMode` de `feGaussianBlur` (§9.14): cómo se extiende la imagen de entrada por fuera
+/// de sus bordes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeMode {
+    /// Valor inicial: ceros fuera de la imagen.
+    #[default]
+    None,
+    Duplicate,
+    Wrap,
+}
+
+/// Operador de `feComposite` (§9.8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompositeOp {
+    Over,
+    In,
+    Out,
+    Atop,
+    Xor,
+    Lighter,
+    Arithmetic { k1: f32, k2: f32, k3: f32, k4: f32 },
+}
+
+/// Modo de `feBlend` (§9.5, Compositing and Blending 1 §10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Darken,
+    Lighten,
+}
+
+/// Operación de una primitiva, con sus magnitudes ya en el sistema del grupo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterKind {
+    /// `feGaussianBlur` (§9.14): desviación típica en x e y (≥ 0; 0 = sin desenfoque en ese
+    /// eje).
+    GaussianBlur { std_dev: (f32, f32), edge: EdgeMode },
+    /// `feOffset` (§9.18).
+    Offset { dx: f32, dy: f32 },
+    /// `feFlood` (§9.13): `flood-color` con `flood-opacity` ya aplicada (en sRGB).
+    Flood { color: Rgba },
+    /// `feMerge` (§9.16): las entradas de sus `feMergeNode`, de abajo arriba.
+    Merge { inputs: Vec<FilterInput> },
+    /// `feColorMatrix` (§9.6): matriz 4×5 por filas sobre RGBA no premultiplicado (todos los
+    /// `type` se reducen a una matriz).
+    ColorMatrix { matrix: [f32; 20] },
+    /// `feComposite` (§9.8): `in` con el operador sobre `in2`.
+    Composite { op: CompositeOp, in2: FilterInput },
+    /// `feBlend` (§9.5): `in` (arriba) mezclada sobre `in2` (fondo).
+    Blend { mode: BlendMode, in2: FilterInput },
+    /// `feDropShadow` (§9.12): el alfa de `in` desenfocado, desplazado y teñido de `color`,
+    /// con `in` encima.
+    DropShadow {
+        std_dev: (f32, f32),
+        dx: f32,
+        dy: f32,
+        color: Rgba,
+    },
+    /// Primitiva que no soportamos: deja pasar su entrada tal cual.
+    Passthrough,
+}
+
+/// Una primitiva de filtro (§9.2–§9.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterPrimitive {
+    pub kind: FilterKind,
+    /// `in` (se ignora en `feFlood` y `feMerge`).
+    pub input: FilterInput,
+    /// Subregión de la primitiva (§9.4), en el sistema del grupo.
+    pub subregion: (f32, f32, f32, f32),
+    /// `color-interpolation-filters: linearRGB` (valor inicial, §10); `false` = sRGB. No
+    /// afecta a `feOffset` ni a `feFlood` (nota de §10).
+    pub linear_rgb: bool,
 }
 
 /// Servidor `pattern` resuelto (SVG 2 §14.4): una tesela de `width`×`height` que se repite.
@@ -461,7 +585,31 @@ pub enum TextAnchor {
     End,
 }
 
-/// Fragmento de texto con un solo estilo.
+/// Línea base con la que se alinea un fragmento (`dominant-baseline` y `alignment-baseline`,
+/// SVG 2 §11.10.2 y CSS Inline 3 §4): la posición del texto es la de esa línea, y el glifo se
+/// desplaza respecto de su línea alfabética con las métricas de la fuente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Baseline {
+    #[default]
+    Alphabetic,
+    /// `hanging`: 0,8 del ascent (como los navegadores sin tabla `BASE`).
+    Hanging,
+    /// `middle`: la mitad de la altura de la x.
+    Middle,
+    /// `central`: el centro de la caja ascent–descent.
+    Central,
+    /// `text-before-edge` / `text-top`: el borde del ascent.
+    TextBeforeEdge,
+    /// `text-after-edge` / `text-bottom`: el borde del descent.
+    TextAfterEdge,
+    /// `ideographic`: como el borde del descent.
+    Ideographic,
+    /// `mathematical`: la mitad del ascent.
+    Mathematical,
+}
+
+/// Fragmento de texto con un solo estilo y sin posiciones absolutas dentro (cada `x`/`y`
+/// absoluto abre un [`Chunk`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     pub text: String,
@@ -471,9 +619,18 @@ pub struct Span {
     pub italic: bool,
     pub fill: Option<Fill>,
     pub stroke: Option<Stroke>,
-    /// Desplazamiento antes del fragmento (`dx`, `dy`).
-    pub dx: f32,
-    pub dy: f32,
+    /// `dx`/`dy` de cada carácter de `text` (SVG 2 §11.8.2, se acumulan); los que falten
+    /// valen 0.
+    pub dx: Vec<f32>,
+    pub dy: Vec<f32>,
+    /// `rotate` de cada carácter, en grados (§11.8.2); los que falten valen 0.
+    pub rotate: Vec<f32>,
+    /// `letter-spacing` y `word-spacing` (CSS Text 3 §8), en unidades de usuario.
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+    /// Línea base de alineación y `baseline-shift` (hacia arriba, en unidades de usuario).
+    pub baseline: Baseline,
+    pub baseline_shift: f32,
     /// `paint-order` con el trazo antes que el relleno (SVG 2 §13.7.3).
     pub stroke_first: bool,
 }
@@ -482,16 +639,29 @@ pub struct Span {
 /// se alinea entero según `anchor`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chunk {
+    /// En un camino (`path`), `x` es la distancia a lo largo de él desde `startOffset`.
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub anchor: TextAnchor,
     pub spans: Vec<Span>,
+    /// Índice en [`Text::paths`] del `textPath` en el que va el chunk.
+    pub path: Option<usize>,
+}
+
+/// El camino de un `textPath` (SVG 2 §11.8): en el espacio de usuario del `text`, ya invertido
+/// con `side="right"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPath {
+    pub segs: Vec<Seg>,
+    /// `startOffset` resuelto (con `pathLength` aplicado; infinito si la escala lo es).
+    pub start_offset: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Text {
     pub transform: Transform,
     pub chunks: Vec<Chunk>,
+    pub paths: Vec<TextPath>,
 }
 
 /// `clipPath`: la unión de las formas, cada una con su regla y su transformación.

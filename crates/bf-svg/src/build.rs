@@ -8,9 +8,12 @@ use bf_style::values::color::{Color, parse_color};
 use crate::geom::{self, Seg, Transform};
 use crate::style::Node as DocNode;
 use crate::{
-    Chunk, ClipPath, Fill, FillRule, Gradient, GradientKind, Group, Intrinsic, LineCap, LineJoin,
-    Mask, Node, Paint, Path, Pattern, Rgba, Span, Spread, Stroke, Svg, Text, TextAnchor, Tree,
+    ClipPath, Fill, FillRule, Gradient, GradientKind, Group, Intrinsic, LineCap, LineJoin, Mask,
+    Node, Paint, Path, Pattern, Rgba, Spread, Stroke, Svg, TextAnchor, Tree,
 };
+
+mod filter;
+mod text;
 
 /// Profundidad máxima de `use` y `href` encadenados (protege de ciclos).
 const MAX_DEPTH: usize = 16;
@@ -166,6 +169,9 @@ fn len_from(v: f32, unit: &str) -> Option<Len> {
         "%" => Some(Len::Pct(v)),
         "em" => Some(Len::Em(v)),
         "ex" => Some(Len::Ex(v)),
+        // Sin métricas de la fuente aquí: `ch` vale 0,5em (CSS Values 4 §6.1.1, el valor por
+        // defecto cuando no se puede medir).
+        "ch" => Some(Len::Em(v * 0.5)),
         u => Some(Len::Px(v * unit_px(u)?)),
     }
 }
@@ -248,11 +254,6 @@ fn url_of(c: &ComponentValue) -> Option<String> {
     }
 }
 
-/// `#id` de una URL local.
-fn fragment(url: &str) -> Option<&str> {
-    url.trim().rsplit_once('#').map(|(_, id)| id)
-}
-
 fn parse_paint(v: &[ComponentValue]) -> Option<PaintSpec> {
     let t = toks(v);
     let simple = |c: &ComponentValue| -> Option<PaintSpec> {
@@ -304,6 +305,9 @@ struct St {
     visible: bool,
     clip_rule: FillRule,
     letter_spacing: f32,
+    word_spacing: f32,
+    /// `dominant-baseline` (SVG 2 §11.10.2.1, heredada).
+    dominant_baseline: crate::Baseline,
     /// `marker-start`, `marker-mid` y `marker-end` (URLs).
     markers: [Option<String>; 3],
     /// `paint-order` (SVG 2 §13.7.3): 0 relleno, 1 trazo, 2 marcadores.
@@ -333,6 +337,8 @@ impl Default for St {
             visible: true,
             clip_rule: FillRule::NonZero,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
+            dominant_baseline: crate::Baseline::Alphabetic,
             markers: [None, None, None],
             paint_order: [0, 1, 2],
         }
@@ -380,8 +386,9 @@ impl<'a> Builder<'a> {
         &self.svg.nodes[i]
     }
 
+    /// El elemento de una referencia: `#id` local o de un documento externo unido.
     fn by_id(&self, url: &str) -> Option<usize> {
-        self.svg.ids.get(fragment(url)?).copied()
+        self.svg.lookup(url)
     }
 
     /// Aplica las propiedades heredadas declaradas en `n` sobre las del padre.
@@ -613,14 +620,28 @@ impl<'a> Builder<'a> {
                     }
                     st.paint_order = [order[0], order[1], order[2]];
                 }
-                "letter-spacing" => {
-                    st.letter_spacing = match id.as_deref() {
+                // CSS Text 3 §8.1–§8.2 (los porcentajes, CSS Text 4: del tamaño de la fuente).
+                "letter-spacing" | "word-spacing" => {
+                    let space = match id.as_deref() {
                         Some("normal") => 0.0,
                         _ => match one(v).and_then(cv_len) {
+                            Some(Len::Pct(p)) => st.size * p / 100.0,
                             Some(l) => vp.resolve(l, Axis::Other, st.size),
                             None => continue,
                         },
                     };
+                    if name == "letter-spacing" {
+                        st.letter_spacing = space;
+                    } else {
+                        st.word_spacing = space;
+                    }
+                }
+                "dominant-baseline" => {
+                    if let Some(b) = id.as_deref().and_then(text::baseline_keyword) {
+                        st.dominant_baseline = b;
+                    } else if id.as_deref() == Some("auto") {
+                        st.dominant_baseline = crate::Baseline::Alphabetic;
+                    }
                 }
                 _ => {}
             }
@@ -760,7 +781,8 @@ impl<'a> Builder<'a> {
             .and_then(|v| one(v).and_then(url_of))
             .and_then(|u| self.by_id(&u))
             .filter(|&m| self.node(m).name == "mask");
-        if opacity >= 1.0 && clip.is_none() && mask.is_none() {
+        let filter = self.filter_ref(n);
+        if opacity >= 1.0 && clip.is_none() && mask.is_none() && filter.is_none() {
             match &mut node {
                 Node::Path(p) => {
                     p.transform = transform.then(&p.transform);
@@ -795,12 +817,22 @@ impl<'a> Builder<'a> {
             }
             None => None,
         };
+        // Filter Effects 1 §9.2: sin primitivas o con una región vacía, el elemento no se
+        // pinta.
+        let filter = match filter {
+            Some(f) => {
+                let bbox = node_bbox(&node, &Transform::IDENTITY);
+                Some(Box::new(self.filter(f, vp, bbox)?))
+            }
+            None => None,
+        };
         Some(Node::Group(Group {
             host_units: false,
             transform,
             opacity,
             clip,
             mask,
+            filter,
             children: vec![node],
         }))
     }
@@ -895,6 +927,7 @@ impl<'a> Builder<'a> {
                 opacity: 1.0,
                 clip: None,
                 mask: None,
+                filter: None,
                 children,
             },
         })
@@ -1263,12 +1296,14 @@ impl<'a> Builder<'a> {
             opacity: Self::opacity(mn),
             clip,
             mask: None,
+            filter: None,
             children: vec![Node::Group(Group {
                 host_units: false,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
                 mask: None,
+                filter: None,
                 children,
             })],
         });
@@ -1280,6 +1315,7 @@ impl<'a> Builder<'a> {
             opacity: 1.0,
             clip: None,
             mask: None,
+            filter: None,
             host_units: true,
             children: vec![node],
         }))
@@ -1349,12 +1385,14 @@ impl<'a> Builder<'a> {
             opacity: 1.0,
             clip,
             mask: None,
+            filter: None,
             children: vec![Node::Group(Group {
                 host_units: false,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
                 mask: None,
+                filter: None,
                 children,
             })],
         }))
@@ -1408,6 +1446,7 @@ impl<'a> Builder<'a> {
             opacity: 1.0,
             clip: None,
             mask: None,
+            filter: None,
             children: vec![inner],
         }))
     }
@@ -1595,6 +1634,7 @@ impl<'a> Builder<'a> {
                 opacity: 1.0,
                 clip: None,
                 mask: None,
+                filter: None,
                 children,
             },
         }))))
@@ -1829,108 +1869,9 @@ impl<'a> Builder<'a> {
         Some(clip)
     }
 
+    /// Elemento `text` (SVG 2 §11): ver [`text`].
     fn text(&mut self, i: usize, st: &St, vp: Viewport) -> Option<Node> {
-        let mut chunks: Vec<Chunk> = Vec::new();
-        self.text_runs(i, st, vp, &mut chunks, true);
-        // Espacios: los del principio y el final del elemento `text` no cuentan.
-        if let Some(first) = chunks.iter_mut().flat_map(|c| c.spans.iter_mut()).next() {
-            first.text = first.text.trim_start().to_owned();
-        }
-        if let Some(last) = chunks
-            .iter_mut()
-            .flat_map(|c| c.spans.iter_mut())
-            .next_back()
-        {
-            last.text = last.text.trim_end().to_owned();
-        }
-        chunks.retain(|c| !c.spans.is_empty());
-        if chunks.is_empty() {
-            return None;
-        }
-        Some(Node::Text(Text {
-            transform: Transform::IDENTITY,
-            chunks,
-        }))
-    }
-
-    /// Recorre `text`/`tspan`/`a`: cada `x`/`y` abre un *chunk*; el texto se normaliza como
-    /// `white-space: normal` (espacios colapsados también entre fragmentos).
-    fn text_runs(&mut self, i: usize, st: &St, vp: Viewport, chunks: &mut Vec<Chunk>, root: bool) {
-        let n = self.node(i);
-        let first_len = |name: &str, axis: Axis| {
-            n.attr(name)
-                .and_then(|v| v.split([' ', ',', '\t', '\n']).find(|s| !s.is_empty()))
-                .and_then(parse_len)
-                .map(|l| vp.resolve(l, axis, st.size))
-        };
-        let x = first_len("x", Axis::X);
-        let y = first_len("y", Axis::Y);
-        let mut dx = first_len("dx", Axis::X).unwrap_or(0.0);
-        let mut dy = first_len("dy", Axis::Y).unwrap_or(0.0);
-        if root || x.is_some() || y.is_some() || chunks.is_empty() {
-            chunks.push(Chunk {
-                x: x.or(if root { Some(0.0) } else { None }),
-                y: y.or(if root { Some(0.0) } else { None }),
-                anchor: st.anchor,
-                spans: Vec::new(),
-            });
-        }
-        let kids = n.children.clone();
-        for k in kids {
-            let kn = self.node(k);
-            if kn.is_text() {
-                let mut text: String = kn
-                    .text
-                    .chars()
-                    .map(|c| if c.is_whitespace() { ' ' } else { c })
-                    .collect();
-                // Colapsa con el espacio final del fragmento anterior.
-                let prev_space = chunks
-                    .iter()
-                    .flat_map(|c| c.spans.iter())
-                    .next_back()
-                    .is_none_or(|s| s.text.ends_with(' '));
-                let mut collapsed = String::with_capacity(text.len());
-                let mut last_space = prev_space;
-                for c in text.drain(..) {
-                    if c == ' ' {
-                        if !last_space {
-                            collapsed.push(' ');
-                        }
-                        last_space = true;
-                    } else {
-                        collapsed.push(c);
-                        last_space = false;
-                    }
-                }
-                if collapsed.is_empty() || !st.visible {
-                    continue;
-                }
-                let bbox = None;
-                let span = Span {
-                    text: collapsed,
-                    family: st.family.clone(),
-                    size: st.size,
-                    weight: st.weight,
-                    italic: st.italic,
-                    fill: self.fill(st, bbox, vp),
-                    stroke: self.stroke(st, bbox, vp),
-                    dx: std::mem::take(&mut dx),
-                    dy: std::mem::take(&mut dy),
-                    stroke_first: st.paint_order.iter().position(|&k| k == 1)
-                        < st.paint_order.iter().position(|&k| k == 0),
-                };
-                if let Some(c) = chunks.last_mut() {
-                    c.spans.push(span);
-                }
-                continue;
-            }
-            if !matches!(kn.name.as_str(), "tspan" | "a") || Self::display_none(kn) {
-                continue;
-            }
-            let kst = self.computed(kn, st, vp);
-            self.text_runs(k, &kst, vp, chunks, false);
-        }
+        text::build(self, i, st, vp)
     }
 }
 
@@ -2349,6 +2290,7 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
             opacity: 1.0,
             clip: None,
             mask: None,
+            filter: None,
             children: vec![Node::Group(full.root)],
         };
         return Tree {
@@ -2367,6 +2309,7 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         opacity: 1.0,
         clip: None,
         mask: None,
+        filter: None,
         children: Vec::new(),
     };
     if let Some(r) = svg.nodes.first()

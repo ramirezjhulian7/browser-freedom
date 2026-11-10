@@ -539,7 +539,6 @@ pub fn parse_transform(s: &str) -> Option<Transform> {
     Some(t)
 }
 
-/// Caja envolvente exacta de un trazado (extremos de las curvas incluidos): x, y, ancho, alto.
 /// Longitud de un trazado (para `pathLength`, SVG 2 §9.5.1): las curvas se aproximan con
 /// 64 cuerdas.
 pub fn length(segs: &[Seg]) -> f32 {
@@ -596,6 +595,225 @@ pub fn length(segs: &[Seg]) -> f32 {
     total
 }
 
+/// Un tramo recto de un trazado aplanado: origen, tangente unitaria, distancia acumulada a lo
+/// largo del trazado en su origen y longitud.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathPiece {
+    pub x: f32,
+    pub y: f32,
+    pub ux: f32,
+    pub uy: f32,
+    pub start: f32,
+    pub len: f32,
+}
+
+impl PathPiece {
+    /// El punto de la recta del tramo a la distancia `d` del principio del trazado (fuera del
+    /// tramo, extrapolado por su tangente).
+    pub fn point(&self, d: f32) -> (f32, f32) {
+        let t = d - self.start;
+        (self.x + self.ux * t, self.y + self.uy * t)
+    }
+}
+
+/// Un trazado medido para colocar cosas a una distancia a lo largo de él (texto en un camino,
+/// SVG 2 §11.8.3). Las curvas se aplanan con las mismas 64 cuerdas que [`length`]; la
+/// longitud total es la suma de la de los subtrazados (los `moveto` no cuentan).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PathMeasure {
+    pieces: Vec<PathPiece>,
+    total: f32,
+    end: Option<(f32, f32)>,
+}
+
+impl PathMeasure {
+    pub fn new(segs: &[Seg]) -> PathMeasure {
+        const STEPS: usize = 64;
+        let mut m = PathMeasure::default();
+        let (mut cur, mut start) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+        let line = |m: &mut PathMeasure, a: (f32, f32), b: (f32, f32)| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.0 && len.is_finite() {
+                m.pieces.push(PathPiece {
+                    x: a.0,
+                    y: a.1,
+                    ux: dx / len,
+                    uy: dy / len,
+                    start: m.total,
+                    len,
+                });
+                m.total += len;
+            }
+        };
+        for s in segs {
+            match *s {
+                Seg::MoveTo(x, y) => {
+                    cur = (x, y);
+                    start = cur;
+                }
+                Seg::LineTo(x, y) => {
+                    line(&mut m, cur, (x, y));
+                    cur = (x, y);
+                }
+                Seg::QuadTo(x1, y1, x, y) => {
+                    let mut prev = cur;
+                    for k in 1..=STEPS {
+                        let t = k as f32 / STEPS as f32;
+                        let u = 1.0 - t;
+                        let p = (
+                            u * u * cur.0 + 2.0 * u * t * x1 + t * t * x,
+                            u * u * cur.1 + 2.0 * u * t * y1 + t * t * y,
+                        );
+                        line(&mut m, prev, p);
+                        prev = p;
+                    }
+                    cur = (x, y);
+                }
+                Seg::CubicTo(x1, y1, x2, y2, x, y) => {
+                    let mut prev = cur;
+                    for k in 1..=STEPS {
+                        let t = k as f32 / STEPS as f32;
+                        let u = 1.0 - t;
+                        let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                        let p = (
+                            a * cur.0 + b * x1 + c * x2 + d * x,
+                            a * cur.1 + b * y1 + c * y2 + d * y,
+                        );
+                        line(&mut m, prev, p);
+                        prev = p;
+                    }
+                    cur = (x, y);
+                }
+                Seg::Close => {
+                    line(&mut m, cur, start);
+                    cur = start;
+                }
+            }
+            m.end = Some(cur);
+        }
+        m
+    }
+
+    /// Longitud total.
+    pub fn length(&self) -> f32 {
+        self.total
+    }
+
+    /// El último punto del trazado (donde sigue el texto tras un `textPath`, §11.8.2).
+    pub fn end(&self) -> Option<(f32, f32)> {
+        self.end
+    }
+
+    /// El tramo en el que cae la distancia `d`; `None` fuera de `[0, longitud]`.
+    pub fn piece_at(&self, d: f32) -> Option<&PathPiece> {
+        if !(0.0..=self.total).contains(&d) || self.pieces.is_empty() {
+            return None;
+        }
+        let i = self.pieces.partition_point(|p| p.start + p.len < d);
+        self.pieces.get(i.min(self.pieces.len() - 1))
+    }
+}
+
+/// El mismo trazado recorrido al revés (`side="right"` de `textPath`, SVG 2 §11.8.4): los
+/// subtrazados en orden inverso, cada uno desde su último punto, y los cerrados siguen
+/// cerrados.
+pub fn reverse(segs: &[Seg]) -> Vec<Seg> {
+    struct Sub {
+        start: (f32, f32),
+        /// Cada segmento con su punto de partida.
+        segs: Vec<((f32, f32), Seg)>,
+        closed: bool,
+    }
+    let end_of = |s: &Seg, or: (f32, f32)| match *s {
+        Seg::MoveTo(x, y) | Seg::LineTo(x, y) | Seg::QuadTo(_, _, x, y) => (x, y),
+        Seg::CubicTo(_, _, _, _, x, y) => (x, y),
+        Seg::Close => or,
+    };
+    let mut subs: Vec<Sub> = Vec::new();
+    let mut cur = (0.0, 0.0);
+    for s in segs {
+        match *s {
+            Seg::MoveTo(x, y) => {
+                cur = (x, y);
+                subs.push(Sub {
+                    start: cur,
+                    segs: Vec::new(),
+                    closed: false,
+                });
+            }
+            Seg::Close => {
+                if let Some(sub) = subs.last_mut() {
+                    if cur != sub.start {
+                        sub.segs.push((cur, Seg::LineTo(sub.start.0, sub.start.1)));
+                    }
+                    sub.closed = true;
+                    cur = sub.start;
+                }
+            }
+            other => {
+                // Tras un cierre, lo que sigue es otro subtrazado que empieza en el mismo punto.
+                if subs.last().is_none_or(|s| s.closed) {
+                    subs.push(Sub {
+                        start: cur,
+                        segs: Vec::new(),
+                        closed: false,
+                    });
+                }
+                if let Some(sub) = subs.last_mut() {
+                    sub.segs.push((cur, other));
+                }
+                cur = end_of(&other, cur);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for sub in subs.iter().rev() {
+        let end = sub.segs.last().map_or(sub.start, |(f, s)| end_of(s, *f));
+        out.push(Seg::MoveTo(end.0, end.1));
+        for &(from, s) in sub.segs.iter().rev() {
+            out.push(match s {
+                Seg::QuadTo(x1, y1, ..) => Seg::QuadTo(x1, y1, from.0, from.1),
+                Seg::CubicTo(x1, y1, x2, y2, ..) => Seg::CubicTo(x2, y2, x1, y1, from.0, from.1),
+                _ => Seg::LineTo(from.0, from.1),
+            });
+        }
+        if sub.closed {
+            out.push(Seg::Close);
+        }
+    }
+    out
+}
+
+/// Los segmentos de `segs` llevados por `t` (las curvas afines se transforman por sus puntos
+/// de control).
+pub fn transform_segs(segs: &[Seg], t: &Transform) -> Vec<Seg> {
+    segs.iter()
+        .map(|s| match *s {
+            Seg::MoveTo(x, y) => {
+                let (x, y) = t.apply(x, y);
+                Seg::MoveTo(x, y)
+            }
+            Seg::LineTo(x, y) => {
+                let (x, y) = t.apply(x, y);
+                Seg::LineTo(x, y)
+            }
+            Seg::QuadTo(x1, y1, x, y) => {
+                let ((x1, y1), (x, y)) = (t.apply(x1, y1), t.apply(x, y));
+                Seg::QuadTo(x1, y1, x, y)
+            }
+            Seg::CubicTo(x1, y1, x2, y2, x, y) => {
+                let (x1, y1) = t.apply(x1, y1);
+                let (x2, y2) = t.apply(x2, y2);
+                let (x, y) = t.apply(x, y);
+                Seg::CubicTo(x1, y1, x2, y2, x, y)
+            }
+            Seg::Close => Seg::Close,
+        })
+        .collect()
+}
+
+/// Caja envolvente exacta de un trazado (extremos de las curvas incluidos): x, y, ancho, alto.
 pub fn bbox(segs: &[Seg]) -> Option<(f32, f32, f32, f32)> {
     let mut b: Option<(f32, f32, f32, f32)> = None;
     let mut add = |x: f32, y: f32| {
@@ -751,6 +969,38 @@ mod tests {
         let circle = ellipse(0.0, 0.0, 100.0, 100.0);
         let c = 2.0 * std::f32::consts::PI * 100.0;
         assert!((length(&circle) - c).abs() < 0.5, "{}", length(&circle));
+    }
+
+    #[test]
+    fn path_measure_and_reverse() {
+        let segs = parse_path("M10,10 h100 M0,0 v50");
+        let m = PathMeasure::new(&segs);
+        assert!((m.length() - 150.0).abs() < 1e-4);
+        assert_eq!(m.end(), Some((0.0, 50.0)));
+        // A 30 del principio: el primer subtrazado, en horizontal.
+        let p = m.piece_at(30.0).unwrap();
+        assert_eq!(p.point(30.0), (40.0, 10.0));
+        assert_eq!((p.ux, p.uy), (1.0, 0.0));
+        // A 120: el segundo, 20 hacia abajo desde (0, 0).
+        let p = m.piece_at(120.0).unwrap();
+        assert_eq!(p.point(120.0), (0.0, 20.0));
+        assert!(m.piece_at(-1.0).is_none() && m.piece_at(151.0).is_none());
+
+        let r = reverse(&parse_path("M0,0 L10,0 Q20,0 20,10 Z"));
+        assert_eq!(
+            r,
+            vec![
+                Seg::MoveTo(0.0, 0.0),
+                Seg::LineTo(20.0, 10.0),
+                Seg::QuadTo(20.0, 0.0, 10.0, 0.0),
+                Seg::LineTo(0.0, 0.0),
+                Seg::Close,
+            ]
+        );
+        assert_eq!(
+            reverse(&parse_path("M0,0 L5,0 M1,1 L1,9")),
+            parse_path("M1,9 L1,1 M5,0 L0,0")
+        );
     }
 
     #[test]

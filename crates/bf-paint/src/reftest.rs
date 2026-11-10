@@ -379,10 +379,17 @@ impl Harness {
         let Some(root) = doc.children(doc.root()).find(|&n| doc.element(n).is_some()) else {
             return out;
         };
-        let Ok(svg) = bf_svg::Svg::from_element(doc, root, &[], bf_svg::Inherited::default())
+        let Ok(mut svg) =
+            bf_svg::Svg::from_element(doc, root, &[], bf_svg::Inherited::default())
         else {
             return out;
         };
+        // Documento de primer nivel: sus referencias a otros documentos se cargan.
+        crate::images::load_svg_externals(
+            &mut svg,
+            Some(&self.base(path)),
+            Some(self.loader.as_ref()),
+        );
         let i = svg.intrinsic();
         let sw = i.width.unwrap_or(VIEWPORT.width);
         let sh = i.height.unwrap_or(VIEWPORT.height);

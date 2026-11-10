@@ -153,6 +153,8 @@ struct TabState {
     overlay_hover: Option<(Rect, bool, String)>,
     page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
     page_generation: u64,
+    anim_epoch: Option<Instant>,
+    image_frame: u64,
     last_layout_request: Option<Size>,
     load_time: Option<Duration>,
     raster: Cell<Option<Duration>>,
@@ -233,6 +235,11 @@ struct App {
     /// DPI ni viewport, así mover el ratón o animar la barra no vuelve a pintar la página.
     page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
     page_generation: u64,
+    /// E7: inicio de las animaciones de GIF/APNG de la página (al mostrarse la navegación;
+    /// los relayouts y los cuadros de scripts lo conservan).
+    anim_epoch: Option<Instant>,
+    /// E7: cambia con cada fotograma nuevo de una imagen animada (invalida el raster).
+    image_frame: u64,
     panel_cache: RefCell<Option<(RasterKey, Pixmap)>>,
     panel_generation: u64,
     /// Último viewport con el que se pidió layout al hilo de trabajo.
@@ -319,6 +326,8 @@ struct RasterKey {
     scroll: (i64, i64),
     scale: u32,
     size: (u32, u32),
+    /// Fotograma de las imágenes animadas (E7).
+    frame: u64,
 }
 
 impl RasterKey {
@@ -331,6 +340,7 @@ impl RasterKey {
             ),
             scale: scale.to_bits(),
             size: (size.width.to_bits(), size.height.to_bits()),
+            frame: 0,
         }
     }
 }
@@ -670,6 +680,8 @@ impl App {
             panel_raster: None,
             page_cache: RefCell::new(None),
             page_generation: 0,
+            anim_epoch: None,
+            image_frame: 0,
             panel_cache: RefCell::new(None),
             panel_generation: 0,
             last_layout_request: None,
@@ -772,6 +784,8 @@ impl App {
         swap(&mut self.overlay_hover, &mut t.overlay_hover);
         swap(&mut self.page_cache, &mut t.page_cache);
         swap(&mut self.page_generation, &mut t.page_generation);
+        swap(&mut self.anim_epoch, &mut t.anim_epoch);
+        swap(&mut self.image_frame, &mut t.image_frame);
         swap(&mut self.last_layout_request, &mut t.last_layout_request);
         swap(&mut self.load_time, &mut t.load_time);
         swap(&mut self.raster, &mut t.raster);
@@ -2118,6 +2132,7 @@ impl App {
         self.current = Some(loaded);
         self.page = Some(page);
         self.page_generation += 1;
+        self.anim_epoch = Some(Instant::now());
         self.selection = None;
         self.raster.set(None);
         self.hover_link = None;
@@ -2281,6 +2296,26 @@ impl App {
 
     // --- Pintura ---
 
+    /// E7: pone en la lista de la página el fotograma visible de cada imagen animada y, si
+    /// cambió alguno, pide un cuadro. Devuelve cuándo cambia el próximo (`None`: sin
+    /// animaciones o todas paradas).
+    fn animate_page(&mut self) -> Option<Instant> {
+        let epoch = self.anim_epoch?;
+        let page = self.page.as_mut()?;
+        if !page.images.has_animations() {
+            return None;
+        }
+        let now = Instant::now();
+        let t = now.saturating_duration_since(epoch);
+        let changed = page.images.animate(&mut page.display_list, t);
+        let next = page.images.next_frame_change(t).map(|d| now + d);
+        if changed {
+            self.image_frame += 1;
+            self.redraw_later();
+        }
+        next
+    }
+
     /// Fase (0 a 1) de la animación de la línea de progreso.
     fn progress_phase(&self) -> f32 {
         (self.clock.elapsed().as_secs_f32() % PROGRESS_CYCLE) / PROGRESS_CYCLE
@@ -2298,7 +2333,9 @@ impl App {
         let area = self.page_area();
         let viewport = self.viewport();
         if let Some(p) = &self.page {
-            let key = RasterKey::new(self.page_generation, self.scroll, dpi * self.zoom, viewport);
+            let mut key =
+                RasterKey::new(self.page_generation, self.scroll, dpi * self.zoom, viewport);
+            key.frame = self.image_frame;
             let mut cache = self.page_cache.borrow_mut();
             if cache.as_ref().is_none_or(|(k, _)| *k != key) {
                 let start = Instant::now();
@@ -3159,6 +3196,14 @@ impl ApplicationHandler<Wake> for App {
             }
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        // E7: los GIF/APNG animados de la página visible; se duerme hasta su próximo cambio.
+        if let Some(next) = self.animate_page() {
+            let until = match event_loop.control_flow() {
+                ControlFlow::WaitUntil(t) => t.min(next),
+                _ => next,
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(until.max(Instant::now())));
         }
     }
 

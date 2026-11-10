@@ -1,14 +1,17 @@
 //! Rasterizado de un árbol de `bf-svg` con `tiny-skia`, al tamaño de píxeles pedido. Los
 //! grupos con `opacity` o `clipPath` se pintan en una capa aparte y se componen con su
 //! opacidad y su máscara (`clipPath` y `mask`); los `pattern` se pintan en una tesela que se
-//! repite; el texto usa las fuentes de `bf-font` (vía [`FontProvider`]).
+//! repite; el texto usa las fuentes de `bf-font` (vía [`FontProvider`]). Los filtros
+//! (`filter`) se aplican en [`filter`].
+
+mod filter;
+mod text;
 
 use super::{SVG_IMAGE_DEPTH, SVG_OVERSAMPLE, SvgImage, SvgResources};
-use bf_layout::{FontProvider, FontRequest, PathCommand};
-use bf_style::properties::types::{FamilyName, FontFamily};
+use bf_layout::FontProvider;
 use bf_svg::{
-    Chunk, ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node, Paint,
-    Pattern, Rgba, Seg, Spread, Stroke, Text, TextAnchor, Tree,
+    ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node, Paint, Pattern,
+    Rgba, Seg, Spread, Stroke, Text, Tree,
 };
 use tiny_skia::{
     Color, FillRule as SkFillRule, FilterQuality, GradientStop, LinearGradient, Mask, MaskType,
@@ -194,7 +197,8 @@ impl Raster<'_> {
         if g.opacity <= 0.0 {
             return;
         }
-        let layered = g.opacity < 1.0 || g.clip.is_some() || g.mask.is_some();
+        let layered =
+            g.opacity < 1.0 || g.clip.is_some() || g.mask.is_some() || g.filter.is_some();
         if !layered {
             for c in &g.children {
                 self.node(c, canvas, ts);
@@ -204,8 +208,29 @@ impl Raster<'_> {
         let Some(mut layer) = Pixmap::new(canvas.width(), canvas.height()) else {
             return;
         };
-        for c in &g.children {
-            self.node(c, &mut layer, ts);
+        if let Some(f) = &g.filter {
+            // Filter Effects 1: el filtro va antes que el recorte, la máscara y la opacidad.
+            let (w, h) = (canvas.width(), canvas.height());
+            let paint = |pm: &mut Pixmap, t: Transform| {
+                for c in &g.children {
+                    self.node(c, pm, t);
+                }
+            };
+            let Some((out, x, y)) = filter::apply(f, w, h, ts, paint) else {
+                return;
+            };
+            layer.draw_pixmap(
+                x,
+                y,
+                out.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        } else {
+            for c in &g.children {
+                self.node(c, &mut layer, ts);
+            }
         }
         let mut mask = g.clip.as_ref().and_then(|c| self.clip_mask(c, canvas, ts));
         if g.clip.is_some() && mask.is_none() {
@@ -446,12 +471,14 @@ impl Raster<'_> {
                         texts: Vec::new(),
                     }),
                     mask: None,
+                    filter: None,
                     children: vec![Node::Group(Group {
                         host_units: false,
                         transform: inner,
                         opacity: 1.0,
                         clip: None,
                         mask: None,
+                        filter: None,
                         children: vec![Node::Group(tree.root)],
                     })],
                 };
@@ -523,115 +550,11 @@ impl Raster<'_> {
     }
 
     /// Los glifos de cada fragmento como paths en coordenadas de usuario, con su relleno y
-    /// trazo. Cada *chunk* se mide entero para aplicar `text-anchor`.
+    /// trazo (ver [`text::paths`]).
     fn text_paths(&self, t: &Text) -> Vec<(Path, Option<Fill>, Option<Stroke>, bool)> {
-        let Some(fonts) = self.fonts else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        let (mut pen_x, mut pen_y) = (0.0f32, 0.0f32);
-        for chunk in &t.chunks {
-            if let Some(x) = chunk.x {
-                pen_x = x;
-            }
-            if let Some(y) = chunk.y {
-                pen_y = y;
-            }
-            let shaped = shape_chunk(fonts, chunk);
-            let width: f32 = shaped
-                .iter()
-                .map(|(span, glyphs)| span.dx + glyphs.iter().map(|g| g.advance).sum::<f32>())
-                .sum();
-            pen_x -= match chunk.anchor {
-                TextAnchor::Start => 0.0,
-                TextAnchor::Middle => width / 2.0,
-                TextAnchor::End => width,
-            };
-            for (span, glyphs) in shaped {
-                pen_x += span.dx;
-                pen_y += span.dy;
-                let mut pb = PathBuilder::new();
-                for g in &glyphs {
-                    if let Some(outline) = fonts.outline(g.font, g.id) {
-                        let k = span.size / outline.units_per_em;
-                        let (ox, oy) = (pen_x + g.x_offset, pen_y - g.y_offset);
-                        let map = |x: f32, y: f32| (ox + x * k, oy - y * k);
-                        for cmd in &outline.commands {
-                            match *cmd {
-                                PathCommand::MoveTo(x, y) => {
-                                    let (x, y) = map(x, y);
-                                    pb.move_to(x, y);
-                                }
-                                PathCommand::LineTo(x, y) => {
-                                    let (x, y) = map(x, y);
-                                    pb.line_to(x, y);
-                                }
-                                PathCommand::QuadTo(x1, y1, x, y) => {
-                                    let (x1, y1) = map(x1, y1);
-                                    let (x, y) = map(x, y);
-                                    pb.quad_to(x1, y1, x, y);
-                                }
-                                PathCommand::CurveTo(x1, y1, x2, y2, x, y) => {
-                                    let (x1, y1) = map(x1, y1);
-                                    let (x2, y2) = map(x2, y2);
-                                    let (x, y) = map(x, y);
-                                    pb.cubic_to(x1, y1, x2, y2, x, y);
-                                }
-                                PathCommand::Close => pb.close(),
-                            }
-                        }
-                    }
-                    pen_x += g.advance;
-                }
-                if let Some(p) = pb.finish() {
-                    out.push((p, span.fill.clone(), span.stroke.clone(), span.stroke_first));
-                }
-            }
+        match self.fonts {
+            Some(fonts) => text::paths(fonts, t),
+            None => Vec::new(),
         }
-        out
     }
-}
-
-/// Familia de CSS a partir de los nombres de `font-family`.
-fn family(names: &[String]) -> FontFamily {
-    const GENERIC: &[&str] = &[
-        "serif",
-        "sans-serif",
-        "monospace",
-        "cursive",
-        "fantasy",
-        "system-ui",
-    ];
-    FontFamily(
-        names
-            .iter()
-            .map(|n| {
-                if GENERIC.contains(&n.to_ascii_lowercase().as_str()) {
-                    FamilyName::Generic(n.to_ascii_lowercase())
-                } else {
-                    FamilyName::Named(n.clone())
-                }
-            })
-            .collect(),
-    )
-}
-
-fn shape_chunk<'c>(
-    fonts: &dyn FontProvider,
-    chunk: &'c Chunk,
-) -> Vec<(&'c bf_svg::Span, Vec<bf_layout::Glyph>)> {
-    chunk
-        .spans
-        .iter()
-        .map(|span| {
-            let fam = family(&span.family);
-            let req = FontRequest {
-                family: &fam,
-                size: span.size,
-                weight: span.weight,
-                italic: span.italic,
-            };
-            (span, fonts.shape(&span.text, &req))
-        })
-        .collect()
 }
