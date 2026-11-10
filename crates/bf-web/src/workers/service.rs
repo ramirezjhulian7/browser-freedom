@@ -270,7 +270,7 @@ pub enum FetchOutcome {
     Fallback,
     /// Error de red.
     Error(String),
-    Response(SwResponse),
+    Response(Box<SwResponse>),
 }
 
 /// Un aviso para un agente (cliente o service worker). Los que no nombran un cliente van a
@@ -288,12 +288,23 @@ pub enum Msg {
         worker: String,
     },
     /// "Update Worker State" (§8.22).
-    WorkerState { worker: u64, state: State },
-    UpdateFound { reg: u64 },
+    WorkerState {
+        worker: u64,
+        state: State,
+    },
+    UpdateFound {
+        reg: u64,
+    },
     /// "Notify Controller Change" (§8.24).
-    Controller { client: u64, worker: String },
+    Controller {
+        client: u64,
+        worker: String,
+    },
     /// La promesa `ready` del cliente (§8.9 paso 7).
-    Ready { client: u64, reg: String },
+    Ready {
+        client: u64,
+        reg: String,
+    },
     /// `Client.postMessage` (§4.2.7): al `ServiceWorkerContainer` del cliente.
     ToClient {
         client: u64,
@@ -301,7 +312,10 @@ pub enum Msg {
         origin: String,
         message: Serialized,
     },
-    FetchReply { fetch: u64, outcome: FetchOutcome },
+    FetchReply {
+        fetch: u64,
+        outcome: FetchOutcome,
+    },
     /// Al service worker: dispara `install` o `activate` y avisa cuando termina.
     Lifecycle {
         kind: &'static str,
@@ -563,7 +577,14 @@ fn unpersist(r: &Reg) {
 }
 
 /// Un registro guardado: scope, updateViaCache, tipo, script y los importados.
-type Saved = (String, String, ScriptType, Url, String, Vec<(String, String)>);
+type Saved = (
+    String,
+    String,
+    ScriptType,
+    Url,
+    String,
+    Vec<(String, String)>,
+);
 
 fn parse_saved(bytes: &[u8]) -> Option<Saved> {
     let mut pos = 0;
@@ -634,10 +655,7 @@ fn load(g: &mut Global, key: &Key, root: &Path, backend: Option<&Arc<dyn NetBack
                 script_type: t,
                 state: State::Activated,
                 script: Arc::new(text),
-                imports: imports
-                    .into_iter()
-                    .map(|(u, t)| (u, Arc::new(t)))
-                    .collect(),
+                imports: imports.into_iter().map(|(u, t)| (u, Arc::new(t))).collect(),
                 skip_waiting: false,
                 run: None,
             },
@@ -926,7 +944,10 @@ fn fetch_sw_script(
         })
         .map_err(|e| ("TypeError", format!("Failed to fetch the script: {e}")))?;
     if r.url_list.len() > 1 {
-        return Err(("TypeError", "The script resource is behind a redirect.".into()));
+        return Err((
+            "TypeError",
+            "The script resource is behind a redirect.".into(),
+        ));
     }
     if !(200..300).contains(&r.status) {
         return Err((
@@ -1047,11 +1068,7 @@ fn update_job(job: &Job) {
             }
             g.versions.remove(&wid);
         }
-        reject(
-            job,
-            "TypeError",
-            "ServiceWorker script evaluation failed",
-        );
+        reject(job, "TypeError", "ServiceWorker script evaluation failed");
         return remove_if_empty(reg);
     }
     install(job, wid, reg);
@@ -1081,8 +1098,7 @@ fn install(job: &Job, wid: u64, reg: u64) {
             .get(&wid)
             .is_some_and(|v| v.state == State::Installing);
     if !ok || !still {
-        if g
-            .versions
+        if g.versions
             .get(&wid)
             .is_some_and(|v| v.state != State::Redundant)
         {
@@ -1118,16 +1134,13 @@ fn try_activate(reg: u64) {
         let Some(w) = r.waiting else {
             return;
         };
-        if r
-            .active
+        if r.active
             .and_then(|a| g.versions.get(&a))
             .is_some_and(|v| v.state == State::Activating)
         {
             return;
         }
-        r.active.is_none()
-            || !in_use(&g, reg)
-            || g.versions.get(&w).is_some_and(|v| v.skip_waiting)
+        r.active.is_none() || !in_use(&g, reg) || g.versions.get(&w).is_some_and(|v| v.skip_waiting)
     };
     if go {
         activate(reg);
@@ -1190,8 +1203,7 @@ fn activate(reg: u64) {
     };
     let _ = run_lifecycle(wid, "activate");
     let mut g = global();
-    if g
-        .versions
+    if g.versions
         .get(&wid)
         .is_some_and(|v| v.state == State::Activating)
     {
@@ -1449,7 +1461,12 @@ pub(crate) fn repartition(agent: &mut Agent, p: u64) {
         .clients
         .iter()
         .filter(|c| ids.contains(&c.id))
-        .map(|c| (c.id, match_reg(g, &c.key, &c.url).and_then(|i| g.regs[i].active)))
+        .map(|c| {
+            (
+                c.id,
+                match_reg(g, &c.key, &c.url).and_then(|i| g.regs[i].active),
+            )
+        })
         .collect();
     for (id, ctrl) in matches {
         if let Some(c) = g.clients.iter_mut().find(|c| c.id == id) {
@@ -1461,7 +1478,13 @@ pub(crate) fn repartition(agent: &mut Agent, p: u64) {
 fn all_clients(agent: &Agent) -> Vec<u64> {
     agent
         .embedder_data::<Local>()
-        .map(|l| l.realms.iter().map(|(c, _)| *c).filter(|c| *c != 0).collect())
+        .map(|l| {
+            l.realms
+                .iter()
+                .map(|(c, _)| *c)
+                .filter(|c| *c != 0)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1491,9 +1514,10 @@ pub(crate) fn busy(agent: &Agent) -> bool {
                 && (matches!(
                     v.state,
                     State::Parsed | State::Installing | State::Activating
-                ) || v.run.as_ref().is_some_and(|(i, c)| {
-                    !c.closed.load(Ordering::SeqCst) && !i.is_idle()
-                }))
+                ) || v
+                    .run
+                    .as_ref()
+                    .is_some_and(|(i, c)| !c.closed.load(Ordering::SeqCst) && !i.is_idle()))
         })
 }
 
@@ -1506,7 +1530,8 @@ pub(crate) fn keeps_polling(agent: &Agent) -> bool {
 
 /// Lo que `net::fetch` hace con la decisión del service worker: `None` es "a la red";
 /// `Some(Ok(..))`, la respuesta ya filtrada; `Some(Err(..))`, un error de red.
-pub type FetchDone = Box<dyn FnOnce(&mut Agent, Option<Result<(ResponseData, HeaderList), String>>)>;
+pub type FetchDone =
+    Box<dyn FnOnce(&mut Agent, Option<Result<(ResponseData, HeaderList), String>>)>;
 
 struct PendingFetch {
     done: FetchDone,
@@ -1643,10 +1668,7 @@ fn client_response(p: &PendingFetch, sr: SwResponse) -> Result<(ResponseData, He
             make("opaque", None, 0, String::new(), None),
             HeaderList::default(),
         ),
-        t => (
-            make(t, url, sr.status, sr.status_text, body),
-            sr.headers,
-        ),
+        t => (make(t, url, sr.status, sr.status_text, body), sr.headers),
     })
 }
 
@@ -1666,7 +1688,10 @@ pub(crate) fn deliver(agent: &mut Agent, m: Msg) {
             let (kind, payload) = match result {
                 JobResult::Reg(s) => ("reg", s),
                 JobResult::Bool(b) => ("bool", b.to_string()),
-                JobResult::Err(n, m) => ("err", format!("{{\"name\":{},\"message\":{}}}", js(n), js(&m))),
+                JobResult::Err(n, m) => (
+                    "err",
+                    format!("{{\"name\":{},\"message\":{}}}", js(n), js(&m)),
+                ),
             };
             call_hook(
                 agent,
@@ -1685,7 +1710,11 @@ pub(crate) fn deliver(agent: &mut Agent, m: Msg) {
                     agent,
                     realm,
                     "regState",
-                    &[Value::Number(reg as f64), Value::str(which), Value::str(&worker)],
+                    &[
+                        Value::Number(reg as f64),
+                        Value::str(which),
+                        Value::str(&worker),
+                    ],
                 );
             }
         }
@@ -1721,7 +1750,15 @@ pub(crate) fn deliver(agent: &mut Agent, m: Msg) {
             message,
         } => {
             if let Some(realm) = realm_of(agent, client) {
-                deliver_message(agent, realm, &source, &origin, message, "message", "messageError");
+                deliver_message(
+                    agent,
+                    realm,
+                    &source,
+                    &origin,
+                    message,
+                    "message",
+                    "messageError",
+                );
             }
         }
         Msg::FetchReply { fetch, outcome } => {
@@ -1733,7 +1770,7 @@ pub(crate) fn deliver(agent: &mut Agent, m: Msg) {
             let result = match outcome {
                 FetchOutcome::Fallback => None,
                 FetchOutcome::Error(m) => Some(Err(m)),
-                FetchOutcome::Response(sr) => Some(client_response(&p, sr)),
+                FetchOutcome::Response(sr) => Some(client_response(&p, *sr)),
             };
             (p.done)(agent, result);
             agent.current_realm = saved;
@@ -1760,7 +1797,15 @@ pub(crate) fn deliver(agent: &mut Agent, m: Msg) {
             message,
         } => {
             if let Some(realm) = realm_of(agent, 0) {
-                deliver_message(agent, realm, &client, &origin, message, "swMessage", "swMessageError");
+                deliver_message(
+                    agent,
+                    realm,
+                    &client,
+                    &origin,
+                    message,
+                    "swMessage",
+                    "swMessageError",
+                );
             }
         }
         Msg::Fetch {
@@ -1843,7 +1888,12 @@ fn deliver_message(
             call_hook(agent, realm, ok_hook, &args);
         }
         None => {
-            call_hook(agent, realm, err_hook, &[Value::str(source), Value::str(origin)]);
+            call_hook(
+                agent,
+                realm,
+                err_hook,
+                &[Value::str(source), Value::str(origin)],
+            );
         }
     }
 }
@@ -1926,7 +1976,11 @@ fn install_js(agent: &mut Agent, realm: RealmId, mode: &str) {
     }
     let g = Value::Object(agent.realms[realm].global_object);
     if let Ok(f) = agent.eval_script(SERVICE_JS, "bf-web:service.js")
-        && let Ok(hooks) = agent.call(&f, Value::Undefined, &[g, Value::Object(native), Value::str(mode)])
+        && let Ok(hooks) = agent.call(
+            &f,
+            Value::Undefined,
+            &[g, Value::Object(native), Value::str(mode)],
+        )
     {
         let h = agent.host_pin(hooks);
         agent.set_realm_data(realm, ServiceJs { hooks: h });
@@ -1954,7 +2008,11 @@ pub(crate) fn import_script(agent: &Agent, url: &Url) -> Option<Result<String, S
     let (state, cached, script_url) = {
         let g = global();
         let v = g.versions.get(&wid)?;
-        let cached = v.imports.iter().find(|(x, _)| *x == u).map(|(_, t)| t.clone());
+        let cached = v
+            .imports
+            .iter()
+            .find(|(x, _)| *x == u)
+            .map(|(_, t)| t.clone());
         (v.state, cached, v.script_url.clone())
     };
     if let Some(t) = cached {
@@ -2036,7 +2094,15 @@ fn has_escaped_slash(u: &Url) -> bool {
 }
 
 /// Programa un trabajo con la promesa `pid` del realm en curso.
-fn schedule_from(agent: &mut Agent, kind: JobKind, scope: Url, script: Option<Url>, t: ScriptType, uvc: String, pid: u64) {
+fn schedule_from(
+    agent: &mut Agent,
+    kind: JobKind,
+    scope: Url,
+    script: Option<Url>,
+    t: ScriptType,
+    uvc: String,
+    pid: u64,
+) {
     let realm = agent.current_realm;
     let (key, backend, root, ua) = context(agent);
     let client = client_of(agent, realm).unwrap_or(0);
@@ -2075,29 +2141,61 @@ fn n_register(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let pid = num_arg(agent, &a.arg(4))?;
     let base = WebContextHandle::current(agent).get(agent).base.clone();
     let Ok(script_url) = Url::parse(&script, Some(&base)) else {
-        return error_pair(agent, "TypeError", &format!("Failed to register a ServiceWorker: The URL '{script}' is invalid."));
+        return error_pair(
+            agent,
+            "TypeError",
+            &format!("Failed to register a ServiceWorker: The URL '{script}' is invalid."),
+        );
     };
     if !matches!(script_url.scheme.as_str(), "http" | "https") {
-        return error_pair(agent, "TypeError", "Failed to register a ServiceWorker: The URL protocol of the script ('{}') is not supported.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to register a ServiceWorker: The URL protocol of the script ('{}') is not supported.",
+        );
     }
     if has_escaped_slash(&script_url) {
-        return error_pair(agent, "TypeError", "Failed to register a ServiceWorker: The provided scriptURL includes a disallowed escape character.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to register a ServiceWorker: The provided scriptURL includes a disallowed escape character.",
+        );
     }
     let scope_url = match &scope {
         None => Url::parse("./", Some(&script_url)),
         Some(s) => Url::parse(s, Some(&base)),
     };
     let Ok(mut scope_url) = scope_url else {
-        return error_pair(agent, "TypeError", "Failed to register a ServiceWorker: The scope URL is invalid.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to register a ServiceWorker: The scope URL is invalid.",
+        );
     };
     scope_url.fragment = None;
     if !matches!(scope_url.scheme.as_str(), "http" | "https") {
-        return error_pair(agent, "TypeError", "Failed to register a ServiceWorker: The URL protocol of the scope is not supported.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to register a ServiceWorker: The URL protocol of the scope is not supported.",
+        );
     }
     if has_escaped_slash(&scope_url) {
-        return error_pair(agent, "TypeError", "Failed to register a ServiceWorker: The provided scope includes a disallowed escape character.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to register a ServiceWorker: The provided scope includes a disallowed escape character.",
+        );
     }
-    schedule_from(agent, JobKind::Register, scope_url, Some(script_url), t, uvc, pid);
+    schedule_from(
+        agent,
+        JobKind::Register,
+        scope_url,
+        Some(script_url),
+        t,
+        uvc,
+        pid,
+    );
     Ok(Value::Null)
 }
 
@@ -2107,11 +2205,19 @@ fn n_get_registration(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let s = str_arg(agent, &a.arg(0))?;
     let base = WebContextHandle::current(agent).get(agent).base.clone();
     let Ok(url) = Url::parse(&s, Some(&base)) else {
-        return error_pair(agent, "TypeError", "Failed to execute 'getRegistration': The provided documentURL is invalid.");
+        return error_pair(
+            agent,
+            "TypeError",
+            "Failed to execute 'getRegistration': The provided documentURL is invalid.",
+        );
     };
     let (key, backend, root, ua) = context(agent);
     if url.origin().to_string() != key.1 {
-        return error_pair(agent, "SecurityError", "Failed to execute 'getRegistration': The origin of the provided documentURL does not match the current origin.");
+        return error_pair(
+            agent,
+            "SecurityError",
+            "Failed to execute 'getRegistration': The origin of the provided documentURL does not match the current origin.",
+        );
     }
     local(agent).used = true;
     let mut g = global();
@@ -2148,7 +2254,11 @@ fn n_controller(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::str("null"));
     };
     let g = global();
-    let w = g.clients.iter().find(|c| c.id == cid).and_then(|c| c.controller);
+    let w = g
+        .clients
+        .iter()
+        .find(|c| c.id == cid)
+        .and_then(|c| c.controller);
     Ok(Value::str(&wsnap(&g, w)))
 }
 
@@ -2201,10 +2311,18 @@ fn n_update(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         })
     };
     let Some((scope, script, t, uvc, installing)) = found else {
-        return error_pair(agent, "InvalidStateError", "Failed to update a ServiceWorker: The registration has no worker.");
+        return error_pair(
+            agent,
+            "InvalidStateError",
+            "Failed to update a ServiceWorker: The registration has no worker.",
+        );
     };
     if installing {
-        return error_pair(agent, "InvalidStateError", "Failed to update a ServiceWorker: The service worker is installing.");
+        return error_pair(
+            agent,
+            "InvalidStateError",
+            "Failed to update a ServiceWorker: The service worker is installing.",
+        );
     }
     let Ok(scope) = Url::parse(&scope, None) else {
         return error_pair(agent, "TypeError", "scope inválido");
@@ -2237,7 +2355,15 @@ fn n_unregister(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
         return Ok(Value::Null);
     };
-    schedule_from(agent, JobKind::Unregister, scope, None, ScriptType::Classic, String::new(), pid);
+    schedule_from(
+        agent,
+        JobKind::Unregister,
+        scope,
+        None,
+        ScriptType::Classic,
+        String::new(),
+        pid,
+    );
     Ok(Value::Null)
 }
 
@@ -2251,8 +2377,7 @@ fn n_post_to_worker(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let cid = client_of(agent, realm);
     let client = {
         let g = global();
-        if g
-            .versions
+        if g.versions
             .get(&wid)
             .is_none_or(|v| v.state == State::Redundant)
         {
@@ -2431,7 +2556,9 @@ fn n_fetch_done(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                             .host_slots_mut(*o)
                             .and_then(|s| s.first().cloned())
                             .unwrap_or(Value::Undefined);
-                        crate::net::headers::data(agent, &hv).map(|h| h.list).unwrap_or_default()
+                        crate::net::headers::data(agent, &hv)
+                            .map(|h| h.list)
+                            .unwrap_or_default()
                     }
                     _ => HeaderList::default(),
                 };
@@ -2440,7 +2567,7 @@ fn n_fetch_done(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 } else {
                     bf_js::builtins::web::encoding::buffer_source_bytes(agent, &a.arg(3))
                 };
-                FetchOutcome::Response(SwResponse {
+                FetchOutcome::Response(Box::new(SwResponse {
                     type_: d.type_,
                     url: d.url,
                     redirected: d.redirected,
@@ -2448,7 +2575,7 @@ fn n_fetch_done(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                     status_text: d.status_text,
                     headers,
                     body,
-                })
+                }))
             }
             None => FetchOutcome::Error("respondWith() was not given a Response".into()),
         },
@@ -2497,7 +2624,9 @@ mod tests {
     #[test]
     fn saved_registration_round_trip() {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"FREEDOM-SW 1\nscope https://a.test/x/\nupdateViaCache imports\ntype classic\n");
+        bytes.extend_from_slice(
+            b"FREEDOM-SW 1\nscope https://a.test/x/\nupdateViaCache imports\ntype classic\n",
+        );
         bytes.extend_from_slice(b"script https://a.test/x/sw.js 5\nhola\n\n");
         bytes.extend_from_slice(b"import https://a.test/x/i.js 2\nab\n");
         let (scope, uvc, t, url, text, imports) = parse_saved(&bytes).expect("parse");
@@ -2506,7 +2635,10 @@ mod tests {
         assert_eq!(t, ScriptType::Classic);
         assert_eq!(url.serialize(false), "https://a.test/x/sw.js");
         assert_eq!(text, "hola\n");
-        assert_eq!(imports, vec![("https://a.test/x/i.js".to_owned(), "ab".to_owned())]);
+        assert_eq!(
+            imports,
+            vec![("https://a.test/x/i.js".to_owned(), "ab".to_owned())]
+        );
     }
 
     #[test]

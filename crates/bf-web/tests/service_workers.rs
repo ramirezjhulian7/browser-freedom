@@ -142,9 +142,7 @@ impl Page {
     fn run(&mut self, src: &str) -> String {
         let realm = self.ctx.realm;
         self.exec("done = false; result = null;");
-        self.exec(&format!(
-            "(async () => {{ {src} }})().catch(fail);"
-        ));
+        self.exec(&format!("(async () => {{ {src} }})().catch(fail);"));
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             bf_web::net::pump(&mut self.rt.agent, realm);
@@ -177,7 +175,8 @@ macro_rules! sw {
     };
 }
 
-const SIMPLE: &str = "self.addEventListener('install', e => {}); self.addEventListener('activate', e => {});";
+const SIMPLE: &str =
+    "self.addEventListener('install', e => {}); self.addEventListener('activate', e => {});";
 
 // --- Interfaces y contexto seguro ---
 
@@ -476,7 +475,15 @@ fn fetch_event_fallback_and_errors() {
 
 #[test]
 fn uncontrolled_page_goes_to_network() {
-    let mut p = Page::new(&[("/dir/sw.js", FETCH_SW.replace("self.onactivate = e => e.waitUntil(clients.claim());", "").as_str()), ("/dir/hola", "red")]);
+    let mut p = Page::new(&[
+        (
+            "/dir/sw.js",
+            FETCH_SW
+                .replace("self.onactivate = e => e.waitUntil(clients.claim());", "")
+                .as_str(),
+        ),
+        ("/dir/hola", "red"),
+    ]);
     assert_eq!(
         p.run("const reg = await navigator.serviceWorker.register('sw.js', { scope: '/dir/' });\
                await waitState(reg.installing, 'activated');\
@@ -540,7 +547,11 @@ fn registration_persists_in_profile() {
             "ok"
         );
     }
-    assert!(dir.join("https_persist.test").join("service_workers").exists());
+    assert!(
+        dir.join("https_persist.test")
+            .join("service_workers")
+            .exists()
+    );
     // Otra página nueva del mismo origen en otra partición (como otra sesión del perfil:
     // el registro sale del disco): nace controlada y su `fetch` pasa por el service worker
     // guardado sin volver a pedirlo.
@@ -557,4 +568,26 @@ fn registration_persists_in_profile() {
     );
     assert!(!files.log.lock().unwrap().iter().any(|p| p == "/dir/sw.js"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Service worker + Cache API ---
+
+#[test]
+fn service_worker_serves_from_cache() {
+    let sw = "self.oninstall = e => e.waitUntil(caches.open('v1').then(c => c.addAll(['datos.txt'])));\
+        self.onactivate = e => e.waitUntil(clients.claim());\
+        self.onfetch = e => e.respondWith(caches.match(e.request).then(r => r || new Response('sin caché')));";
+    let mut p = Page::new(&[("/dir/sw.js", sw), ("/dir/datos.txt", "guardado")]);
+    assert_eq!(
+        p.run(
+            "const reg = await navigator.serviceWorker.register('sw.js', { scope: '/dir/' });\
+             await waitState(reg.installing, 'activated');\
+             while (!navigator.serviceWorker.controller) await new Promise(r => setTimeout(r, 5));\
+             const a = await (await fetch('datos.txt')).text();\
+             const b = await (await fetch('otro.txt')).text();\
+             const keys = await caches.keys();\
+             finish([a, b, keys.join()].join('|'));"
+        ),
+        "guardado|sin caché|v1"
+    );
 }

@@ -316,7 +316,11 @@ fn run_inner(spec: WorkerSpec) {
 }
 
 /// Evalúa el script de un service worker; `false` si lanzó (o no compiló).
-fn run_service_script(agent: &mut Agent, spec: &WorkerSpec, info: &super::service::ServiceInfo) -> bool {
+fn run_service_script(
+    agent: &mut Agent,
+    spec: &WorkerSpec,
+    info: &super::service::ServiceInfo,
+) -> bool {
     let src = spec.url.serialize(false);
     let r = match spec.script_type {
         ScriptType::Classic => agent.eval_script(&info.script, &src).map(|_| ()),
@@ -642,7 +646,13 @@ fn install(
     }
     // `[Exposed=(Window,DedicatedWorker,SharedWorker)]`: no están en un service worker.
     if matches!(kind, ScopeKind::Service(_)) {
-        for name in ["Worker", "XMLHttpRequest", "XMLHttpRequestUpload", "XMLHttpRequestEventTarget", "FileReaderSync"] {
+        for name in [
+            "Worker",
+            "XMLHttpRequest",
+            "XMLHttpRequestUpload",
+            "XMLHttpRequestEventTarget",
+            "FileReaderSync",
+        ] {
             let _ = agent.delete(g, &PropertyKey::from(name));
         }
     }

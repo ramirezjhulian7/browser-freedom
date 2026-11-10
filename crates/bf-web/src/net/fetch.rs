@@ -1352,12 +1352,11 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, 
     // su evento `fetch` (SW §4.6 "Handle Fetch"; Fetch §4.3 "HTTP fetch" paso 5). Sin
     // `respondWith`, vuelve aquí y sale a la red.
     let (rd, l) = (r.clone(), list.clone());
-    let done: crate::workers::service::FetchDone = Box::new(move |agent: &mut Agent, outcome| {
-        match outcome {
+    let done: crate::workers::service::FetchDone =
+        Box::new(move |agent: &mut Agent, outcome| match outcome {
             None => start_network_direct(agent, id, rd, &l, from_stream),
             Some(result) => deliver_response(agent, id, result),
-        }
-    });
+        });
     if crate::workers::service::handle_fetch(agent, &r, list, done).is_ok() {
         return;
     }
@@ -1365,7 +1364,11 @@ fn start_network(agent: &mut Agent, id: u64, r: RequestData, list: &HeaderList, 
 }
 
 /// Resuelve (o rechaza) la promesa del `fetch()` `id` con una respuesta ya filtrada.
-fn deliver_response(agent: &mut Agent, id: u64, result: Result<(ResponseData, HeaderList), String>) {
+fn deliver_response(
+    agent: &mut Agent,
+    id: u64,
+    result: Result<(ResponseData, HeaderList), String>,
+) {
     let Some(p) = finish_call(agent, id) else {
         return;
     };
