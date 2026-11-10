@@ -291,3 +291,23 @@ fn xml_parser_reports_inserted_links() {
     assert_eq!(seen, ["a", "b"]);
     assert!(doc.element(doc.document_element().unwrap()).is_some());
 }
+
+/// E10: con XML scripting support disabled (`DOMParser`) los `script` HTML y SVG nacen
+/// *already started*; el parser de navegación no los toca.
+#[test]
+fn inert_xml_parser_marks_scripts_already_started() {
+    let input = "<r><script xmlns='http://www.w3.org/1999/xhtml'>1</script>\
+                 <script xmlns='http://www.w3.org/2000/svg'>2</script><script>3</script></r>";
+    let started = |doc: &bf_dom::Document| -> Vec<bool> {
+        doc.inclusive_descendants(doc.root())
+            .into_iter()
+            .filter(|&n| doc.element(n).is_some_and(|e| e.name == "script"))
+            .map(|n| doc.script_state(n).already_started)
+            .collect()
+    };
+    let inert = bf_html::parse_xml_inert(input).unwrap();
+    assert_eq!(started(&inert), [true, true, false]);
+    let normal = parse_xml(input).unwrap();
+    assert_eq!(started(&normal), [false, false, false]);
+    assert!(bf_html::parse_xml_inert("<a>").is_err());
+}

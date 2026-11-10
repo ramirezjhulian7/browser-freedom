@@ -46,8 +46,9 @@ fn parse_from_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => {
             // Un error de buena formación deja solo un `parsererror` (paso 2 de
             // `parseFromString`, HTML §8.5.1).
-            let mut d =
-                bf_html::parse_xml(&text).unwrap_or_else(|e| bf_html::parsererror_document(&e));
+            // Con *XML scripting support disabled* (paso 3): los `script` quedan inertes.
+            let mut d = bf_html::parse_xml_inert(&text)
+                .unwrap_or_else(|e| bf_html::parsererror_document(&e));
             d.content_type = type_.as_str().into();
             d
         }

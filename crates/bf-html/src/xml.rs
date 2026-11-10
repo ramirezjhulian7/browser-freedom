@@ -202,6 +202,9 @@ struct Parser {
     expanded: usize,
     /// E10: los `link` XHTML insertados, en orden ([`parse_xml_partial_with`]).
     links: Vec<NodeId>,
+    /// *XML scripting support disabled* (`DOMParser`, HTML §8.5.1): los `script` nacen
+    /// *already started*.
+    scripting_disabled: bool,
 }
 
 impl Parser {
@@ -221,6 +224,7 @@ impl Parser {
             seen_doctype: false,
             expanded: 0,
             links: Vec::new(),
+            scripting_disabled: false,
         };
         let text: Rc<str> = match input.char_indices().find(|&(_, c)| !is_char(c)) {
             Some((i, c)) => {
@@ -869,6 +873,15 @@ impl Parser {
         if self.doc.element(node).is_some_and(|e| e.is_html("link")) {
             self.links.push(node);
         }
+        // Con XML scripting support disabled los `script` (HTML y SVG) quedan inertes: no se
+        // ejecutan ni al insertarlos en otro documento ni sus copias (§4.12.1, cloning steps).
+        if self.scripting_disabled
+            && self.doc.element(node).is_some_and(|e| {
+                e.name == "script" && matches!(e.ns, Namespace::Html | Namespace::Svg)
+            })
+        {
+            self.doc.script_state_mut(node).already_started = true;
+        }
         if !empty {
             self.stack.push(Open { node, qname, scope });
         }
@@ -1106,6 +1119,17 @@ pub fn parse_xml_partial_with(
         on_link(&mut doc, link);
     }
     (doc, result.err())
+}
+
+/// Parsea un documento XML bien formado con *XML scripting support disabled* (el parser de
+/// `DOMParser.parseFromString`, HTML §8.5.1 paso 3): los elementos `script` del namespace HTML
+/// o SVG se marcan *already started*, así que no se ejecutan aunque se inserten (o se importen,
+/// adopten o clonen) en un documento con scripting.
+pub fn parse_xml_inert(input: &str) -> Result<Document, XmlError> {
+    let mut parser = Parser::new(input);
+    parser.scripting_disabled = true;
+    parser.run()?;
+    Ok(parser.doc)
 }
 
 /// Parsea un documento XML bien formado.
