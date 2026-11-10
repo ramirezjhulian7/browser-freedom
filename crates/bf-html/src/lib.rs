@@ -11,5 +11,5 @@ pub use tree_builder::script::{Parser, ParserStatus, ScriptDisposition, ScriptHo
 pub use tree_builder::{FragmentContext, ParseOptions, parse_document, parse_fragment};
 pub use xml::{
     PARSERERROR_NAMESPACE, XmlError, parse_xml, parse_xml_document, parse_xml_partial,
-    parsererror_document,
+    parse_xml_partial_with, parsererror_document,
 };

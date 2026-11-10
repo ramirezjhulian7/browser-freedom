@@ -24,6 +24,7 @@
 pub mod abort;
 mod character_data;
 pub mod collections;
+mod custom_states; // E10
 mod document;
 mod element;
 pub mod events;
@@ -250,6 +251,8 @@ pub struct Document {
     pub(crate) aborts: abort::AbortState,
     pub(crate) scripts: script::ScriptLists,
     pub(crate) live_ranges: range::LiveRanges, // E3
+    /// E10: el *states set* de cada custom element (`:state()`, ver `custom_states`).
+    custom_states: HashMap<NodeId, Vec<DomString>>,
 }
 
 impl Default for Document {
@@ -277,6 +280,7 @@ impl Document {
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
+            custom_states: HashMap::new(), // E10
         };
         doc.push(NodeData::Document);
         doc

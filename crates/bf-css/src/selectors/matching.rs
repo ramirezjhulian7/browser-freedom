@@ -514,6 +514,10 @@ impl Matcher<'_> {
                 ranges.iter().any(|r| lang_matches(r, lang.as_deref()))
             }
             PseudoClass::Dir(dir) => self.directionality(node) == *dir,
+            // HTML §4.13.7.4: "must match all custom elements whose states set's set entries
+            // contains identifier". Solo los custom elements tienen states set (lo rellena
+            // `CustomStateSet`, ver `bf_dom::Document::custom_states`).
+            PseudoClass::State(state) => self.doc.has_custom_state(node, state),
             PseudoClass::Scope => self.scope(node),
             // Sin custom element registry: los custom elements (nombre con '-') no están
             // definidos; el resto de los elementos sí.

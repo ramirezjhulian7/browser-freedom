@@ -136,6 +136,9 @@ pub enum PseudoClass {
     /// `:heading` (vacío) o `:heading(<integer>#)` de HTML: elementos `h1`–`h6` con esos
     /// niveles.
     Heading(Vec<i32>),
+    /// E10: `:state(<ident>)` (HTML §4.13.7.4): custom elements cuyo *states set* contiene
+    /// el identificador.
+    State(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -520,6 +523,7 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
             let levels: Vec<String> = levels.iter().map(ToString::to_string).collect();
             return write!(f, ":heading({})", levels.join(", "));
         }
+        PseudoClass::State(state) => return write!(f, ":state({state})"),
         PseudoClass::Dir(d) => {
             return f.write_str(match d {
                 Dir::Ltr => ":dir(ltr)",

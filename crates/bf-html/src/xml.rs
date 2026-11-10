@@ -200,6 +200,8 @@ struct Parser {
     undeclared_ok: bool,
     seen_doctype: bool,
     expanded: usize,
+    /// E10: los `link` XHTML insertados, en orden ([`parse_xml_partial_with`]).
+    links: Vec<NodeId>,
 }
 
 impl Parser {
@@ -218,6 +220,7 @@ impl Parser {
             undeclared_ok: false,
             seen_doctype: false,
             expanded: 0,
+            links: Vec::new(),
         };
         let text: Rc<str> = match input.char_indices().find(|&(_, c)| !is_char(c)) {
             Some((i, c)) => {
@@ -863,6 +866,9 @@ impl Parser {
         }));
         let parent = self.current();
         self.doc.append(parent, node);
+        if self.doc.element(node).is_some_and(|e| e.is_html("link")) {
+            self.links.push(node);
+        }
         if !empty {
             self.stack.push(Open { node, qname, scope });
         }
@@ -1080,9 +1086,26 @@ fn position(text: &str, offset: usize) -> (usize, usize) {
 /// Parsea un documento XML: el árbol construido hasta el primer error fatal (si lo hay) y el
 /// error.
 pub fn parse_xml_partial(input: &str) -> (Document, Option<XmlError>) {
+    parse_xml_partial_with(input, &mut |_, _| {})
+}
+
+/// [`parse_xml_partial`] avisando al host de cada elemento `link` del namespace HTML que el
+/// parser insertó en el documento, en orden de documento: es cuando el `link` "becomes
+/// browsing-context connected" (HTML §4.6.7) y el host busca su recurso (y después dispara
+/// `load`/`error`). El parser XML no corre scripts ni cede el control, así que el aviso llega
+/// al terminar de parsear, con el `link` conectado y con sus atributos; también los `link`
+/// insertados antes de un error de buena formación.
+pub fn parse_xml_partial_with(
+    input: &str,
+    on_link: &mut dyn FnMut(&mut Document, NodeId),
+) -> (Document, Option<XmlError>) {
     let mut parser = Parser::new(input);
     let result = parser.run();
-    (parser.doc, result.err())
+    let mut doc = parser.doc;
+    for link in parser.links {
+        on_link(&mut doc, link);
+    }
+    (doc, result.err())
 }
 
 /// Parsea un documento XML bien formado.

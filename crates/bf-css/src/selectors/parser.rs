@@ -533,6 +533,14 @@ impl<'a> Parser<'a> {
                 }
                 PseudoClass::Heading(levels)
             }
+            // HTML §4.13.7.4: `:state(<ident>)`; el identificador distingue mayúsculas.
+            "state" => {
+                let mut values = args.iter().filter(|v| !v.is_whitespace());
+                match (values.next().and_then(ComponentValue::token), values.next()) {
+                    (Some(TokenKind::Ident(v)), None) => PseudoClass::State(v.clone()),
+                    _ => return Err(SelectorError),
+                }
+            }
             "dir" => {
                 let mut values = args.iter().filter(|v| !v.is_whitespace());
                 match (values.next().and_then(ComponentValue::token), values.next()) {

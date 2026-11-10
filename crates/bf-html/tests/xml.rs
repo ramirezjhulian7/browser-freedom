@@ -273,3 +273,21 @@ fn documento_parsererror() {
     assert_eq!(doc.children(doc.root()).count(), 1);
     assert!(doc.text_content(r).contains("unclosed element <a>"));
 }
+
+/// E10: el parser XML avisa al host de los `link` XHTML insertados, en orden, también los que
+/// quedan antes de un error de buena formación.
+#[test]
+fn xml_parser_reports_inserted_links() {
+    let mut seen = Vec::new();
+    let (doc, error) = bf_html::parse_xml_partial_with(
+        "<html xmlns='http://www.w3.org/1999/xhtml'><head><link href='a'/>\
+         <x:link xmlns:x='urn:x' href='no'/><link href='b'></link></head><body><oops></body></html>",
+        &mut |doc, link| {
+            assert!(doc.is_connected(link));
+            seen.push(doc.element(link).unwrap().attr("href").unwrap().to_owned());
+        },
+    );
+    assert!(error.is_some());
+    assert_eq!(seen, ["a", "b"]);
+    assert!(doc.element(doc.document_element().unwrap()).is_some());
+}

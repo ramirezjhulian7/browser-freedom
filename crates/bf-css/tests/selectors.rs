@@ -328,6 +328,57 @@ fn dynamic_state_and_scope() {
     assert_eq!(select_in(&d, ":focus-visible", &ctx, &ns), ["i2"]);
 }
 
+/// E10: `:state(<ident>)` (HTML §4.13.7.4) contra el *states set* que guarda `bf_dom`.
+#[test]
+fn custom_state_pseudo_class() {
+    let ns = NamespaceMap::default();
+    for selector in [":state()", ":state(a b)", ":state(\"a\")", ":state(1)", ":state(a, b)"] {
+        assert!(
+            parse_selector_list(selector, &ns).is_err(),
+            "debería ser inválido: {selector:?}"
+        );
+    }
+    let list = parse_selector_list("my-el:state(  open )", &ns).unwrap();
+    assert_eq!(list.to_string(), "my-el:state(open)");
+    assert_eq!(list.0[0].specificity(), Specificity(0, 1, 1));
+
+    let mut d = doc(DOC);
+    let custom = node_by_id(&d, "custom");
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, ":state(open)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    let v = d.version();
+    assert!(d.add_custom_state(custom, "open"));
+    assert!(!d.add_custom_state(custom, "open"));
+    assert!(d.add_custom_state(custom, "Busy"));
+    assert!(d.version() > v, "un cambio del states set invalida el estilo");
+    assert_eq!(d.custom_states(custom), ["open", "Busy"]);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(select_in(&d, ":state(open)", &ctx, &ns), ["custom"]);
+    assert_eq!(select_in(&d, "my-el:state(Busy)", &ctx, &ns), ["custom"]);
+    // Distingue mayúsculas.
+    assert_eq!(
+        select_in(&d, ":state(busy)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    assert_eq!(select_in(&d, ":not(:state(open))#custom", &ctx, &ns), Vec::<String>::new());
+    assert!(d.delete_custom_state(custom, "open"));
+    assert!(!d.delete_custom_state(custom, "open"));
+    assert_eq!(
+        select_in(&d, ":state(open)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    let v = d.version();
+    d.clear_custom_states(custom);
+    assert!(d.custom_states(custom).is_empty());
+    assert!(d.version() > v);
+    let v = d.version();
+    d.clear_custom_states(custom);
+    assert_eq!(d.version(), v, "vaciar un set vacío no cambia nada");
+}
+
 #[test]
 fn root_quirks_and_namespaces() {
     let d = doc("<!DOCTYPE html><html id=h><body id=b class=Foo><p id=p class=Bar></p>");
