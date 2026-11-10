@@ -84,6 +84,10 @@ struct Registry {
     /// Los *form-associated custom elements*: el form owner y el estado *disabled* que
     /// vieron sus callbacks por última vez.
     face: HashMap<NodeRef, (Option<NodeRef>, bool)>,
+    /// La *backup element queue* (§4.13.6) de los `formResetCallback` encolados fuera de
+    /// `[CEReactions]`, y si ya hay un microtask para procesarla.
+    backup: Vec<NodeRef>,
+    backup_scheduled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -947,9 +951,41 @@ fn face_sync(agent: &mut Agent) {
     }
 }
 
-/// El "reset algorithm" de un FACE (HTML §4.13.7): encola `formResetCallback`.
-pub fn enqueue_form_reset(agent: &mut Agent, el: NodeRef) {
-    enqueue_callback(agent, el, Reaction::FormReset);
+/// El "reset algorithm" de un FACE (HTML §4.13.7): encola `formResetCallback`. Con `backup`
+/// (sin `[CEReactions]` en la pila, p. ej. el click de un botón de reset) el elemento va a la
+/// *backup element queue* y la procesa un microtask ("enqueue an element on the appropriate
+/// element queue", §4.13.6).
+pub fn enqueue_form_reset(agent: &mut Agent, el: NodeRef, backup: bool) {
+    if !backup {
+        enqueue_callback(agent, el, Reaction::FormReset);
+        return;
+    }
+    let reg = registry(agent);
+    reg.backup.push(el);
+    if reg.backup_scheduled {
+        return;
+    }
+    reg.backup_scheduled = true;
+    let f = agent.create_builtin_function(process_backup_queue, 0, "", false);
+    let realm = realm(agent);
+    agent.enqueue_job(bf_js::builtins::promise::Job::Microtask {
+        callback: Value::Object(f),
+        realm,
+    });
+}
+
+/// El microtask de la *backup element queue*: invoca sus reacciones.
+fn process_backup_queue(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    let els = {
+        let reg = registry(agent);
+        reg.backup_scheduled = false;
+        std::mem::take(&mut reg.backup)
+    };
+    for el in els {
+        enqueue_callback(agent, el, Reaction::FormReset);
+    }
+    invoke_reactions(agent);
+    Ok(Value::Undefined)
 }
 
 // --- Los constructores HTML (§3.2.3 "HTML element constructors") ---

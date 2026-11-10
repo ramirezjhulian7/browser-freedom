@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use bf_dom::events::EventInit;
 use bf_dom::{DomException, Namespace, NodeData};
 use bf_infra::DomString;
-use bf_js::host::{HostClass, webidl};
+use bf_js::host::{HostClass, HostClassId, webidl};
 use bf_js::string::JsString;
 use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
@@ -920,13 +920,14 @@ fn form_request_submit(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// algorithm" de cada control.
 fn form_reset(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    reset_form(agent, n);
+    reset_form(agent, n, false);
     Ok(Value::Undefined)
 }
 
 /// "Reset" (§4.10.21.6): `reset` (cancelable, de confianza) y el "reset algorithm" de cada
-/// control.
-pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
+/// control. `from_activation` (botón de reset, fuera de `[CEReactions]`): los
+/// `formResetCallback` van a la *backup element queue* y corren en un microtask (§4.13.6).
+pub(super) fn reset_form(agent: &mut Agent, form: NodeRef, from_activation: bool) {
     let realm = WebContextHandle::current(agent).realm;
     // "Locked for reset".
     let locked = agent
@@ -958,9 +959,21 @@ pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
                 Some("select") => {
                     with_doc_mut(agent, c.doc, |d| d.reset_form_control(c.node));
                 }
+                // E1: el "reset algorithm" de `output` (§4.10.12): el contenido pasa a ser el
+                // *default value* y el *default value override* vuelve a null.
+                Some("output") => {
+                    let default = state_mut(agent, c).value.take().unwrap_or_else(|| {
+                        with_doc(agent, c.doc, |d| d.text_content(c.node))
+                    });
+                    let s = DomString::from(default.as_str());
+                    with_doc_mut(agent, c.doc, |d| {
+                        let node = (!s.is_empty()).then(|| d.create_text_node(s));
+                        d.replace_all(node, c.node);
+                    });
+                }
                 // E1: el "reset algorithm" de un FACE encola `formResetCallback`.
                 _ if is_face(agent, c) => {
-                    super::custom_elements::enqueue_form_reset(agent, c);
+                    super::custom_elements::enqueue_form_reset(agent, c, from_activation);
                 }
                 _ => {}
             }
@@ -1546,7 +1559,195 @@ fn selected_options_list(d: &bf_dom::Document, s: bf_dom::NodeId) -> Vec<bf_dom:
 
 fn form_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    Ok(live_collection(agent, n, 5, form_elements_list))
+    // E1: `form.elements` es un `HTMLFormControlsCollection` (§2.7.2.2).
+    let realm = agent.current_realm;
+    let key = bf_js::host::HostKey(n.key().0 ^ (5 << 52) | (1 << 62));
+    if let Some(o) = agent.host_lookup(realm, key) {
+        return Ok(Value::Object(o));
+    }
+    let class = collection_classes(agent).controls;
+    let coll = bf_dom::collections::HtmlCollection::new(
+        n.node,
+        bf_dom::collections::CollectionFilter::Computed(bf_dom::collections::ComputedList(
+            form_elements_list,
+        )),
+    );
+    Ok(Value::Object(agent.host_wrap(
+        realm,
+        key,
+        class,
+        Box::new(crate::dom::collections::HtmlCollectionData { doc: n.doc, coll }),
+    )))
+}
+
+// --- HTMLFormControlsCollection y RadioNodeList (§2.7.2.2, §2.7.2.3), E1 ---
+
+/// Las clases `HTMLFormControlsCollection` y `RadioNodeList`.
+#[derive(Debug, Clone, Copy)]
+pub struct FormCollectionClasses {
+    pub controls: HostClassId,
+    pub radio_list: HostClassId,
+}
+
+pub fn register_collections(agent: &mut Agent) {
+    if agent.embedder_data::<FormCollectionClasses>().is_some() {
+        return;
+    }
+    use crate::dom::collections as c;
+    let dc = crate::dom::classes(agent).clone();
+    let controls = agent.register_host_class(
+        HostClass::new("HTMLFormControlsCollection")
+            .parent(dc.html_collection)
+            .method("namedItem", 1, fc_named_item)
+            .exotic(bf_js::host::HostExotic {
+                length: Some(c::hc_len),
+                item: Some(c::hc_at),
+                named: Some(fc_named),
+                names: Some(c::hc_names),
+                named_enumerable: false,
+                override_builtins: false,
+            }),
+    );
+    let radio_list = agent.register_host_class(
+        HostClass::new("RadioNodeList")
+            .parent(dc.node_list)
+            .attribute("value", Some(rnl_value), Some(rnl_set_value))
+            .exotic(bf_js::host::HostExotic {
+                length: Some(c::nl_len),
+                item: Some(c::nl_at),
+                ..bf_js::host::HostExotic::default()
+            }),
+    );
+    agent.set_embedder_data(FormCollectionClasses {
+        controls,
+        radio_list,
+    });
+}
+
+fn collection_classes(agent: &Agent) -> FormCollectionClasses {
+    *agent
+        .embedder_data::<FormCollectionClasses>()
+        .expect("FormCollectionClasses")
+}
+
+/// `namedItem(name)` de `HTMLFormControlsCollection` (§2.7.2.2): null, el único elemento con
+/// ese `id` o `name`, o un `RadioNodeList` con todos ellos.
+fn fc_lookup(
+    agent: &mut Agent,
+    d: &crate::dom::collections::HtmlCollectionData,
+    key: &DomString,
+) -> Option<Value> {
+    if key.is_empty() {
+        return None;
+    }
+    let items = crate::dom::collections::hc_items(agent, d);
+    let matches: Vec<bf_dom::NodeId> = with_doc(agent, d.doc, |doc| {
+        items
+            .into_iter()
+            .filter(|&n| {
+                doc.element(n).is_some_and(|e| {
+                    e.attrs.iter().any(|a| {
+                        a.ns.is_none() && (a.name == "id" || a.name == "name") && a.value == *key
+                    })
+                })
+            })
+            .collect()
+    });
+    match matches.len() {
+        0 => None,
+        1 => Some(wrap_node(agent, NodeRef::new(d.doc, matches[0]))),
+        _ => {
+            let class = collection_classes(agent).radio_list;
+            Some(Value::Object(agent.host_create(
+                class,
+                Box::new(crate::dom::collections::NodeListData::Static {
+                    doc: d.doc,
+                    nodes: matches,
+                }),
+            )))
+        }
+    }
+}
+
+fn fc_named(
+    agent: &mut Agent,
+    o: bf_js::heap::Gc<bf_js::object::Object>,
+    name: &JsString,
+) -> Option<Value> {
+    let d = agent
+        .host_unwrap::<crate::dom::collections::HtmlCollectionData>(&Value::Object(o))
+        .cloned()?;
+    fc_lookup(agent, &d, &DomString::from_utf16(name.units()))
+}
+
+fn fc_named_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(d) = agent
+        .host_unwrap::<crate::dom::collections::HtmlCollectionData>(&a.this)
+        .cloned()
+    else {
+        return agent.type_error("Illegal invocation");
+    };
+    let key = webidl::to_dom_string(agent, &a.arg(0))?;
+    let key = DomString::from_utf16(key.units());
+    Ok(fc_lookup(agent, &d, &key).unwrap_or(Value::Null))
+}
+
+/// Los radios (`input type=radio`) de un `RadioNodeList`, en orden.
+fn rnl_radios(agent: &mut Agent, this: &Value) -> JsResult<(crate::DocIndex, Vec<bf_dom::NodeId>)> {
+    let Some(crate::dom::collections::NodeListData::Static { doc, nodes }) = agent
+        .host_unwrap::<crate::dom::collections::NodeListData>(this)
+        .cloned()
+    else {
+        return agent.type_error("Illegal invocation");
+    };
+    let radios = with_doc(agent, doc, |d| {
+        nodes
+            .into_iter()
+            .filter(|&n| {
+                d.element(n).is_some_and(|e| {
+                    e.ns == Namespace::Html
+                        && e.name.to_string() == "input"
+                        && e.attr("type")
+                            .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                })
+            })
+            .collect()
+    });
+    Ok((doc, radios))
+}
+
+/// `RadioNodeList.value` (§2.7.2.3): el valor del primer radio marcado ("on" sin atributo
+/// `value`), o la cadena vacía.
+fn rnl_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (doc, radios) = rnl_radios(agent, &a.this)?;
+    let v = with_doc(agent, doc, |d| {
+        radios.into_iter().find(|&r| d.checkedness(r)).map(|r| {
+            d.element(r)
+                .and_then(|e| e.attr("value"))
+                .map_or_else(|| "on".to_owned(), |v| v.to_string())
+        })
+    });
+    Ok(js_str(&v.unwrap_or_default()))
+}
+
+/// El setter: marca el primer radio cuyo `value` es el nuevo valor (o sin `value`, si es
+/// "on").
+fn rnl_set_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let v = webidl::to_dom_string(agent, &a.arg(0))?.to_string_lossy();
+    let (doc, radios) = rnl_radios(agent, &a.this)?;
+    with_doc_mut(agent, doc, |d| {
+        let hit = radios.into_iter().find(|&r| {
+            match d.element(r).and_then(|e| e.attr("value")) {
+                Some(x) => x.to_string() == v,
+                None => v == "on",
+            }
+        });
+        if let Some(r) = hit {
+            d.set_checkedness(r, true);
+        }
+    });
+    mutated(agent);
+    Ok(Value::Undefined)
 }
 
 fn fieldset_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

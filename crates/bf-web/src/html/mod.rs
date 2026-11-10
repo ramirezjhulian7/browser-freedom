@@ -26,5 +26,6 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     crate::dom::serializer::register(agent); // E1
     custom_elements::register(agent);
     submission::register(agent);
+    forms::register_collections(agent); // E1
     elements::register(agent, realm, ctx);
 }
