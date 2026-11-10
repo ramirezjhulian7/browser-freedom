@@ -1,7 +1,15 @@
 //! Cookies (RFC 6265bis): parser de `Set-Cookie` (§5.6), modelo de almacenamiento (§5.7) y la
 //! cabecera `Cookie` (§5.8.3). Jarra en memoria, sin persistencia ni lista de sufijos públicos.
+//!
+//! E4: `SameSite` (§5.2, §5.7 y §5.8.3) y el bloqueo de cookies de terceros. El "site for
+//! cookies" de una petición es el del documento de nivel superior: el hilo del documento lo
+//! declara con [`set_thread_context`] y lo usan las peticiones que salen de ese hilo (el
+//! documento, sus subrecursos, sus marcos y `document.cookie`). Una petición sin contexto
+//! (otro hilo, la línea de comandos antes de cargar) se trata como del mismo sitio.
 
+use std::cell::RefCell;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bf_url::{Host, Url};
@@ -139,10 +147,71 @@ fn path_match(request: &str, cookie: &str) -> bool {
             && (cookie.ends_with('/') || request[cookie.len()..].starts_with('/')))
 }
 
+/// El contexto de las peticiones de un hilo para `SameSite` (RFC 6265bis §5.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CookieContext {
+    /// El "site for cookies": el sitio (dominio registrable) del documento de nivel superior.
+    pub site_for_cookies: Option<String>,
+    /// ¿Es una navegación de nivel superior (la de ese documento)? Las cookies `Lax` viajan
+    /// en las navegaciones de nivel superior aunque sean entre sitios.
+    pub top_level_navigation: bool,
+}
+
+thread_local! {
+    static CONTEXT: RefCell<Option<CookieContext>> = const { RefCell::new(None) };
+}
+
+/// Declara el contexto de las peticiones que salgan de este hilo (`None`: sin contexto).
+pub fn set_thread_context(ctx: Option<CookieContext>) {
+    CONTEXT.with(|c| *c.borrow_mut() = ctx);
+}
+
+/// El contexto declarado en este hilo.
+pub fn thread_context() -> Option<CookieContext> {
+    CONTEXT.with(|c| c.borrow().clone())
+}
+
+/// El sitio de `url` (HTML §7.1.1 "obtain a site", sin esquema: dominio registrable). Sin lista
+/// de sufijos públicos: las dos últimas etiquetas, o tres si la penúltima es un segundo nivel
+/// genérico bajo un ccTLD (`example.co.uk`, `example.com.ar`). Las IP son su propio sitio.
+pub fn site_of(url: &Url) -> Option<String> {
+    let host = match url.host.as_ref()? {
+        Host::Domain(d) => d.to_ascii_lowercase(),
+        h @ (Host::Ipv4(_) | Host::Ipv6(_)) => return Some(h.to_string()),
+        _ => return None,
+    };
+    let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+    let n = labels.len();
+    if n <= 2 {
+        return Some(labels.join("."));
+    }
+    let generic = [
+        "co", "com", "net", "org", "gov", "edu", "ac", "gob", "or", "ne", "go",
+    ];
+    let keep = if labels[n - 1].len() == 2 && generic.contains(&labels[n - 2]) {
+        3
+    } else {
+        2
+    };
+    Some(labels[n - keep..].join("."))
+}
+
+/// ¿Una petición a `url` es del mismo sitio que el contexto? (§5.2: "same-site" si el dominio
+/// registrable del destino es el del "site for cookies".)
+fn same_site_request(url: &Url, ctx: Option<&CookieContext>) -> bool {
+    match ctx.and_then(|c| c.site_for_cookies.as_deref()) {
+        None => true,
+        Some(site) => site_of(url).as_deref() == Some(site),
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CookieJar {
     cookies: Mutex<Vec<Cookie>>,
     counter: Mutex<u64>,
+    /// No mandar ni guardar cookies en peticiones entre sitios (opción del navegador; por
+    /// defecto `false`).
+    block_third_party: AtomicBool,
 }
 
 impl CookieJar {
@@ -154,11 +223,37 @@ impl CookieJar {
         }
     }
 
+    /// ¿Se bloquean las cookies de terceros?
+    pub fn block_third_party(&self) -> bool {
+        self.block_third_party.load(Ordering::Relaxed)
+    }
+
+    pub fn set_block_third_party(&self, block: bool) {
+        self.block_third_party.store(block, Ordering::Relaxed);
+    }
+
+    /// ¿Se descarta `cookie`, recibida para `url` en el contexto del hilo? (§5.7: las de
+    /// `same-site-flag` distinto de "None" que llegan entre sitios fuera de una navegación de
+    /// nivel superior; el bloqueo de terceros es una política del navegador, §7.1.)
+    fn rejected_by_site(&self, url: &Url, cookie: &Cookie) -> bool {
+        let ctx = thread_context();
+        if same_site_request(url, ctx.as_ref()) {
+            return false;
+        }
+        if self.block_third_party() {
+            return true;
+        }
+        cookie.same_site != SameSite::None && !ctx.as_ref().is_some_and(|c| c.top_level_navigation)
+    }
+
     /// Procesa una cabecera `Set-Cookie` recibida para `url` (§5.6 y §5.7).
     pub fn set_cookie(&self, url: &Url, header: &str) {
         let Some(cookie) = self.parse(url, header, now()) else {
             return;
         };
+        if self.rejected_by_site(url, &cookie) {
+            return;
+        }
         let mut jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
         let mut cookie = cookie;
         let old = jar.iter().position(|c| {
@@ -325,6 +420,14 @@ impl CookieJar {
         let (host, is_ip) = Self::host_of(url)?;
         let path = url.path_string();
         let secure = url.scheme == "https";
+        let ctx = thread_context();
+        let same_site = same_site_request(url, ctx.as_ref());
+        if !same_site && self.block_third_party() {
+            return None;
+        }
+        // §5.8.3 paso 1: entre sitios, `Strict` nunca viaja; `Lax` (y sin atributo, que se
+        // aplica como `Lax`) solo en una navegación de nivel superior por HTTP.
+        let lax_ok = http && ctx.as_ref().is_some_and(|c| c.top_level_navigation);
         let t = now();
         let mut jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
         jar.retain(|c| c.expires.is_none_or(|e| e > t));
@@ -340,6 +443,12 @@ impl CookieJar {
                     && path_match(&path, &c.path)
                     && (!c.secure || secure)
                     && (http || !c.http_only)
+                    && (same_site
+                        || match c.same_site {
+                            SameSite::None => true,
+                            SameSite::Strict => false,
+                            SameSite::Lax | SameSite::Default => lax_ok,
+                        })
             })
             .collect();
         if matching.is_empty() {
@@ -376,6 +485,57 @@ impl CookieJar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_site_and_third_party() {
+        // RFC 6265bis §5.2 y §5.8.3: desde a.example, b.test es otro sitio.
+        let jar = CookieJar::default();
+        let b = url("https://b.test/x");
+        jar.set_cookie(&b, "n=1; SameSite=None; Secure");
+        jar.set_cookie(&b, "l=2; SameSite=Lax");
+        jar.set_cookie(&b, "s=3; SameSite=Strict");
+        jar.set_cookie(&b, "d=4");
+        let a = site_of(&url("https://www.a.example/"));
+        set_thread_context(Some(CookieContext {
+            site_for_cookies: a.clone(),
+            top_level_navigation: false,
+        }));
+        assert_eq!(jar.cookie_header(&b).as_deref(), Some("n=1"));
+        assert_eq!(jar.script_cookies(&b), "n=1");
+        // Una cookie `Lax` que llega en una petición entre sitios no se guarda; `None` sí.
+        jar.set_cookie(&b, "l2=5");
+        jar.set_cookie(&b, "n2=6; SameSite=None; Secure");
+        assert_eq!(jar.cookie_header(&b).as_deref(), Some("n=1; n2=6"));
+        // Navegación de nivel superior: `Lax` viaja; `Strict` no.
+        set_thread_context(Some(CookieContext {
+            site_for_cookies: a,
+            top_level_navigation: true,
+        }));
+        assert_eq!(
+            jar.cookie_header(&b).as_deref(),
+            Some("n=1; l=2; d=4; n2=6")
+        );
+        // Bloqueo de terceros: nada entre sitios; el mismo sitio no cambia.
+        jar.set_block_third_party(true);
+        assert_eq!(jar.cookie_header(&b), None);
+        set_thread_context(Some(CookieContext {
+            site_for_cookies: site_of(&url("https://sub.b.test/")),
+            top_level_navigation: false,
+        }));
+        assert_eq!(
+            jar.cookie_header(&b).as_deref(),
+            Some("n=1; l=2; s=3; d=4; n2=6")
+        );
+        set_thread_context(None);
+        assert_eq!(
+            site_of(&url("https://a.b.example.co.uk/")).as_deref(),
+            Some("example.co.uk")
+        );
+        assert_eq!(
+            site_of(&url("http://127.0.0.1:8000/")).as_deref(),
+            Some("127.0.0.1")
+        );
+    }
 
     fn url(s: &str) -> Url {
         Url::parse(s, None).unwrap()

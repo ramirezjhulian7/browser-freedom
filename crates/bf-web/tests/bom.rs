@@ -1056,10 +1056,13 @@ fn content_window_exists_before_sync_with_about_blank() {
 fn sandbox_without_allow_scripts_blocks_scripts_and_origin() {
     let mut p = framed(
         "<iframe id=a sandbox srcdoc=\"<script>parent.corrio = true;</script><p>x</p>\"></iframe>\
-         <iframe id=b sandbox=allow-scripts srcdoc=\"<script>parent.b = 1;</script>\"></iframe>",
+         <iframe id=b sandbox=allow-scripts srcdoc=\"<script>parent.postMessage(1, '*');</script>\"></iframe>\
+         <script>var b; addEventListener('message', function (e) { b = e.data + ':' + e.origin; });</script>",
         &[],
     );
-    assert!(p.truthy("typeof corrio === 'undefined' && b === 1"));
+    p.idle();
+    // E4: con origen opaco el marco no puede escribir en `parent`; sí mandarle mensajes.
+    assert!(p.truthy("typeof corrio === 'undefined' && b === '1:null'"));
     // Sin `allow-same-origin`: origen opaco, sin `contentDocument`.
     assert!(p.truthy(
         "document.getElementById('a').contentDocument === null && \
@@ -1074,8 +1077,9 @@ fn cross_origin_frame_hides_its_document() {
         &[("https://otro.test/p.html", "<p>otro origen")],
     );
     assert!(p.truthy(
-        "var f = document.getElementById('f'); f.contentDocument === null && \
-         f.contentWindow !== null && f.contentWindow.frameElement === undefined || true"
+        "var f = document.getElementById('f'); var err; \
+         try { f.contentWindow.frameElement; } catch (e) { err = e.name; } \
+         f.contentDocument === null && f.contentWindow !== null && err === 'SecurityError'"
     ));
     assert!(p.truthy("document.getElementById('f').contentDocument === null"));
 }
@@ -1089,6 +1093,65 @@ fn post_message_between_frames() {
     );
     p.idle();
     assert_eq!(p.show("recibido"), "desde el marco");
+}
+
+/// E4: HTML §9.3.3: `MessageEvent` con `origin` y `source`; `targetOrigin` filtra.
+#[test]
+fn post_message_has_origin_source_and_target_origin() {
+    let mut p = framed(
+        "<script>var log = []; addEventListener('message', function (e) { \
+         log.push(e.data + '|' + e.origin + '|' + (e.source === frames[0]) + '|' + (e instanceof MessageEvent)); });</script>\
+         <iframe srcdoc=\"<script>parent.postMessage('a', '*'); parent.postMessage('b', 'https://otro.test'); \
+         parent.postMessage('c', '/'); parent.postMessage('d', {targetOrigin: 'https://example.test/x'});</script>\"></iframe>",
+        &[],
+    );
+    p.idle();
+    assert_eq!(
+        p.show("log.join(' ')"),
+        "a|https://example.test|true|true c|https://example.test|true|true d|https://example.test|true|true"
+    );
+    assert_eq!(
+        p.show(
+            "(function () { try { postMessage('x', 'nope'); } catch (e) { return e.name; } })()"
+        ),
+        "SyntaxError"
+    );
+}
+
+/// E4: HTML §7.2.3.1: entre orígenes, el `WindowProxy` solo deja usar "CrossOriginProperties".
+#[test]
+fn cross_origin_window_proxy_is_restricted() {
+    let mut p = framed(
+        "<script>var eco = []; addEventListener('message', function (e) { \
+         eco.push(e.data + '|' + e.origin + '|' + (e.source === frames[0])); });</script>\
+         <iframe id=f src=https://otro.test/p.html></iframe>",
+        &[(
+            "https://otro.test/p.html",
+            "<script>var secreto = 1; var dePadre = 'nada'; \
+             try { parent.document; } catch (e) { dePadre = e.name; } \
+             addEventListener('message', function (e) { parent.postMessage('eco:' + e.data + ':' + e.origin, '*'); }); \
+             parent.postMessage('listo:' + dePadre + ':' + typeof parent.postMessage, '*');</script>",
+        )],
+    );
+    p.idle();
+    assert_eq!(
+        p.show(
+            "(function () { var w = document.getElementById('f').contentWindow; var r = []; \
+             try { w.secreto; r.push('leido'); } catch (e) { r.push(e.name); } \
+             r.push(w === frames[0], w.window === w, w.self === w, typeof w.postMessage, \
+             Object.getPrototypeOf(w) === null, w.parent === window, w.length, w.closed, \
+             w[Symbol.toStringTag] === undefined); \
+             try { w.foo = 1; r.push('escrito'); } catch (e) { r.push(e.name); } \
+             w.postMessage('hola', 'https://otro.test'); w.postMessage('perdido', 'https://example.test'); \
+             return r.join(); })()"
+        ),
+        "SecurityError,true,true,true,function,true,true,0,false,true,SecurityError"
+    );
+    p.idle();
+    assert_eq!(
+        p.show("eco.join(' ')"),
+        "listo:SecurityError:function|https://otro.test|true eco:hola:https://example.test|https://otro.test|true"
+    );
 }
 
 #[test]

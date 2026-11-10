@@ -12,8 +12,14 @@
 //!   origen es opaco (y `contentDocument` es `null`).
 //!
 //! Las navegaciones de un marco (`location.href` dentro del iframe) cargan el marco, no la
-//! pestaña. El acceso entre orígenes distintos no tiene los `WindowProxy` restringidos del
-//! estándar: `contentWindow` da el global del marco.
+//! pestaña.
+//!
+//! E4: entre orígenes distintos, `contentWindow`, `parent`, `top`, `window[i]` y el `source`
+//! de los mensajes dan un `WindowProxy` restringido (HTML §7.2.3.1 y §7.2.1.3): solo las
+//! propiedades de "CrossOriginProperties" (`postMessage`, `location`, `parent`…); el resto
+//! lanza `SecurityError`. `postMessage` (HTML §9.3.3) clona el mensaje, comprueba
+//! `targetOrigin` y dispara un `MessageEvent` con `origin` y `source`. [`frame_views`] da al
+//! navegador los documentos de los marcos para pintarlos dentro de su `<iframe>`.
 
 use std::sync::Arc;
 
@@ -21,6 +27,7 @@ use bf_dom::events::{Event, EventInit, EventTarget};
 use bf_dom::{Document, NodeId};
 use bf_infra::encoding::{self, Encoding};
 use bf_infra::{DomString, Namespace, ResourceLoader, Url};
+use bf_js::host::{HostHandle, TaskSource};
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
@@ -483,8 +490,8 @@ fn index_children(agent: &mut Agent, realm: RealmId) {
         let key = PropertyKey::from(i.to_string().as_str());
         match kids.get(i) {
             Some(&k) => {
-                let w = agent.realms[k].global_object;
-                agent.put_data(g, key, Value::Object(w), false, true, true);
+                let w = window_proxy(agent, realm, k);
+                agent.put_data(g, key, w, false, true, true);
             }
             None => {
                 if agent.heap[g].props.get(&key).is_none() {
@@ -500,23 +507,30 @@ fn index_children(agent: &mut Agent, realm: RealmId) {
 /// ¿Las ventanas `a` y `b` son del mismo origen? (Los marcos con `sandbox` sin
 /// `allow-same-origin` tienen origen opaco.)
 pub fn same_origin(agent: &Agent, a: RealmId, b: RealmId) -> bool {
-    let opaque = |r: RealmId| frame_of(agent, r).is_some_and(|f| f.opaque);
-    if opaque(a) || opaque(b) {
-        return a == b;
+    if a == b {
+        return true;
     }
-    let origin = |r: RealmId| {
-        let ctx = WebContextHandle { realm: r }.get(agent);
-        // `about:blank` y `about:srcdoc` heredan el origen del padre.
-        if ctx.url.scheme == "about" {
-            let p = parent_of(agent, r).unwrap_or(r);
-            if p != r {
-                return super::origin_of(&WebContextHandle { realm: p }.get(agent).url);
-            }
-        }
-        super::origin_of(&ctx.url)
-    };
-    let (oa, ob) = (origin(a), origin(b));
+    let (oa, ob) = (origin_string(agent, a), origin_string(agent, b));
     oa != "null" && oa == ob
+}
+
+/// La serialización del origen de la ventana `realm` (HTML §7.1.1): `null` si es opaco;
+/// `about:blank` y `about:srcdoc` heredan el del padre.
+pub fn origin_string(agent: &Agent, realm: RealmId) -> String {
+    let mut r = realm;
+    for _ in 0..=MAX_DEPTH {
+        if frame_of(agent, r).is_some_and(|f| f.opaque) {
+            return "null".to_owned();
+        }
+        let Some(ctx) = agent.realm_data::<WebContext>(r) else {
+            return "null".to_owned();
+        };
+        match parent_of(agent, r) {
+            Some(p) if ctx.url.scheme == "about" => r = p,
+            _ => return super::origin_of(&ctx.url),
+        }
+    }
+    "null".to_owned()
 }
 
 // --- Las propiedades de JavaScript ---
@@ -553,8 +567,9 @@ fn frame_for_this(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Option<RealmI
 
 /// `iframe.contentWindow` (HTML §4.8.5).
 fn content_window(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let viewer = WebContextHandle::current(agent).realm;
     Ok(match frame_for_this(agent, a)? {
-        Some(r) => Value::Object(agent.realms[r].global_object),
+        Some(r) => window_proxy(agent, viewer, r),
         None => Value::Null,
     })
 }
@@ -585,14 +600,14 @@ fn wrap_document(agent: &mut Agent, realm: RealmId) -> Value {
 pub fn window_parent(agent: &mut Agent) -> Value {
     let realm = WebContextHandle::current(agent).realm;
     let p = parent_of(agent, realm).unwrap_or(realm);
-    Value::Object(agent.realms[p].global_object)
+    window_proxy(agent, realm, p)
 }
 
 /// `window.top`.
 pub fn window_top(agent: &mut Agent) -> Value {
     let realm = WebContextHandle::current(agent).realm;
     let t = top_of(agent, realm);
-    Value::Object(agent.realms[t].global_object)
+    window_proxy(agent, realm, t)
 }
 
 /// `window.length`: cuántos marcos hijos tiene.
@@ -629,4 +644,503 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     let proto = agent.host_class_objects(realm, class).prototype;
     super::accessor(agent, proto, "contentWindow", content_window, None);
     super::accessor(agent, proto, "contentDocument", content_document, None);
+}
+
+// --- E4: el navegador (pintado y eventos de los marcos) ---
+
+/// Un marco visto por el navegador: su `<iframe>`, su ventana y una copia de su documento.
+#[derive(Debug, Clone)]
+pub struct FrameView {
+    pub element: NodeId,
+    pub realm: RealmId,
+    pub doc: Document,
+    pub base: Url,
+    pub children: Vec<FrameView>,
+}
+
+/// Los marcos de la ventana `realm` (y los suyos), en orden de documento.
+pub fn frame_views(agent: &Agent, realm: RealmId) -> Vec<FrameView> {
+    frame_views_at(agent, realm, 0)
+}
+
+fn frame_views_at(agent: &Agent, realm: RealmId, depth: usize) -> Vec<FrameView> {
+    if depth > MAX_DEPTH {
+        return Vec::new();
+    }
+    children_of(agent, realm)
+        .into_iter()
+        .filter_map(|r| {
+            let f = frame_of(agent, r)?;
+            let ctx = agent.realm_data::<WebContext>(r)?;
+            Some(FrameView {
+                element: f.element,
+                realm: r,
+                doc: ctx.document().clone(),
+                base: ctx.base.clone(),
+                children: frame_views_at(agent, r, depth + 1),
+            })
+        })
+        .collect()
+}
+
+/// La ventana a la que lleva `path` (los `<iframe>`, de afuera hacia adentro) desde `realm`.
+pub fn frame_at_path(agent: &Agent, realm: RealmId, path: &[NodeId]) -> Option<RealmId> {
+    let mut r = realm;
+    for &el in path {
+        r = frames(agent)?
+            .list
+            .iter()
+            .find(|f| f.parent == r && f.element == el)?
+            .realm;
+    }
+    Some(r)
+}
+
+/// Navega el marco `realm` a `url` (un enlace dentro del marco, HTML §7.4.2.2 con el propio
+/// marco como navegable).
+pub fn navigate_frame(agent: &mut Agent, realm: RealmId, url: Url) {
+    set_pending(agent, realm, Some((url, false)));
+    let top = top_of(agent, realm);
+    sync_frames(agent, top);
+}
+
+// --- E4: WindowProxy entre orígenes (HTML §7.2.3.1, §7.2.1.3) ---
+
+/// "CrossOriginProperties" de `Window` (HTML §7.2.1.3.1); además, los índices de los marcos.
+const CROSS_ORIGIN: [&str; 13] = [
+    "window",
+    "self",
+    "location",
+    "close",
+    "closed",
+    "focus",
+    "blur",
+    "frames",
+    "length",
+    "top",
+    "opener",
+    "parent",
+    "postMessage",
+];
+
+/// Las vistas restringidas ya creadas: quién mira, qué ventana, el `Proxy` y su objeto
+/// interior (el mismo objeto cada vez, como el `WindowProxy`).
+#[derive(Debug, Default)]
+struct CrossOriginViews(Vec<CrossOriginView>);
+
+#[derive(Debug, Clone, Copy)]
+struct CrossOriginView {
+    viewer: RealmId,
+    target: RealmId,
+    proxy: HostHandle,
+    inner: HostHandle,
+}
+
+fn views(agent: &mut Agent) -> &mut CrossOriginViews {
+    if agent.embedder_data::<CrossOriginViews>().is_none() {
+        agent.set_embedder_data(CrossOriginViews::default());
+    }
+    agent
+        .embedder_data_mut::<CrossOriginViews>()
+        .expect("CrossOriginViews")
+}
+
+/// La vista de la que `v` es el `Proxy` o el objeto interior.
+fn view_of(agent: &Agent, v: &Value) -> Option<CrossOriginView> {
+    let Value::Object(o) = v else {
+        return None;
+    };
+    let is = |h: HostHandle| matches!(agent.host_pinned(h), Some(Value::Object(x)) if x == *o);
+    agent
+        .embedder_data::<CrossOriginViews>()?
+        .0
+        .iter()
+        .find(|w| is(w.proxy) || is(w.inner))
+        .copied()
+}
+
+/// El `WindowProxy` de la ventana `target` visto desde la ventana `viewer`: el global si son
+/// del mismo origen; si no, un objeto que solo deja usar las propiedades entre orígenes.
+pub fn window_proxy(agent: &mut Agent, viewer: RealmId, target: RealmId) -> Value {
+    if same_origin(agent, viewer, target) {
+        return Value::Object(agent.realms[target].global_object);
+    }
+    let existing = agent.embedder_data::<CrossOriginViews>().and_then(|v| {
+        v.0.iter()
+            .find(|w| w.viewer == viewer && w.target == target)
+            .copied()
+    });
+    if let Some(w) = existing
+        && let Some(p) = agent.host_pinned(w.proxy)
+    {
+        return p;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = viewer;
+    let proxy = cross_origin_object(agent, viewer, target);
+    agent.current_realm = saved;
+    proxy.unwrap_or(Value::Null)
+}
+
+fn cross_origin_object(agent: &mut Agent, viewer: RealmId, target: RealmId) -> JsResult<Value> {
+    let inner = agent.new_object(None);
+    for name in ["window", "self", "frames"] {
+        super::accessor(agent, inner, name, xo_self, None);
+    }
+    super::accessor(agent, inner, "parent", xo_parent, None);
+    super::accessor(agent, inner, "top", xo_top, None);
+    super::accessor(agent, inner, "length", xo_length, None);
+    super::accessor(agent, inner, "closed", xo_false, None);
+    super::accessor(agent, inner, "opener", xo_null, None);
+    super::accessor(agent, inner, "location", xo_location, Some(xo_set_location));
+    super::method(agent, inner, "postMessage", 1, xo_post_message);
+    for name in ["close", "focus", "blur"] {
+        super::method(agent, inner, name, 0, xo_noop);
+    }
+    let handler = agent.new_plain_object();
+    super::method(agent, handler, "get", 3, xo_trap_get);
+    super::method(agent, handler, "set", 4, xo_trap_set);
+    super::method(agent, handler, "getPrototypeOf", 1, xo_trap_proto);
+    super::method(agent, handler, "defineProperty", 3, xo_trap_deny);
+    super::method(agent, handler, "deleteProperty", 2, xo_trap_deny);
+    let g = agent.realms[viewer].global_object;
+    let Value::Object(ctor) = agent.get(g, &PropertyKey::from("Proxy"), Value::Object(g))? else {
+        return Ok(Value::Null);
+    };
+    let proxy = agent.construct(ctor, &[Value::Object(inner), Value::Object(handler)], None)?;
+    let view = CrossOriginView {
+        viewer,
+        target,
+        proxy: agent.host_pin(proxy.clone()),
+        inner: agent.host_pin(Value::Object(inner)),
+    };
+    views(agent).0.push(view);
+    Ok(proxy)
+}
+
+/// `SecurityError` (HTML §7.2.3.1: acceso a una propiedad que no es entre orígenes).
+fn security_error<T>(agent: &mut Agent, what: &str) -> JsResult<T> {
+    crate::net::dom_error(
+        agent,
+        "SecurityError",
+        &format!("Blocked a frame from accessing a cross-origin frame ({what})."),
+    )
+}
+
+/// `[[Get]]` (HTML §7.2.3.7 "CrossOriginGet"): solo las propiedades entre orígenes y los
+/// índices de los marcos; los símbolos y `then` dan `undefined` (§7.2.3.7 paso 2,
+/// "CrossOriginPropertyFallback").
+fn xo_trap_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let target = a.arg(0);
+    let key = agent.to_property_key(&a.arg(1))?;
+    let Some(view) = view_of(agent, &target) else {
+        return Ok(Value::Undefined);
+    };
+    match &key {
+        PropertyKey::Index(i) => {
+            let kids = children_of(agent, view.target);
+            match kids.get(*i as usize) {
+                Some(&k) => Ok(window_proxy(agent, view.viewer, k)),
+                None => security_error(agent, &i.to_string()),
+            }
+        }
+        PropertyKey::Symbol(_) => Ok(Value::Undefined),
+        PropertyKey::String(s) => {
+            let name = s.to_string();
+            if CROSS_ORIGIN.contains(&name.as_str()) {
+                let Value::Object(o) = target else {
+                    return Ok(Value::Undefined);
+                };
+                agent.get(o, &key, a.arg(2))
+            } else if name == "then" {
+                Ok(Value::Undefined)
+            } else {
+                security_error(agent, &name)
+            }
+        }
+    }
+}
+
+/// `[[Set]]` (HTML §7.2.3.8 "CrossOriginSet"): solo `location`.
+fn xo_trap_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let key = agent.to_property_key(&a.arg(1))?;
+    if key.to_string() == "location" {
+        return match location_target(agent, &a.arg(0)) {
+            Some(v) => {
+                xo_navigate(agent, v, &a.arg(2), false)?;
+                Ok(Value::from_bool(true))
+            }
+            None => Ok(Value::from_bool(false)),
+        };
+    }
+    let what = key.to_string();
+    security_error(agent, &what)
+}
+
+/// `[[GetPrototypeOf]]` de un objeto entre orígenes: `null` (HTML §7.2.3.2).
+fn xo_trap_proto(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Null)
+}
+
+/// `[[DefineOwnProperty]]` y `[[Delete]]`: `SecurityError` (HTML §7.2.3.5, §7.2.3.9).
+fn xo_trap_deny(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let key = agent.to_property_key(&a.arg(1))?;
+    let what = key.to_string();
+    security_error(agent, &what)
+}
+
+fn location_target(agent: &Agent, v: &Value) -> Option<CrossOriginView> {
+    view_of(agent, v)
+}
+
+fn xo_self(_: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(a.this.clone())
+}
+
+fn xo_parent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(v) = view_of(agent, &a.this) else {
+        return Ok(Value::Null);
+    };
+    let p = parent_of(agent, v.target).unwrap_or(v.target);
+    Ok(window_proxy(agent, v.viewer, p))
+}
+
+fn xo_top(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(v) = view_of(agent, &a.this) else {
+        return Ok(Value::Null);
+    };
+    let t = top_of(agent, v.target);
+    Ok(window_proxy(agent, v.viewer, t))
+}
+
+fn xo_length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = view_of(agent, &a.this).map_or(0, |v| children_of(agent, v.target).len());
+    Ok(Value::Number(n as f64))
+}
+
+fn xo_false(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::from_bool(false))
+}
+
+fn xo_null(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Null)
+}
+
+fn xo_noop(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::Undefined)
+}
+
+/// Las `Location` entre orígenes ya creadas: el objeto y la vista de su ventana.
+#[derive(Debug, Default)]
+struct CrossOriginLocations(Vec<(HostHandle, CrossOriginView)>);
+
+/// `location` entre orígenes (HTML §7.10.6): solo `href` (de escritura) y `replace()`, que
+/// navegan la otra ventana.
+fn xo_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(view) = view_of(agent, &a.this) else {
+        return Ok(Value::Null);
+    };
+    let existing = agent.embedder_data::<CrossOriginLocations>().and_then(|l| {
+        l.0.iter()
+            .find(|(_, v)| v.viewer == view.viewer && v.target == view.target)
+            .map(|(h, _)| *h)
+    });
+    if let Some(v) = existing.and_then(|h| agent.host_pinned(h)) {
+        return Ok(v);
+    }
+    let loc = agent.new_object(None);
+    super::accessor(agent, loc, "href", xo_href_denied, Some(xo_set_href));
+    super::method(agent, loc, "replace", 1, xo_replace);
+    let h = agent.host_pin(Value::Object(loc));
+    if agent.embedder_data::<CrossOriginLocations>().is_none() {
+        agent.set_embedder_data(CrossOriginLocations::default());
+    }
+    if let Some(l) = agent.embedder_data_mut::<CrossOriginLocations>() {
+        l.0.push((h, view));
+    }
+    Ok(Value::Object(loc))
+}
+
+/// La ventana de una `Location` entre orígenes.
+fn location_view(agent: &Agent, this: &Value) -> Option<CrossOriginView> {
+    let Value::Object(o) = this else {
+        return None;
+    };
+    agent
+        .embedder_data::<CrossOriginLocations>()?
+        .0
+        .iter()
+        .find(|(h, _)| matches!(agent.host_pinned(*h), Some(Value::Object(x)) if x == *o))
+        .map(|(_, v)| *v)
+}
+
+fn xo_href_denied(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    security_error(agent, "href")
+}
+
+/// Navega la ventana de la vista `view` a `href` (relativa a la URL base de quien llama).
+fn xo_navigate(
+    agent: &mut Agent,
+    view: CrossOriginView,
+    href: &Value,
+    replace: bool,
+) -> JsResult<Value> {
+    let href = super::to_rust_string(agent, href)?;
+    let base = WebContextHandle::current(agent).get(agent).base.clone();
+    let Ok(url) = Url::parse(href.trim(), Some(&base)) else {
+        return crate::net::dom_error(
+            agent,
+            "SyntaxError",
+            &format!("'{href}' is not a valid URL."),
+        );
+    };
+    if let Some(s) = agent.realm_data_mut::<super::BomState>(view.target) {
+        s.hooks.navigate(&url, replace);
+    }
+    Ok(Value::Undefined)
+}
+
+fn xo_set_href(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    match location_view(agent, &a.this) {
+        Some(v) => xo_navigate(agent, v, &a.arg(0), false),
+        None => Ok(Value::Undefined),
+    }
+}
+
+fn xo_replace(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    match location_view(agent, &a.this) {
+        Some(v) => xo_navigate(agent, v, &a.arg(0), true),
+        None => Ok(Value::Undefined),
+    }
+}
+
+/// `otherWindow.location = url` entre orígenes (`[PutForwards=href]`).
+fn xo_set_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    match view_of(agent, &a.this) {
+        Some(v) => xo_navigate(agent, v, &a.arg(0), false),
+        None => Ok(Value::Undefined),
+    }
+}
+
+fn xo_post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(v) = view_of(agent, &a.this) else {
+        return Ok(Value::Undefined);
+    };
+    post_to(agent, v.target, a)
+}
+
+// --- E4: postMessage (HTML §9.3.3) ---
+
+/// `window.postMessage(message, targetOrigin, transfer)` o `postMessage(message, options)`
+/// sobre el global de una ventana (de este realm o de otro del mismo origen).
+pub fn post_message(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let target = match &a.this {
+        Value::Object(o) => (0..agent.realms.len())
+            .find(|&r| agent.realms[r].global_object == *o)
+            .unwrap_or(agent.current_realm),
+        _ => agent.current_realm,
+    };
+    post_to(agent, target, a)
+}
+
+/// "Window post message steps" (HTML §9.3.3).
+fn post_to(agent: &mut Agent, target: RealmId, a: &CallArgs<'_>) -> JsResult<Value> {
+    // La ventana que llama (el "incumbent settings object"): la del script que corre.
+    let incumbent = agent.frames.last().map_or(agent.current_realm, |f| f.realm);
+    // `postMessage(message, targetOrigin, transfer)` o `postMessage(message, options)`.
+    let (target_origin, transfer) = match a.arg(1) {
+        Value::Object(o) if a.len() < 3 => {
+            let t = agent.get(o, &PropertyKey::from("targetOrigin"), Value::Object(o))?;
+            let t = match t {
+                Value::Undefined => "/".to_owned(),
+                v => super::to_rust_string(agent, &v)?,
+            };
+            let tr = crate::workers::ports::transfer_argument(agent, &Value::Object(o))?;
+            (t, tr)
+        }
+        Value::Undefined if a.len() < 2 => ("/".to_owned(), Vec::new()),
+        v => {
+            let t = super::to_rust_string(agent, &v)?;
+            let tr = crate::workers::ports::transfer_argument(agent, &a.arg(2))?;
+            (t, tr)
+        }
+    };
+    // Pasos 3–4: "/" es el origen de quien llama, "*" cualquiera; si no, una URL.
+    let wanted = match target_origin.as_str() {
+        "/" => Some(origin_string(agent, incumbent)),
+        "*" => None,
+        s => match Url::parse(s, None) {
+            Ok(u) => Some(super::origin_of(&u)),
+            Err(_) => {
+                return crate::net::dom_error(
+                    agent,
+                    "SyntaxError",
+                    &format!("Invalid target origin '{s}' in a call to 'postMessage'."),
+                );
+            }
+        },
+    };
+    // Paso 5: StructuredSerializeWithTransfer (los `MessagePort` se transfieren).
+    let isolated = crate::workers::dedicated::cross_origin_isolated(agent);
+    let serialized = crate::workers::ports::serialize(agent, &a.arg(0), &transfer, isolated)?;
+    let origin = origin_string(agent, incumbent);
+    agent.queue_task(
+        TaskSource::PostedMessage,
+        Box::new(move |agent: &mut Agent| {
+            if agent.realm_data::<WebContext>(target).is_none() {
+                return;
+            }
+            // El origen del destino ya no es el pedido (navegó): no se entrega.
+            if wanted
+                .as_ref()
+                .is_some_and(|w| *w != origin_string(agent, target))
+            {
+                return;
+            }
+            let saved = agent.current_realm;
+            agent.current_realm = target;
+            let source = window_proxy(agent, target, incumbent);
+            // Paso 7.4: StructuredDeserializeWithTransfer; si falla, `messageerror`.
+            let Ok((data, transferred)) =
+                bf_js::builtins::web::serialize::deserialize_with_transfer(agent, serialized)
+            else {
+                let t = crate::dom::events::TargetRef {
+                    doc: 0,
+                    target: EventTarget::Window,
+                };
+                crate::net::channels::fire_message(
+                    agent,
+                    t,
+                    "messageerror",
+                    Value::Null,
+                    &origin,
+                    "",
+                    Vec::new(),
+                );
+                agent.current_realm = saved;
+                return;
+            };
+            let ports = crate::workers::ports::ports_of(agent, &transferred);
+            let ports = match agent.create_array_from_list(&ports) {
+                Ok(arr) => {
+                    let _ = agent.set_integrity_level(arr, true);
+                    Value::Object(arr)
+                }
+                Err(_) => Value::Null,
+            };
+            let ev = crate::net::channels::create_message_event(
+                agent, "message", data, &origin, "", ports,
+            );
+            if let Some(s) = agent.host_slots_mut(ev)
+                && let Some(slot) = s.get_mut(6)
+            {
+                *slot = source;
+            }
+            let pin = agent.host_pin(Value::Object(ev));
+            let _ = crate::dom::events::dispatch_js_event(agent, 0, EventTarget::Window, ev, false);
+            agent.host_unpin(pin);
+            agent.current_realm = saved;
+        }),
+    );
+    Ok(Value::Undefined)
 }
