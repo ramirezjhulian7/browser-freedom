@@ -185,6 +185,8 @@ pub(crate) fn establishes_bfc(b: &LayoutBox, is_root: bool) -> bool {
                 | Display::InlineFlex
                 | Display::Grid
                 | Display::InlineGrid
+                | Display::GridLanes
+                | Display::InlineGridLanes
                 | Display::Table
                 | Display::InlineTable
                 | Display::TableCell

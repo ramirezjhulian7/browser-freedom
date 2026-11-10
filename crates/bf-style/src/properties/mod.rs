@@ -241,6 +241,10 @@ longhands! {
     Contain "contain" contain: Contain = "none", inherited: false, animatable: false;
     ContainIntrinsicWidth "contain-intrinsic-width" contain_intrinsic_width: ContainIntrinsicSize = "none", inherited: false, animatable: true;
     ContainIntrinsicHeight "contain-intrinsic-height" contain_intrinsic_height: ContainIntrinsicSize = "none", inherited: false, animatable: true;
+    // E5: grid lanes (CSS Grid 3 §2.3, §4.2 y §4.3).
+    GridLanesDirection "grid-lanes-direction" grid_lanes_direction: GridLanesDirection = "normal", inherited: false, animatable: false;
+    GridLanesPack "grid-lanes-pack" grid_lanes_pack: GridLanesPack = "normal", inherited: false, animatable: false;
+    FlowTolerance "flow-tolerance" flow_tolerance: FlowTolerance = "normal", inherited: false, animatable: true;
 }
 
 impl LonghandId {

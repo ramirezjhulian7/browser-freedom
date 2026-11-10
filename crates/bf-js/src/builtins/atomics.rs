@@ -480,13 +480,24 @@ fn do_wait_prefix(
 fn wait(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (_, block, byte_index, size, v, t) = do_wait_prefix(agent, a, true)?;
     let timeout = t.is_finite().then(|| Duration::from_secs_f64(t / 1000.0));
-    let r = agents::wait(&block, byte_index, size, v, timeout, agent.options.deadline);
+    // E3: `Worker.terminate()` pone la interrupción del agente; la espera la mira.
+    let r = agents::wait(
+        &block,
+        byte_index,
+        size,
+        v,
+        timeout,
+        agent.options.deadline,
+        agent.interrupt.as_deref(),
+    );
     Ok(Value::str(match r {
         agents::WaitResult::NotEqual => "not-equal",
         agents::WaitResult::Ok => "ok",
         agents::WaitResult::TimedOut => "timed-out",
         agents::WaitResult::Terminated => {
-            return Err(Throw::Terminate("tiempo agotado".into()));
+            return Err(Throw::Terminate(
+                "espera interrumpida o tiempo agotado".into(),
+            ));
         }
     }))
 }

@@ -59,6 +59,9 @@ keyword_enum!(Display {
     InlineFlex = "inline-flex",
     Grid = "grid",
     InlineGrid = "inline-grid",
+    // E5: CSS Grid 3 §2.2.
+    GridLanes = "grid-lanes",
+    InlineGridLanes = "inline-grid-lanes",
     Table = "table",
     InlineTable = "inline-table",
     TableRowGroup = "table-row-group",
@@ -82,6 +85,7 @@ impl Display {
                 | Display::InlineBlock
                 | Display::InlineFlex
                 | Display::InlineGrid
+                | Display::InlineGridLanes
                 | Display::InlineTable
                 | Display::Ruby
                 | Display::RubyText
@@ -96,6 +100,7 @@ impl Display {
             }
             Display::InlineFlex => Display::Flex,
             Display::InlineGrid => Display::Grid,
+            Display::InlineGridLanes => Display::GridLanes,
             Display::InlineTable => Display::Table,
             Display::TableRowGroup
             | Display::TableHeaderGroup
@@ -128,6 +133,8 @@ impl PropValue for Display {
             ["inline", "flex"] | ["flex", "inline"] => Display::InlineFlex,
             ["block", "grid"] | ["grid", "block"] => Display::Grid,
             ["inline", "grid"] | ["grid", "inline"] => Display::InlineGrid,
+            ["block", "grid-lanes"] | ["grid-lanes", "block"] => Display::GridLanes,
+            ["inline", "grid-lanes"] | ["grid-lanes", "inline"] => Display::InlineGridLanes,
             ["block", "table"] | ["table", "block"] => Display::Table,
             ["inline", "table"] | ["table", "inline"] => Display::InlineTable,
             ["list-item", "block"]
@@ -2580,3 +2587,116 @@ impl PropValue for ContainIntrinsicSize {
 
 pub use super::gradient::*; // E4
 pub use super::grid::*; // E4
+
+// --- E5: grid lanes (CSS Grid 3) ---
+
+/// E5: eje de rejilla pedido por `grid-lanes-direction` (CSS Grid 3 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanesAxis {
+    Normal,
+    Row,
+    Column,
+}
+
+/// E5: `grid-lanes-direction: normal | [ row | column ] [ fill-reverse || track-reverse ]?`
+/// (CSS Grid 3 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridLanesDirection {
+    pub axis: LanesAxis,
+    pub fill_reverse: bool,
+    pub track_reverse: bool,
+}
+
+impl PropValue for GridLanesDirection {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let items = components(input);
+        let (first, rest) = items.split_first()?;
+        if is_ident(first, "normal") && rest.is_empty() {
+            return Some(GridLanesDirection {
+                axis: LanesAxis::Normal,
+                fill_reverse: false,
+                track_reverse: false,
+            });
+        }
+        let axis = if is_ident(first, "row") {
+            LanesAxis::Row
+        } else if is_ident(first, "column") {
+            LanesAxis::Column
+        } else {
+            return None;
+        };
+        let (mut fill_reverse, mut track_reverse) = (false, false);
+        for v in rest {
+            if !fill_reverse && is_ident(v, "fill-reverse") {
+                fill_reverse = true;
+            } else if !track_reverse && is_ident(v, "track-reverse") {
+                track_reverse = true;
+            } else {
+                return None;
+            }
+        }
+        Some(GridLanesDirection {
+            axis,
+            fill_reverse,
+            track_reverse,
+        })
+    }
+    fn to_css(&self) -> String {
+        let mut s = String::from(match self.axis {
+            LanesAxis::Normal => "normal",
+            LanesAxis::Row => "row",
+            LanesAxis::Column => "column",
+        });
+        if self.fill_reverse {
+            s.push_str(" fill-reverse");
+        }
+        if self.track_reverse {
+            s.push_str(" track-reverse");
+        }
+        s
+    }
+}
+
+keyword_enum!(
+    /// E5: `grid-lanes-pack: normal | dense` (CSS Grid 3 §4.3).
+    GridLanesPack {
+        Normal = "normal",
+        Dense = "dense",
+    }
+);
+keyword_prop!(GridLanesPack);
+
+/// E5: `flow-tolerance: normal | <length-percentage [0,inf]> | infinite` (CSS Grid 3 §4.2; el
+/// borrador actual la llama `fit-tolerance`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlowTolerance {
+    Normal,
+    LengthPercentage(LengthPercentage),
+    Infinite,
+}
+
+impl PropValue for FlowTolerance {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        match trim(input) {
+            [v] if is_ident(v, "normal") => Some(FlowTolerance::Normal),
+            [v] if is_ident(v, "infinite") => Some(FlowTolerance::Infinite),
+            [v] => parse_non_negative_lp(v).map(FlowTolerance::LengthPercentage),
+            _ => None,
+        }
+    }
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        match self {
+            FlowTolerance::LengthPercentage(lp) => {
+                FlowTolerance::LengthPercentage(lp.compute(&ctx.len))
+            }
+            v => v.clone(),
+        }
+    }
+    fn to_css(&self) -> String {
+        match self {
+            FlowTolerance::Normal => "normal".into(),
+            FlowTolerance::LengthPercentage(lp) => lp.to_string(),
+            FlowTolerance::Infinite => "infinite".into(),
+        }
+    }
+}
