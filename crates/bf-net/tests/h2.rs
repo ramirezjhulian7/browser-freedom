@@ -676,6 +676,66 @@ fn tls_bad_certificate_is_a_tls_error() {
     server.join().unwrap();
 }
 
+/// E6: HSTS (RFC 6797) de punta a punta. Una respuesta por TLS con `Strict-Transport-Security`
+/// hace que el siguiente `http://localhost:<puerto>/` vaya por `https:` al mismo puerto (§8.3
+/// paso 5), reusando la conexión. El servidor solo escucha en 127.0.0.1: si `localhost` resuelve
+/// primero a `::1`, la conexión llega por IPv4 gracias a Happy Eyeballs (RFC 8305).
+#[test]
+fn hsts_upgrades_http_to_https() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let mut stream = tls_accept(&listener, tls_server_config(&[b"http/1.1"]));
+        let mut paths = Vec::new();
+        for sts in ["max-age=600", ""] {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut tmp).unwrap();
+                assert!(n > 0, "el cliente cerró");
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let line = String::from_utf8_lossy(&buf)
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned();
+            paths.push(line.split(' ').nth(1).unwrap().to_owned());
+            let extra = if sts.is_empty() {
+                String::new()
+            } else {
+                format!("Strict-Transport-Security: {sts}\r\n")
+            };
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\n{extra}Content-Length: 2\r\n\r\nok").as_bytes(),
+                )
+                .unwrap();
+            stream.flush().unwrap();
+        }
+        paths
+    });
+    let f = test_fetcher();
+    let start = std::time::Instant::now();
+    let first = Url::parse(&format!("https://localhost:{port}/primera"), None).unwrap();
+    assert_eq!(
+        f.fetch(&first, &FetchOptions::default()).unwrap().body,
+        b"ok"
+    );
+    assert!(f.hsts.is_known("localhost"));
+    let plain = Url::parse(&format!("http://localhost:{port}/segunda"), None).unwrap();
+    let res = f.fetch(&plain, &FetchOptions::default()).unwrap();
+    assert_eq!(res.url.href(), format!("https://localhost:{port}/segunda"));
+    assert_eq!(res.body, b"ok");
+    assert_eq!(server.join().unwrap(), ["/primera", "/segunda"]);
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(1500),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 /// La red de verdad: Wikipedia habla h2. `cargo test -p bf-net --test h2 -- --ignored`.
 #[test]
 #[ignore]
