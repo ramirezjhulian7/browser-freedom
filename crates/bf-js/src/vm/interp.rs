@@ -64,6 +64,32 @@ impl Agent {
         r
     }
 
+    /// E8: `Call` a una función simple del realm actual sin pasar por `op_call`.
+    #[inline]
+    fn fast_call_op(&mut self, argc: u32) -> bool {
+        let realm = &self.realms[self.current_realm];
+        let cx = CallCx {
+            realm: self.current_realm,
+            global_object: realm.global_object,
+            max_frames: self.options.max_frames.saturating_sub(self.call_depth),
+        };
+        let mut pools = Pools {
+            values: &mut self.value_pool,
+            locals: &mut self.locals_pool,
+        };
+        fast_call(&mut self.frames, &self.heap, &mut pools, &cx, argc)
+    }
+
+    /// E8: `Return` de una llamada en línea sin handlers ni `new`.
+    #[inline]
+    fn fast_return_op(&mut self) -> bool {
+        let mut pools = Pools {
+            values: &mut self.value_pool,
+            locals: &mut self.locals_pool,
+        };
+        fast_return(&mut self.frames, &mut pools)
+    }
+
     /// Saca el frame de una llamada en línea (E3) y restaura el realm del llamador.
     fn pop_inline_frame(&mut self) {
         let f = self.frames.pop().expect("frame");
@@ -117,15 +143,21 @@ impl Agent {
                         };
                         let heap = &mut self.heap;
                         let f = self.frames.last_mut().expect("frame");
+                        let mut backs = 0u32;
                         loop {
                             let op = f.code.ops[f.pc];
                             f.pc += 1;
                             match fast_op(f, heap, &cx, op) {
                                 Fast::Done => n += 1,
+                                // E8: el safepoint cada 256 saltos hacia atrás (no en cada
+                                // vuelta de un bucle).
                                 Fast::BackJump => {
                                     n += 1;
-                                    back = true;
-                                    break;
+                                    backs += 1;
+                                    if backs & 0xFF == 0 {
+                                        back = true;
+                                        break;
+                                    }
                                 }
                                 Fast::Slow => {
                                     f.pc -= 1;
@@ -142,14 +174,24 @@ impl Agent {
                     let f = frame!(self);
                     match f.code.ops[f.pc] {
                         Op::Return => {
-                            f.pc += 1;
                             self.instructions += 1;
+                            // E8: la vuelta de una llamada en línea sin handlers.
+                            if self.fast_return_op() {
+                                continue;
+                            }
+                            let f = frame!(self);
+                            f.pc += 1;
                             let v = f.stack.pop().expect("pila vacía");
                             Ok(Flow::Return(v))
                         }
                         Op::Call(argc, t) => {
-                            f.pc += 1;
                             self.instructions += 1;
+                            // E8: una función simple sin pasar por `op_call`.
+                            if self.fast_call_op(argc) {
+                                continue;
+                            }
+                            let f = frame!(self);
+                            f.pc += 1;
                             self.op_call(argc, t)
                         }
                         Op::New(argc, t) => {
@@ -1768,6 +1810,92 @@ impl Agent {
             Op::AsyncYieldStarResult { slot, done } => {
                 return self.async_yield_star_result(slot, done);
             }
+            // E8: las superinstrucciones fuera de la ruta rápida (operandos que no son Number).
+            Op::ArgToLocal(i, s) => {
+                let v = frame!(self)
+                    .args
+                    .get(i as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                frame!(self).locals[s as usize] = Some(v);
+            }
+            Op::LocalAddInt(s, k) | Op::LocalSubInt(s, k) => {
+                let l = self.local(s);
+                let bin = if matches!(op, Op::LocalAddInt(..)) {
+                    Op::Add
+                } else {
+                    Op::Sub
+                };
+                let v = self.apply_binary(bin, l, Value::Number(f64::from(k)))?;
+                self.push(v);
+            }
+            Op::JumpIfNotLocalLtInt { slot, k, target } => {
+                let l = self.local(slot);
+                let lt = self.is_less_than(&l, &Value::Number(f64::from(k)), true)? == Some(true);
+                if !lt {
+                    frame!(self).pc = target as usize;
+                }
+            }
+            // E8: Explicit Resource Management.
+            Op::DisposeInit(slot) => {
+                let cap = self.new_dispose_capability();
+                frame!(self).locals[slot as usize] = Some(Value::Object(cap));
+            }
+            Op::AddDispose { slot, is_async } => {
+                let v = self.pop();
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let hint = if is_async {
+                    crate::builtins::disposable::Hint::Async
+                } else {
+                    crate::builtins::disposable::Hint::Sync
+                };
+                self.add_disposable_resource(cap, v, hint, None)?;
+            }
+            Op::DisposeSync {
+                slot,
+                kind_slot,
+                value_slot,
+            } => {
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                let c = self.dispose_resources_sync(cap, c)?;
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+            }
+            Op::DisposeAsyncStep {
+                slot,
+                kind_slot,
+                value_slot,
+                done,
+            } => {
+                let Value::Object(cap) = self.local(slot) else {
+                    unreachable!("DisposeCapability del scope")
+                };
+                let mut c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                let step = self.dispose_async_step(cap, &mut c)?;
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+                match step {
+                    crate::builtins::disposable::AsyncStep::Await(v) => self.push(v),
+                    crate::builtins::disposable::AsyncStep::Done => {
+                        frame!(self).pc = done as usize;
+                    }
+                }
+            }
+            Op::DisposeAwaitError {
+                kind_slot,
+                value_slot,
+            } => {
+                let e = self.pop();
+                let mut c = self.dispose_completion(kind_slot, value_slot);
+                let thrown = c.is_some();
+                self.merge_dispose_error(&mut c, e);
+                self.set_dispose_completion(kind_slot, value_slot, thrown, c);
+            }
 
             // --- Funciones ---
             Op::CreateArguments(table) => {
@@ -2437,6 +2565,29 @@ const YS_CLOSE: i32 = 4;
 
 impl Agent {
     /// ¿La completion guardada en `kind_slot` es throw? (`u32::MAX`: completion normal.)
+    /// E8: la completion de un finally de DisposeResources (Some: throw).
+    fn dispose_completion(&self, kind_slot: u32, value_slot: u32) -> Option<Value> {
+        self.completion_is_throw(kind_slot)
+            .then(|| self.local(value_slot))
+    }
+
+    /// E8: guarda la completion de DisposeResources si cambió.
+    fn set_dispose_completion(
+        &mut self,
+        kind_slot: u32,
+        value_slot: u32,
+        was_throw: bool,
+        c: Option<Value>,
+    ) {
+        if let Some(e) = c {
+            let f = frame!(self);
+            f.locals[kind_slot as usize] = Some(Value::Number(f64::from(COMPLETION_THROW)));
+            f.locals[value_slot as usize] = Some(e);
+        } else {
+            debug_assert!(!was_throw, "una throw completion no vuelve a ser normal");
+        }
+    }
+
     fn completion_is_throw(&self, kind_slot: u32) -> bool {
         kind_slot != u32::MAX
             && matches!(self.local(kind_slot), Value::Number(n) if n as u32 == COMPLETION_THROW)
@@ -2652,6 +2803,35 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
             let v = f.args.get(i as usize).cloned().unwrap_or_default();
             f.stack.push(v);
         }
+        // E8: superinstrucciones.
+        Op::ArgToLocal(i, s) => {
+            let v = f.args.get(i as usize).cloned().unwrap_or_default();
+            f.locals[s as usize] = Some(v);
+        }
+        Op::LocalAddInt(s, k) => match &f.locals[s as usize] {
+            Some(Value::Number(n)) => {
+                let v = *n + f64::from(k);
+                f.stack.push(Value::Number(v));
+            }
+            _ => return Fast::Slow,
+        },
+        Op::LocalSubInt(s, k) => match &f.locals[s as usize] {
+            Some(Value::Number(n)) => {
+                let v = *n - f64::from(k);
+                f.stack.push(Value::Number(v));
+            }
+            _ => return Fast::Slow,
+        },
+        Op::JumpIfNotLocalLtInt { slot, k, target } => match &f.locals[slot as usize] {
+            Some(Value::Number(n)) => {
+                // NaN no es menor: también salta.
+                let lt = *n < f64::from(k);
+                if !lt {
+                    return jump!(target);
+                }
+            }
+            _ => return Fast::Slow,
+        },
         Op::Ctx(CtxWhat::This, CtxLoc::Frame) => match &f.this {
             Some(v) => {
                 let v = v.clone();
@@ -3270,6 +3450,134 @@ struct FastCx {
     string_proto: Gc<Object>,
     object_proto: Gc<Object>,
     array_proto: Gc<Object>,
+}
+
+/// E8: lo que necesita una llamada rápida.
+struct CallCx {
+    realm: crate::vm::RealmId,
+    global_object: Gc<Object>,
+    /// `max_frames` menos las llamadas de Rust en curso.
+    max_frames: usize,
+}
+
+/// E8: los pools de vectores del agente (para crear y reciclar frames en la ráfaga).
+struct Pools<'a> {
+    values: &'a mut Vec<Vec<Value>>,
+    locals: &'a mut Vec<Vec<Option<Value>>>,
+}
+
+/// E8: `Call` en la ráfaga a una función ECMAScript simple del mismo realm (como
+/// `inline_frame`: no generadora, no async, no constructor de clase; OrdinaryCallBindThis
+/// sin ToObject). Deja la pila igual y devuelve `false` si no corresponde.
+#[inline]
+fn fast_call(
+    frames: &mut Vec<Frame>,
+    heap: &crate::heap::Heap,
+    pools: &mut Pools<'_>,
+    cx: &CallCx,
+    argc: u32,
+) -> bool {
+    if frames.len() > cx.max_frames {
+        return false;
+    }
+    let f = frames.last_mut().expect("frame");
+    let base = f.stack.len() - argc as usize - 2;
+    let Value::Object(fo) = f.stack[base] else {
+        return false;
+    };
+    let ObjectKind::Function(c) = &heap[fo].kind else {
+        return false;
+    };
+    if c.code.is_async
+        || c.code.is_generator
+        || matches!(c.code.kind, CodeKind::ClassConstructor { .. })
+        || c.realm != cx.realm
+    {
+        return false;
+    }
+    // OrdinaryCallBindThis (§10.2.1.2).
+    let this = &f.stack[base + 1];
+    let this_value = if c.code.kind == CodeKind::Arrow {
+        None
+    } else if c.code.strict || this.is_object() {
+        Some(this.clone())
+    } else if this.is_nullish() {
+        Some(Value::Object(cx.global_object))
+    } else {
+        return false;
+    };
+    let (code, env, realm) = (c.code.clone(), c.env, c.realm);
+    // PrepareForTailCall (§15.10.3): una llamada en posición de cola en código estricto
+    // (seguida de `Return`, directo o tras un salto) reemplaza el frame del llamador.
+    let tail = f.code.strict
+        && f.inline
+        && f.handlers.is_empty()
+        && f.construct.is_none()
+        && f.caller_realm == realm
+        && match f.code.ops.get(f.pc + 1) {
+            Some(Op::Return) => true,
+            Some(Op::Jump(t)) => matches!(f.code.ops.get(*t as usize), Some(Op::Return)),
+            _ => false,
+        };
+    let mut args = pools.values.pop().unwrap_or_default();
+    args.extend(f.stack.drain(base + 2..));
+    f.stack.truncate(base);
+    f.pc += 1;
+    if tail {
+        let old = frames.pop().expect("frame");
+        recycle_into(old, pools.values, pools.locals);
+    }
+    let stack = pools.values.pop().unwrap_or_else(|| Vec::with_capacity(16));
+    let mut locals = pools.locals.pop().unwrap_or_default();
+    locals.resize(code.num_locals as usize, None);
+    let mut frame = Frame::with_buffers(code, env, realm, stack, locals);
+    frame.this = this_value;
+    frame.callee = Some(fo);
+    frame.inline = true;
+    frame.args = args;
+    frames.push(frame);
+    true
+}
+
+/// E8: `Return` en la ráfaga de un frame en línea sin handlers ni `new` del mismo realm que
+/// el llamador: el resultado pasa a la pila del frame de abajo.
+#[inline]
+fn fast_return(frames: &mut Vec<Frame>, pools: &mut Pools<'_>) -> bool {
+    let f = frames.last_mut().expect("frame");
+    if !f.inline || !f.handlers.is_empty() || f.construct.is_some() || f.caller_realm != f.realm {
+        return false;
+    }
+    let v = f.stack.pop().expect("pila vacía");
+    let frame = frames.pop().expect("frame");
+    recycle_into(frame, pools.values, pools.locals);
+    frames.last_mut().expect("frame").stack.push(v);
+    true
+}
+
+/// Devuelve los vectores de un frame terminado a los pools.
+pub(crate) fn recycle_into(
+    frame: Frame,
+    value_pool: &mut Vec<Vec<Value>>,
+    locals_pool: &mut Vec<Vec<Option<Value>>>,
+) {
+    const MAX_POOL: usize = 64;
+    const MAX_CAPACITY: usize = 256;
+    let Frame {
+        mut stack,
+        mut locals,
+        mut args,
+        ..
+    } = frame;
+    for v in [&mut stack, &mut args] {
+        if v.capacity() <= MAX_CAPACITY && value_pool.len() < MAX_POOL {
+            v.clear();
+            value_pool.push(std::mem::take(v));
+        }
+    }
+    if locals.capacity() <= MAX_CAPACITY && locals_pool.len() < MAX_POOL {
+        locals.clear();
+        locals_pool.push(locals);
+    }
 }
 
 /// Un acierto de la inline cache de `InitProp` (la transición del literal).
