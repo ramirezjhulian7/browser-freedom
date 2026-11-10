@@ -322,10 +322,26 @@ impl Entry {
 }
 
 /// El valor de una cabecera de la petición para comparar por `Vary` (§4.1: se combinan las
-/// líneas y se normaliza el espacio).
+/// líneas y se normaliza el espacio). `Cookie` se normaliza además ordenando sus pares, que
+/// §4.1 permite cuando el orden no tiene significado: RFC 6265bis §5.8.3 deja el orden al agente
+/// y pide a los servidores no depender de él (§4.2.2). Sin esto, una cookie de sesión que vuelve
+/// a llegar en otra sesión cambia el orden y ninguna variante guardada coincide.
 fn vary_value(headers: &Headers, name: &str) -> Option<String> {
     let values: Vec<&str> = headers.get_all(name).map(str::trim).collect();
-    (!values.is_empty()).then(|| values.join(", "))
+    if values.is_empty() {
+        return None;
+    }
+    if name.eq_ignore_ascii_case("cookie") {
+        let mut pairs: Vec<&str> = values
+            .iter()
+            .flat_map(|v| v.split(';'))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        pairs.sort_unstable();
+        return Some(pairs.join("; "));
+    }
+    Some(values.join(", "))
 }
 
 /// Las cabeceras que nombra el `Vary` de una respuesta; `None` si es `*` (§4.1: nunca
@@ -1281,6 +1297,26 @@ mod tests {
             (u, sent.get("if-modified-since")),
             (CacheUse::Revalidated, Some(lm))
         );
+    }
+
+    /// `Vary: Cookie` con los mismos pares en otro orden coincide (§4.1, normalización); con otro
+    /// valor, no.
+    #[test]
+    fn vary_cookie_ignores_pair_order() {
+        let r = rig(None);
+        let d = Default::default();
+        let vary = [
+            ("Cache-Control", "max-age=0, must-revalidate"),
+            ("Last-Modified", "Tue, 14 Nov 2023 21:56:40 GMT"),
+            ("Vary", "Cookie"),
+        ];
+        r.get(&[("Cookie", "a=1; b=2; GeoIP=x")], d, &vary, 200);
+        let (_, u, sent) = r.get(&[("Cookie", "GeoIP=x;b=2; a=1")], d, &[], 304);
+        assert_eq!(u, CacheUse::Revalidated);
+        assert!(sent.get("if-modified-since").is_some());
+        let (_, u, sent) = r.get(&[("Cookie", "a=1; b=3")], d, &vary, 200);
+        assert_eq!(u, CacheUse::Network);
+        assert!(sent.get("if-modified-since").is_none());
     }
 
     #[test]

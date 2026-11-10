@@ -486,7 +486,13 @@ impl Fetcher {
         if let Some(sts) = headers.get("strict-transport-security") {
             self.hsts.note(url, sts);
         }
-        let body = http::decode_content(raw, &headers.list("content-encoding"))?;
+        // Un cuerpo vacío (304, 204, HEAD) no se decodifica: un 304 puede traer
+        // `Content-Encoding: gzip` de la representación guardada (RFC 9110 §15.4.5).
+        let body = if raw.is_empty() {
+            raw
+        } else {
+            http::decode_content(raw, &headers.list("content-encoding"))?
+        };
         Ok(Response {
             url: url.clone(),
             status: status.0,
