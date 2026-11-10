@@ -1066,6 +1066,34 @@ fn nodes_from_another_window_cannot_be_adopted() {
     ));
 }
 
+/// E4: una operación de la interfaz de un `<iframe>` aplicada a un objeto de la ventana corre
+/// en el realm del objeto (WebIDL §3.9, DOM §4.4 "create a node"); antes leía el `NodeRef` en
+/// el documento del marco (pánico de índice en `node-creation-realm.html`). Un nodo de otra
+/// ventana pasado a `append` lanza `NotSupportedError`.
+#[test]
+fn interface_operations_run_in_the_realm_of_this() {
+    let mut p = framed(
+        "<div id=d></div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
+        &[],
+    );
+    assert!(p.truthy(concat!(
+        "var inner = document.getElementById('f').contentWindow;",
+        "var t = inner.Document.prototype.createTextNode.call(document, 'x');",
+        "var c = inner.Node.prototype.cloneNode.call(document.getElementById('d'));",
+        "var e = inner.Node.prototype.appendChild.call(document.body, document.createElement('i'));",
+        "t instanceof Text && !(t instanceof inner.Text) && t.ownerDocument === document &&",
+        "c instanceof HTMLDivElement && c.id === 'd' && e.parentNode === document.body",
+    )));
+    assert_eq!(
+        p.show(concat!(
+            "(function () { var fd = document.getElementById('f').contentDocument;",
+            "try { document.body.append(fd.getElementById('dentro')); return 'sin error'; }",
+            "catch (e) { return e.name; } })()",
+        )),
+        "NotSupportedError"
+    );
+}
+
 #[test]
 fn src_frame_loads_through_the_loader() {
     let mut p = framed(

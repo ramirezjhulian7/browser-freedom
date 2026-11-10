@@ -54,7 +54,7 @@ impl Agent {
     }
 
     /// E4: el realm del objeto host `o` (el de su prototipo de clase), si hay varios realms.
-    fn host_object_realm(&self, o: Gc<Object>) -> Option<RealmId> {
+    pub(crate) fn host_object_realm(&self, o: Gc<Object>) -> Option<RealmId> {
         if self.host.realm_classes.len() < 2 {
             return None;
         }
@@ -63,10 +63,12 @@ impl Agent {
         };
         let ci = h.class.0 as usize;
         let proto = self.heap[o].proto?;
-        self.host
-            .realm_classes
-            .iter()
-            .position(|cs| cs.get(ci).copied().flatten().is_some_and(|c| c.prototype == proto))
+        self.host.realm_classes.iter().position(|cs| {
+            cs.get(ci)
+                .copied()
+                .flatten()
+                .is_some_and(|c| c.prototype == proto)
+        })
     }
 }
 

@@ -314,8 +314,12 @@ pub fn wrap_opt(agent: &mut Agent, doc: DocIndex, n: Option<bf_dom::NodeId>) -> 
 }
 
 /// El nodo de un wrapper.
+///
+/// E4: el wrapper de un nodo de otra ventana (un `<iframe>`) no cuenta: su `NodeRef` se
+/// refiere a los documentos de su `WebContext`, no a los de la ventana en curso.
 pub fn unwrap_node(agent: &Agent, v: &Value) -> Option<NodeRef> {
-    agent.host_unwrap::<NodeRef>(v).copied()
+    let n = agent.host_unwrap::<NodeRef>(v).copied()?;
+    (foreign_realm(agent, v, n).is_none()).then_some(n)
 }
 
 /// El nodo de `this` (el trampolín ya hizo el brand check).
@@ -333,7 +337,7 @@ pub fn this_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
 /// arena, así que adoptarlo o insertarlo entre browsing contexts (DOM §4.5 "adopt") lanza
 /// `NotSupportedError` en vez de tocar un nodo equivocado.
 pub fn arg_node(agent: &mut Agent, v: &Value, what: &str) -> JsResult<NodeRef> {
-    match unwrap_node(agent, v) {
+    match agent.host_unwrap::<NodeRef>(v).copied() {
         Some(n) if foreign_realm(agent, v, n).is_some() => {
             throw_dom(agent, DomException::NotSupportedError)
         }
@@ -347,6 +351,9 @@ pub fn foreign_realm(agent: &Agent, v: &Value, n: NodeRef) -> Option<bf_js::vm::
     let Value::Object(o) = v else {
         return None;
     };
+    if agent.realms.len() < 2 {
+        return None;
+    }
     let current = agent.current_realm;
     if agent.host_lookup(current, n.key()) == Some(*o) {
         return None;

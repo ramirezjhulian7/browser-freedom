@@ -813,6 +813,18 @@ impl Timing {
 
 // --- Animaciones y transiciones en curso ---
 
+/// ¿El estilo declara animaciones CSS o transiciones que puedan arrancar?
+fn declares_animations(s: &ComputedStyle) -> bool {
+    s.animation_name.0.iter().any(|n| n.name().is_some())
+        || (!s.transition_property.0.is_empty()
+            && s.transition_property.0[0] != TransitionProperty::None
+            && (s.transition_duration.0.iter().any(|d| d.secs() > 0.0)
+                || s.transition_delay.0.iter().any(|d| d.0 > 0.0)
+                || s.transition_behavior
+                    .0
+                    .contains(&TransitionBehavior::AllowDiscrete)))
+}
+
 /// Una animación CSS en curso (CSS Animations 1 §3).
 #[derive(Debug, Clone)]
 pub struct CssAnimation {
@@ -899,6 +911,9 @@ pub struct Animator {
     next_id: u64,
     /// ¿Queda algo animándose (hace falta otro cuadro)?
     active: bool,
+    /// Los estilos de la cascada del último "style change event": el "before-change style"
+    /// de los elementos que todavía no tenían estado (CSS Transitions 1 §3).
+    previous: StyleMap,
 }
 
 /// Lo que cada elemento animado necesita del documento para actualizarse.
@@ -974,6 +989,19 @@ impl Animator {
         keys
     }
 
+    /// ¿Algún elemento de `styles` tiene animaciones o transiciones declaradas, o queda alguna en
+    /// curso? Si no, [`Animator::update`] no cambiaría nada y basta [`Animator::note_styles`].
+    pub fn needed(&self, styles: &StyleMap) -> bool {
+        !self.is_empty() || styles.values().any(|s| declares_animations(s))
+    }
+
+    /// Un "style change event" sin nada que animar: solo se recuerdan los estilos (el
+    /// "before-change style" de la próxima transición).
+    pub fn note_styles(&mut self, styles: &StyleMap) {
+        self.active = false;
+        self.previous = styles.clone();
+    }
+
     /// Anota el tamaño de la caja de referencia de `key` (tras el layout).
     pub fn set_box_size(&mut self, key: Key, size: (f32, f32)) {
         if let Some(e) = self.elements.get_mut(&key) {
@@ -991,6 +1019,7 @@ impl Animator {
     pub fn update(&mut self, styles: &mut StyleMap, input: &UpdateInput<'_>) {
         let now = input.now;
         self.active = false;
+        let cascade = styles.clone();
         // Elementos que ya no tienen estilo (o con `display: none`): se cancelan.
         let gone: Vec<Key> = self
             .elements
@@ -1089,6 +1118,21 @@ impl Animator {
             if !has_anims && !has_transitions && !self.elements.contains_key(&key) {
                 continue;
             }
+            // Un elemento que empieza a transicionar: su estilo anterior es el de la cascada del
+            // último cambio (no había valores animados).
+            if has_transitions
+                && !self.elements.contains_key(&key)
+                && let Some(prev) = self.previous.get(&key)
+            {
+                self.elements.insert(
+                    key,
+                    ElementState {
+                        base: Some(prev.clone()),
+                        shown: Some(prev.clone()),
+                        ..ElementState::default()
+                    },
+                );
+            }
             let shown = self.update_element(key, &base, parent_style.as_deref(), input);
             if !Arc::ptr_eq(&shown, &base) || !Arc::ptr_eq(&base, &styles[&key]) {
                 if key.1.is_none() {
@@ -1107,6 +1151,7 @@ impl Animator {
                 styles.insert(key, shown);
             }
         }
+        self.previous = cascade;
     }
 
     /// Actualiza un elemento y devuelve el estilo a mostrar.

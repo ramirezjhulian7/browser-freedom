@@ -336,6 +336,21 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if s[2].as_number() == Some(CALL_METHOD) && !agent.host_is_instance(&a.this, class) {
         return agent.type_error("Illegal invocation");
     }
+    // E4: una operación de la interfaz de otro realm (un `<iframe>`) aplicada a un objeto de
+    // esta ventana corre en el realm del objeto, su "relevant realm" (WebIDL §3.9; DOM §4.4
+    // "create a node" usa el realm del documento del nodo): los datos del objeto se leen en
+    // el estado de su ventana y lo que crea es de esa ventana.
+    if s[2].as_number() == Some(CALL_METHOD)
+        && let Value::Object(o) = a.this
+        && let Some(r) = agent.host_object_realm(o)
+        && r != agent.current_realm
+    {
+        let saved = agent.current_realm;
+        agent.current_realm = r;
+        let v = f(agent, a);
+        agent.current_realm = saved;
+        return v;
+    }
     f(agent, a)
 }
 
