@@ -76,6 +76,8 @@ impl Item<'_> {
 
 struct Line {
     items: Vec<usize>,
+    /// E5: ítems con `visibility: collapse` de la línea (segunda pasada de §4.4).
+    collapsed: Vec<usize>,
     cross: f32,
     /// Máximo de la distancia a la baseline de los ítems alineados por baseline.
     baseline: f32,
@@ -201,6 +203,22 @@ impl<'a> Layout<'a> {
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+        self.flex_layout_pass(container, cb, None)
+    }
+
+    /// E5: una pasada del algoritmo. Con ítems `visibility: collapse` (§4.4), la primera
+    /// anota el tamaño cruzado de la línea de cada uno ("strut") y repite el layout; en la
+    /// segunda (`struts`), esos ítems miden 0 en el eje principal al formar las líneas, se
+    /// ignoran después y cada línea mide al menos el mayor strut de sus ítems colapsados.
+    fn flex_layout_pass(
+        &mut self,
+        container: &'a LayoutBox,
+        cb: Cb,
+        struts: Option<&[f32]>,
+    ) -> (Vec<Fragment>, f32) {
+        let abs_mark = (self.abs_frames.last().map_or(0, Vec::len), self.fixed.len());
+        let is_collapsed =
+            |b: &LayoutBox| b.style.visibility == bf_style::properties::types::Visibility::Collapse;
         let cs = &container.style;
         let row = matches!(
             cs.flex_direction,
@@ -421,6 +439,11 @@ impl<'a> Layout<'a> {
             }
             let max_main = max_main.max(min_main);
             let hyp = base.min(max_main).max(min_main);
+            let (base, hyp, min_main, max_main) = if struts.is_some() && is_collapsed(b) {
+                (0.0, 0.0, 0.0, 0.0)
+            } else {
+                (base, hyp, min_main, max_main)
+            };
             items.push(Item {
                 b,
                 margins,
@@ -444,8 +467,13 @@ impl<'a> Layout<'a> {
         let mut lines: Vec<Line> = Vec::new();
         {
             let mut current: Vec<usize> = Vec::new();
+            let mut current_collapsed: Vec<usize> = Vec::new();
             let mut used = 0.0;
             for (i, item) in items.iter().enumerate() {
+                if struts.is_some() && is_collapsed(item.b) {
+                    current_collapsed.push(i);
+                    continue;
+                }
                 let outer = item.outer_main(item.hyp);
                 let extra = if current.is_empty() {
                     outer
@@ -458,6 +486,7 @@ impl<'a> Layout<'a> {
                 {
                     lines.push(Line {
                         items: std::mem::take(&mut current),
+                        collapsed: std::mem::take(&mut current_collapsed),
                         cross: 0.0,
                         baseline: 0.0,
                         offset: 0.0,
@@ -472,6 +501,7 @@ impl<'a> Layout<'a> {
             }
             lines.push(Line {
                 items: current,
+                collapsed: current_collapsed,
                 cross: 0.0,
                 baseline: 0.0,
                 offset: 0.0,
@@ -637,6 +667,30 @@ impl<'a> Layout<'a> {
         }
         if !wrap && let (Some(def), Some(line)) = (single_definite_cross, lines.first_mut()) {
             line.cross = def;
+        }
+        // E5: `visibility: collapse` (§4.4 y §9.4 paso 9).
+        match struts {
+            None if items.iter().any(|it| is_collapsed(it.b)) => {
+                let mut s = vec![0.0f32; items.len()];
+                for line in &lines {
+                    for &i in &line.items {
+                        s[i] = line.cross;
+                    }
+                }
+                if let Some(frame) = self.abs_frames.last_mut() {
+                    frame.truncate(abs_mark.0);
+                }
+                self.fixed.truncate(abs_mark.1);
+                return self.flex_layout_pass(container, cb, Some(&s));
+            }
+            Some(s) => {
+                for line in &mut lines {
+                    for &i in &line.collapsed {
+                        line.cross = line.cross.max(s[i]);
+                    }
+                }
+            }
+            None => {}
         }
         // Tamaño cruzado del contenedor y align-content (§9.4 paso 15 y §9.6).
         let lines_cross: f32 = lines.iter().map(|l| l.cross).sum::<f32>()
@@ -878,6 +932,17 @@ impl<'a> Layout<'a> {
                 };
                 let b = it.b;
                 let f = self.layout_item(b, cb, (x, y), content_w, height, margins);
+                out.push(f);
+            }
+            // Los ítems colapsados quedan sin tamaño al inicio de su línea.
+            for &i in &line.collapsed {
+                let it = &items[i];
+                let (x, y) = if row {
+                    (cb.x, cb.y + line.offset)
+                } else {
+                    (cb.x + line.offset, cb.y)
+                };
+                let f = self.layout_item(it.b, cb, (x, y), 0.0, Some(0.0), Edges::default());
                 out.push(f);
             }
         }
