@@ -1270,7 +1270,9 @@ fn document_interfaces_and_dom_parser() {
               new Document() instanceof XMLDocument, \
               document.implementation.createDocument(null, 'r') instanceof XMLDocument].join()"
         ),
-        "true,true,urn:x,application/xml,true,hola,false,true"
+        // `DOMParser` con un tipo XML crea un `Document`, no un `XMLDocument` (HTML §8.5.1;
+        // WPT `domparsing/DOMParser-parseFromString-xml.html`).
+        "true,false,urn:x,application/xml,true,hola,false,true"
     );
     assert!(
         p.error("new DOMParser().parseFromString('x', 'text/plain')")
