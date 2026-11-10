@@ -116,9 +116,32 @@ pub(crate) fn cross_origin_isolated(agent: &Agent) -> bool {
         .and_then(|h| h.scope.as_ref())
     {
         Some(s) => s.cross_origin_isolated,
+        // Un marco está en el grupo de contextos de navegación de la ventana de arriba.
+        None => {
+            let realm = WebContextHandle::current(agent).realm;
+            let top = crate::bom::frames::top_of(agent, realm);
+            agent
+                .realm_data::<super::Isolation>(realm)
+                .or_else(|| agent.realm_data::<super::Isolation>(top))
+                .is_some_and(|i| i.0)
+        }
+    }
+}
+
+/// La política de inserción (COEP) del global en curso: la del worker, o la del documento
+/// (`workers::isolation::set_document_policies`; sin ella, `unsafe-none`).
+pub(crate) fn embedder_policy(agent: &Agent) -> super::isolation::EmbedderPolicy {
+    match agent
+        .embedder_data::<super::WorkerHost>()
+        .and_then(|h| h.scope.as_ref())
+    {
+        Some(s) => s.coep,
         None => agent
-            .realm_data::<super::Isolation>(WebContextHandle::current(agent).realm)
-            .is_some_and(|i| i.0),
+            .realm_data::<super::isolation::DocumentEmbedderPolicy>(
+                WebContextHandle::current(agent).realm,
+            )
+            .map(|p| p.0)
+            .unwrap_or_default(),
     }
 }
 
@@ -165,7 +188,9 @@ fn worker_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         inbox: worker_inbox,
         control,
         cross_origin_isolated: cross_origin_isolated(agent),
+        owner_coep: embedder_policy(agent),
         user_agent: agent.host.hooks.user_agent(),
+        partition: super::partition(agent),
     };
     if super::scope::spawn(spec).is_err() {
         parent.push(Envelope::FromWorker {
