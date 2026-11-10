@@ -1,7 +1,11 @@
 //! CSS Flexible Box Layout Module Level 1, §9 (algoritmo de layout).
 //!
-//! Solo `writing-mode: horizontal-tb` y `direction: ltr`: el eje principal es horizontal para
-//! `row`/`row-reverse` y vertical para `column`/`column-reverse`.
+//! Solo `writing-mode: horizontal-tb`: el eje principal es horizontal para `row`/`row-reverse`
+//! y vertical para `column`/`column-reverse`. E5: `direction: rtl` (§5.1): en filas el
+//! main-start es el borde derecho (`row-reverse` lo devuelve a la izquierda); en columnas el
+//! cross-start es el borde derecho. `justify-content: start/end/left/right` y
+//! `align-self: start/end/self-start/self-end` siguen el modo de escritura (CSS Box Alignment 3
+//! §5.1 y §6.1), no la dirección flex.
 //!
 //! Interpretaciones:
 //! - `min-width`/`min-height: auto` (§4.5): para ítems que no son contenedores de scroll, el
@@ -16,7 +20,7 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    ContentAlign, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
+    ContentAlign, Direction, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
     LengthPercentageAuto, Overflow, Size,
 };
 
@@ -37,7 +41,8 @@ pub(crate) fn is_flex_container(b: &LayoutBox) -> bool {
 /// diga otra cosa.
 struct Item<'a> {
     b: &'a LayoutBox,
-    /// Márgenes (`None` = `auto`) en orden: main-start, main-end, cross-start, cross-end.
+    /// Márgenes (`None` = `auto`) en orden: main-start, main-end y, en el eje cruzado, el del
+    /// lado físico bajo (arriba/izquierda) y el del alto (abajo/derecha).
     margins: [Option<f32>; 4],
     /// Borde + padding en el eje principal y en el cruzado.
     bp_main: f32,
@@ -207,6 +212,12 @@ impl<'a> Layout<'a> {
         );
         let wrap = cs.flex_wrap != FlexWrap::Nowrap;
         let wrap_reverse = cs.flex_wrap == FlexWrap::WrapReverse;
+        // E5: CSS Flexbox 1 §5.1 con `direction: rtl`. `main_rev`: el main-start está en el
+        // borde físico alto (derecha en filas, abajo en columnas). `cross_flip`: el cross-start
+        // está en el borde físico alto (abajo en filas, derecha en columnas).
+        let rtl = cs.direction == Direction::Rtl;
+        let main_rev = if row { reverse != rtl } else { reverse };
+        let cross_flip = wrap_reverse != (!row && rtl);
         // Espacio disponible: el ancho siempre es definido; el alto, si se especificó.
         let avail_main = if row { Some(cb.width) } else { cb.height };
         let main_gap = if row {
@@ -247,20 +258,17 @@ impl<'a> Layout<'a> {
                 border.vertical() + padding.vertical(),
             );
             let m = |v: &LengthPercentageAuto| margin_value(v, cb.width);
-            let margins = if row {
-                [
-                    m(&s.margin_left),
-                    m(&s.margin_right),
-                    m(&s.margin_top),
-                    m(&s.margin_bottom),
-                ]
-            } else {
-                [
-                    m(&s.margin_top),
-                    m(&s.margin_bottom),
-                    m(&s.margin_left),
-                    m(&s.margin_right),
-                ]
+            let (l, r, t, bm) = (
+                m(&s.margin_left),
+                m(&s.margin_right),
+                m(&s.margin_top),
+                m(&s.margin_bottom),
+            );
+            let margins = match (row, main_rev) {
+                (true, false) => [l, r, t, bm],
+                (true, true) => [r, l, t, bm],
+                (false, false) => [t, bm, l, r],
+                (false, true) => [bm, t, l, r],
             };
             let (bp_main, bp_cross) = if row { (bp_h, bp_v) } else { (bp_v, bp_h) };
             let align = resolved_align(s, cs);
@@ -672,7 +680,7 @@ impl<'a> Layout<'a> {
                 l.offset = offset;
                 offset += l.cross + cross_gap + between;
             }
-            if wrap_reverse {
+            if cross_flip {
                 for l in &mut lines {
                     l.offset = container_cross - l.offset - l.cross;
                 }
@@ -745,8 +753,25 @@ impl<'a> Layout<'a> {
                 free = 0.0;
             }
             let (mut start, mut between) = (0.0, 0.0);
+            // E5: `start`/`end` según el modo de escritura (en filas, el inline-start coincide
+            // con el main-start salvo en `row-reverse`; en columnas, el block-start salvo en
+            // `column-reverse`); `left`/`right` son físicos en filas y `start` en columnas
+            // (CSS Box Alignment 3 §5.1).
+            let at_end = match cs.justify_content {
+                ContentAlign::FlexEnd => Some(true),
+                ContentAlign::Start => Some(reverse),
+                ContentAlign::End => Some(!reverse),
+                ContentAlign::Left if row => Some(main_rev),
+                ContentAlign::Right if row => Some(!main_rev),
+                ContentAlign::Left | ContentAlign::Right => Some(reverse),
+                _ => None,
+            };
             match cs.justify_content {
-                ContentAlign::FlexEnd | ContentAlign::End | ContentAlign::Right => start = free,
+                _ if at_end.is_some() => {
+                    if at_end == Some(true) {
+                        start = free;
+                    }
+                }
                 ContentAlign::Center => start = free / 2.0,
                 ContentAlign::SpaceBetween if n > 1.0 && free > 0.0 => between = free / (n - 1.0),
                 ContentAlign::SpaceAround if free > 0.0 => {
@@ -761,7 +786,7 @@ impl<'a> Layout<'a> {
                 ContentAlign::SpaceEvenly => start = free / 2.0,
                 _ => {}
             }
-            // `flex-end`/`end` en direcciones invertidas: el "start" está al final.
+            // `pos` se mide desde el main-start; con `main_rev`, desde el borde físico alto.
             let mut pos = start;
             for &i in &line.items {
                 let (m0, m1, size, bp_main) = {
@@ -774,7 +799,7 @@ impl<'a> Layout<'a> {
                     )
                 };
                 let border_box = size + bp_main;
-                let main_start = if reverse {
+                let main_start = if main_rev {
                     main_len - pos - m0 - border_box
                 } else {
                     pos + m0
@@ -787,32 +812,38 @@ impl<'a> Layout<'a> {
                 let cross_margin_start = match (it.margins[2], it.margins[3]) {
                     (None, None) => line_free.max(0.0) / 2.0,
                     (None, Some(_)) => line_free.max(0.0),
+                    // E5: el margen `auto` del lado alto absorbe el espacio positivo (§8.1).
+                    (Some(m), None) if line_free >= 0.0 => m,
                     (Some(m), _) => {
-                        let flip = wrap_reverse;
-                        let start_offset =
-                            match it.align {
-                                ItemAlign::FlexEnd | ItemAlign::End | ItemAlign::SelfEnd => {
-                                    if flip { 0.0 } else { line_free }
+                        // E5: `flex-start`/`flex-end` siguen el cross-start de la línea;
+                        // `start`/`end`, el modo de escritura del contenedor, y
+                        // `self-start`/`self-end`, el del ítem (CSS Box Alignment 3 §6.1).
+                        let item_rtl = !row && it.b.style.direction == Direction::Rtl;
+                        let container_rtl = !row && rtl;
+                        let at_high = match it.align {
+                            ItemAlign::FlexEnd => Some(!cross_flip),
+                            ItemAlign::End => Some(!container_rtl),
+                            ItemAlign::SelfEnd => Some(!item_rtl),
+                            ItemAlign::Start => Some(container_rtl),
+                            ItemAlign::SelfStart => Some(item_rtl),
+                            ItemAlign::Center | ItemAlign::Baseline => None,
+                            _ => Some(cross_flip),
+                        };
+                        let start_offset = match (at_high, it.align) {
+                            (Some(true), _) => line_free,
+                            (Some(false), _) => 0.0,
+                            (None, ItemAlign::Baseline) if row => {
+                                line.baseline - it.baseline.unwrap_or(line.baseline)
+                            }
+                            (None, ItemAlign::Baseline) => {
+                                if cross_flip {
+                                    line_free
+                                } else {
+                                    0.0
                                 }
-                                ItemAlign::FlexStart | ItemAlign::Start | ItemAlign::SelfStart => {
-                                    if flip {
-                                        line_free
-                                    } else {
-                                        0.0
-                                    }
-                                }
-                                ItemAlign::Center => line_free / 2.0,
-                                ItemAlign::Baseline if row => {
-                                    line.baseline - it.baseline.unwrap_or(line.baseline)
-                                }
-                                _ => {
-                                    if flip {
-                                        line_free
-                                    } else {
-                                        0.0
-                                    }
-                                }
-                            };
+                            }
+                            _ => line_free / 2.0,
+                        };
                         start_offset + m
                     }
                 };
@@ -829,17 +860,18 @@ impl<'a> Layout<'a> {
                 };
                 // Un alto forzado solo si el ítem se estiró o flexionó; si no, su alto natural
                 // (para no alterar el `auto` de los porcentajes internos).
+                let (lo, hi) = if main_rev { (m1, m0) } else { (m0, m1) };
                 let margins = if row {
                     Edges {
-                        left: m0,
-                        right: m1,
+                        left: lo,
+                        right: hi,
                         top: it.margin(2),
                         bottom: it.margin(3),
                     }
                 } else {
                     Edges {
-                        top: m0,
-                        bottom: m1,
+                        top: lo,
+                        bottom: hi,
                         left: it.margin(2),
                         right: it.margin(3),
                     }

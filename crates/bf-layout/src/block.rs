@@ -94,6 +94,9 @@ pub(crate) struct Layout<'a> {
     pub pct_height_basis: Option<f32>,
     /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
     pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
+    /// E5: `direction: rtl` en el containing block del bloque en flujo que se va a maquetar
+    /// (CSS 2.2 §10.3.3: sobre-restringido, se ignora `margin-left`).
+    pub cb_rtl: bool,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -325,6 +328,7 @@ impl<'a> Layout<'a> {
             bfc_items: Vec::new(), // E4 grid
             subgrids: std::collections::HashMap::new(),
             pct_height_basis: None,
+            cb_rtl: false,
         }
     }
 
@@ -500,14 +504,20 @@ impl<'a> Layout<'a> {
             Some(w) => {
                 let rest = cb_width - w - edges_h;
                 // §10.3.3: si lo que no es auto ya excede el containing block, los márgenes
-                // auto valen 0 (y sobre-restringido, se ajusta margin-right).
+                // auto valen 0 (y sobre-restringido, se ajusta margin-right; E5: margin-left si
+                // el containing block es `rtl`).
                 if w + edges_h + ml.unwrap_or(0.0) + mr.unwrap_or(0.0) > cb_width {
+                    if self.cb_rtl {
+                        let r = mr.unwrap_or(0.0);
+                        return (w, rest - r, r);
+                    }
                     let l = ml.unwrap_or(0.0);
                     return (w, l, rest - l);
                 }
                 match (ml, mr) {
                     (None, None) => (w, rest / 2.0, rest / 2.0),
                     (None, Some(r)) => (w, rest - r, r),
+                    (Some(_), Some(r)) if self.cb_rtl => (w, rest - r, r),
                     // Sobre-restringido (o margin-right auto): se ajusta margin-right (ltr).
                     (Some(l), _) => (w, l, rest - l),
                 }
@@ -656,6 +666,7 @@ impl<'a> Layout<'a> {
     ) -> (Fragment, CollapsedMargin) {
         let mut y = top;
         let mut guess = 0.0f32;
+        let cb_rtl = std::mem::take(&mut self.cb_rtl);
         let snapshot = |l: &Self| (l.abs_frames.last().map_or(0, Vec::len), l.fixed.len());
         let restore = |l: &mut Self, (a, f): (usize, usize)| {
             if let Some(frame) = l.abs_frames.last_mut() {
@@ -672,7 +683,9 @@ impl<'a> Layout<'a> {
                 ..cb
             };
             let saved = snapshot(self);
+            self.cb_rtl = cb_rtl;
             let (f, m) = self.block_in(b, cb, avail, y, floats, false);
+            self.cb_rtl = false;
             if attempt == 7 {
                 return (f, m);
             }
@@ -748,6 +761,7 @@ impl<'a> Layout<'a> {
                 ) {
                     (None, None) => (rest / 2.0, rest / 2.0),
                     (None, Some(r)) => (rest - r, r),
+                    (Some(_), Some(r)) if self.cb_rtl => (rest - r, r),
                     (Some(l), _) => (l, rest - l),
                 };
                 (width, l, r)
@@ -759,6 +773,7 @@ impl<'a> Layout<'a> {
             }
         };
         self.pct_height_basis = saved_basis;
+        self.cb_rtl = false;
         let margins = Edges {
             top: margin_value(&style.margin_top, cb.width).unwrap_or(0.0),
             right: mr,
@@ -1149,7 +1164,9 @@ impl<'a> Layout<'a> {
                 top = clear_y;
                 cleared = true;
             }
+            let rtl = b.style.direction == bf_style::properties::types::Direction::Rtl;
             if self.is_empty(child) && !cleared {
+                self.cb_rtl = rtl;
                 let (f, _) = self.block(child, cb, top, floats, false);
                 frags.push(f);
                 if !consumed {
@@ -1160,6 +1177,7 @@ impl<'a> Layout<'a> {
             }
             after_cleared_empty = cleared && self.is_empty(child);
             sibling_merged = false;
+            self.cb_rtl = rtl;
             let (f, bottom) = self.block(child, cb, top, floats, false);
             cursor = f.rect.bottom();
             // Un bloque desplazado con `position: relative` no mueve el flujo.
