@@ -97,6 +97,10 @@ pub(crate) struct Layout<'a> {
     /// E5: `direction: rtl` en el containing block del bloque en flujo que se va a maquetar
     /// (CSS 2.2 §10.3.3: sobre-restringido, se ignora `margin-left`).
     pub cb_rtl: bool,
+    /// E5: la próxima caja se maquetará para medir el alto de su contenido: sin su `height`
+    /// (ni `stretch` o `aspect-ratio`) y sin `min-height`/`max-height` (tamaño de contenido de
+    /// un ítem flex en columnas, CSS Flexbox 1 §4.5 y §9.2.3 E).
+    pub content_probe: bool,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -329,6 +333,7 @@ impl<'a> Layout<'a> {
             subgrids: std::collections::HashMap::new(),
             pct_height_basis: None,
             cb_rtl: false,
+            content_probe: false,
         }
     }
 
@@ -806,6 +811,7 @@ impl<'a> Layout<'a> {
         is_root: bool,
     ) -> (Fragment, CollapsedMargin) {
         let forced = self.forced_height.take();
+        let probe = std::mem::take(&mut self.content_probe);
         let style = &b.style;
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);
@@ -869,11 +875,15 @@ impl<'a> Layout<'a> {
             }
             _ => None,
         };
-        let spec_h = forced
-            .or_else(|| specified_height(style, cb.height, edges_v))
-            .or(stretch_h)
-            .or(ratio_h)
-            .or(control_h);
+        let spec_h = if probe {
+            control_h
+        } else {
+            forced
+                .or_else(|| specified_height(style, cb.height, edges_v))
+                .or(stretch_h)
+                .or(ratio_h)
+                .or(control_h)
+        };
         // Los porcentajes de los hijos se resuelven contra la altura usada (ya limitada por
         // min-height/max-height), no la especificada (§10.7).
         // E5: el alto por `aspect-ratio` con mínimo automático puede crecer con el contenido:
@@ -1003,7 +1013,11 @@ impl<'a> Layout<'a> {
         // CSS 2.2 §8.3.1: con altura computada `auto` el margen del último hijo es adyacente
         // al inferior de la caja aunque max-height la recorte (margin-collapse-038);
         // normal-flow/max-height-separates-margin espera lo contrario.
-        content_h = content_h.min(hmax).max(hmin).max(0.0);
+        content_h = if probe {
+            content_h.max(0.0)
+        } else {
+            content_h.min(hmax).max(hmin).max(0.0)
+        };
         // `align-content` en un block container (CSS Box Alignment 3 §5.2): el contenido se
         // desplaza dentro de un content box más alto. Los campos de texto usan `unsafe center`
         // (hoja UA): se centran aunque el texto no quepa.

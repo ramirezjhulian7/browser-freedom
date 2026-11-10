@@ -192,10 +192,14 @@ impl<'a> Layout<'a> {
         min.max(available).min(max)
     }
 
-    /// Altura de contenido de un ítem maquetado con ancho de contenido `w`.
+    /// Altura de contenido de un ítem maquetado con ancho de contenido `w`. E5: sin su propio
+    /// `height` ni sus límites (el tamaño de contenido, §4.5 y §9.2.3 E).
     fn item_content_height(&mut self, b: &'a LayoutBox, cb: Cb, w: f32, bp_v: f32) -> f32 {
         self.measuring(|this| {
+            // Con `aspect-ratio` el alto de contenido sale de la relación (CSS Sizing 4 §5.2).
+            this.content_probe = b.style.aspect_ratio.preferred().is_none();
             let f = this.layout_item(b, cb, (0.0, 0.0), w, None, Edges::default());
+            this.content_probe = false;
             f.rect.height - bp_v
         })
     }
@@ -305,7 +309,10 @@ impl<'a> Layout<'a> {
                     None if kw != Size::Auto => self
                         .width_for_keyword(b, &kw, available, cb.width)
                         .unwrap_or(available),
-                    None if align == ItemAlign::Stretch && !auto_cross_margin => available,
+                    // E5: con wrap, fit-content (§9.4 paso 7); se estira con la línea.
+                    None if align == ItemAlign::Stretch && !auto_cross_margin && !wrap => {
+                        available
+                    }
                     None => self.item_fit_width(b, available),
                 }
                 .min(wmax)
@@ -668,6 +675,19 @@ impl<'a> Layout<'a> {
         if !wrap && let (Some(def), Some(line)) = (single_definite_cross, lines.first_mut()) {
             line.cross = def;
         }
+        // E5: sin tamaño cruzado definido (filas con alto auto), una sola línea y el
+        // contenedor quedan dentro de `min-height`/`max-height` (§9.4 pasos 8 y 15).
+        let cross_limits = if row && single_definite_cross.is_none() {
+            let bp_v = border_edges(cs).vertical() + padding_edges(cs, cb.width).vertical();
+            Some(height_limits(cs, None, bp_v))
+        } else {
+            None
+        };
+        if !wrap
+            && let (Some((lo, hi)), Some(line)) = (cross_limits, lines.first_mut())
+        {
+            line.cross = line.cross.min(hi).max(lo);
+        }
         // E5: `visibility: collapse` (§4.4 y §9.4 paso 9).
         match struts {
             None if items.iter().any(|it| is_collapsed(it.b)) => {
@@ -695,9 +715,10 @@ impl<'a> Layout<'a> {
         // Tamaño cruzado del contenedor y align-content (§9.4 paso 15 y §9.6).
         let lines_cross: f32 = lines.iter().map(|l| l.cross).sum::<f32>()
             + lines.len().saturating_sub(1) as f32 * cross_gap;
-        let container_cross = match single_definite_cross {
-            Some(c) => c,
-            None => lines_cross,
+        let container_cross = match (single_definite_cross, cross_limits) {
+            (Some(c), _) => c,
+            (None, Some((lo, hi))) => lines_cross.min(hi).max(lo),
+            (None, None) => lines_cross,
         };
         {
             let free = container_cross - lines_cross;
@@ -720,12 +741,13 @@ impl<'a> Layout<'a> {
                         between = free / n;
                         start = between / 2.0;
                     }
-                    ContentAlign::SpaceAround => start = free / 2.0,
+                    // E5: con espacio negativo, `safe center` (§8.4): al inicio.
+                    ContentAlign::SpaceAround => {}
                     ContentAlign::SpaceEvenly if free > 0.0 => {
                         between = free / (n + 1.0);
                         start = between;
                     }
-                    ContentAlign::SpaceEvenly => start = free / 2.0,
+                    ContentAlign::SpaceEvenly => {}
                     _ => {}
                 }
             }
@@ -832,12 +854,13 @@ impl<'a> Layout<'a> {
                     between = free / n;
                     start = between / 2.0;
                 }
-                ContentAlign::SpaceAround => start = free / 2.0,
+                // E5: con espacio negativo, `safe center` (§8.2): al inicio.
+                ContentAlign::SpaceAround => {}
                 ContentAlign::SpaceEvenly if free > 0.0 => {
                     between = free / (n + 1.0);
                     start = between;
                 }
-                ContentAlign::SpaceEvenly => start = free / 2.0,
+                ContentAlign::SpaceEvenly => {}
                 _ => {}
             }
             // `pos` se mide desde el main-start; con `main_rev`, desde el borde físico alto.
@@ -1052,7 +1075,63 @@ impl<'a> Layout<'a> {
         let (mut min, mut max) = (0.0f32, 0.0f32);
         let mut n = 0;
         for c in b.children.iter().filter(|c| !c.is_absolutely_positioned()) {
-            let (cmin, cmax) = self.outer_intrinsic_widths(c);
+            let (mut cmin, mut cmax) = self.outer_intrinsic_widths(c);
+            let content_min = cmin;
+            // E5: en filas, la aportación de un ítem que no puede crecer (encoger) no pasa de
+            // (no baja de) su flex base size, y luego queda entre su min/max-width (§9.9.1).
+            if row {
+                let s = &c.style;
+                let bp = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
+                let mh = crate::block::margin_edges(s, 0.0).horizontal();
+                let fixed = |lp: &bf_style::values::LengthPercentage| {
+                    (!lp.has_percentage()).then(|| {
+                        let v = lp.resolve(0.0);
+                        if s.box_sizing == bf_style::properties::types::BoxSizing::BorderBox {
+                            (v - bp).max(0.0)
+                        } else {
+                            v
+                        }
+                    })
+                };
+                let outer_base = match (&s.flex_basis, &s.width) {
+                    (FlexBasis::Size(Size::LengthPercentage(lp)), _) => {
+                        fixed(lp).map(|v| v + bp + mh)
+                    }
+                    (FlexBasis::Size(Size::Auto), Size::LengthPercentage(lp)) => {
+                        fixed(lp).map(|v| v + bp + mh)
+                    }
+                    (FlexBasis::Size(Size::Auto), Size::Auto) | (FlexBasis::Content, _) => {
+                        Some(cmax)
+                    }
+                    _ => None,
+                };
+                if let Some(ob) = outer_base {
+                    if s.flex_shrink.0 == 0.0 {
+                        cmin = cmin.max(ob);
+                        cmax = cmax.max(ob);
+                    }
+                    if s.flex_grow.0 == 0.0 {
+                        cmin = cmin.min(ob);
+                        cmax = cmax.min(ob);
+                    }
+                    let (lo, hi) = width_limits(s, 0.0, bp);
+                    let pct_min = matches!(&s.min_width, Size::LengthPercentage(lp) if lp.has_percentage());
+                    let pct_max = matches!(&s.max_width,
+                        bf_style::properties::types::MaxSize::LengthPercentage(lp) if lp.has_percentage());
+                    let lo = if pct_min { 0.0 } else { lo + bp + mh };
+                    // El mínimo automático (§4.5): la aportación min-content.
+                    let lo = if matches!(s.min_width, Size::Auto)
+                        && matches!(s.overflow_x, Overflow::Visible | Overflow::Clip)
+                    {
+                        lo.max(content_min)
+                    } else {
+                        lo
+                    };
+                    let hi = if pct_max { f32::INFINITY } else { hi + bp + mh };
+                    cmin = cmin.min(hi).max(lo);
+                    cmax = cmax.min(hi).max(lo);
+                }
+            }
             n += 1;
             if row {
                 max += cmax;
