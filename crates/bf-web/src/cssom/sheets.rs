@@ -46,6 +46,12 @@ pub enum RuleKind {
     Style {
         selector: String,
         block: DeclBlock,
+        /// Las reglas anidadas (CSS Nesting §6: `CSSStyleRule` es un `CSSGroupingRule`).
+        rules: Vec<CssRule>,
+    },
+    /// `CSSNestedDeclarations` (CSS Nesting §6.2).
+    NestedDeclarations {
+        block: DeclBlock,
     },
     Media {
         media: String,
@@ -92,7 +98,8 @@ pub enum RuleKind {
 impl RuleKind {
     fn children(&self) -> Option<&Vec<CssRule>> {
         match self {
-            RuleKind::Media { rules, .. }
+            RuleKind::Style { rules, .. }
+            | RuleKind::Media { rules, .. }
             | RuleKind::Supports { rules, .. }
             | RuleKind::Keyframes { rules, .. }
             | RuleKind::LayerBlock { rules, .. } => Some(rules),
@@ -102,7 +109,8 @@ impl RuleKind {
 
     fn children_mut(&mut self) -> Option<&mut Vec<CssRule>> {
         match self {
-            RuleKind::Media { rules, .. }
+            RuleKind::Style { rules, .. }
+            | RuleKind::Media { rules, .. }
             | RuleKind::Supports { rules, .. }
             | RuleKind::Keyframes { rules, .. }
             | RuleKind::LayerBlock { rules, .. } => Some(rules),
@@ -113,6 +121,7 @@ impl RuleKind {
     fn block_mut(&mut self) -> Option<&mut DeclBlock> {
         match self {
             RuleKind::Style { block, .. }
+            | RuleKind::NestedDeclarations { block }
             | RuleKind::FontFace { block }
             | RuleKind::Page { block, .. }
             | RuleKind::Keyframe { block, .. } => Some(block),
@@ -176,9 +185,16 @@ impl SheetStore {
         let mut out = Vec::new();
         for r in rules {
             let kind = match r {
-                Rule::Style(s) => RuleKind::Style {
-                    selector: s.selectors.to_string(),
+                Rule::Style(s) if s.nested_declarations => RuleKind::NestedDeclarations {
                     block: DeclBlock::from_declarations(&s.declarations),
+                },
+                Rule::Style(s) => RuleKind::Style {
+                    selector: s
+                        .relative
+                        .as_ref()
+                        .map_or_else(|| s.selectors.to_string(), relative_selector_text),
+                    block: DeclBlock::from_declarations(&s.declarations),
+                    rules: self.convert_nested(&s.nested),
                 },
                 Rule::Media(m) => RuleKind::Media {
                     media: media_text(&unrange(&m.queries.to_string())),
@@ -237,6 +253,35 @@ impl SheetStore {
                 kind,
             });
         }
+        out
+    }
+
+    /// Las reglas anidadas de un style rule: solo style rules, nested declarations y las
+    /// group rules condicionales y `@layer` (CSS Nesting §3.2); lo demás se descarta, también
+    /// dentro de esas group rules.
+    fn convert_nested(&mut self, rules: &[Rule]) -> Vec<CssRule> {
+        let mut out = self.convert(rules);
+        fn keep(rules: &mut Vec<CssRule>) {
+            rules.retain(|r| {
+                matches!(
+                    r.kind,
+                    RuleKind::Style { .. }
+                        | RuleKind::NestedDeclarations { .. }
+                        | RuleKind::Media { .. }
+                        | RuleKind::Supports { .. }
+                        | RuleKind::LayerBlock { .. }
+                        | RuleKind::LayerStatement { .. }
+                )
+            });
+            for r in rules.iter_mut() {
+                if !matches!(r.kind, RuleKind::Style { .. })
+                    && let Some(c) = r.kind.children_mut()
+                {
+                    keep(c);
+                }
+            }
+        }
+        keep(&mut out);
         out
     }
 
@@ -338,6 +383,28 @@ fn parent_of(rules: &[CssRule], id: RuleId, parent: Option<RuleId>) -> Option<Op
     None
 }
 
+/// El `selectorText` de una regla anidada (CSS Nesting §6.1): un selector relativo lleva el
+/// `&` delante (`> .bar` → `& > .bar`, `.foo` → `& .foo`).
+fn relative_selector_text(list: &bf_css::selectors::SelectorList) -> String {
+    let mut out = String::new();
+    for (i, sel) in list.0.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        match sel.leading {
+            Some(c) => {
+                let mut rest = sel.clone();
+                rest.leading = None;
+                out.push('&');
+                out.push_str(&c.to_string());
+                out.push_str(&rest.to_string());
+            }
+            None => out.push_str(&sel.to_string()),
+        }
+    }
+    out
+}
+
 fn layer_name(n: &bf_css::stylesheet::LayerName) -> String {
     if n.0.iter().any(|s| s.starts_with('\0')) {
         String::new()
@@ -398,17 +465,50 @@ pub fn rule_text(rule: &CssRule) -> String {
             format!("{selector} {{ {t} }}")
         }
     };
+    // CSSOM §6.4.2: cada regla hija en su línea, sin re-indentar las de varias líneas; un
+    // `CSSNestedDeclarations` vacío no se escribe (CSS Nesting §6.2).
     let group = |head: String, rules: &[CssRule]| {
         let mut s = format!("{head} {{");
         for r in rules {
+            let t = rule_text(r);
+            if t.is_empty() {
+                continue;
+            }
             s.push_str("\n  ");
-            s.push_str(&rule_text(r).replace('\n', "\n  "));
+            s.push_str(&t);
         }
         s.push_str("\n}");
         s
     };
     match &rule.kind {
-        RuleKind::Style { selector, block: b } => block(selector, b),
+        RuleKind::Style {
+            selector,
+            block: b,
+            rules,
+        } => {
+            if rules.is_empty() {
+                return block(selector, b);
+            }
+            // CSS Nesting §6.1: las declaraciones y cada regla anidada en su línea (sin
+            // re-indentar las reglas de varias líneas, como pide la spec).
+            let mut s = format!("{selector} {{");
+            let t = b.css_text();
+            if !t.is_empty() {
+                s.push_str("\n  ");
+                s.push_str(&t);
+            }
+            for r in rules {
+                let t = rule_text(r);
+                if t.is_empty() {
+                    continue;
+                }
+                s.push_str("\n  ");
+                s.push_str(&t);
+            }
+            s.push_str("\n}");
+            s
+        }
+        RuleKind::NestedDeclarations { block: b } => b.css_text(),
         RuleKind::Media { media, rules } => group(format!("@media {media}"), rules),
         RuleKind::Supports { condition, rules } => group(format!("@supports {condition}"), rules),
         RuleKind::Import {
@@ -779,6 +879,7 @@ pub fn rule_block(agent: &mut Agent, r: RuleRef) -> Option<DeclBlock> {
     let st = &state(agent).sheets;
     match &st.rule(r)?.kind {
         RuleKind::Style { block, .. }
+        | RuleKind::NestedDeclarations { block }
         | RuleKind::FontFace { block }
         | RuleKind::Page { block, .. }
         | RuleKind::Keyframe { block, .. } => Some(block.clone()),
@@ -814,6 +915,7 @@ pub struct RuleClasses {
     pub keyframe: HostClassId,
     pub layer_block: HostClassId,
     pub layer_statement: HostClassId,
+    pub nested_declarations: HostClassId,
 }
 
 /// El payload de `StyleSheet`/`CSSStyleSheet`.
@@ -911,9 +1013,17 @@ pub fn register_classes(
             .constant("SUPPORTS_RULE", 12.0)
             .constant("FONT_FEATURE_VALUES_RULE", 14.0),
     );
+    let grouping = agent.register_host_class(
+        HostClass::new("CSSGroupingRule")
+            .parent(rule)
+            .attribute("cssRules", Some(rule_css_rules), None)
+            .method("insertRule", 1, rule_insert_rule)
+            .method("deleteRule", 1, rule_delete_rule),
+    );
+    // CSS Nesting §6: `CSSStyleRule : CSSGroupingRule`.
     let style = agent.register_host_class(
         HostClass::new("CSSStyleRule")
-            .parent(rule)
+            .parent(grouping)
             .attribute(
                 "selectorText",
                 Some(rule_selector_text),
@@ -921,12 +1031,10 @@ pub fn register_classes(
             )
             .attribute("style", Some(rule_style), Some(rule_set_style)),
     );
-    let grouping = agent.register_host_class(
-        HostClass::new("CSSGroupingRule")
+    let nested_declarations = agent.register_host_class(
+        HostClass::new("CSSNestedDeclarations")
             .parent(rule)
-            .attribute("cssRules", Some(rule_css_rules), None)
-            .method("insertRule", 1, rule_insert_rule)
-            .method("deleteRule", 1, rule_delete_rule),
+            .attribute("style", Some(rule_style), Some(rule_set_style)),
     );
     let condition = agent.register_host_class(
         HostClass::new("CSSConditionRule")
@@ -1021,6 +1129,7 @@ pub fn register_classes(
             keyframe,
             layer_block,
             layer_statement,
+            nested_declarations,
         },
     )
 }
@@ -1137,6 +1246,7 @@ pub fn wrap_rule(agent: &mut Agent, r: RuleRef) -> Value {
     let c = classes(agent).rules.clone();
     let class = match state(agent).sheets.rule(r).map(|x| &x.kind) {
         Some(RuleKind::Style { .. }) => c.style,
+        Some(RuleKind::NestedDeclarations { .. }) => c.nested_declarations,
         Some(RuleKind::Media { .. }) => c.media,
         Some(RuleKind::Supports { .. }) => c.supports,
         Some(RuleKind::Import { .. }) => c.import,
@@ -1378,15 +1488,59 @@ fn sheet_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 /// Parsea el texto de una regla para `insertRule` ("parse a CSS rule", CSSOM §6.6.3).
-fn parse_one_rule(agent: &mut Agent, text: &str) -> Result<CssRule, DomException> {
+fn parse_one_rule(agent: &mut Agent, text: &str, nested: bool) -> Result<CssRule, DomException> {
     if bf_css::syntax::parse_rule(text).is_err() {
+        // Dentro de un style rule, unas declaraciones son un `CSSNestedDeclarations`
+        // (CSS Nesting §6.3, "insert a CSS rule" paso 2).
+        if nested {
+            let block = DeclBlock::parse(text);
+            if !block.css_text().is_empty() {
+                let st = &mut state(agent).sheets;
+                st.next_rule += 1;
+                return Ok(CssRule {
+                    id: st.next_rule,
+                    kind: RuleKind::NestedDeclarations { block },
+                });
+            }
+        }
         return Err(DomException::SyntaxError);
     }
-    let mut rules = state(agent).sheets.parse_rules(text);
+    let st = &mut state(agent).sheets;
+    if nested {
+        // Se parsea como regla anidada de un style rule cualquiera y se toma su hija (sin
+        // descartar las no anidables: `insert_rule` las rechaza con HierarchyRequestError).
+        let sheet = Stylesheet::parse(&format!("x{{{text}}}"), Origin::Author);
+        let mut rules = match sheet.rules.first() {
+            Some(Rule::Style(s)) => st.convert(&s.nested),
+            _ => Vec::new(),
+        };
+        return if rules.len() == 1 {
+            Ok(rules.remove(0))
+        } else {
+            Err(DomException::SyntaxError)
+        };
+    }
+    let mut rules = st.parse_rules(text);
     if rules.len() != 1 {
         return Err(DomException::SyntaxError);
     }
     Ok(rules.remove(0))
+}
+
+/// ¿La regla `r` está dentro de un style rule (directamente o en una group rule)?
+fn in_style_rule(st: &SheetStore, r: RuleRef) -> bool {
+    let mut cur = st.parent(r);
+    while let Some(id) = cur {
+        let pr = RuleRef {
+            sheet: r.sheet,
+            rule: id,
+        };
+        if matches!(st.rule(pr).map(|x| &x.kind), Some(RuleKind::Style { .. })) {
+            return true;
+        }
+        cur = st.parent(pr);
+    }
+    false
 }
 
 /// "Insert a CSS rule" (CSSOM §6.6.3).
@@ -1397,10 +1551,34 @@ fn insert_rule(
     index: usize,
     nested: bool,
 ) -> JsResult<Value> {
-    let rule = match parse_one_rule(agent, text) {
+    // Dentro de un style rule (o de una group rule anidada en uno) se parsea como regla
+    // anidada (CSS Nesting §6.3).
+    let in_style = match owner {
+        ListOwner::Sheet(_) => false,
+        ListOwner::Rule(r) => {
+            let st = &state(agent).sheets;
+            matches!(st.rule(r).map(|x| &x.kind), Some(RuleKind::Style { .. }))
+                || in_style_rule(st, r)
+        }
+    };
+    let rule = match parse_one_rule(agent, text, in_style) {
         Ok(r) => r,
         Err(e) => return throw_dom(agent, e),
     };
+    // CSS Nesting §3.2: dentro de un style rule solo van reglas anidables.
+    if in_style
+        && !matches!(
+            rule.kind,
+            RuleKind::Style { .. }
+                | RuleKind::NestedDeclarations { .. }
+                | RuleKind::Media { .. }
+                | RuleKind::Supports { .. }
+                | RuleKind::LayerBlock { .. }
+                | RuleKind::LayerStatement { .. }
+        )
+    {
+        return throw_dom(agent, DomException::HierarchyRequestError);
+    }
     let sheet = match owner {
         ListOwner::Sheet(s) => s,
         ListOwner::Rule(r) => r.sheet,
@@ -1888,8 +2066,17 @@ fn rule_set_selector_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value
         state(agent).sheets.rule(r).map(|x| &x.kind),
         Some(RuleKind::Page { .. })
     );
+    let nested = in_style_rule(&state(agent).sheets, r);
     let new = if is_page {
         Some(text.trim().to_owned())
+    } else if nested {
+        // Dentro de un style rule: `<relative-selector-list>` (CSS Nesting §3.1).
+        bf_css::selectors::parse_relative_selector_list_from(
+            &bf_css::syntax::parse_component_value_list(&text),
+            &Default::default(),
+        )
+        .ok()
+        .map(|l| relative_selector_text(&l))
     } else {
         parse_selector_list(&text, &Default::default())
             .ok()

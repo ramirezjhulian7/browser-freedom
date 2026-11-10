@@ -761,3 +761,16 @@ rt!(
     "var n = 0; var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = BASE + '/a.css'; l.onerror = () => n++; document.head.appendChild(l); l.href = BASE + '/b.css'; var m = document.createElement('link'); m.rel = 'stylesheet'; m.href = BASE + '/c.css'; m.onerror = () => setTimeout(() => finish(n), 0); document.head.appendChild(m);",
     "1"
 );
+
+// --- CSS Nesting en el CSSOM (CSS Nesting §6) ---
+
+rt!(
+    nesting_cssom_rules,
+    "var s = document.createElement('style'); s.textContent = '.a { color: red; > .b { color: blue; } .c & { } }'; document.head.appendChild(s); var r = s.sheet.cssRules[0]; finish([r.cssRules.length, r.cssRules[0].selectorText, r.cssRules[1].selectorText, r instanceof CSSGroupingRule, JSON.stringify(r.cssText)].join('|'));",
+    "2|& > .b|.c &|true|\".a {\n  color: red;\n  & > .b { color: blue; }\n  .c & { }\n}\""
+);
+rt!(
+    nesting_insert_declarations_and_hierarchy,
+    "var s = document.createElement('style'); s.textContent = '.a { & .b { } }'; document.head.appendChild(s); var r = s.sheet.cssRules[0]; r.insertRule('color: green', 1); var e = ''; try { r.insertRule('@font-face {}', 0); } catch (x) { e = x.name; } finish([r.cssRules[1].constructor.name, r.cssRules[1].style.color, e].join());",
+    "CSSNestedDeclarations,green,HierarchyRequestError"
+);
