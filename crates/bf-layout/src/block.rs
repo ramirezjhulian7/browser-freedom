@@ -101,6 +101,9 @@ pub(crate) struct Layout<'a> {
     /// (ni `stretch` o `aspect-ratio`) y sin `min-height`/`max-height` (tamaño de contenido de
     /// un ítem flex en columnas, CSS Flexbox 1 §4.5 y §9.2.3 E).
     pub content_probe: bool,
+    /// E5: ejes en los que un ítem puede ser subgrid según su contenedor (por dirección de la
+    /// caja): un ítem de grid lanes solo lo es en el eje de rejilla (CSS Grid 3 §2.5).
+    pub subgrid_mask: std::collections::HashMap<usize, (bool, bool)>,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -334,6 +337,7 @@ impl<'a> Layout<'a> {
             pct_height_basis: None,
             cb_rtl: false,
             content_probe: false,
+            subgrid_mask: std::collections::HashMap::new(),
         }
     }
 

@@ -117,6 +117,7 @@ struct RepeatSpace {
 }
 
 /// Rejilla explícita en un eje.
+#[derive(Clone)]
 struct ExplicitAxis {
     /// Funciones de dimensionado de `grid-template-*` (con las repeticiones expandidas).
     sizes: Vec<TrackSize>,
@@ -389,6 +390,69 @@ fn subgrid_axes(b: &LayoutBox) -> (bool, bool) {
         matches!(s.grid_template_columns, GridTemplate::Subgrid(_)),
         matches!(s.grid_template_rows, GridTemplate::Subgrid(_)),
     )
+}
+
+impl Layout<'_> {
+    /// E5: [`subgrid_axes`] con la máscara del contenedor (los ítems de grid lanes solo son
+    /// subgrid en el eje de rejilla).
+    fn sub_axes(&self, b: &LayoutBox) -> (bool, bool) {
+        let (c, r) = subgrid_axes(b);
+        match self.subgrid_mask.get(&(b as *const LayoutBox as usize)) {
+            Some(&(mc, mr)) => (c && mc, r && mr),
+            None => (c, r),
+        }
+    }
+}
+
+/// E5: nombres de línea de `ax` en las líneas de `span` (índices de pista con `before`
+/// implícitas antes de la línea 1), para un subgrid (§9).
+fn span_line_names(ax: &ExplicitAxis, before: usize, span: (usize, usize)) -> Vec<Vec<String>> {
+    (span.0..=span.1)
+        .map(|l| {
+            l.checked_sub(before)
+                .and_then(|e| ax.names.get(e))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// E5: tamaños de las pistas del padre en `span` para un subgrid con estilo `s` (§9): sin su
+/// margen, borde y padding en los bordes ni la mitad de la diferencia de gaps en cada línea
+/// interior. `None` si el área no está en las pistas.
+fn subgrid_track_sizes(
+    s: &ComputedStyle,
+    span: (usize, usize),
+    (starts, ends): (&[f32], &[f32]),
+    gap: f32,
+    basis: f32,
+    columns: bool,
+) -> Option<Vec<f32>> {
+    let n = span.1 - span.0;
+    if n == 0 || span.1 > starts.len() {
+        return None;
+    }
+    let (m0, m1) = mbp_edges(s, basis, columns);
+    let own = if columns { &s.column_gap } else { &s.row_gap };
+    let total = ends[span.1 - 1] - starts[span.0];
+    let own_gap = match own {
+        Gap::Normal => gap,
+        g => gap_px(g, Some(total)),
+    };
+    let d = (own_gap - gap) / 2.0;
+    let mut sizes: Vec<f32> = (span.0..span.1).map(|k| ends[k] - starts[k]).collect();
+    sizes[0] -= m0;
+    sizes[n - 1] -= m1;
+    for (k, v) in sizes.iter_mut().enumerate() {
+        if k > 0 {
+            *v -= d;
+        }
+        if k + 1 < n {
+            *v -= d;
+        }
+        *v = v.max(0.0);
+    }
+    Some(sizes)
 }
 
 /// E5: rejilla explícita de un eje subgrid (§9): tantas pistas como abarca en el padre, con los
@@ -1731,7 +1795,7 @@ impl<'a> Layout<'a> {
         let col_gap = gap_px(&cs.column_gap, width);
         let row_gap = gap_px(&cs.row_gap, height);
         // E5: ejes subgrid (§9), con lo que registró el contenedor padre.
-        let (sc, sr) = subgrid_axes(container);
+        let (sc, sr) = self.sub_axes(container);
         let mut sub = self
             .subgrids
             .get(&(container as *const LayoutBox as usize))
@@ -2040,7 +2104,7 @@ impl<'a> Layout<'a> {
         let mut ml = margin_value(&s.margin_left, area_w);
         let mut mr = margin_value(&s.margin_right, area_w);
         // E5: un subgrid en las columnas ocupa siempre su área (§9).
-        if subgrid_axes(b).0 {
+        if self.sub_axes(b).0 {
             ml = ml.or(Some(0.0));
             mr = mr.or(Some(0.0));
             return (
@@ -2381,7 +2445,7 @@ impl<'a> Layout<'a> {
             };
             // E5: un subgrid se estira siempre en sus ejes subgrid, con los márgenes `auto`
             // a 0 (§9).
-            let sub_rows = subgrid_axes(b).1;
+            let sub_rows = self.sub_axes(b).1;
             let (mt, mb) = if sub_rows {
                 (mt.or(Some(0.0)), mb.or(Some(0.0)))
             } else {
@@ -2592,18 +2656,9 @@ impl<'a> Layout<'a> {
     /// E5: registra para cada ítem subgrid de `grid` los nombres de línea del padre en las
     /// líneas que abarca y el gap del padre (§9); los tamaños llegan después.
     fn register_subgrids(&mut self, grid: &Grid<'a>, col_gap: f32, row_gap: f32) {
-        let names = |ax: &ExplicitAxis, before: usize, span: (usize, usize)| {
-            (span.0..=span.1)
-                .map(|l| {
-                    l.checked_sub(before)
-                        .and_then(|e| ax.names.get(e))
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect::<Vec<_>>()
-        };
+        let names = span_line_names;
         for it in &grid.items {
-            let (sc, sr) = subgrid_axes(it.b);
+            let (sc, sr) = self.sub_axes(it.b);
             if !sc && !sr {
                 continue;
             }
@@ -2636,36 +2691,16 @@ impl<'a> Layout<'a> {
         basis: f32,
     ) {
         for it in &grid.items {
-            let (sc, sr) = subgrid_axes(it.b);
+            let (sc, sr) = self.sub_axes(it.b);
             if !(if columns { sc } else { sr }) {
                 continue;
             }
             let span = if columns { it.col } else { it.row };
-            let n = span.1 - span.0;
-            if n == 0 || span.1 > starts.len() {
+            let Some(sizes) =
+                subgrid_track_sizes(&it.b.style, span, (starts, ends), gap, basis, columns)
+            else {
                 continue;
-            }
-            let s = &it.b.style;
-            let (m0, m1) = mbp_edges(s, basis, columns);
-            let own = if columns { &s.column_gap } else { &s.row_gap };
-            let total = ends[span.1 - 1] - starts[span.0];
-            let own_gap = match own {
-                Gap::Normal => gap,
-                g => gap_px(g, Some(total)),
             };
-            let d = (own_gap - gap) / 2.0;
-            let mut sizes: Vec<f32> = (span.0..span.1).map(|k| ends[k] - starts[k]).collect();
-            sizes[0] -= m0;
-            sizes[n - 1] -= m1;
-            for (k, v) in sizes.iter_mut().enumerate() {
-                if k > 0 {
-                    *v -= d;
-                }
-                if k + 1 < n {
-                    *v -= d;
-                }
-                *v = v.max(0.0);
-            }
             let entry = self
                 .subgrids
                 .entry(it.b as *const LayoutBox as usize)
@@ -2708,7 +2743,7 @@ impl<'a> Layout<'a> {
         out: &mut Vec<GridItem<'a>>,
         depth: usize,
     ) {
-        let (sc, sr) = subgrid_axes(it.b);
+        let (sc, sr) = self.sub_axes(it.b);
         if !(if columns { sc } else { sr }) || depth > 32 {
             out.push(it);
             return;

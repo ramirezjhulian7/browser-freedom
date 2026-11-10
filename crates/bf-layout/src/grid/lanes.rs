@@ -323,6 +323,14 @@ impl<'a> Layout<'a> {
             }
         }
         children.sort_by_key(|c| c.style.order.0);
+        // E5: un ítem subgrid de un contenedor grid lanes solo hereda el eje de rejilla (CSS
+        // Grid 3, "subgrids"): en el de apilado `subgrid` cuenta como sin pistas heredadas.
+        if !rows {
+            for c in &children {
+                self.subgrid_mask
+                    .insert(*c as *const LayoutBox as usize, (true, false));
+            }
+        }
         let axis = explicit_axis(template, &cs.grid_template_areas, !rows, space, gap);
         let hyp = self.lanes_hypothetical_sizes(
             container,
@@ -572,22 +580,36 @@ impl<'a> Layout<'a> {
             cols: setup.tracks.clone(),
             rows: vec![Track::new(&TrackSize::AUTO, None)],
             abs: Vec::new(),
-            col_axis: explicit_axis(
-                &GridTemplate::None,
-                &GridTemplateAreas::None,
-                true,
-                RepeatSpace {
-                    size: None,
-                    min: None,
-                    basis: None,
-                },
-                0.0,
-            ),
+            // E5: con los nombres de línea del eje (para los subgrids).
+            col_axis: setup.axis.clone(),
             row_axis: empty_axis(),
             col_before: setup.before,
             row_before: 0,
             sub: SubgridParent::default(),
         }
+    }
+
+    /// E5: ítems que dimensionan las columnas de la rejilla falsa de `lanes_fake_grid`: cada
+    /// subgrid en las columnas recibe los nombres de línea de su posición (§9 de Grid 2; un
+    /// auto-colocado aparece en cada posición posible) y se sustituye por sus ítems.
+    fn lanes_column_items(&mut self, grid: &Grid<'a>, gap: f32, basis: f32) -> Vec<GridItem<'a>> {
+        let mut out = Vec::with_capacity(grid.items.len());
+        for it in &grid.items {
+            if self.sub_axes(it.b).0 {
+                let entry = SubgridParent {
+                    cols: Some(SubgridAxis {
+                        names: span_line_names(&grid.col_axis, grid.col_before, it.col),
+                        sizes: Vec::new(),
+                        gap,
+                    }),
+                    rows: None,
+                };
+                self.subgrids
+                    .insert(it.b as *const LayoutBox as usize, entry);
+            }
+            self.push_axis_item(it.clone(), true, None, basis, &mut out, 0);
+        }
+        out
     }
 
     /// Ancho de contenido y márgenes de un ítem en el eje de apilado inline (filas como eje de
@@ -646,7 +668,24 @@ impl<'a> Layout<'a> {
             let col_gap = gap_px(&cs.column_gap, Some(cb.width));
             let row_gap = gap_px(&cs.row_gap, cb.height);
             let mut grid = self.lanes_fake_grid(&setup);
-            let (starts, ends) = self.size_grid_columns(container, &mut grid, cb.width, col_gap);
+            // Como `size_grid_columns`, con los subgrids sustituidos por sus ítems.
+            let items = self.lanes_column_items(&grid, col_gap, cb.width);
+            let contribs: Vec<Contrib> = items
+                .iter()
+                .map(|it| self.column_contrib(it, &grid.cols, col_gap, None))
+                .collect();
+            size_tracks(
+                &mut grid.cols,
+                &contribs,
+                col_gap,
+                Space::Definite(cb.width),
+                (cb.width, cb.width),
+                matches!(
+                    cs.justify_content,
+                    ContentAlign::Normal | ContentAlign::Stretch
+                ),
+            );
+            let (starts, ends) = track_positions(&grid.cols, col_gap, cb.width, cs.justify_content);
             let n = setup.tracks.len();
             let mut run = Running::new(
                 n,
@@ -698,6 +737,27 @@ impl<'a> Layout<'a> {
                     height: cb.height,
                 };
                 let x = cb.x + x0 + dx + ml;
+                // E5: un subgrid recibe los nombres y tamaños de las pistas que ocupa.
+                if self.sub_axes(b).0 {
+                    let sizes = subgrid_track_sizes(
+                        s,
+                        (c0, c1),
+                        (&starts, &ends),
+                        col_gap,
+                        cb.width,
+                        true,
+                    )
+                    .unwrap_or_default();
+                    let entry = SubgridParent {
+                        cols: Some(SubgridAxis {
+                            names: span_line_names(&setup.axis, setup.before, (c0, c1)),
+                            sizes,
+                            gap: col_gap,
+                        }),
+                        rows: None,
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                }
                 let mut f = self.grid_item_fragment(b, item_cb, (x, cb.y + mt), w, None, margins);
                 if f.kind == FragmentKind::Block {
                     f.kind = FragmentKind::InlineBlock;
@@ -1054,8 +1114,8 @@ impl<'a> Layout<'a> {
             let gap = gap_px(&cs.column_gap, None);
             let tracks = setup.tracks.clone();
             let grid = self.lanes_fake_grid(&setup);
-            let contribs: Vec<Contrib> = grid
-                .items
+            let items = self.lanes_column_items(&grid, gap, 0.0);
+            let contribs: Vec<Contrib> = items
                 .iter()
                 .map(|it| self.column_contrib(it, &tracks, gap, None))
                 .collect();
