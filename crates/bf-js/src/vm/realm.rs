@@ -141,6 +141,20 @@ intrinsics!(
     date_ctor,
     date_prototype,
     web_registry,
+    // E8
+    suppressed_error_prototype,
+    disposable_stack_ctor,
+    disposable_stack_prototype,
+    async_disposable_stack_ctor,
+    async_disposable_stack_prototype,
+    temporal_duration_prototype,
+    temporal_instant_prototype,
+    temporal_plain_date_prototype,
+    temporal_plain_time_prototype,
+    temporal_plain_date_time_prototype,
+    temporal_plain_year_month_prototype,
+    temporal_plain_month_day_prototype,
+    temporal_zoned_date_time_prototype,
 );
 
 pub struct Realm {

@@ -192,6 +192,9 @@ pub struct Agent {
     pub gc_inhibit: u32,
     pub options: AgentOptions,
     pub instructions: u64,
+    /// E8: el próximo valor de `instructions` en el que el safepoint mira la interrupción y
+    /// el tiempo límite (las ráfagas suman varias instrucciones de una vez).
+    next_poll: u64,
     /// Lo no implementado que se ejecutó (InternalError): el runner lo cuenta como fallo.
     pub internal_errors: Vec<String>,
     /// La salida de `print`.
@@ -271,6 +274,7 @@ impl Agent {
             gc_inhibit: 0,
             options,
             instructions: 0,
+            next_poll: 0,
             internal_errors: Vec::new(),
             printer: Box::new(|s| println!("{s}")),
             value_pool: Vec::new(),
@@ -497,17 +501,19 @@ impl Agent {
                 "presupuesto de instrucciones agotado".into(),
             ));
         }
+        if self.instructions < self.next_poll {
+            return Ok(());
+        }
+        self.next_poll = self.instructions + 0x400;
         // E3: la interrupción desde otro hilo.
-        if self.instructions & 0x3FF == 0
-            && self
-                .interrupt
-                .as_ref()
-                .is_some_and(|i| i.load(std::sync::atomic::Ordering::Relaxed))
+        if self
+            .interrupt
+            .as_ref()
+            .is_some_and(|i| i.load(std::sync::atomic::Ordering::Relaxed))
         {
             return Err(Throw::Terminate("agente interrumpido".into()));
         }
-        if self.instructions & 0x3FF == 0
-            && let Some(d) = self.options.deadline
+        if let Some(d) = self.options.deadline
             && Instant::now() > d
         {
             return Err(Throw::Terminate("tiempo agotado".into()));

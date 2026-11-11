@@ -277,6 +277,8 @@ pub struct FragmentTree {
     pub viewport: Size,
     /// Lo que el layout degradó al construir el árbol de cajas.
     pub report: crate::box_tree::LayoutReport,
+    /// Scroll containers y cajas `sticky` (E12, ver [`crate::scroll`]).
+    pub scroll: crate::scroll::ScrollState,
 }
 
 fn label(doc: &Document, f: &Fragment) -> String {

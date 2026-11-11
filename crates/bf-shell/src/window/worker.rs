@@ -642,7 +642,7 @@ impl State {
             }))
         };
         let loaded = current.loaded.clone();
-        let (loaded, page) = match page(&loaded) {
+        let (loaded, mut page) = match page(&loaded) {
             Ok(p) => (loaded, p),
             // Un error del motor con este documento: se muestra como página de error en
             // lugar de terminar el hilo.
@@ -670,6 +670,11 @@ impl State {
             }
         };
         let view = self.view();
+        // E12: las posiciones de scroll de los elementos y lo `sticky` del viewport.
+        if let Some(engine) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {
+            let offsets = engine.element_scroll_offsets();
+            page.apply_scroll(&loaded.doc, &offsets, view.scroll);
+        }
         let resized = self
             .last_viewport
             .is_some_and(|v| v.width != viewport.width || v.height != viewport.height);
@@ -718,6 +723,14 @@ impl State {
             let _ = self.tx.send(FromDoc::Request {
                 tab: self.tab,
                 request: Box::new(PageRequest::ScrollTo(x, y)),
+            });
+            (self.wake)();
+        }
+        let changes = engine.take_element_scroll_changes();
+        if !changes.is_empty() {
+            let _ = self.tx.send(FromDoc::Request {
+                tab: self.tab,
+                request: Box::new(PageRequest::ScrollElements(changes)),
             });
             (self.wake)();
         }
