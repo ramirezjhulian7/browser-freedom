@@ -693,8 +693,8 @@ impl TreeBuilder {
         id
     }
 
-    /// Create an element for a token. `intended_parent` solo importa para custom elements y
-    /// form owners, que aún no existen.
+    /// Create an element for a token. El intended parent (para el form owner) se aproxima con
+    /// el *appropriate place* actual.
     fn create_element_for_token(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
         let id = self.create_element(Element {
             ns,
@@ -708,6 +708,26 @@ impl TreeBuilder {
             && let Some(is) = tag.attr("is")
         {
             self.doc.set_is_value(id, Some(is.into()));
+        }
+        // E1: paso 13: un form-associated element (no custom) se asocia con el *form element
+        // pointer* si no hay `template` en la pila, no es listed con atributo `form` y el
+        // intended parent está en el mismo árbol que el form.
+        if ns == Namespace::Html
+            && let Some(form) = self.form
+            && !self.stack_has_template()
+        {
+            let name = tag.name.to_string();
+            let listed = matches!(
+                name.as_str(),
+                "button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea"
+            );
+            if (listed || name == "img")
+                && !(listed && tag.attr("form").is_some())
+                && self.doc.tree_root(self.appropriate_place(None).parent)
+                    == self.doc.tree_root(form)
+            {
+                self.doc.set_parser_form_owner(id, form);
+            }
         }
         id
     }

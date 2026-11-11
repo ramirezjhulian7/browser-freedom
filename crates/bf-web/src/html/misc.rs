@@ -575,8 +575,20 @@ fn focus_delegate(agent: &Agent, host: NodeRef) -> Option<NodeRef> {
 
 /// "Unfocusing steps" (§6.6.4).
 pub fn blur(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_node(agent, a)?;
+    let mut n = this_node(agent, a)?;
     let realm = WebContextHandle::current(agent).realm;
+    // E1: paso 1: un host con `delegatesFocus` cuyo shadow tree tiene el foco pasa a ser el
+    // área enfocada.
+    let current = agent.realm_data::<Focus>(realm).and_then(|f| f.0);
+    if let Some(c) = current
+        && delegates_focus(agent, n)
+        && c.doc == n.doc
+        && with_doc(agent, n.doc, |d| {
+            d.is_shadow_including_inclusive_ancestor(n.node, c.node)
+        })
+    {
+        n = c;
+    }
     if agent.realm_data::<Focus>(realm).and_then(|f| f.0) != Some(n) {
         return Ok(Value::Undefined);
     }
