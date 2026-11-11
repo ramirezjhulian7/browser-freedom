@@ -118,7 +118,7 @@ fn line_mut<'f>(children: &'f mut [Fragment], path: &[usize]) -> &'f mut Fragmen
 }
 
 /// El camino hasta la última hoja de contenido de una línea (texto o caja atómica).
-fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
+pub(crate) fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
     for (i, c) in f.children.iter().enumerate().rev() {
         match c.kind {
             FragmentKind::Text | FragmentKind::InlineBlock | FragmentKind::Replaced => {
@@ -140,7 +140,7 @@ fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
 
 /// El extremo derecho del contenido de la línea: la última hoja o, si las cajas inline que la
 /// contienen terminan en esta línea, su borde del final (con su padding y borde).
-fn content_end(line: &Fragment) -> Option<f32> {
+pub(crate) fn content_end(line: &Fragment) -> Option<f32> {
     let mut path = Vec::new();
     if !last_leaf(line, &mut path) {
         return None;

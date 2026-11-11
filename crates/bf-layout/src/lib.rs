@@ -7,6 +7,7 @@
 mod block;
 pub mod box_tree;
 mod clamp; // E12
+mod text_overflow; // E12
 pub mod controls;
 mod flex;
 pub mod float;

@@ -948,8 +948,12 @@ impl<'a> Layout<'a> {
             auto_h
         } else {
             let max_h = Some(height_limits(style, cb.height, edges_v).1).filter(|h| h.is_finite());
-            self.line_clamp(style, &mut children, content_top, auto_h, spec_h, max_h)
-                .unwrap_or(auto_h)
+            let h = self
+                .line_clamp(style, &mut children, content_top, auto_h, spec_h, max_h)
+                .unwrap_or(auto_h);
+            // E12: `text-overflow` (CSS Overflow 3 §5) en las líneas que desbordan.
+            self.text_overflow(style, &mut children);
+            h
         };
         let mut content_h = spec_h.unwrap_or(auto_h);
         // E5: el alto por `aspect-ratio` con `min-height: auto` no baja del contenido (CSS
