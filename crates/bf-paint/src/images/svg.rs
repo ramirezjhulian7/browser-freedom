@@ -10,8 +10,8 @@ mod text;
 use super::{SVG_IMAGE_DEPTH, SVG_OVERSAMPLE, SvgImage, SvgResources};
 use bf_layout::FontProvider;
 use bf_svg::{
-    ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node, Paint, Pattern,
-    Rgba, Seg, Spread, Stroke, Text, Tree,
+    ClipPath, Fill, FillRule, Gradient, GradientKind, Group, LineCap, LineJoin, Node, Paint,
+    Pattern, Rgba, Seg, Spread, Stroke, Text, Tree,
 };
 use tiny_skia::{
     Color, FillRule as SkFillRule, FilterQuality, GradientStop, LinearGradient, Mask, MaskType,
@@ -197,8 +197,7 @@ impl Raster<'_> {
         if g.opacity <= 0.0 {
             return;
         }
-        let layered =
-            g.opacity < 1.0 || g.clip.is_some() || g.mask.is_some() || g.filter.is_some();
+        let layered = g.opacity < 1.0 || g.clip.is_some() || g.mask.is_some() || g.filter.is_some();
         if !layered {
             for c in &g.children {
                 self.node(c, canvas, ts);

@@ -379,8 +379,7 @@ impl Harness {
         let Some(root) = doc.children(doc.root()).find(|&n| doc.element(n).is_some()) else {
             return out;
         };
-        let Ok(mut svg) =
-            bf_svg::Svg::from_element(doc, root, &[], bf_svg::Inherited::default())
+        let Ok(mut svg) = bf_svg::Svg::from_element(doc, root, &[], bf_svg::Inherited::default())
         else {
             return out;
         };

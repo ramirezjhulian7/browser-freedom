@@ -341,19 +341,20 @@ fn expand_font(value: &[ComponentValue]) -> Option<Vec<(&'static str, Vec<Compon
                 "italic" | "oblique" => style = Some(c.clone()),
                 "bold" | "bolder" | "lighter" => weight = Some(c.clone()),
                 s if s.ends_with("condensed") || s.ends_with("expanded") => {}
-                "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large"
-                | "xx-large" | "xxx-large" | "larger" | "smaller" => break c.clone(),
+                "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large" | "xx-large"
+                | "xxx-large" | "larger" | "smaller" => break c.clone(),
                 _ => return None,
             },
-            TokenKind::Number(n) if (1.0..=1000.0).contains(&n.value) => {
-                weight = Some(c.clone())
-            }
+            TokenKind::Number(n) if (1.0..=1000.0).contains(&n.value) => weight = Some(c.clone()),
             TokenKind::Dimension(..) | TokenKind::Percentage(_) => break c.clone(),
             _ => return None,
         }
     };
     // `/ <line-height>`: no se usa en SVG.
-    if matches!(parts.get(k).and_then(|c| c.token()), Some(TokenKind::Delim('/'))) {
+    if matches!(
+        parts.get(k).and_then(|c| c.token()),
+        Some(TokenKind::Delim('/'))
+    ) {
         k += 2;
     }
     let family: Vec<ComponentValue> = parts.get(k..)?.iter().map(|c| (*c).clone()).collect();
@@ -362,8 +363,14 @@ fn expand_font(value: &[ComponentValue]) -> Option<Vec<(&'static str, Vec<Compon
     }
     let initial = |s: &str| parse_component_value_list(s);
     Some(vec![
-        ("font-style", style.map_or_else(|| initial("normal"), |c| vec![c])),
-        ("font-weight", weight.map_or_else(|| initial("normal"), |c| vec![c])),
+        (
+            "font-style",
+            style.map_or_else(|| initial("normal"), |c| vec![c]),
+        ),
+        (
+            "font-weight",
+            weight.map_or_else(|| initial("normal"), |c| vec![c]),
+        ),
         ("font-size", vec![size]),
         ("font-family", family),
     ])

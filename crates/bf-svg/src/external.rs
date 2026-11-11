@@ -133,8 +133,7 @@ impl Svg {
         let mut out: Vec<String> = Vec::new();
         for r in refs {
             let (doc, _) = split(&r);
-            if doc.is_empty() || doc.starts_with(EXT_SCHEME) || self.externals.contains_key(doc)
-            {
+            if doc.is_empty() || doc.starts_with(EXT_SCHEME) || self.externals.contains_key(doc) {
                 continue;
             }
             if !out.iter().any(|o| o == doc) {
@@ -190,7 +189,11 @@ impl Svg {
             root: e.root + offset,
         };
         let own = ExtDoc {
-            ids: ext.ids.iter().map(|(k, v)| (k.clone(), v + offset)).collect(),
+            ids: ext
+                .ids
+                .iter()
+                .map(|(k, v)| (k.clone(), v + offset))
+                .collect(),
             root: offset,
         };
         for (k, e) in &ext.externals {
