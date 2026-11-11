@@ -767,7 +767,7 @@ rt!(
 rt!(
     nesting_cssom_rules,
     "var s = document.createElement('style'); s.textContent = '.a { color: red; > .b { color: blue; } .c & { } }'; document.head.appendChild(s); var r = s.sheet.cssRules[0]; finish([r.cssRules.length, r.cssRules[0].selectorText, r.cssRules[1].selectorText, r instanceof CSSGroupingRule, JSON.stringify(r.cssText)].join('|'));",
-    "2|& > .b|.c &|true|\".a {\n  color: red;\n  & > .b { color: blue; }\n  .c & { }\n}\""
+    "2|& > .b|.c &|true|\".a {\\n  color: red;\\n  & > .b { color: blue; }\\n  .c & { }\\n}\""
 );
 rt!(
     nesting_insert_declarations_and_hierarchy,
