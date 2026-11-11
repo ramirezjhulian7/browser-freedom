@@ -398,13 +398,14 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     let viewport = window_metrics(agent).viewport;
     let mut provider = state(agent).provider.take();
     let doc = h.get(agent).document();
-    let tree = match provider.as_mut() {
+    let mut tree = match provider.as_mut() {
         Some(p) => p.layout(doc, &styles, viewport),
         None => bf_layout::layout_document(doc, &styles, viewport, &TestFont),
     };
+    state(agent).provider = provider;
+    view::restore_element_scroll(agent, &mut tree); // E12
     let tree = Arc::new(tree);
     let st = state(agent);
-    st.provider = provider;
     st.layout = Some((version, generation, tree.clone()));
     tree
 }

@@ -78,6 +78,8 @@ pub enum PageRequest {
     Close,
     /// `window.scrollTo` y compañía: desplazar la página a (x, y) px CSS.
     ScrollTo(f32, f32),
+    /// E12: `element.scrollTop` y compañía: posiciones nuevas de scroll containers (px CSS).
+    ScrollElements(Vec<(bf_dom::NodeId, (f32, f32))>),
     /// El documento cambió el `localStorage` de su origen: las otras pestañas reciben
     /// `storage`.
     StorageChanged(StorageNotice),
@@ -664,6 +666,22 @@ impl Engine {
             s.scroll = scroll;
             s.device_pixel_ratio = device_pixel_ratio;
         }
+    }
+
+    /// E12: los desplazamientos de elementos hechos desde JavaScript que la ventana debe
+    /// aplicar a su página.
+    pub fn take_element_scroll_changes(&mut self) -> Vec<(bf_dom::NodeId, (f32, f32))> {
+        bf_web::cssom::view::take_element_scroll_changes(&mut self.rt.agent, self.realm)
+    }
+
+    /// E12: las posiciones de desplazamiento de los elementos (para una maqueta nueva).
+    pub fn element_scroll_offsets(&mut self) -> Vec<(bf_dom::NodeId, (f32, f32))> {
+        bf_web::cssom::view::element_scroll_offsets(&mut self.rt.agent, self.realm)
+    }
+
+    /// E12: el usuario desplazó un elemento con la rueda (la ventana ya lo aplicó).
+    pub fn user_scrolled_element(&mut self, node: bf_dom::NodeId, offset: (f32, f32)) {
+        bf_web::cssom::view::user_scrolled_element(&mut self.rt.agent, self.realm, node, offset);
     }
 
     /// Un desplazamiento pedido desde JavaScript (`scrollTo`…) que la ventana debe aplicar.

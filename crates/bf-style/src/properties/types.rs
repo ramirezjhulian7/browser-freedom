@@ -124,6 +124,10 @@ impl PropValue for Display {
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         // Sintaxis de varias keywords (CSS Display 3 §2): <display-outside> || <display-inside>.
         Some(match words.as_slice() {
+            // E12: las cajas heredadas de WebKit (Compat) se tratan como block containers: es
+            // lo que son con `-webkit-line-clamp` (CSS Overflow 4 §5.5), su uso casi único.
+            ["-webkit-box"] => Display::FlowRoot,
+            ["-webkit-inline-box"] => Display::InlineBlock,
             [w] => Display::from_ident(w)?,
             ["block", "flow"] | ["flow", "block"] => Display::Block,
             ["inline", "flow"] | ["flow", "inline"] => Display::Inline,

@@ -3,6 +3,7 @@
 //! Los shorthands están en [`shorthands`].
 
 pub mod animations; // E4
+pub mod clamp; // E12
 pub mod gradient; // E4
 pub mod grid; // E4
 pub mod shorthands;
@@ -16,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use bf_css::syntax::ComponentValue;
 
 use crate::values::{Color, LengthContext, LengthPercentage};
+use clamp::{BoxOrient, LineClamp, WebkitLineClamp};
 use types::*;
 
 /// Contexto de cómputo de un elemento.
@@ -238,6 +240,10 @@ longhands! {
     GridRowEnd "grid-row-end" grid_row_end: GridLine = "auto", inherited: false, animatable: false;
     GridColumnStart "grid-column-start" grid_column_start: GridLine = "auto", inherited: false, animatable: false;
     GridColumnEnd "grid-column-end" grid_column_end: GridLine = "auto", inherited: false, animatable: false;
+    // E12: CSS Overflow 4 §5.
+    LineClampP "line-clamp" line_clamp: LineClamp = "none", inherited: false, animatable: false;
+    WebkitLineClampP "-webkit-line-clamp" webkit_line_clamp: WebkitLineClamp = "none", inherited: false, animatable: false;
+    WebkitBoxOrient "-webkit-box-orient" webkit_box_orient: BoxOrient = "horizontal", inherited: false, animatable: false;
     // E5: tamaño intrínseco (CSS Sizing 4 §5 y §7) y contención de tamaño (CSS Containment 2).
     AspectRatio "aspect-ratio" aspect_ratio: AspectRatio = "auto", inherited: false, animatable: true;
     Contain "contain" contain: Contain = "none", inherited: false, animatable: false;
