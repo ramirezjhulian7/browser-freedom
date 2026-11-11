@@ -2449,7 +2449,10 @@ impl<'a> Layout<'a> {
         });
 
         // --- Elementos absolutos (§9) ---
-        let positioned = is_positioned(cs);
+        // E12: un contenedor transformado también es su containing block (CSS Transforms 1 §3),
+        // y además el de sus hijos fijos.
+        let transformed = crate::positioned::transform_contains(cs);
+        let positioned = is_positioned(cs) || transformed;
         let pad = padding_edges(cs, cb.width);
         let content_box = Rect::new(cb.x, cb.y, cb.width, content_h);
         let padding_box = Rect::new(
@@ -2513,7 +2516,7 @@ impl<'a> Layout<'a> {
         }
         for &c in &grid.abs {
             let s = &c.style;
-            if !positioned || s.position == Position::Fixed {
+            if !positioned || (s.position == Position::Fixed && !transformed) {
                 // §9.2: la posición estática es la de un único ítem en un área con los bordes
                 // del content box, alineado con `justify-self`/`align-self`.
                 let f = self.measuring(|this| {
@@ -2549,6 +2552,7 @@ impl<'a> Layout<'a> {
                 dx
             };
             f.translate(dx, dy);
+            crate::positioned::unfix(&mut f); // E12: hijo fijo de un contenedor transformado
             out.push(f);
         }
         self.grid_baseline = baseline;

@@ -85,12 +85,22 @@ const MULTI_CLICK: Duration = Duration::from_millis(500);
 const KEY_REPLY_WAIT: Duration = Duration::from_millis(100);
 
 /// Lo que mueve el puntero con el botón apretado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
     /// Extiende la selección de texto de la página.
     Text,
     /// Extiende la selección dentro del campo con el foco.
     Field,
+    /// E12: el pulgar de una barra de desplazamiento (`node`: su scroll container, `None`: el
+    /// viewport); `grab` es la coordenada del puntero en el eje al agarrarlo y `offset` la
+    /// posición de scroll de entonces.
+    Thumb {
+        node: Option<NodeId>,
+        vertical: bool,
+        ratio: f32,
+        grab: f32,
+        offset: (f32, f32),
+    },
 }
 
 struct Graphics {
@@ -177,6 +187,8 @@ struct App {
     text_index: RefCell<Option<(u64, Rc<TextIndex>)>>,
     /// Arrastre en curso con el botón izquierdo.
     drag: Option<Drag>,
+    /// E12: el elemento del último clic en la página; el teclado desplaza su scroll container.
+    scroll_target: Option<NodeId>,
     /// Último clic en la página (cuándo, dónde y cuántos seguidos), para el doble y triple.
     last_click: Option<(Instant, (f32, f32), u8)>,
     /// Menú contextual abierto.
@@ -643,6 +655,7 @@ impl App {
             selection: None,
             text_index: RefCell::new(None),
             drag: None,
+            scroll_target: None,
             last_click: None,
             menu: None,
             fonts: fonts.clone(),
@@ -1814,7 +1827,9 @@ impl App {
     /// Soltar el botón izquierdo: termina el arrastre y, sobre la página, `mouseup` y `click`
     /// (con su activation behavior en el documento).
     fn release(&mut self) {
-        self.drag = None;
+        if matches!(self.drag.take(), Some(Drag::Thumb { .. })) {
+            return;
+        }
         if self.dialog.is_some() {
             return;
         }
@@ -1983,6 +1998,9 @@ impl App {
                 app.scroll = (x, y);
                 app.clamp_scroll();
                 app.redraw_later();
+            }),
+            PageRequest::ScrollElements(changes) => self.with_tab(i, |app| {
+                app.apply_page_scroll(&changes);
             }),
             PageRequest::Dialog {
                 kind,
@@ -2352,6 +2370,8 @@ impl App {
             if let Some((_, page)) = cache.as_ref() {
                 blit(&mut frame, page, 0.0, area.y * dpi);
             }
+            drop(cache);
+            self.paint_scrollbars(&mut frame, p, area.y * dpi);
             if self.overlay {
                 let view = Rect::new(
                     self.scroll.0,
@@ -2468,6 +2488,7 @@ impl App {
     fn redraw(&mut self) {
         trace("redraw");
         self.sync_view();
+        self.apply_page_scroll(&[]); // E12: `sticky` del viewport
         let frame = self.frame();
         // El panel muestra el tiempo de raster en cuanto se conoce.
         if self.chrome.panel_open && self.panel_raster.is_none() && self.raster.get().is_some() {
@@ -2643,8 +2664,97 @@ impl App {
                     self.navigate(url);
                 }
             }
-            Area::Page => self.page_click(),
+            Area::Page => {
+                if !self.grab_thumb() {
+                    self.page_click();
+                }
+            }
         }
+    }
+
+    /// E12: apretar sobre el pulgar de una barra (de la página o de un scroll container)
+    /// empieza a arrastrarlo; el documento no recibe el `mousedown`.
+    fn grab_thumb(&mut self) -> bool {
+        let Some(page) = &self.page else {
+            return false;
+        };
+        let point = self.page_point(self.mouse.0, self.mouse.1);
+        let extent = document_extent(&page.tree);
+        let extent = bf_layout::Size {
+            width: extent.width,
+            height: extent.height,
+        };
+        let Some(hit) =
+            bf_paint::scrollbars::thumb_at(&page.tree, self.viewport(), extent, self.scroll, point)
+        else {
+            return false;
+        };
+        let vertical = hit.thumb.vertical;
+        self.drag = Some(Drag::Thumb {
+            node: hit.node,
+            vertical,
+            ratio: hit.thumb.ratio,
+            grab: if vertical { point.1 } else { point.0 },
+            offset: hit.offset,
+        });
+        true
+    }
+
+    /// E12: lleva el scroll container `node` de la página a `to` (limitado) y avisa al
+    /// documento.
+    fn scroll_element_to(&mut self, node: NodeId, to: (f32, f32)) {
+        let (Some(page), Some(current)) = (self.page.as_mut(), self.current.as_ref()) else {
+            return;
+        };
+        let before = page.tree.scroll.boxes.get(&node).map(|b| b.offset);
+        let Some(offset) = bf_layout::scroll::set_scroll_offset(&mut page.tree, node, to) else {
+            return;
+        };
+        if before == Some(offset) {
+            return;
+        }
+        page.repaint(&current.doc);
+        self.page_generation += 1;
+        self.send_input(events::UserInput::ScrollElement { node, offset });
+        self.redraw_later();
+    }
+
+    /// E12: el teclado sobre el scroll container del último clic (el más interno que todavía
+    /// pueda moverse); devuelve si lo consumió (si no, se desplaza la página).
+    fn key_scroll_element(&mut self, key: &Key, shift: bool) -> bool {
+        let (Some(target), Some(page), Some(current)) = (
+            self.scroll_target,
+            self.page.as_mut(),
+            self.current.as_ref(),
+        ) else {
+            return false;
+        };
+        let line = LINE;
+        let step = |sb: &bf_layout::scroll::ScrollBox| -> (f32, f32) {
+            let page = (sb.client.height - line).max(sb.client.height * 0.5);
+            match key {
+                Key::Named(NamedKey::ArrowDown) => (0.0, line),
+                Key::Named(NamedKey::ArrowUp) => (0.0, -line),
+                Key::Named(NamedKey::ArrowRight) => (line, 0.0),
+                Key::Named(NamedKey::ArrowLeft) => (-line, 0.0),
+                Key::Named(NamedKey::PageDown) => (0.0, page),
+                Key::Named(NamedKey::PageUp) => (0.0, -page),
+                Key::Named(NamedKey::Space) if shift => (0.0, -page),
+                Key::Named(NamedKey::Space) => (0.0, page),
+                Key::Named(NamedKey::Home) => (0.0, f32::NEG_INFINITY),
+                Key::Named(NamedKey::End) => (0.0, f32::INFINITY),
+                _ => (0.0, 0.0),
+            }
+        };
+        let Some((node, offset)) = bf_layout::scroll::scroll_at_with(&mut page.tree, target, step)
+        else {
+            return false;
+        };
+        page.repaint(&current.doc);
+        self.page_generation += 1;
+        self.send_input(events::UserInput::ScrollElement { node, offset });
+        self.redraw_later();
+        true
     }
 
     /// Clic en la página: `mousedown` al documento; enlaces y botones de envío los sigue el
@@ -2656,6 +2766,8 @@ impl App {
             self.refresh_chrome();
         }
         self.send_mouse(events::MouseKind::Down, 0, 1);
+        let hit = self.frame_under_mouse();
+        self.scroll_target = hit.frame.first().copied().or(hit.node);
         if self.link_under_mouse().is_some() {
             self.selection = None;
             return;
@@ -2785,6 +2897,33 @@ impl App {
     /// El puntero se movió con el botón apretado.
     fn drag_to(&mut self, drag: Drag) {
         match drag {
+            Drag::Thumb {
+                node,
+                vertical,
+                ratio,
+                grab,
+                offset,
+            } => {
+                let point = self.page_point(self.mouse.0, self.mouse.1);
+                let moved = (if vertical { point.1 } else { point.0 }) - grab;
+                let mut to = offset;
+                if vertical {
+                    to.1 += moved * ratio;
+                } else {
+                    to.0 += moved * ratio;
+                }
+                match node {
+                    Some(node) => self.scroll_element_to(node, to),
+                    None => {
+                        let before = self.scroll;
+                        self.scroll = to;
+                        self.clamp_scroll();
+                        if self.scroll != before {
+                            self.redraw_later();
+                        }
+                    }
+                }
+            }
             Drag::Text => {
                 if let (Some(sel), Some(p)) = (self.selection, self.text_point())
                     && sel.focus != p
@@ -2846,6 +2985,94 @@ impl App {
         }
     }
 
+    /// E12: las barras de desplazamiento de los scroll containers y del viewport, encima de la
+    /// página (en px de dispositivo, la página empieza en `top`).
+    fn paint_scrollbars(&self, frame: &mut Pixmap, p: &bf_paint::Page, top: f32) {
+        use bf_paint::scrollbars::{THICKNESS, scrollbars, viewport_scrollbars};
+        let theme = self.chrome.theme;
+        let color = Rgba {
+            a: 0.55,
+            ..theme.text_secondary
+        };
+        let viewport = self.viewport();
+        let scale = self.dpi() * self.zoom;
+        let list = scrollbars(&p.tree, color);
+        if !list.items.is_empty() {
+            let layer = render_scrolled(&list, viewport, scale, Rgba::TRANSPARENT, self.scroll);
+            blit(frame, &layer, 0.0, top);
+        }
+        // El viewport: solo las franjas de los bordes derecho e inferior.
+        let extent = document_extent(&p.tree);
+        let list = viewport_scrollbars(
+            viewport,
+            bf_layout::Size {
+                width: extent.width,
+                height: extent.height,
+            },
+            self.scroll,
+            color,
+        );
+        if list.items.is_empty() {
+            return;
+        }
+        let strip = THICKNESS + 4.0;
+        let vertical = bf_layout::Size {
+            width: strip,
+            height: viewport.height,
+        };
+        let layer = render_scrolled(
+            &list,
+            vertical,
+            scale,
+            Rgba::TRANSPARENT,
+            (viewport.width - strip, 0.0),
+        );
+        blit(frame, &layer, (viewport.width - strip) * scale, top);
+        let horizontal = bf_layout::Size {
+            width: viewport.width - strip,
+            height: strip,
+        };
+        let layer = render_scrolled(
+            &list,
+            horizontal,
+            scale,
+            Rgba::TRANSPARENT,
+            (0.0, viewport.height - strip),
+        );
+        blit(frame, &layer, 0.0, top + (viewport.height - strip) * scale);
+    }
+
+    /// E12: aplica a la página mostrada posiciones de scroll de elementos y el scroll de la
+    /// página (las cajas `sticky` del viewport); si cambió algo, se repinta.
+    fn apply_page_scroll(&mut self, changes: &[(NodeId, (f32, f32))]) {
+        let (Some(page), Some(current)) = (self.page.as_mut(), self.current.as_ref()) else {
+            return;
+        };
+        if page.apply_scroll(&current.doc, changes, self.scroll) {
+            self.page_generation += 1;
+            self.redraw_later();
+        }
+    }
+
+    /// E12: la rueda sobre un scroll container de la página (`scroll_at`): lo desplaza y avisa
+    /// al documento. Devuelve si lo consumió (si no, se desplaza la página).
+    fn wheel_element(&mut self, target: Option<NodeId>, delta: (f32, f32)) -> bool {
+        let (Some(target), Some(page), Some(current)) =
+            (target, self.page.as_mut(), self.current.as_ref())
+        else {
+            return false;
+        };
+        let Some((node, offset)) = bf_layout::scroll::scroll_at(&mut page.tree, target, delta)
+        else {
+            return false;
+        };
+        page.repaint(&current.doc);
+        self.page_generation += 1;
+        self.send_input(events::UserInput::ScrollElement { node, offset });
+        self.redraw_later();
+        true
+    }
+
     fn wheel(&mut self, dx: f32, dy: f32) {
         let (x, y) = self.mouse;
         if self.dialog.is_some() {
@@ -2864,7 +3091,7 @@ impl App {
                 delta: (dx, dy),
                 mods: self.mods(),
                 target: hit.node,
-                frame: hit.frame,
+                frame: hit.frame.clone(),
             };
             self.send_input(input);
             // E4: la rueda desplaza primero el marco más interior que pueda desplazarse.
@@ -2879,6 +3106,13 @@ impl App {
                     hit::set_frame_scroll(p, &frame, to);
                 }
                 self.send_input(events::UserInput::FrameScroll { frame, scroll: to });
+                self.mouse_moved();
+                return;
+            }
+            // E12: luego el scroll container más interno de la página (sobre un marco que no
+            // puede moverse, los contenedores que rodean a su `<iframe>`).
+            let element = hit.frame.first().copied().or(hit.node);
+            if self.wheel_element(element, (dx, dy)) {
                 self.mouse_moved();
                 return;
             }
@@ -3089,6 +3323,9 @@ impl App {
             self.chrome.field.set_text(String::new());
             self.chrome.field.insert(t);
             self.refresh_chrome();
+            return;
+        }
+        if self.key_scroll_element(key, shift) {
             return;
         }
         let page = self.viewport().height - LINE;

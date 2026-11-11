@@ -4,8 +4,8 @@
 //! pinta el test y cada referencia con la misma tubería y se comparan píxel a píxel (con la
 //! tolerancia de `<meta name="fuzzy">`). Pasa si coincide con todas las `match` y difiere de
 //! todas las `mismatch`. Los archivos sin referencias son tests de testharness.js o manuales,
-//! y los que tienen `<script>` dependen de JS: ambos cuentan como `needs-js`. Un pánico o una
-//! referencia que no existe cuentan como `error`.
+//! y los que tienen `<script>` o atributos manejadores de eventos `on*` dependen de JS: ambos
+//! cuentan como `needs-js`. Un pánico o una referencia que no existe cuentan como `error`.
 //!
 //! Condiciones: viewport 800×600, DPR 1, fondo blanco, `/` resuelto contra la raíz de WPT
 //! (para `/fonts/ahem.css` y `/css/support/*`), fuentes del sistema más las de `@font-face`.
@@ -208,7 +208,16 @@ fn meta(doc: &Document) -> Meta {
         let NodeData::Element(el) = &doc.get(node).data else {
             continue;
         };
-        if el.name.as_lossy_str() == "script" {
+        // E12: los atributos manejadores de eventos (HTML §8.1.8.1, `onload="…"`) también son
+        // script; muchos tests de `css/css-position/sticky` desplazan así sus contenedores.
+        let handler = el.attrs.iter().any(|a| {
+            a.ns.is_none()
+                && a.name
+                    .as_lossy_str()
+                    .get(..2)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("on"))
+        });
+        if el.name.as_lossy_str() == "script" || handler {
             m.has_script = true;
         }
         if el.is_html("link") {
@@ -573,6 +582,11 @@ impl Harness {
         install_panic_hook();
         let mut tests: Vec<(PathBuf, String)> = Vec::new();
         for g in groups {
+            // E12: con un filtro de ruta solo se recorren los grupos que pueden contenerlo
+            // (recorrer todos tarda minutos con el disco cargado).
+            if filter.is_some_and(|flt| !group_may_match(g, flt)) {
+                continue;
+            }
             let mut files = Vec::new();
             collect_files(&self.wpt.join(g), &mut files);
             files.sort();
@@ -657,7 +671,19 @@ pub const GROUPS: &[&str] = &[
     "css/css-writing-modes",
     "css/CSS2/bidi-text",
     "css/css-text",
+    // E12: scroll, sticky y object-fit.
+    "css/css-overflow",
+    "css/css-position",
+    "css/css-images",
 ];
+
+/// ¿Puede haber tests del grupo `g` (`css/css-position`) cuya ruta contenga `flt`? Un filtro
+/// sin `/` puede estar en cualquier grupo; uno con `/` tiene que contener el grupo, estar
+/// dentro de él o empezar por su último segmento (`css-position/sticky`).
+fn group_may_match(g: &str, flt: &str) -> bool {
+    let last = g.rsplit('/').next().unwrap_or(g);
+    !flt.contains('/') || flt.contains(g) || g.contains(flt) || flt.starts_with(last)
+}
 
 /// Tabla Markdown por directorio.
 pub fn summary_table(results: &[Outcome], groups: &[&str]) -> String {
@@ -733,8 +759,8 @@ pub fn run_and_report(workspace: &Path, filter: Option<&str>, docs: bool) -> Vec
              (`tests/wpt/fonts/Ahem.ttf`, como si estuviera instalada) y `@font-face`."
                 .to_owned(),
             "- `.xht`/`.xhtml` se parsean como XML; el resto, como HTML.".to_owned(),
-            "- `needs-js`: tests de testharness.js, manuales o con `<script>` (en el test o en \
-             la referencia)."
+            "- `needs-js`: tests de testharness.js, manuales o con `<script>` o atributos \
+             manejadores de eventos `on*` (en el test o en la referencia)."
                 .to_owned(),
             "- `error`: pánico o recurso faltante.".to_owned(),
             "- El porcentaje se calcula sobre pass + fail + error.".to_owned(),
@@ -799,6 +825,19 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn group_filter() {
+        assert!(group_may_match("css/css-position", "sticky"));
+        assert!(group_may_match(
+            "css/css-position",
+            "css/css-position/sticky"
+        ));
+        assert!(group_may_match("css/css-position", "css-position/sticky"));
+        assert!(group_may_match("css/CSS2/positioning", "css/CSS2"));
+        assert!(!group_may_match("css/CSS2/positioning", "css/css-position"));
+        assert!(!group_may_match("css/css-grid", "css/css-overflow/x.html"));
+    }
     use super::*;
 
     #[test]

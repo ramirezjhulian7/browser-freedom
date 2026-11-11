@@ -15,6 +15,24 @@ use crate::compiler::scope::{Tag, key};
 use crate::compiler::{BindMode, Codegen, Control, JumpExit, Label, NameSource, labelled_fn};
 use crate::string::JsString;
 
+/// E8: si una lista de sentencias declara `using` directamente: `Some(true)` si alguna es
+/// `await using` (su DisposeResources espera).
+pub(crate) fn using_hint<'a>(body: impl IntoIterator<Item = &'a Stmt>) -> Option<bool> {
+    let mut hint = None;
+    for s in body {
+        if let Stmt::Variable(d) = s {
+            match d.kind {
+                VarKind::Using => {
+                    hint.get_or_insert(false);
+                }
+                VarKind::AwaitUsing => hint = Some(true),
+                _ => {}
+            }
+        }
+    }
+    hint
+}
+
 /// A qué apunta un `break`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BreakKind {
@@ -43,7 +61,8 @@ impl<'t> Codegen<'t> {
         if let Some(id) = self.tree.scope(key(span, Tag::Block)) {
             self.enter_scope(id);
             self.instantiate_block_functions(body);
-            self.statements(body);
+            // E8: Block evaluation, DisposeResources(blockEnv.[[DisposeCapability]], …).
+            self.dispose_region(using_hint(body), |cg| cg.statements(body));
             self.exit_scope(id, parent);
         } else {
             self.statements(body);
@@ -413,27 +432,31 @@ impl<'t> Codegen<'t> {
                 .collect();
             self.instantiate_block_functions(&all);
         }
-        let (brk, _) = self.push_breakable(BreakKind::Switch, 0);
-        let labels: Vec<Label> = cases.iter().map(|_| self.new_label()).collect();
-        let mut default = None;
-        for (i, c) in cases.iter().enumerate() {
-            match &c.test {
-                Some(t) => {
-                    self.emit(Op::GetLocal(tmp));
-                    self.expr(t);
-                    self.emit(Op::StrictEq);
-                    self.emit_to(Op::JumpIfTrue(0), labels[i]);
+        // E8: el CaseBlock con `using` dispone sus recursos al salir (§14.12.4).
+        let hint = using_hint(cases.iter().flat_map(|c| c.consequent.iter()));
+        self.dispose_region(hint, |cg| {
+            let (brk, _) = cg.push_breakable(BreakKind::Switch, 0);
+            let labels: Vec<Label> = cases.iter().map(|_| cg.new_label()).collect();
+            let mut default = None;
+            for (i, c) in cases.iter().enumerate() {
+                match &c.test {
+                    Some(t) => {
+                        cg.emit(Op::GetLocal(tmp));
+                        cg.expr(t);
+                        cg.emit(Op::StrictEq);
+                        cg.emit_to(Op::JumpIfTrue(0), labels[i]);
+                    }
+                    None => default = Some(labels[i]),
                 }
-                None => default = Some(labels[i]),
             }
-        }
-        self.jump(default.unwrap_or(brk));
-        for (i, c) in cases.iter().enumerate() {
-            self.bind(labels[i]);
-            self.statements(&c.consequent);
-        }
-        self.bind(brk);
-        self.pop_breakable(BreakKind::Switch);
+            cg.jump(default.unwrap_or(brk));
+            for (i, c) in cases.iter().enumerate() {
+                cg.bind(labels[i]);
+                cg.statements(&c.consequent);
+            }
+            cg.bind(brk);
+            cg.pop_breakable(BreakKind::Switch);
+        });
         if let Some(id) = scope {
             self.exit_scope(id, parent);
         }
@@ -510,6 +533,94 @@ impl<'t> Codegen<'t> {
         self.free_temp(ks);
     }
 
+    /// E8: una región cuyos recursos `using` se disponen al salir, normal o abruptamente:
+    /// como un `try`/`finally` cuyo bloque final es DisposeResources con la completion.
+    /// `hint`: None si la región no tiene `using`; Some(true) si espera (`await using`).
+    pub(crate) fn dispose_region(&mut self, hint: Option<bool>, body: impl FnOnce(&mut Self)) {
+        let Some(is_async) = hint else {
+            body(self);
+            return;
+        };
+        let ds = self.alloc_temp();
+        let ks = self.alloc_temp();
+        let vs = self.alloc_temp();
+        self.emit(Op::DisposeInit(ds));
+        let entry = self.new_label();
+        self.emit_to(
+            Op::PushFinally {
+                target: 0,
+                kind_slot: ks,
+                value_slot: vs,
+            },
+            entry,
+        );
+        self.st().controls.push(Control::Finally {
+            kind_slot: ks,
+            entry,
+            exits: Vec::new(),
+        });
+        let saved = self.st().dispose_slot.replace(ds);
+        body(self);
+        self.st().dispose_slot = saved;
+        let exits = match self.st().controls.pop() {
+            Some(Control::Finally { exits, .. }) => exits,
+            _ => unreachable!("control de finally"),
+        };
+        self.emit(Op::PopHandler);
+        self.emit(Op::Int(COMPLETION_NORMAL as i32));
+        self.emit(Op::InitLocal(ks));
+        self.bind(entry);
+        if is_async {
+            let lp = self.new_label();
+            let done = self.new_label();
+            let catch = self.new_label();
+            self.bind(lp);
+            self.emit_to(
+                Op::DisposeAsyncStep {
+                    slot: ds,
+                    kind_slot: ks,
+                    value_slot: vs,
+                    done: 0,
+                },
+                done,
+            );
+            self.emit_to(Op::PushCatch(0), catch);
+            self.emit(Op::Await);
+            self.emit(Op::PopHandler);
+            self.emit(Op::Pop);
+            self.jump(lp);
+            self.bind(catch);
+            self.emit(Op::DisposeAwaitError {
+                kind_slot: ks,
+                value_slot: vs,
+            });
+            self.jump(lp);
+            self.bind(done);
+        } else {
+            self.emit(Op::DisposeSync {
+                slot: ds,
+                kind_slot: ks,
+                value_slot: vs,
+            });
+        }
+        let table = self.add_const(Constant::FinallyTable(std::rc::Rc::new(Vec::new())));
+        self.emit(Op::EndFinally {
+            kind_slot: ks,
+            value_slot: vs,
+            table,
+        });
+        let after = self.new_label();
+        self.jump(after);
+        let mut entries = Vec::new();
+        for (k, exit) in exits {
+            entries.push((k, self.target_pc()));
+            self.emit_unwind(exit.target, exit.is_continue);
+        }
+        self.st().consts[table as usize] = Constant::FinallyTable(std::rc::Rc::new(entries));
+        self.bind(after);
+        self.free_temp(ds);
+    }
+
     fn try_catch(&mut self, block: &BlockStmt, handler: Option<&CatchClause>) {
         let Some(h) = handler else {
             self.block(&block.body, block.span);
@@ -563,35 +674,46 @@ impl<'t> Codegen<'t> {
                 per_iteration = d.kind == VarKind::Let && self.tree.scopes[id].materialized;
             }
         }
-        match init {
-            Some(ForInit::Variable(d)) => self.var_declaration(d),
-            Some(ForInit::Expr(e)) => {
-                self.expr(e);
-                self.emit(Op::Pop);
+        // E8: `for (using …;;)` dispone al terminar el bucle (ForLoopEvaluation).
+        let hint = match init {
+            Some(ForInit::Variable(d)) => match d.kind {
+                VarKind::Using => Some(false),
+                VarKind::AwaitUsing => Some(true),
+                _ => None,
+            },
+            _ => None,
+        };
+        self.dispose_region(hint, |cg| {
+            match init {
+                Some(ForInit::Variable(d)) => cg.var_declaration(d),
+                Some(ForInit::Expr(e)) => {
+                    cg.expr(e);
+                    cg.emit(Op::Pop);
+                }
+                None => {}
             }
-            None => {}
-        }
-        if per_iteration {
-            self.emit(Op::CopyScope);
-        }
-        let (brk, cont) = self.push_breakable(BreakKind::Loop, 0);
-        let top = self.new_label();
-        self.bind(top);
-        if let Some(t) = test {
-            self.expr(t);
-            self.emit_to(Op::JumpIfFalse(0), brk);
-        }
-        self.stmt(body);
-        self.bind(cont);
-        if per_iteration {
-            self.emit(Op::CopyScope);
-        }
-        if let Some(u) = update {
-            self.expr_discard(u);
-        }
-        self.jump(top);
-        self.bind(brk);
-        self.pop_breakable(BreakKind::Loop);
+            if per_iteration {
+                cg.emit(Op::CopyScope);
+            }
+            let (brk, cont) = cg.push_breakable(BreakKind::Loop, 0);
+            let top = cg.new_label();
+            cg.bind(top);
+            if let Some(t) = test {
+                cg.expr(t);
+                cg.emit_to(Op::JumpIfFalse(0), brk);
+            }
+            cg.stmt(body);
+            cg.bind(cont);
+            if per_iteration {
+                cg.emit(Op::CopyScope);
+            }
+            if let Some(u) = update {
+                cg.expr_discard(u);
+            }
+            cg.jump(top);
+            cg.bind(brk);
+            cg.pop_breakable(BreakKind::Loop);
+        });
         if let Some(id) = head {
             self.exit_scope(id, parent);
         }
@@ -671,20 +793,37 @@ impl<'t> Codegen<'t> {
             self.enter_scope(id);
         }
         match left {
+            ForHead::Variable(d) if matches!(d.kind, VarKind::Using | VarKind::AwaitUsing) => {
+                // E8: ForIn/OfBodyEvaluation con `using`: cada iteración dispone sus
+                // recursos (DisposeResources(iterationEnv.[[DisposeCapability]], result))
+                // antes de cerrar el iterador.
+                let is_async = d.kind == VarKind::AwaitUsing;
+                let tv = self.alloc_temp();
+                self.emit(Op::InitLocal(tv));
+                self.dispose_region(Some(is_async), |cg| {
+                    let ds = cg.sti().dispose_slot.expect("DisposeCapability");
+                    cg.emit(Op::GetLocal(tv));
+                    cg.emit(Op::Dup);
+                    cg.emit(Op::AddDispose { slot: ds, is_async });
+                    cg.pattern_binding(&d.declarations[0].id, BindMode::Lexical);
+                    cg.stmt(body);
+                });
+                self.free_temp(tv);
+            }
             ForHead::Variable(d) => {
                 let mode = if d.kind == VarKind::Var {
                     BindMode::Var
                 } else {
                     BindMode::Lexical
                 };
-                if matches!(d.kind, VarKind::Using | VarKind::AwaitUsing) {
-                    self.unsupported("using (explicit-resource-management)");
-                }
                 self.pattern_binding(&d.declarations[0].id, mode);
+                self.stmt(body);
             }
-            ForHead::Pattern(p) => self.pattern_binding(p, BindMode::Assign),
+            ForHead::Pattern(p) => {
+                self.pattern_binding(p, BindMode::Assign);
+                self.stmt(body);
+            }
         }
-        self.stmt(body);
         self.bind(cont);
         if let Some(id) = iter_scope {
             self.exit_scope(id, parent);
@@ -738,7 +877,25 @@ impl<'t> Codegen<'t> {
 
     pub(crate) fn var_declaration(&mut self, d: &VariableDeclaration) {
         if matches!(d.kind, VarKind::Using | VarKind::AwaitUsing) {
-            self.unsupported("using (explicit-resource-management)");
+            // E8: LexicalBinding con `using`: InitializeReferencedBinding con el hint, que
+            // hace AddDisposableResource antes de inicializar el binding.
+            let is_async = d.kind == VarKind::AwaitUsing;
+            let ds = self.sti().dispose_slot.expect("scope con using");
+            for dec in &d.declarations {
+                self.pos(dec.span.start);
+                let Pat::Ident(id) = &dec.id else {
+                    unreachable!("using con un patrón (lo rechaza el parser)")
+                };
+                match &dec.init {
+                    Some(init) => {
+                        self.expr_named(init, Some(NameSource::Const(id.name.to_js_string())))
+                    }
+                    None => self.emit(Op::Undefined),
+                }
+                self.emit(Op::Dup);
+                self.emit(Op::AddDispose { slot: ds, is_async });
+                self.emit_init_lexical(&id.name);
+            }
             return;
         }
         let var = d.kind == VarKind::Var;
