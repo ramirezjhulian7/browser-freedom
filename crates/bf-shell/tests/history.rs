@@ -180,3 +180,46 @@ fn suggestions_prefer_typed_prefix_and_frequent_pages() {
     );
     assert!(urls("zzz").is_empty());
 }
+
+#[test]
+fn top_sites_rank_by_frecency_one_per_site() {
+    let mut h = History::memory();
+    let day = 86_400;
+    let now = 400 * day;
+    // Muchas visitas recientes a un sitio, con dos páginas: un solo acceso (la más visitada).
+    for i in 0..6 {
+        h.record("https://es.wikipedia.org/wiki/Canción", "Canción", now - i);
+    }
+    h.record("https://es.wikipedia.org/wiki/Árbol", "Árbol", now);
+    // `www.` no separa sitios.
+    h.record("https://www.example.com/", "Example", now - day);
+    h.record("https://example.com/otra", "Otra", now - day);
+    h.record("https://example.com/otra", "Otra", now - day);
+    // Muchas visitas, pero viejas: pesan menos que pocas recientes.
+    for _ in 0..8 {
+        h.record("https://viejo.example.org/", "Viejo", now - 300 * day);
+    }
+    h.record(
+        "https://news.ycombinator.com/",
+        "Hacker News",
+        now - 2 * day,
+    );
+    // Los archivos locales cuentan cada uno por su ruta.
+    h.record("file:///C:/a.html", "A", now);
+    h.record("file:///C:/b.html", "B", now);
+
+    let top: Vec<&str> = h.top_sites(8, now).iter().map(|v| v.url.as_str()).collect();
+    assert_eq!(
+        top,
+        [
+            "https://es.wikipedia.org/wiki/Canción",
+            "https://example.com/otra",
+            "file:///C:/a.html",
+            "file:///C:/b.html",
+            "https://news.ycombinator.com/",
+            "https://viejo.example.org/",
+        ]
+    );
+    assert_eq!(h.top_sites(2, now).len(), 2);
+    assert!(History::memory().top_sites(8, now).is_empty());
+}

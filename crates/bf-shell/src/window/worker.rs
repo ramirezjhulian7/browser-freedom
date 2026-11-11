@@ -193,6 +193,21 @@ impl Documents {
             let _ = t.jobs.send(Msg::Stop);
         }
     }
+
+    /// Cierra los hilos de todas las pestañas (E11: se cierra la ventana).
+    pub fn close_all(&mut self) {
+        for (_, t) in self.threads.drain() {
+            let _ = t.jobs.send(Msg::Stop);
+        }
+    }
+
+    /// Manda un trabajo solo si la pestaña `tab` ya tiene hilo (E11: una pestaña restaurada
+    /// que todavía no se mostró no arranca uno para un aviso).
+    pub fn send_existing(&mut self, tab: u64, job: Job) {
+        if let Some(t) = self.threads.get(&tab) {
+            let _ = t.jobs.send(Msg::Job(job));
+        }
+    }
 }
 
 enum Msg {

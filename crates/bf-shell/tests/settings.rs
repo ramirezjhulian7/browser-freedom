@@ -79,3 +79,16 @@ fn saved_to_the_profile_file() {
     assert!(again.block_third_party_cookies);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn restore_session_option() {
+    // Por omisión, Freedom vuelve a la sesión de la última vez.
+    assert!(Settings::default().restore_session);
+    let s = Settings::parse("restore_session\tfalse\n");
+    assert!(!s.restore_session);
+    let out = s.serialize();
+    assert!(out.contains("restore_session\tfalse\n"));
+    assert_eq!(Settings::parse(&out), s);
+    // Un valor inválido deja el de omisión.
+    assert!(Settings::parse("restore_session\tquizás\n").restore_session);
+}

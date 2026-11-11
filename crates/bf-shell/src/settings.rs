@@ -25,6 +25,8 @@ pub struct Settings {
     pub block_third_party_cookies: bool,
     /// Zoom de texto (1 = sin zoom): escala solo los tamaños de fuente, no la página.
     pub text_zoom: f32,
+    /// Al abrir, volver a las ventanas y pestañas de la última vez ([`crate::restore`]).
+    pub restore_session: bool,
     /// Líneas con nombres que esta versión no conoce, tal cual.
     unknown: Vec<String>,
     path: Option<PathBuf>,
@@ -35,6 +37,7 @@ impl Default for Settings {
         Settings {
             block_third_party_cookies: false,
             text_zoom: 1.0,
+            restore_session: true,
             unknown: Vec::new(),
             path: None,
         }
@@ -75,6 +78,11 @@ impl Settings {
                         s.text_zoom = z;
                     }
                 }
+                "restore_session" => {
+                    if let Some(b) = parse_bool(value) {
+                        s.restore_session = b;
+                    }
+                }
                 _ => s.unknown.push(line.to_owned()),
             }
         }
@@ -84,19 +92,20 @@ impl Settings {
     /// El archivo: encabezado, las opciones conocidas y las desconocidas al final.
     pub fn serialize(&self) -> String {
         let mut out = format!("{HEADER}\n");
-        let bool_text = if self.block_third_party_cookies {
-            "true"
-        } else {
-            "false"
-        };
+        let bool_text = |b: bool| if b { "true" } else { "false" };
         out.push_str(&profile::join_record(&[
             "block_third_party_cookies",
-            bool_text,
+            bool_text(self.block_third_party_cookies),
         ]));
         out.push('\n');
         out.push_str(&profile::join_record(&[
             "text_zoom",
             &format!("{}", self.text_zoom),
+        ]));
+        out.push('\n');
+        out.push_str(&profile::join_record(&[
+            "restore_session",
+            bool_text(self.restore_session),
         ]));
         out.push('\n');
         for line in &self.unknown {

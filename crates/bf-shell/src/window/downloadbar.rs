@@ -23,8 +23,6 @@ use crate::theme::Theme;
 /// Alto de la barra y ancho de cada tarjeta (con su margen).
 pub const HEIGHT: f32 = 48.0;
 const ITEM: f32 = 242.0;
-/// Cada cuánto se redibuja el progreso mientras algo descarga.
-pub const TICK: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -188,7 +186,12 @@ impl App {
     /// Descarga `url` a la carpeta de descargas (con progreso en la barra), sin dejar la
     /// página actual.
     pub(super) fn start_download(&mut self, url: Url, name: Option<String>) {
-        let id = downloads::start(&url, name.as_deref(), self.net.clone(), Arc::new(|| {}));
+        let id = downloads::start(
+            &url,
+            name.as_deref(),
+            self.net.clone(),
+            self.download_wake.clone(),
+        );
         self.show_downloads(id);
         self.set_notice(format!(
             "Descargando {}",
@@ -227,8 +230,9 @@ impl App {
         }
     }
 
-    /// Antes de pintar y en cada vuelta del bucle: si cambió el avance o el tamaño, vuelve a
-    /// maquetar. Devuelve si hay descargas en curso (para seguir redibujando).
+    /// Antes de pintar y cuando el hilo de una descarga despierta la ventana (E11, sin
+    /// sondeo): si cambió el avance o el tamaño, vuelve a maquetar. Devuelve si hay descargas
+    /// en curso.
     pub(super) fn tick_downloads(&mut self) -> bool {
         let running = downloads::global().running() > 0;
         let area = self.page_area();
@@ -343,10 +347,5 @@ impl App {
             .map(|d| format!("{} ({})", d.name(), d.status()))
             .collect();
         format!(" descargas={items:?}")
-    }
-
-    /// Cuándo volver a mirar el progreso.
-    pub(super) fn downloads_deadline(&self) -> Instant {
-        Instant::now() + TICK
     }
 }

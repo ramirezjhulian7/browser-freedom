@@ -68,6 +68,7 @@ const WPT_STATUS: &str = include_str!("../../../docs/wpt-status.md");
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Ir a la barra de dirección"),
     ("Ctrl+T · Ctrl+W", "Pestaña nueva y cerrar pestaña"),
+    ("Ctrl+N", "Ventana nueva"),
     ("Ctrl+Tab · Ctrl+1…9", "Cambiar de pestaña"),
     (
         "Clic central · Ctrl+clic",
@@ -76,7 +77,13 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Alt+← · Alt+→", "Atrás y adelante"),
     ("Ctrl+R · F5", "Recargar"),
     ("Esc", "Detener la carga"),
-    ("Ctrl+H", "Inicio"),
+    ("Alt+Inicio", "Página de inicio"),
+    ("Ctrl+H · Ctrl+J", "Historial y descargas"),
+    (
+        "Ctrl+D · Ctrl+Shift+B",
+        "Guardar marcador y ver los marcadores",
+    ),
+    ("Ctrl+F", "Buscar en la página"),
     (
         "Ctrl++ · Ctrl+− · Ctrl+0",
         "Acercar, alejar y tamaño normal",
@@ -93,7 +100,10 @@ pub const DEV_SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+D", "Volcar el layout"),
 ];
 
-/// Accesos de `about:home`.
+/// Cuántos sitios más visitados muestra la página de pestaña nueva (dos filas de cuatro).
+const TOP_SITES: usize = 8;
+
+/// Accesos de `about:home` cuando el historial está vacío.
 const TILES: &[(&str, &str, &str)] = &[
     ("Google", "https://www.google.com/", "www.google.com"),
     (
@@ -327,6 +337,12 @@ pub fn profile_action(url: &Url) -> Option<Outcome> {
                 ..Outcome::default()
             })
         }
+        "setting-restore-session" => {
+            let mut s = crate::settings::global();
+            s.restore_session = !s.restore_session;
+            s.save();
+            Some(Outcome::reload())
+        }
         "setting-text-zoom" => {
             let mut s = crate::settings::global();
             s.text_zoom = match url.query.as_deref().unwrap_or("") {
@@ -459,6 +475,19 @@ fn settings_page(ctx: &LoadContext) -> String {
             (
                 "cookies_state",
                 if s.block_third_party_cookies {
+                    "Activado"
+                } else {
+                    "Desactivado"
+                }
+                .to_owned(),
+            ),
+            (
+                "restore_on",
+                if s.restore_session { " on" } else { "" }.to_owned(),
+            ),
+            (
+                "restore_state",
+                if s.restore_session {
                     "Activado"
                 } else {
                     "Desactivado"
@@ -804,13 +833,38 @@ fn source(url: &Url, ctx: &LoadContext) -> String {
 }
 
 fn home(ctx: &LoadContext) -> String {
+    // Los sitios más visitados del historial (E11); sin historial, unos accesos de ejemplo.
+    let top: Vec<(String, String, String)> = crate::history::global()
+        .top_sites(TOP_SITES, crate::profile::now())
+        .into_iter()
+        .map(|v| (v.label().to_owned(), v.url.clone(), host_of(&v.url)))
+        .collect();
+    let top = if top.is_empty() {
+        TILES
+            .iter()
+            .map(|(n, h, o)| ((*n).to_owned(), (*h).to_owned(), (*o).to_owned()))
+            .collect()
+    } else {
+        top
+    };
     let mut tiles = String::new();
-    for (name, href, host) in TILES {
-        let letter = name.chars().next().unwrap_or('?').to_uppercase();
+    for (name, href, host) in &top {
+        let letter = host
+            .strip_prefix("www.")
+            .unwrap_or(host)
+            .chars()
+            .chain(name.chars())
+            .find(|c| c.is_alphanumeric())
+            .unwrap_or('?')
+            .to_uppercase();
         let _ = write!(
             tiles,
-            "<a class=\"tile\" href=\"{href}\"><span class=\"frame\">{letter}<span class=\"gap\">\
-             </span></span><span class=\"name\">{name}</span><span class=\"host\">{host}</span></a>"
+            "<a class=\"tile\" href=\"{href}\" title=\"{name}\"><span class=\"frame\">{letter}\
+             <span class=\"gap\"></span></span><span class=\"name\">{name}</span>\
+             <span class=\"host\">{host}</span></a>",
+            href = escape(href),
+            name = escape(name),
+            host = escape(host),
         );
     }
     let mut recent = String::new();
@@ -1448,6 +1502,7 @@ mod tests {
             "engine",
             "history",
             "bookmarks",
+            "settings",
         ] {
             let url = Url::parse(&format!("about:{name}"), None).unwrap();
             let loaded = page(&url, &ctx);

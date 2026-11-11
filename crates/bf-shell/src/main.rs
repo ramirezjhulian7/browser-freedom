@@ -14,6 +14,7 @@ mod history;
 mod internal;
 mod load;
 mod profile;
+mod restore;
 mod script;
 mod settings;
 mod theme;

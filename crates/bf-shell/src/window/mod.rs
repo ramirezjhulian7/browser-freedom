@@ -16,6 +16,7 @@
 //!
 //! Los atajos están en [`crate::internal::SHORTCUTS`] (y en `about:home`).
 
+mod browser;
 mod chrome;
 mod dialog;
 mod downloadbar;
@@ -47,16 +48,17 @@ use bf_paint::{
     render_scrolled,
 };
 use bf_style::values::color::Rgba;
-use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::internal;
 use crate::load::{Loaded, indicated_element};
+use crate::restore::{SavedEntry, SavedTab, SavedWindow};
 use crate::theme::Theme;
+use browser::{Browser, Wake, WindowRequest};
 use chrome::{BAR, Chrome, PANEL, Region, STATUS, TabInfo};
 use edit::{Editable, Focus};
 use menu::{Menu, MenuAction, MenuItem};
@@ -256,6 +258,12 @@ struct App {
     /// Aviso temporal en la línea de estado ("Guardado …").
     notice: Option<(String, Instant)>,
     clock: Instant,
+    /// Pedidos al navegador (E11: ventana nueva, `storage` para las otras ventanas).
+    requests: Vec<WindowRequest>,
+    /// Cambió algo que la sesión guardada refleja (E11, [`crate::restore`]).
+    session_dirty: bool,
+    /// Despierta el bucle cuando una descarga avanza o termina (E11).
+    download_wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Interpreta lo escrito en el campo de URL: una URL, una ruta local, un host (se antepone
@@ -633,16 +641,15 @@ fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
 }
 
 impl App {
-    fn new(worker: Documents, fonts: Arc<FontDb>, initial: Option<Url>, theme: Theme) -> App {
+    fn new(
+        worker: Documents,
+        fonts: Arc<FontDb>,
+        initial: Option<Url>,
+        theme: Theme,
+        net: Arc<NetLoader>,
+    ) -> App {
         App {
-            net: {
-                // Las opciones del perfil que viven en la red (E4: cookies de terceros).
-                let net = NetLoader::new();
-                net.fetcher
-                    .cookies
-                    .set_block_third_party(crate::settings::global().block_third_party_cookies);
-                Arc::new(net)
-            },
+            net,
             tabs: vec![None],
             active: 0,
             focus: None,
@@ -697,6 +704,9 @@ impl App {
             load_time: None,
             notice: None,
             clock: Instant::now(),
+            requests: Vec::new(),
+            session_dirty: false,
+            download_wake: Arc::new(|| {}),
         }
     }
 
@@ -833,7 +843,15 @@ impl App {
         t.current
             .as_ref()
             .and_then(|l| l.title().or_else(|| Some(short_name(&l.url))))
-            .or_else(|| t.history.get(t.index).map(|e| short_name(&e.url)))
+            .or_else(|| {
+                t.history.get(t.index).map(|e| {
+                    if e.title.trim().is_empty() {
+                        short_name(&e.url)
+                    } else {
+                        e.title.clone()
+                    }
+                })
+            })
             .unwrap_or_default()
     }
 
@@ -927,6 +945,7 @@ impl App {
         self.tabs[self.active] = Some(incoming);
         self.active = i;
         self.chrome.field.focused = false;
+        self.load_restored();
         self.update_title();
         self.refresh_chrome();
         self.refresh_panel();
@@ -1186,6 +1205,10 @@ impl App {
                 MenuAction::OpenInTab(l.clone()),
             ));
             items.push(MenuItem::new(
+                "Abrir enlace en una ventana nueva",
+                MenuAction::OpenInWindow(l.clone()),
+            ));
+            items.push(MenuItem::new(
                 "Copiar dirección del enlace",
                 MenuAction::CopyText(l.clone()),
             ));
@@ -1282,6 +1305,11 @@ impl App {
                     self.new_tab(Some(u), true);
                 }
             }
+            MenuAction::OpenInWindow(u) => {
+                if let Ok(u) = Url::parse(&u, None) {
+                    self.new_window(Some(u));
+                }
+            }
             MenuAction::CopyText(t) => {
                 let message = if set_clipboard(&t) {
                     "Copiado"
@@ -1373,6 +1401,7 @@ impl App {
 
     /// Vuelve a maquetar la barra y la línea de estado con el estado actual.
     fn refresh_chrome(&mut self) {
+        self.session_dirty = true;
         let vp = self.viewport();
         let tabs: Vec<TabInfo> = (0..self.tabs.len())
             .map(|i| TabInfo {
@@ -2041,8 +2070,15 @@ impl App {
                     self.new_tab(Some(u), false);
                 }
             }
+            PageRequest::OpenWindow(url) => {
+                if let Ok(u) = Url::parse(&url, None) {
+                    self.new_window(Some(u));
+                }
+            }
             PageRequest::Close => self.close_tab(i),
             PageRequest::StorageChanged(notice) => {
+                // E11: y las pestañas de las otras ventanas.
+                self.requests.push(WindowRequest::Storage(notice.clone()));
                 // Las otras pestañas (de cualquier origen: cada una filtra el suyo).
                 let keys: Vec<u64> = (0..self.tabs.len())
                     .filter(|&j| j != i)
@@ -2050,7 +2086,7 @@ impl App {
                     .collect();
                 for key in keys {
                     self.worker
-                        .send(key, Job::Storage(Box::new(notice.clone())));
+                        .send_existing(key, Job::Storage(Box::new(notice.clone())));
                 }
             }
             PageRequest::ScrollTo(x, y) => self.with_tab(i, |app| {
@@ -3210,6 +3246,7 @@ impl App {
         // Atajos globales.
         match key {
             Key::Character(c) if ctrl && is(c, "t") => return self.new_tab(None, false),
+            Key::Character(c) if ctrl && !shift && is(c, "n") => return self.new_window(None),
             Key::Character(c) if ctrl && is(c, "w") => return self.close_tab(self.active),
             Key::Named(NamedKey::Tab) if ctrl && shift => return self.cycle_tab(-1),
             Key::Named(NamedKey::Tab) if ctrl => return self.cycle_tab(1),
@@ -3233,7 +3270,16 @@ impl App {
             Key::Character(c) if ctrl && is(c, "f") => return self.open_find(),
             Key::Named(NamedKey::F3) if self.find.is_none() => return self.open_find(),
             Key::Character(c) if ctrl && is(c, "s") => return self.save_png(),
-            Key::Character(c) if ctrl && is(c, "h") => return self.home(),
+            Key::Character(c) if ctrl && is(c, "h") => {
+                return self.open_internal("freedom://history");
+            }
+            Key::Character(c) if ctrl && is(c, "j") => {
+                return self.open_internal("freedom://downloads");
+            }
+            Key::Character(c) if ctrl && shift && is(c, "b") => {
+                return self.open_internal("freedom://bookmarks");
+            }
+            Key::Named(NamedKey::Home) if alt => return self.home(),
             Key::Named(NamedKey::Escape) if self.loading.is_some() => return self.stop(),
             Key::Named(NamedKey::ArrowLeft) if alt => return self.back(),
             Key::Named(NamedKey::ArrowRight) if alt => return self.forward(),
@@ -3316,14 +3362,25 @@ fn fixed_ancestry(root: Option<&Fragment>, target: &Fragment) -> bool {
     root.and_then(|r| walk(r, target, false)).unwrap_or(false)
 }
 
-/// Evento de usuario: el hilo de trabajo terminó algo.
-struct Wake;
+/// Lo que la ventana hace con el bucle de eventos (E11: el [`Browser`] reparte los eventos
+/// entre las ventanas).
+impl App {
+    /// La red compartida por las ventanas, con las opciones del perfil que viven en ella (E4:
+    /// cookies de terceros).
+    fn shared_net() -> Arc<NetLoader> {
+        let net = NetLoader::new();
+        net.fetcher
+            .cookies
+            .set_block_third_party(crate::settings::global().block_third_party_cookies);
+        Arc::new(net)
+    }
 
-impl ApplicationHandler<Wake> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.graphics.is_some() {
-            return;
-        }
+    fn window_id(&self) -> Option<WindowId> {
+        self.graphics.as_ref().map(|g| g.window.id())
+    }
+
+    /// Crea la ventana y su superficie de dibujo; `false` si no se pudo.
+    fn create_window(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let attributes = Window::default_attributes()
             .with_window_icon(window_icon())
             .with_title("Freedom")
@@ -3332,8 +3389,7 @@ impl ApplicationHandler<Wake> for App {
             Ok(w) => Rc::new(w),
             Err(e) => {
                 eprintln!("no se pudo crear la ventana: {e}");
-                event_loop.exit();
-                return;
+                return false;
             }
         };
         let graphics = softbuffer::Context::new(window.clone()).and_then(|context| {
@@ -3348,65 +3404,233 @@ impl ApplicationHandler<Wake> for App {
             Ok(g) => self.graphics = Some(g),
             Err(e) => {
                 eprintln!("no se pudo crear la superficie de dibujo: {e}");
-                event_loop.exit();
-                return;
+                return false;
             }
         }
         // Tema del sistema (`prefers-color-scheme`).
         let dark = window.theme().map(|t| t == winit::window::Theme::Dark);
         self.chrome.theme = Theme::for_system(dark);
-        let url = self
-            .initial
-            .take()
-            .or_else(|| Url::parse("about:home", None).ok());
-        if let Some(url) = url {
-            self.start_load(url, Navigation::Push);
-        } else {
-            self.refresh_chrome();
+        true
+    }
+
+    /// Empieza a mostrar: las pestañas de `saved` (la visible se carga ya, las demás al
+    /// mostrarlas) o la URL inicial, o la página de inicio.
+    fn start(&mut self, saved: Option<SavedWindow>) {
+        if !saved.is_some_and(|w| self.restore_tabs(&w)) {
+            let url = self
+                .initial
+                .take()
+                .or_else(|| Url::parse("about:home", None).ok());
+            if let Some(url) = url {
+                self.start_load(url, Navigation::Push);
+            } else {
+                self.refresh_chrome();
+            }
         }
-        window.request_redraw();
+        self.redraw_later();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: Wake) {
-        self.receive();
+    /// Pone las pestañas de una ventana guardada ([`crate::restore`]); `false` si no queda
+    /// ninguna que se pueda abrir.
+    fn restore_tabs(&mut self, saved: &SavedWindow) -> bool {
+        let mut tabs: Vec<(Vec<Entry>, usize)> = Vec::new();
+        let mut active = 0;
+        for (n, t) in saved.tabs.iter().enumerate() {
+            let mut history = Vec::new();
+            let mut index = 0;
+            for (i, e) in t.entries.iter().enumerate() {
+                let Ok(url) = Url::parse(&e.url, None) else {
+                    continue;
+                };
+                if i <= t.index {
+                    index = history.len();
+                }
+                history.push(Entry {
+                    url,
+                    title: e.title.clone(),
+                    scroll: (0.0, 0.0),
+                });
+            }
+            if history.is_empty() {
+                continue;
+            }
+            if n <= saved.active {
+                active = tabs.len();
+            }
+            tabs.push((history, index));
+        }
+        if tabs.is_empty() {
+            return false;
+        }
+        self.tabs.clear();
+        for (i, (history, index)) in tabs.into_iter().enumerate() {
+            if i == active {
+                self.history = history;
+                self.index = index;
+                self.tabs.push(None);
+            } else {
+                self.next_tab_key += 1;
+                self.tabs.push(Some(TabState {
+                    tab_key: self.next_tab_key,
+                    history,
+                    index,
+                    ..TabState::default()
+                }));
+            }
+        }
+        self.active = active;
+        self.load_restored();
+        self.update_title();
+        self.refresh_chrome();
+        true
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // La línea de progreso y los indicadores de las pestañas se animan mientras algo carga;
-        // el aviso se borra al vencer.
+    /// La pestaña activa es una restaurada que todavía no se cargó: carga su entrada actual.
+    fn load_restored(&mut self) {
+        if self.current.is_none()
+            && self.loading.is_none()
+            && let Some(e) = self.history.get(self.index)
+        {
+            let url = e.url.clone();
+            self.start_load(url, Navigation::Traverse(self.index));
+        }
+    }
+
+    /// La ventana para el archivo de la sesión: sus pestañas con el historial de cada una.
+    fn saved_window(&self) -> Option<SavedWindow> {
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for i in 0..self.tabs.len() {
+            let (history, index, loading) = if i == self.active {
+                (&self.history, self.index, &self.loading)
+            } else {
+                match self.tabs[i].as_ref() {
+                    Some(t) => (&t.history, t.index, &t.loading),
+                    None => continue,
+                }
+            };
+            let mut entries: Vec<SavedEntry> = history
+                .iter()
+                .map(|e| SavedEntry {
+                    url: e.url.href(),
+                    title: e.title.clone(),
+                })
+                .collect();
+            let mut index = index;
+            // Una pestaña nueva que todavía carga su primera página.
+            if entries.is_empty()
+                && let Some(l) = loading
+            {
+                entries.push(SavedEntry {
+                    url: l.url.href(),
+                    title: String::new(),
+                });
+                index = 0;
+            }
+            if let Some(t) = SavedTab::new(entries, index) {
+                if i <= self.active {
+                    active = tabs.len();
+                }
+                tabs.push(t);
+            }
+        }
+        (!tabs.is_empty()).then_some(SavedWindow { tabs, active })
+    }
+
+    /// La ventana se cierra: terminan los hilos de sus pestañas.
+    fn shutdown(&mut self) {
+        self.worker.close_all();
+    }
+
+    /// Pide al navegador una ventana nueva con `url` (o la página de inicio).
+    fn new_window(&mut self, url: Option<Url>) {
+        self.requests.push(WindowRequest::NewWindow(url));
+    }
+
+    /// Muestra la página interna `href` (historial, descargas, marcadores): pasa a la pestaña
+    /// que ya la muestra, usa la pestaña nueva en la que se está o abre otra.
+    fn open_internal(&mut self, href: &str) {
+        let Ok(url) = Url::parse(href, None) else {
+            return;
+        };
+        let target = url.href();
+        let shows = |current: &Option<Arc<Loaded>>, history: &[Entry], index: usize| {
+            current
+                .as_ref()
+                .map(|l| l.url.href())
+                .or_else(|| history.get(index).map(|e| e.url.href()))
+                .is_some_and(|h| h == target)
+        };
+        for i in 0..self.tabs.len() {
+            let found = if i == self.active {
+                shows(&self.current, &self.history, self.index)
+            } else {
+                self.tabs[i]
+                    .as_ref()
+                    .is_some_and(|t| shows(&t.current, &t.history, t.index))
+            };
+            if found {
+                return self.activate_tab(i);
+            }
+        }
+        let fresh_tab = self.history.len() <= 1
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|l| l.url.href() == "about:home");
+        if fresh_tab {
+            self.navigate(url);
+        } else {
+            self.new_tab(Some(url), false);
+        }
+    }
+
+    /// Una descarga avanzó o terminó (el hilo de la descarga despierta el bucle).
+    fn downloads_changed(&mut self) {
+        if self.downloads.is_some() {
+            self.tick_downloads();
+            self.redraw_later();
+        }
+    }
+
+    /// Una pestaña de otra ventana cambió el `localStorage` de un origen.
+    fn storage_changed_elsewhere(&mut self, notice: &crate::script::StorageNotice) {
+        let keys: Vec<u64> = (0..self.tabs.len())
+            .filter_map(|j| self.key_of_tab(j))
+            .collect();
+        for key in keys {
+            self.worker
+                .send_existing(key, Job::Storage(Box::new(notice.clone())));
+        }
+    }
+
+    /// Cuándo hay que volver a despertar por esta ventana (`None`: solo con eventos). La línea
+    /// de progreso y los indicadores de las pestañas se animan mientras algo carga; el aviso se
+    /// borra al vencer.
+    fn next_deadline(&mut self) -> Option<Instant> {
         if self.any_loading() {
             let next = self.last_progress_frame + PROGRESS_FRAME;
             if Instant::now() >= next {
                 self.last_progress_frame = Instant::now();
                 self.redraw_later();
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next.max(Instant::now())));
-        } else if let Some((_, at)) = &self.notice {
+            return Some(next.max(Instant::now()));
+        }
+        if let Some((_, at)) = &self.notice {
             let until = *at + NOTICE;
             if Instant::now() >= until {
                 self.notice = None;
                 self.refresh_chrome();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+                return None;
             }
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            return Some(until);
         }
-        // Las descargas en curso (E11): el progreso se mira cada `downloadbar::TICK`.
-        if self.tick_downloads() {
-            let next = self.downloads_deadline();
-            let sooner = match event_loop.control_flow() {
-                ControlFlow::WaitUntil(t) => t.min(next),
-                _ => next,
-            };
-            event_loop.set_control_flow(ControlFlow::WaitUntil(sooner));
-        }
+        None
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    /// Un evento de la ventana (salvo cerrarla, que decide el [`Browser`]).
+    fn window_event(&mut self, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resized(),
             WindowEvent::ThemeChanged(t) => {
                 self.chrome.theme = Theme::for_system(Some(t == winit::window::Theme::Dark));
@@ -3470,8 +3694,8 @@ impl ApplicationHandler<Wake> for App {
     }
 }
 
-/// Abre una ventana con el documento (o `about:home`) y corre el bucle de eventos hasta que
-/// se cierre.
+/// Abre el navegador con el documento (o la sesión de la última vez, o `about:home`) y corre
+/// el bucle de eventos hasta que se cierre la última ventana.
 pub fn open(arg: Option<&str>) -> Result<(), String> {
     let url = match arg {
         Some(a) => {
@@ -3482,18 +3706,9 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
     let event_loop = EventLoop::<Wake>::with_user_event()
         .build()
         .map_err(|e| format!("no se pudo iniciar la ventana: {e}"))?;
-    let proxy: EventLoopProxy<Wake> = event_loop.create_proxy();
-    let fonts = FontDb::system();
-    let proxy = std::sync::Mutex::new(proxy);
-    let worker = Documents::new(fonts.clone(), move || {
-        let _ = proxy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_event(Wake);
-    });
-    let mut app = App::new(worker, fonts, url, Theme::for_system(None));
+    let mut browser = Browser::new(event_loop.create_proxy(), url);
     event_loop
-        .run_app(&mut app)
+        .run_app(&mut browser)
         .map_err(|e| format!("error en el bucle de eventos: {e}"))
 }
 
@@ -3806,7 +4021,13 @@ pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     }
     let fonts = FontDb::system();
     let worker = Documents::new(fonts.clone(), || {});
-    let mut app = App::new(worker, fonts, None, Theme::for_system(None));
+    let mut app = App::new(
+        worker,
+        fonts,
+        None,
+        Theme::for_system(None),
+        App::shared_net(),
+    );
     app.headless = Size {
         width: 1180.0,
         height: 800.0,

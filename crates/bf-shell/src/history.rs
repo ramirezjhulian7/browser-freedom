@@ -292,6 +292,42 @@ impl History {
         out.truncate(limit);
         out
     }
+
+    /// Los sitios más visitados para la página de pestaña nueva (E11): hasta `limit` visitas
+    /// por *frecencia* (las visitas pesadas por lo reciente), una por host para que un sitio
+    /// con muchas páginas no ocupe todos los accesos (la más visitada de cada host).
+    pub fn top_sites(&self, limit: usize, now: u64) -> Vec<&Visit> {
+        let mut scored: Vec<(f64, &Visit)> =
+            self.entries.iter().map(|v| (frecency(v, now), v)).collect();
+        scored.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then(b.1.last.cmp(&a.1.last))
+                .then_with(|| a.1.url.cmp(&b.1.url))
+        });
+        let mut hosts = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (_, v) in scored {
+            if out.len() >= limit {
+                break;
+            }
+            if hosts.insert(site_key(&v.url)) {
+                out.push(v);
+            }
+        }
+        out
+    }
+}
+
+/// El host de `url` sin `www.` (o la URL entera si no tiene host, como los `file:`).
+fn site_key(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    match lower.split_once("://") {
+        Some((scheme, rest)) if scheme != "file" => {
+            let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            host.strip_prefix("www.").unwrap_or(host).to_owned()
+        }
+        _ => lower,
+    }
 }
 
 /// La URL sin esquema ni `www.` (para que "wiki" sugiera `https://es.wikipedia.org/`).
