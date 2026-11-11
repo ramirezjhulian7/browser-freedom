@@ -593,6 +593,47 @@ pub enum Op {
         slot: u32,
         done: u32,
     },
+
+    // --- E8: superinstrucciones de la mirilla ---
+    /// `GetArg(arg)` + `InitLocal(slot)`.
+    ArgToLocal(u32, u32),
+    /// `GetLocal(slot)` + `Int(k)` + `Add`.
+    LocalAddInt(u32, i32),
+    /// `GetLocal(slot)` + `Int(k)` + `Sub`.
+    LocalSubInt(u32, i32),
+    /// `GetLocal(slot)` + `Int(k)` + `Lt` + `JumpIfFalse(target)`.
+    JumpIfNotLocalLtInt {
+        slot: u32,
+        k: i32,
+        target: u32,
+    },
+
+    // --- E8: Explicit Resource Management ---
+    /// NewDisposeCapability en el slot (un scope con `using`).
+    DisposeInit(u32),
+    /// [v] → (): AddDisposableResource(slot, v, hint) (async-dispose con `await using`).
+    AddDispose {
+        slot: u32,
+        is_async: bool,
+    },
+    /// DisposeResources sin `await` con la completion del finally en `kind`/`value`.
+    DisposeSync {
+        slot: u32,
+        kind_slot: u32,
+        value_slot: u32,
+    },
+    /// Un paso de DisposeResources con `await`: [] → [valor a esperar], o salta a `done`.
+    DisposeAsyncStep {
+        slot: u32,
+        kind_slot: u32,
+        value_slot: u32,
+        done: u32,
+    },
+    /// El rechazo de un `Await` de DisposeResources: [error] → (), combinado con la completion.
+    DisposeAwaitError {
+        kind_slot: u32,
+        value_slot: u32,
+    },
 }
 
 /// Una función compilada.
