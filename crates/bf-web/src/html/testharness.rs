@@ -568,10 +568,15 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         // E4: "update the rendering" (HTML §8.1.7.3): con callbacks de `requestAnimationFrame`,
         // el reloj virtual salta al próximo cuadro (cada 16 ms) si llega antes que el próximo
         // temporizador, y se corren con esa hora.
-        if rt.agent.has_animation_frame_callbacks() {
+        // También hay cuadro con animaciones o transiciones CSS en curso, eventos de animación
+        // pendientes o un documento cambiado ("update animations and send events").
+        if rt.agent.has_animation_frame_callbacks()
+            || crate::bom::animation::wants_frame(&rt.agent, realm, true)
+        {
             let frame = (clock.get() / FRAME_MS).floor() * FRAME_MS + FRAME_MS;
             if rt.agent.next_wake().is_none_or(|t| frame <= t) {
                 clock.set(frame);
+                crate::bom::animation::update_and_send_events(&mut rt.agent, realm);
                 if let Err(Throw::Terminate(_)) = rt.agent.run_animation_frames(frame) {
                     return result(Harness::NoResult("tiempo agotado".into()), vec![]);
                 }

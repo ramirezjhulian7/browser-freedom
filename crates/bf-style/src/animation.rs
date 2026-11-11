@@ -941,6 +941,11 @@ impl Animator {
             .all(|e| e.animations.is_empty() && e.transitions.is_empty())
     }
 
+    /// ¿Hay eventos pendientes de despachar?
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// Los eventos pendientes, en orden.
     pub fn take_events(&mut self) -> Vec<AnimationEvent> {
         let mut ev = std::mem::take(&mut self.events);

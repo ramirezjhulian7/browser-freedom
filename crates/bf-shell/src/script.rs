@@ -1053,9 +1053,12 @@ impl Engine {
         n
     }
 
-    /// E4: ¿hay callbacks de `requestAnimationFrame` esperando un cuadro?
+    /// E4: ¿hay callbacks de `requestAnimationFrame` esperando un cuadro, o animaciones y
+    /// transiciones CSS en curso?
     pub fn wants_frame(&self) -> bool {
         self.rt.agent.has_animation_frame_callbacks()
+            || (self.has_window()
+                && bf_web::bom::animation::wants_frame(&self.rt.agent, self.realm, false))
     }
 
     /// E4: el paso de "update the rendering" (HTML §8.1.7.3, paso 16) que corre los callbacks
@@ -1063,6 +1066,10 @@ impl Engine {
     pub fn run_animation_frames(&mut self) {
         let now = self.rt.agent.host.hooks.now();
         self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);
+        // "Update animations and send events" antes de los callbacks (HTML §8.1.7.3).
+        if self.has_window() {
+            bf_web::bom::animation::update_and_send_events(&mut self.rt.agent, self.realm);
+        }
         let r = self.rt.run_animation_frames(now);
         self.rt.agent.options.deadline = None;
         if let Err(e) = r {

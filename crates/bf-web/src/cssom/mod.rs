@@ -348,7 +348,16 @@ pub fn media_context(agent: &mut Agent) -> MediaContext {
 }
 
 /// Los estilos computados del documento de la ventana, al día.
+///
+/// E4: con las animaciones y transiciones CSS de la ventana aplicadas en la hora actual
+/// (`crate::bom::animation::animate`, el "style change event").
 pub fn current_styles(agent: &mut Agent) -> Arc<StyleMap> {
+    let base = cascade_styles(agent);
+    crate::bom::animation::animate(agent, base)
+}
+
+/// Los estilos de la cascada (sin animaciones) del documento de la ventana.
+fn cascade_styles(agent: &mut Agent) -> Arc<StyleMap> {
     if let Some(s) = fresh_snapshot(agent) {
         return s.styles;
     }

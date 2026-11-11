@@ -330,7 +330,10 @@ fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
     let enc = if xml.is_some() {
         Encoding::Utf8
     } else {
-        let mime = res.content_type.as_deref().and_then(bf_net::MimeType::parse);
+        let mime = res
+            .content_type
+            .as_deref()
+            .and_then(bf_net::MimeType::parse);
         match bf_net::html_encoding_with_source(&res.bytes, mime.as_ref()) {
             (e, bf_net::EncodingSource::Default) => {
                 parent_encoding(agent, realm, &res.url).unwrap_or(e)
