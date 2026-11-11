@@ -8,6 +8,7 @@ mod effects; // E4
 pub mod images;
 pub mod raster;
 pub mod reftest;
+pub mod scrollbars; // E12
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -79,6 +80,38 @@ impl FramePage {
             let (x, y) = (point.0 - f.rect.x, point.1 - f.rect.y);
             (x >= 0.0 && y >= 0.0 && x < f.rect.width && y < f.rect.height).then_some((f, (x, y)))
         })
+    }
+}
+
+impl Page {
+    /// Rehace la lista de visualización después de cambiar el árbol sin maquetar de nuevo
+    /// (el scroll de un elemento o las cajas `sticky`, E12).
+    pub fn repaint(&mut self, doc: &Document) {
+        let start = Instant::now();
+        self.display_list =
+            build_display_list_with_images(doc, &self.tree, &self.fonts, &self.images);
+        self.timings.paint = start.elapsed();
+    }
+
+    /// Aplica las posiciones de desplazamiento de los elementos y el scroll de la página (para
+    /// las cajas `sticky` del viewport) y, si cambió el árbol, rehace la lista. Devuelve si
+    /// cambió.
+    pub fn apply_scroll(
+        &mut self,
+        doc: &Document,
+        offsets: &[(bf_dom::NodeId, (f32, f32))],
+        page_scroll: (f32, f32),
+    ) -> bool {
+        let boxes = &self.tree.scroll.boxes;
+        let moved = offsets
+            .iter()
+            .any(|(n, o)| boxes.get(n).is_some_and(|b| b.clamp(*o) != b.offset));
+        bf_layout::scroll::apply_offsets(&mut self.tree, offsets.iter().copied());
+        let sticky = bf_layout::scroll::page_scrolled(&mut self.tree, page_scroll);
+        if moved || sticky {
+            self.repaint(doc);
+        }
+        moved || sticky
     }
 }
 

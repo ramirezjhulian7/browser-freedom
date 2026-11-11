@@ -89,6 +89,12 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         &|key, _| match key {
             "kn" => vec!["false".into(), "true".into()],
             "kf" => vec!["false".into(), "lower".into(), "upper".into()],
+            // E8: la colación por defecto primero y las de la raíz (las que da
+            // Intl.Locale.prototype.getCollations).
+            "co" => std::iter::once("default")
+                .chain(crate::builtins::intl::locale_object::ROOT_COLLATIONS)
+                .map(str::to_owned)
+                .collect(),
             _ => Vec::new(),
         },
     );
