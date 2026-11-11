@@ -1111,6 +1111,7 @@ fn document_write_while_parsing() {
     let mut parser = bf_web::Parser::new(&bf_html::ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        ..bf_html::ParseOptions::default()
     });
     parser.feed(html, &mut bf_dom::events::NoScript);
     let url = Url::parse("https://example.com/", None).expect("url");

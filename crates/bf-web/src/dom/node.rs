@@ -260,7 +260,9 @@ fn set_text_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn get_root_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let r = with_doc(agent, n.doc, |d| d.get_root_node(n.node));
+    // E1: `GetRootNodeOptions.composed`.
+    let composed = crate::dom::events::dict_bool(agent, &a.arg(0), "composed")?;
+    let r = with_doc(agent, n.doc, |d| d.get_root_node_composed(n.node, composed));
     Ok(wrap_node(agent, NodeRef::new(n.doc, r)))
 }
 
@@ -289,7 +291,11 @@ fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let r = with_doc_mut(agent, n.doc, |d| d.clone_node_checked(n.node, deep));
     match r {
-        Ok(c) => Ok(wrap_node(agent, NodeRef::new(n.doc, c))),
+        Ok(c) => {
+            // E1: los custom elements de la copia.
+            crate::html::custom_elements::cloned(agent, NodeRef::new(n.doc, c));
+            Ok(wrap_node(agent, NodeRef::new(n.doc, c)))
+        }
         Err(e) => throw_dom(agent, e),
     }
 }

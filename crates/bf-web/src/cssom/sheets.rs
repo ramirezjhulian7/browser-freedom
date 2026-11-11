@@ -599,6 +599,22 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
     ids
 }
 
+/// E1: la hoja de un wrapper `CSSStyleSheet` y si fue construida (`new CSSStyleSheet()`).
+pub fn sheet_of(agent: &Agent, v: &Value) -> Option<SheetId> {
+    agent.host_unwrap::<SheetPayload>(v).map(|s| s.0)
+}
+
+/// E1: ¿Es una hoja construida? y su texto (para `adoptedStyleSheets`).
+pub fn constructed_sheet(agent: &mut Agent, id: SheetId) -> Option<(bool, String)> {
+    let s = state(agent).sheets.sheets.get(&id)?;
+    let text = if s.disabled {
+        String::new()
+    } else {
+        sheet_text(s)
+    };
+    Some((s.constructed, text))
+}
+
 /// El texto de la hoja de un `<link rel=stylesheet>` (decodificada como UTF-8, CSS Syntax
 /// §3.2 sin `@charset`), o `None` si no se pudo cargar.
 fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {

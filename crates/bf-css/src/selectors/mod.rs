@@ -7,7 +7,10 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 
-pub use matching::{MatchContext, matches, matches_list, matching_specificity};
+pub use matching::{
+    MatchContext, ShadowMatch, ShadowMode, matches, matches_list, matching_specificity,
+    matching_specificity_in,
+};
 pub use parser::{
     SelectorError, parse_relative_selector_list_from, parse_selector_list, parse_selector_list_from,
 };
@@ -139,6 +142,10 @@ pub enum PseudoClass {
     /// E10: `:state(<ident>)` (HTML §4.13.7.4): custom elements cuyo *states set* contiene
     /// el identificador.
     State(String),
+    /// E1: `:host` y `:host(<compound-selector>)` (CSS Scoping §3.2.1).
+    Host(Option<SelectorList>),
+    /// E1: `:host-context(<compound-selector>)`.
+    HostContext(SelectorList),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -211,6 +218,11 @@ pub struct ComplexSelector {
     pub combinators: Vec<Combinator>,
     /// Pseudo-elemento al final del último compound.
     pub pseudo_element: Option<PseudoElement>,
+    /// E1: `::slotted(<compound-selector>)` (CSS Scoping §3.3): el último compound elige el
+    /// `slot` y el argumento el elemento asignado.
+    pub slotted: Option<Box<SelectorList>>,
+    /// E1: `::part(<ident>+)` (CSS Shadow Parts §4.1): el último compound elige el host.
+    pub part: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -282,6 +294,14 @@ impl ComplexSelector {
         if self.pseudo_element.is_some() {
             s = s + Specificity(0, 0, 1);
         }
+        // E1: `::slotted()` cuenta como pseudo-elemento más su argumento; `::part()` como
+        // pseudo-elemento.
+        if let Some(list) = &self.slotted {
+            s = s + Specificity(0, 0, 1) + list.max_specificity();
+        }
+        if self.part.is_some() {
+            s = s + Specificity(0, 0, 1);
+        }
         s
     }
 
@@ -332,6 +352,15 @@ fn simple_specificity(simple: &Simple) -> Specificity {
                 list.max_specificity()
             }
             PseudoClass::Where(_) => Specificity::default(),
+            // E1: como una pseudo-clase más la especificidad del argumento.
+            PseudoClass::Host(arg) => {
+                Specificity(0, 1, 0)
+                    + arg
+                        .as_ref()
+                        .map(SelectorList::max_specificity)
+                        .unwrap_or_default()
+            }
+            PseudoClass::HostContext(arg) => Specificity(0, 1, 0) + arg.max_specificity(),
             PseudoClass::NthChild { of, .. } | PseudoClass::NthLastChild { of, .. } => {
                 Specificity(0, 1, 0)
                     + of.as_ref()
@@ -345,9 +374,12 @@ fn simple_specificity(simple: &Simple) -> Specificity {
 
 fn pseudo_class_lists(pc: &PseudoClass) -> impl Iterator<Item = &SelectorList> {
     let list = match pc {
-        PseudoClass::Not(l) | PseudoClass::Is(l) | PseudoClass::Where(l) | PseudoClass::Has(l) => {
-            Some(l)
-        }
+        PseudoClass::Not(l)
+        | PseudoClass::Is(l)
+        | PseudoClass::Where(l)
+        | PseudoClass::Has(l)
+        | PseudoClass::HostContext(l) => Some(l),
+        PseudoClass::Host(l) => l.as_ref(),
         PseudoClass::NthChild { of, .. } | PseudoClass::NthLastChild { of, .. } => of.as_ref(),
         _ => None,
     };
@@ -356,9 +388,12 @@ fn pseudo_class_lists(pc: &PseudoClass) -> impl Iterator<Item = &SelectorList> {
 
 fn pseudo_class_lists_mut(pc: &mut PseudoClass) -> impl Iterator<Item = &mut SelectorList> {
     let list = match pc {
-        PseudoClass::Not(l) | PseudoClass::Is(l) | PseudoClass::Where(l) | PseudoClass::Has(l) => {
-            Some(l)
-        }
+        PseudoClass::Not(l)
+        | PseudoClass::Is(l)
+        | PseudoClass::Where(l)
+        | PseudoClass::Has(l)
+        | PseudoClass::HostContext(l) => Some(l),
+        PseudoClass::Host(l) => l.as_mut(),
         PseudoClass::NthChild { of, .. } | PseudoClass::NthLastChild { of, .. } => of.as_mut(),
         _ => None,
     };
@@ -407,6 +442,13 @@ impl fmt::Display for ComplexSelector {
             for simple in compound {
                 write!(f, "{simple}")?;
             }
+        }
+        // E1.
+        if let Some(list) = &self.slotted {
+            write!(f, "::slotted({list})")?;
+        }
+        if let Some(names) = &self.part {
+            write!(f, "::part({})", names.join(" "))?;
         }
         if let Some(pe) = self.pseudo_element {
             write!(f, "::{}", pe.name())?;
@@ -483,6 +525,10 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
         PseudoClass::Is(l) => return write!(f, ":is({l})"),
         PseudoClass::Where(l) => return write!(f, ":where({l})"),
         PseudoClass::Has(l) => return write!(f, ":has({l})"),
+        // E1.
+        PseudoClass::Host(None) => return f.write_str(":host"),
+        PseudoClass::Host(Some(l)) => return write!(f, ":host({l})"),
+        PseudoClass::HostContext(l) => return write!(f, ":host-context({l})"),
         PseudoClass::NthChild { a, b, of } | PseudoClass::NthLastChild { a, b, of } => {
             let name = if matches!(pc, PseudoClass::NthChild { .. }) {
                 "nth-child"
