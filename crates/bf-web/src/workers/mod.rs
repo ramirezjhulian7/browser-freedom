@@ -64,6 +64,9 @@ pub enum Envelope {
         origin: String,
         message: Serialized,
     },
+    /// Algo que otro hilo pide correr en este agente (IndexedDB entre pestañas,
+    /// `storage::shared`, E2).
+    Run(Box<dyn FnOnce(&mut Agent) + Send>),
 }
 
 /// Un evento de un worker para su dueño.
@@ -289,6 +292,7 @@ fn handle(agent: &mut Agent, e: Envelope) {
             origin,
             message,
         } => ports::deliver_broadcast(agent, local, origin, message),
+        Envelope::Run(f) => f(agent),
     }
 }
 
@@ -325,7 +329,8 @@ fn poll_tick(agent: &mut Agent, _: &bf_js::vm::function::CallArgs<'_>) -> JsResu
         .values()
         .any(|w| !w.control.closed.load(Ordering::SeqCst))
         || !h.shared.is_empty()
-        || ports::has_remote_ports(agent);
+        || ports::has_remote_ports(agent)
+        || crate::storage::shared::active(agent);
     if !alive && let Some((_, t)) = host(agent).poll.take() {
         agent.clear_timer(t);
     }
