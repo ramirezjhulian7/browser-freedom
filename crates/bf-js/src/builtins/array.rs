@@ -23,7 +23,17 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     agent.realms[realm].intrinsics.array_prototype = proto;
     let ctor = constructor(agent, "Array", 1, array_ctor, proto);
     agent.realms[realm].intrinsics.array_ctor = ctor;
-    const STATICS: &[FnEntry] = &[("from", 1, from), ("isArray", 1, is_array), ("of", 0, of)];
+    const STATICS: &[FnEntry] = &[
+        ("from", 1, from),
+        // E8: Array.fromAsync (§23.1.2.2).
+        (
+            "fromAsync",
+            1,
+            crate::builtins::array_from_async::from_async,
+        ),
+        ("isArray", 1, is_array),
+        ("of", 0, of),
+    ];
     methods(agent, ctor, STATICS);
     let species = PropertyKey::Symbol(agent.well_known.species);
     accessor(
