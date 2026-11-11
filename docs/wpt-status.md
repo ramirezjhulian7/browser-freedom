@@ -29,7 +29,13 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| **Total** | 5265 | 1865 | 5173 | 4 | 12307 | 73.8% |
+| svg (E7, 2026-11-07) | 286 | 168 | 968 | 0 | 1422 | 63.0% |
+| **Total** | 5551 | 2033 | 6141 | 4 | 13729 | 73.2% |
+
+La fila `svg` se midió aparte el 2026-11-07 en `army/e7` con el mismo commit de WPT
+(`cargo test --release -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
+filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo) y el resto es del
+2026-10-20.
 
 Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
 total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`

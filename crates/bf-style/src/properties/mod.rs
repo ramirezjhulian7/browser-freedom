@@ -177,6 +177,13 @@ longhands! {
     BackgroundSize "background-size" background_size: BackgroundSize = "auto", inherited: false, animatable: true;
     BackgroundOrigin "background-origin" background_origin: BackgroundOrigin = "padding-box", inherited: false, animatable: false;
     BackgroundAttachment "background-attachment" background_attachment: BackgroundAttachment = "scroll", inherited: false, animatable: false;
+    // E7: capas de `mask-image` (CSS Masking 1 §7), con la misma sintaxis que los fondos.
+    MaskImage "mask-image" mask_image: BackgroundImages = "none", inherited: false, animatable: false;
+    MaskRepeat "mask-repeat" mask_repeat: BackgroundRepeat = "repeat", inherited: false, animatable: false;
+    MaskPosition "mask-position" mask_position: BackgroundPosition = "0% 0%", inherited: false, animatable: true;
+    MaskSize "mask-size" mask_size: BackgroundSize = "auto", inherited: false, animatable: true;
+    MaskOrigin "mask-origin" mask_origin: BackgroundOrigin = "border-box", inherited: false, animatable: false;
+    MaskClip "mask-clip" mask_clip: BackgroundClip = "border-box", inherited: false, animatable: false;
     FontFamily "font-family" font_family: FontFamily = "serif", inherited: true, animatable: false;
     FontSize "font-size" font_size: FontSize = "medium", inherited: true, animatable: true;
     FontWeight "font-weight" font_weight: FontWeight = "normal", inherited: true, animatable: true;
