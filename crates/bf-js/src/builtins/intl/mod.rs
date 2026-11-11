@@ -7,9 +7,18 @@ pub mod cldr;
 pub mod collator;
 pub mod date_time_format;
 pub mod decimal;
+pub mod display_names;
+pub mod duration_format;
 pub mod locale;
+// E8
+pub mod list_format;
+pub mod locale_object;
 pub mod number_format;
 pub mod plural_rules;
+pub mod relative_time_format;
+pub mod segment;
+pub mod segment_tables;
+pub mod segmenter;
 
 use crate::builtins::web::{WebData, str_value};
 use crate::heap::{Gc, Trace, Tracer};
@@ -25,6 +34,15 @@ pub enum IntlData {
     DateTimeFormat(Box<date_time_format::DateTimeFormat>),
     Collator(Box<collator::Collator>),
     PluralRules(Box<plural_rules::PluralRules>),
+    // E8
+    Locale(Box<locale_object::LocaleObj>),
+    ListFormat(Box<list_format::ListFormat>),
+    RelativeTimeFormat(Box<relative_time_format::RelativeTimeFormat>),
+    Segmenter(Box<segmenter::Segmenter>),
+    Segments(Box<segmenter::Segments>),
+    SegmentIterator(Box<segmenter::SegmentIterator>),
+    DurationFormat(Box<duration_format::DurationFormat>),
+    DisplayNames(Box<display_names::DisplayNames>),
 }
 
 impl Trace for IntlData {
@@ -33,7 +51,19 @@ impl Trace for IntlData {
             IntlData::NumberFormat(n) => t.opt(n.bound_format),
             IntlData::DateTimeFormat(d) => t.opt(d.bound_format),
             IntlData::Collator(c) => t.opt(c.bound_compare),
-            IntlData::PluralRules(_) => {}
+            IntlData::RelativeTimeFormat(r) => {
+                if let Some(nf) = &r.number_format {
+                    t.opt(nf.bound_format);
+                }
+            }
+            IntlData::PluralRules(_)
+            | IntlData::Locale(_)
+            | IntlData::ListFormat(_)
+            | IntlData::Segmenter(_)
+            | IntlData::Segments(_)
+            | IntlData::SegmentIterator(_)
+            | IntlData::DurationFormat(_)
+            | IntlData::DisplayNames(_) => {}
         }
     }
 }
@@ -50,6 +80,12 @@ pub fn init(agent: &mut Agent, realm: RealmId) {
     date_time_format::init(agent, realm, intl);
     collator::init(agent, realm, intl);
     plural_rules::init(agent, realm, intl);
+    locale_object::init(agent, realm, intl);
+    list_format::init(agent, realm, intl);
+    relative_time_format::init(agent, realm, intl);
+    segmenter::init(agent, realm, intl);
+    duration_format::init(agent, realm, intl);
+    display_names::init(agent, realm, intl);
 }
 
 /// Los slots de Intl de `v`.
@@ -220,7 +256,10 @@ fn supported_values_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let key = agent.to_string(&a.arg(0))?.to_string_lossy();
     let list: Vec<String> = match key.as_str() {
         "calendar" => vec!["gregory".into(), "iso8601".into()],
-        "collation" => Vec::new(),
+        "collation" => locale_object::ROOT_COLLATIONS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
         "currency" => {
             let mut v: Vec<String> = locale::data_for("en")
                 .numbers

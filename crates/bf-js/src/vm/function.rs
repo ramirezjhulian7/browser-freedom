@@ -380,24 +380,7 @@ impl Agent {
 
     /// Devuelve los vectores de un frame terminado a los pools (E3).
     pub(crate) fn recycle_frame(&mut self, frame: Frame) {
-        const MAX_POOL: usize = 64;
-        const MAX_CAPACITY: usize = 256;
-        let Frame {
-            mut stack,
-            mut locals,
-            mut args,
-            ..
-        } = frame;
-        for v in [&mut stack, &mut args] {
-            if v.capacity() <= MAX_CAPACITY && self.value_pool.len() < MAX_POOL {
-                v.clear();
-                self.value_pool.push(std::mem::take(v));
-            }
-        }
-        if locals.capacity() <= MAX_CAPACITY && self.locals_pool.len() < MAX_POOL {
-            locals.clear();
-            self.locals_pool.push(locals);
-        }
+        crate::vm::interp::recycle_into(frame, &mut self.value_pool, &mut self.locals_pool);
     }
 
     /// El frame de una llamada en línea a `f` (E3): una función ECMAScript que no es

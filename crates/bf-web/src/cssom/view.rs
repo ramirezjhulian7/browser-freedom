@@ -4,16 +4,22 @@
 //! ([`super::current_layout`]); un elemento sin caja da ceros.
 
 use bf_dom::{Document, NodeId};
-use bf_js::host::{HostClass, HostClassId};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use bf_js::host::{HostClass, HostClassId, TaskSource};
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
-use bf_js::vm::{Agent, JsResult};
+use bf_js::vm::{Agent, JsResult, RealmId};
+use bf_layout::scroll::{self as layout_scroll, ScrollBox};
 use bf_layout::{Fragment, FragmentKind, FragmentTree, Rect};
 use bf_style::properties::types::{Display, Overflow, PointerEvents, Position, Visibility};
 
-use super::{classes, current_layout, current_styles, set_indexed, state, window_metrics};
+use super::{
+    classes, current_layout, current_styles, set_indexed, state, state_of, window_metrics,
+};
 use crate::dom::{this_node, unwrap_node, wrap_node};
-use crate::{NodeRef, with_doc};
+use crate::{NodeRef, WebContextHandle, with_doc};
 
 // --- Fragmentos ---
 
@@ -406,7 +412,7 @@ fn boxes(agent: &mut Agent, n: NodeRef) -> Vec<Fragment> {
     if n.doc != 0 || !with_doc(agent, 0, |d| d.is_connected(n.node)) {
         return Vec::new();
     }
-    let tree = current_layout(agent);
+    let tree = geometry_layout(agent);
     element_fragments(&tree, n.node)
         .into_iter()
         .map(|f| {
@@ -422,10 +428,164 @@ fn first_box_with_children(agent: &mut Agent, n: NodeRef) -> Option<Fragment> {
     if n.doc != 0 {
         return None;
     }
-    let tree = current_layout(agent);
+    let tree = geometry_layout(agent);
     element_fragments(&tree, n.node)
         .first()
         .map(|f| (*f).clone())
+}
+
+// --- Scroll de los elementos (E12) ---
+//
+// La posición de desplazamiento de cada scroll container vive en `CssomState::element_scroll`
+// y se aplica a las maquetas (la del snapshot del shell y la calculada aquí) con
+// `bf_layout::scroll`, de modo que la geometría (`getBoundingClientRect`…) la refleja. El
+// shell se entera con [`take_element_scroll_changes`] y avisa los desplazamientos del
+// usuario con [`user_scrolled_element`].
+
+/// Los elementos con un evento `scroll` pendiente ("pending scroll event targets", CSSOM
+/// View §13.1).
+#[derive(Default)]
+struct PendingScrollEvents(HashSet<NodeRef>);
+
+/// Los desplazamientos hechos desde script que el shell todavía no aplicó a su página.
+#[derive(Default)]
+struct ElementScrollChanges(Vec<(NodeId, (f32, f32))>);
+
+/// Aplica `f` a las maquetas en caché del realm en curso (el snapshot del shell y la propia).
+fn update_layouts(agent: &mut Agent, f: impl Fn(&mut FragmentTree)) {
+    if let Some((_, _, t)) = &mut state(agent).layout {
+        f(Arc::make_mut(t));
+    }
+    let h = WebContextHandle::current(agent);
+    if let Some(snap) = h.get_mut(agent).layout.as_mut() {
+        f(Arc::make_mut(&mut snap.fragments));
+    }
+}
+
+/// La maqueta para la geometría: la actual, con las cajas `sticky` del viewport al día con
+/// el scroll de la página.
+fn geometry_layout(agent: &mut Agent) -> Arc<FragmentTree> {
+    let tree = current_layout(agent);
+    let scroll = window_metrics(agent).scroll;
+    if tree.scroll.viewport_sticky && tree.scroll.page_scroll != scroll {
+        drop(tree);
+        update_layouts(agent, |t| {
+            layout_scroll::page_scrolled(t, scroll);
+        });
+        return current_layout(agent);
+    }
+    tree
+}
+
+/// Aplica a una maqueta recién hecha los desplazamientos guardados (limitados a la nueva
+/// área desplazable) y los guarda ya limitados.
+pub fn restore_element_scroll(agent: &mut Agent, tree: &mut FragmentTree) {
+    let offsets: Vec<(NodeId, (f32, f32))> = state(agent)
+        .element_scroll
+        .iter()
+        .filter(|(n, _)| n.doc == 0)
+        .map(|(n, o)| (n.node, *o))
+        .collect();
+    let applied = layout_scroll::apply_offsets(tree, offsets);
+    let st = state(agent);
+    for (node, o) in applied {
+        st.element_scroll.insert(NodeRef::new(0, node), o);
+    }
+    let scroll = window_metrics(agent).scroll;
+    layout_scroll::page_scrolled(tree, scroll);
+}
+
+/// El scroll container de `n` en la maqueta actual, si lo es.
+fn scroll_box(agent: &mut Agent, n: NodeRef) -> Option<ScrollBox> {
+    if n.doc != 0 || !with_doc(agent, 0, |d| d.is_connected(n.node)) {
+        return None;
+    }
+    current_layout(agent).scroll.boxes.get(&n.node).copied()
+}
+
+/// Cambia la posición de desplazamiento de `n` (ya limitada) en el estado y las maquetas, y
+/// encola el evento `scroll` (CSSOM View §13.1: no burbujea en los elementos).
+fn set_element_scroll(agent: &mut Agent, n: NodeRef, offset: (f32, f32), from_script: bool) {
+    state(agent).element_scroll.insert(n, offset);
+    update_layouts(agent, |t| {
+        layout_scroll::set_scroll_offset(t, n.node, offset);
+    });
+    let realm = WebContextHandle::current(agent).realm;
+    if from_script {
+        if agent.realm_data::<ElementScrollChanges>(realm).is_none() {
+            agent.set_realm_data(realm, ElementScrollChanges::default());
+        }
+        if let Some(c) = agent.realm_data_mut::<ElementScrollChanges>(realm) {
+            c.0.retain(|(node, _)| *node != n.node);
+            c.0.push((n.node, offset));
+        }
+    }
+    if agent.realm_data::<PendingScrollEvents>(realm).is_none() {
+        agent.set_realm_data(realm, PendingScrollEvents::default());
+    }
+    let fresh = agent
+        .realm_data_mut::<PendingScrollEvents>(realm)
+        .is_some_and(|p| p.0.insert(n));
+    if fresh {
+        agent.queue_task(
+            TaskSource::UserInteraction,
+            Box::new(move |agent: &mut Agent| fire_element_scroll(agent, realm, n)),
+        );
+    }
+}
+
+fn fire_element_scroll(agent: &mut Agent, realm: RealmId, n: NodeRef) {
+    let pending = agent
+        .realm_data_mut::<PendingScrollEvents>(realm)
+        .is_some_and(|p| p.0.remove(&n));
+    if !pending {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    if with_doc(agent, n.doc, |d| d.is_connected(n.node)) {
+        crate::dom::events::fire_event(
+            agent,
+            n.doc,
+            bf_dom::events::EventTarget::Node(n.node),
+            "scroll",
+            bf_dom::events::EventInit::default(),
+            bf_dom::events::EventKind::Event,
+        );
+    }
+    agent.current_realm = saved;
+}
+
+/// Los desplazamientos de elementos hechos desde script desde la última llamada (para que el
+/// shell los aplique a su página).
+pub fn take_element_scroll_changes(agent: &mut Agent, realm: RealmId) -> Vec<(NodeId, (f32, f32))> {
+    agent
+        .realm_data_mut::<ElementScrollChanges>(realm)
+        .map(|c| std::mem::take(&mut c.0))
+        .unwrap_or_default()
+}
+
+/// Las posiciones de desplazamiento de los elementos del documento de la ventana.
+pub fn element_scroll_offsets(agent: &mut Agent, realm: RealmId) -> Vec<(NodeId, (f32, f32))> {
+    state_of(agent, realm)
+        .element_scroll
+        .iter()
+        .filter(|(n, o)| n.doc == 0 && **o != (0.0, 0.0))
+        .map(|(n, o)| (n.node, *o))
+        .collect()
+}
+
+/// El usuario desplazó el elemento `node` (la rueda): el shell ya lo aplicó a su página; aquí
+/// se guarda y se encola el evento `scroll`.
+pub fn user_scrolled_element(agent: &mut Agent, realm: RealmId, node: NodeId, offset: (f32, f32)) {
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let n = NodeRef::new(0, node);
+    let cur = element_scroll_pos(agent, n);
+    if cur != offset {
+        set_element_scroll(agent, n, offset, false);
+    }
+    agent.current_realm = saved;
 }
 
 fn scroll_offset(agent: &mut Agent) -> (f32, f32) {
@@ -595,6 +755,9 @@ fn scroll_size(agent: &mut Agent, n: NodeRef) -> (f32, f32) {
         let tree = current_layout(agent);
         return document_extent(&tree);
     }
+    if let Some(sb) = scroll_box(agent, n) {
+        return (sb.scroll_size.width, sb.scroll_size.height);
+    }
     match first_box_with_children(agent, n) {
         Some(f) if !is_inline_box(&f) => {
             if f.style.overflow_x == Overflow::Visible && f.style.overflow_y == Overflow::Visible {
@@ -623,11 +786,7 @@ fn element_scroll_pos(agent: &mut Agent, n: NodeRef) -> (f32, f32) {
     if is_scrolling_element(agent, n) {
         return scroll_offset(agent);
     }
-    state(agent)
-        .element_scroll
-        .get(&n)
-        .copied()
-        .unwrap_or((0.0, 0.0))
+    scroll_box(agent, n).map_or((0.0, 0.0), |sb| sb.offset)
 }
 
 /// Desplaza un elemento a `(x, y)` (sujeto a los límites de su área de desplazamiento).
@@ -636,26 +795,16 @@ fn scroll_element_to(agent: &mut Agent, n: NodeRef, x: Option<f64>, y: Option<f6
         window_scroll_to(agent, x, y);
         return;
     }
-    let Some(f) = first_box_with_children(agent, n) else {
+    // CSSOM View §6.1 (`scroll()` sobre un elemento): sin caja de scroll container, nada.
+    let Some(sb) = scroll_box(agent, n) else {
         return;
     };
-    let scrollable =
-        f.style.overflow_x != Overflow::Visible || f.style.overflow_y != Overflow::Visible;
-    if !scrollable {
-        return;
+    let pick =
+        |v: Option<f64>, cur: f32| v.map_or(cur, |v| if v.is_finite() { v as f32 } else { 0.0 });
+    let new = sb.clamp((pick(x, sb.offset.0), pick(y, sb.offset.1)));
+    if new != sb.offset {
+        set_element_scroll(agent, n, new, true);
     }
-    let (sw, sh) = content_extent(&f);
-    let p = f.padding_rect();
-    let cur = element_scroll_pos(agent, n);
-    let clamp = |v: Option<f64>, cur: f32, max: f32| {
-        v.map_or(cur, |v| {
-            let v = if v.is_finite() { v as f32 } else { 0.0 };
-            v.clamp(0.0, max.max(0.0))
-        })
-    };
-    let nx = clamp(x, cur.0, sw - p.width);
-    let ny = clamp(y, cur.1, sh - p.height);
-    state(agent).element_scroll.insert(n, (nx, ny));
 }
 
 fn scroll_top(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -731,42 +880,111 @@ fn element_scroll_by(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// `scrollIntoView(arg)` (CSSOM View §6.1): alinea el borde superior (o el inferior con
-/// `false` / `block: "end"`) de la caja con el del viewport.
+/// `ScrollLogicalPosition` de `scrollIntoView`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Align {
+    Start,
+    Center,
+    End,
+    Nearest,
+}
+
+impl Align {
+    fn parse(s: &str) -> Option<Align> {
+        Some(match s {
+            "start" => Align::Start,
+            "center" => Align::Center,
+            "end" => Align::End,
+            "nearest" => Align::Nearest,
+            _ => return None,
+        })
+    }
+
+    /// El desplazamiento nuevo de un eje ("determine the scroll-into-view position", CSSOM
+    /// View §6.1): `cur` es el actual, `(e0, e1)` los bordes del elemento y `(p0, p1)` los
+    /// del scrollport, en el mismo sistema de coordenadas.
+    fn position(self, cur: f32, (e0, e1): (f32, f32), (p0, p1): (f32, f32)) -> f32 {
+        match self {
+            Align::Start => cur + e0 - p0,
+            Align::End => cur + e1 - p1,
+            Align::Center => cur + (e0 + e1) / 2.0 - (p0 + p1) / 2.0,
+            Align::Nearest => {
+                let (ew, pw) = (e1 - e0, p1 - p0);
+                if (e0 < p0 && ew <= pw) || (e1 > p1 && ew > pw) {
+                    cur + e0 - p0
+                } else if (e1 > p1 && ew <= pw) || (e0 < p0 && ew > pw) {
+                    cur + e1 - p1
+                } else {
+                    cur
+                }
+            }
+        }
+    }
+}
+
+/// `scrollIntoView(arg)` (CSSOM View §6.1, "scroll an element into view"): cada scroll
+/// container que contiene al elemento, del más interno al viewport, se desplaza para alinear
+/// la caja según `block` (por defecto `start`) e `inline` (por defecto `nearest`).
 fn scroll_into_view(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let arg = a.arg(0);
-    let mut block = "start".to_owned();
+    let (mut block, mut inline) = (Align::Start, Align::Nearest);
     match &arg {
-        Value::Boolean(false) => block = "end".into(),
+        Value::Boolean(false) => block = Align::End,
         Value::Object(o) => {
-            let b = agent.get(*o, &PropertyKey::from("block"), arg.clone())?;
-            if !b.is_undefined() {
-                block = agent.to_string(&b)?.to_string();
+            for (key, slot) in [("block", &mut block), ("inline", &mut inline)] {
+                let v = agent.get(*o, &PropertyKey::from(key), arg.clone())?;
+                if !v.is_undefined() {
+                    let text = agent.to_string(&v)?.to_string();
+                    match Align::parse(&text) {
+                        Some(al) => *slot = al,
+                        None => {
+                            return agent.type_error(&format!(
+                                "'{text}' is not a valid ScrollLogicalPosition"
+                            ));
+                        }
+                    }
+                }
             }
         }
         _ => {}
     }
-    let Some(f) = boxes(agent, n).into_iter().next() else {
+    if boxes(agent, n).is_empty() {
         return Ok(Value::Undefined);
-    };
-    let vh = window_metrics(agent).viewport.height;
-    let y = match block.as_str() {
-        "end" => f.rect.bottom() - vh,
-        "center" => f.rect.y + f.rect.height / 2.0 - vh / 2.0,
-        "nearest" => {
-            let cur = scroll_offset(agent).1;
-            if f.rect.y < cur {
-                f.rect.y
-            } else if f.rect.bottom() > cur + vh {
-                f.rect.bottom() - vh
-            } else {
-                cur
+    }
+    // Los scroll containers que contienen al elemento, del más interno al más externo.
+    let mut cur = n.node;
+    loop {
+        let tree = geometry_layout(agent);
+        let Some(parent) = layout_scroll::scroll_parent(&tree, cur) else {
+            break;
+        };
+        let element = boxes(agent, n).first().map(|f| f.rect);
+        let port = element_fragments(&tree, parent)
+            .first()
+            .map(|f| f.padding_rect());
+        let sb = tree.scroll.boxes.get(&parent).copied();
+        drop(tree);
+        if let (Some(e), Some(p), Some(sb)) = (element, port, sb) {
+            let x = inline.position(sb.offset.0, (e.x, e.right()), (p.x, p.right()));
+            let y = block.position(sb.offset.1, (e.y, e.bottom()), (p.y, p.bottom()));
+            let new = sb.clamp((x, y));
+            if new != sb.offset {
+                set_element_scroll(agent, NodeRef::new(0, parent), new, true);
             }
         }
-        _ => f.rect.y,
+        cur = parent;
+    }
+    // El viewport.
+    let Some(e) = boxes(agent, n).first().map(|f| f.rect) else {
+        return Ok(Value::Undefined);
     };
-    window_scroll_to(agent, None, Some(f64::from(y)));
+    let m = window_metrics(agent);
+    let (sx, sy) = m.scroll;
+    let (vw, vh) = (m.viewport.width, m.viewport.height);
+    let x = inline.position(sx, (e.x, e.right()), (sx, sx + vw));
+    let y = block.position(sy, (e.y, e.bottom()), (sy, sy + vh));
+    window_scroll_to(agent, Some(f64::from(x)), Some(f64::from(y)));
     Ok(Value::Undefined)
 }
 
@@ -825,21 +1043,25 @@ fn offset_pos(agent: &mut Agent, n: NodeRef) -> (f32, f32) {
     let Some(mine) = boxes(agent, n).into_iter().next() else {
         return (0.0, 0.0);
     };
-    let Some(p) = offset_parent_of(agent, n) else {
-        return (mine.rect.x, mine.rect.y);
+    let parent = offset_parent_of(agent, n);
+    let tree = geometry_layout(agent);
+    // E12: la posición de layout no cuenta el scroll de los contenedores intermedios.
+    let (sx, sy) = layout_scroll::scroll_offset_between(&tree, n.node, parent);
+    let (x, y) = (mine.rect.x + sx, mine.rect.y + sy);
+    let Some(p) = parent else {
+        return (x, y);
     };
-    let tree = current_layout(agent);
     let Some(pf) = element_fragments(&tree, p).first().copied() else {
-        return (mine.rect.x, mine.rect.y);
+        return (x, y);
     };
     let body_static = with_doc(agent, 0, |d| {
         d.element(p).is_some_and(|e| e.is_html("body"))
     }) && pf.style.position == Position::Static;
     if body_static {
-        return (mine.rect.x, mine.rect.y);
+        return (x, y);
     }
     let pad = pf.padding_rect();
-    (mine.rect.x - pad.x, mine.rect.y - pad.y)
+    (x - pad.x, y - pad.y)
 }
 
 fn offset_left(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1122,6 +1344,11 @@ fn window_scroll_to(agent: &mut Agent, x: Option<f64>, y: Option<f64>) {
     let st = state(agent);
     st.scroll = (nx, ny);
     st.scroll_request = Some((nx, ny));
+    if tree.scroll.viewport_sticky {
+        update_layouts(agent, |t| {
+            layout_scroll::page_scrolled(t, (nx, ny));
+        });
+    }
 }
 
 fn window_scroll(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
