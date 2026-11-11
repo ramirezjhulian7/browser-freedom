@@ -1144,6 +1144,9 @@ fn create_contextual_fragment(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<V
         };
         bf_html::dom::parse_fragment_into(d, context, &markup)
     });
+    // E1: los custom elements del fragmento se actualizan (el fragment parser encola su
+    // upgrade).
+    crate::html::custom_elements::cloned(agent, NodeRef::new(doc, fragment));
     Ok(wrap_node(agent, NodeRef::new(doc, fragment)))
 }
 

@@ -212,6 +212,8 @@ fn deliver(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     let ctx = WebContextHandle::current(agent);
     let n = ctx.get(agent).documents.len();
     for doc in 0..n as DocIndex {
+        // E1: la *signal slots* se toma antes de los callbacks.
+        let slots = with_doc_mut(agent, doc, |d| d.take_signal_slots());
         let notes = with_doc_mut(agent, doc, |d| d.notify_mutation_observers());
         for (id, records) in notes {
             if records.is_empty() {
@@ -233,6 +235,8 @@ fn deliver(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
                 Err(t) => return Err(t),
             }
         }
+        // E1: `slotchange` en los slots señalados.
+        crate::dom::shadow::fire_slotchange(agent, doc, slots);
     }
     Ok(Value::Undefined)
 }

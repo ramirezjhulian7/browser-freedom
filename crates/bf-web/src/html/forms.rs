@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use bf_dom::events::EventInit;
 use bf_dom::{DomException, Namespace, NodeData};
 use bf_infra::DomString;
-use bf_js::host::{HostClass, webidl};
+use bf_js::host::{HostClass, HostClassId, webidl};
 use bf_js::string::JsString;
 use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
@@ -789,15 +789,30 @@ fn is_form_associated(name: &str) -> bool {
     )
 }
 
+/// ¿Es un *form-associated custom element* (E1)?
+pub(super) fn is_face(agent: &Agent, n: NodeRef) -> bool {
+    with_doc(agent, n.doc, |d| {
+        d.is_form_associated_custom_element(n.node)
+    })
+}
+
 /// El *form owner*: el `form` del atributo `form` (si es un id de un `form` del mismo árbol)
 /// o el `form` ancestro más cercano.
 pub fn form_owner_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
-    if let Some(id) = attr_value(agent, n, "form") {
+    // "Reset the form owner" (HTML §4.10.17.3), paso 3: el atributo `form` solo cuenta si el
+    // elemento está conectado; si no, el `form` ancestro.
+    if let Some(id) = attr_value(agent, n, "form")
+        && with_doc(agent, n.doc, |d| d.is_connected(n.node))
+    {
         let f = with_doc(agent, n.doc, |d| {
             d.get_element_by_id(&id)
                 .filter(|f| d.element(*f).is_some_and(|e| e.is_html("form")))
         });
         return f.map(|f| NodeRef::new(n.doc, f));
+    }
+    // E1: el form que asoció el parser (*parser inserted flag*).
+    if let Some(f) = with_doc(agent, n.doc, |d| d.parser_form_owner(n.node)) {
+        return Some(NodeRef::new(n.doc, f));
     }
     with_doc(agent, n.doc, |d| {
         let mut cur = d.parent(n.node);
@@ -844,11 +859,12 @@ fn listed_elements(agent: &Agent, form: NodeRef) -> Vec<NodeRef> {
         .into_iter()
         .map(|c| NodeRef::new(form.doc, c))
         .filter(|c| {
-            html_local_name(agent, *c).is_some_and(|name| {
+            (html_local_name(agent, *c).is_some_and(|name| {
                 is_form_associated(&name)
                     && name != "img"
                     && !(name == "input" && input_type(agent, *c) == "image")
-            }) && form_owner_of(agent, *c) == Some(form)
+            }) || is_face(agent, *c))
+                && form_owner_of(agent, *c) == Some(form)
         })
         .collect()
 }
@@ -908,13 +924,14 @@ fn form_request_submit(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// algorithm" de cada control.
 fn form_reset(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    reset_form(agent, n);
+    reset_form(agent, n, false);
     Ok(Value::Undefined)
 }
 
 /// "Reset" (§4.10.21.6): `reset` (cancelable, de confianza) y el "reset algorithm" de cada
-/// control.
-pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
+/// control. `from_activation` (botón de reset, fuera de `[CEReactions]`): los
+/// `formResetCallback` van a la *backup element queue* y corren en un microtask (§4.13.6).
+pub(super) fn reset_form(agent: &mut Agent, form: NodeRef, from_activation: bool) {
     let realm = WebContextHandle::current(agent).realm;
     // "Locked for reset".
     let locked = agent
@@ -946,6 +963,23 @@ pub(super) fn reset_form(agent: &mut Agent, form: NodeRef) {
                 Some("select") => {
                     with_doc_mut(agent, c.doc, |d| d.reset_form_control(c.node));
                 }
+                // E1: el "reset algorithm" de `output` (§4.10.12): el contenido pasa a ser el
+                // *default value* y el *default value override* vuelve a null.
+                Some("output") => {
+                    let default = state_mut(agent, c)
+                        .value
+                        .take()
+                        .unwrap_or_else(|| with_doc(agent, c.doc, |d| d.text_content(c.node)));
+                    let s = DomString::from(default.as_str());
+                    with_doc_mut(agent, c.doc, |d| {
+                        let node = (!s.is_empty()).then(|| d.create_text_node(s));
+                        d.replace_all(node, c.node);
+                    });
+                }
+                // E1: el "reset algorithm" de un FACE encola `formResetCallback`.
+                _ if is_face(agent, c) => {
+                    super::custom_elements::enqueue_form_reset(agent, c, from_activation);
+                }
                 _ => {}
             }
         }
@@ -971,7 +1005,8 @@ fn will_validate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// ¿Es candidato a la validación de restricciones (§4.10.20.1)?
 pub(super) fn will_validate_node(agent: &Agent, n: NodeRef) -> bool {
     let name = html_local_name(agent, n).unwrap_or_default();
-    if !matches!(name.as_str(), "input" | "textarea" | "select" | "button") {
+    let face = is_face(agent, n);
+    if !face && !matches!(name.as_str(), "input" | "textarea" | "select" | "button") {
         return false;
     }
     let in_datalist = with_doc(agent, n.doc, |d| {
@@ -990,7 +1025,7 @@ pub(super) fn will_validate_node(agent: &Agent, n: NodeRef) -> bool {
                     "reset" | "button"
                 )
             }))
-        || (matches!(name.as_str(), "input" | "textarea")
+        || ((face || matches!(name.as_str(), "input" | "textarea"))
             && attr_value(agent, n, "readonly").is_some());
     !barred
 }
@@ -1002,7 +1037,7 @@ fn check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Boolean(check_node(agent, n)))
 }
 
-fn check_node(agent: &mut Agent, n: NodeRef) -> bool {
+pub(super) fn check_node(agent: &mut Agent, n: NodeRef) -> bool {
     if !will_validate_node(agent, n) || satisfies_constraints(agent, n) {
         return true;
     }
@@ -1028,6 +1063,9 @@ fn form_check_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// ¿Satisface sus restricciones? (Los estados `valueMissing` y `customError`.)
 pub(super) fn satisfies_constraints(agent: &Agent, n: NodeRef) -> bool {
+    if is_face(agent, n) {
+        return super::custom_elements::face_is_valid(agent, n);
+    }
     let st = state(agent, n);
     if !st.custom_validity.is_empty() {
         return false;
@@ -1286,7 +1324,10 @@ fn option_form(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- HTMLLabelElement (§4.10.4) ---
 
-fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
+pub(super) fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
+    if is_face(agent, n) {
+        return true;
+    }
     match html_local_name(agent, n).as_deref() {
         Some("button" | "meter" | "output" | "progress" | "select" | "textarea") => true,
         Some("input") => input_type(agent, n) != "hidden",
@@ -1294,7 +1335,7 @@ fn is_labelable(agent: &Agent, n: NodeRef) -> bool {
     }
 }
 
-fn label_control_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
+pub(super) fn label_control_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
     if let Some(id) = attr_value(agent, n, "for") {
         let e = with_doc(agent, n.doc, |d| d.get_element_by_id(&id))?;
         let e = NodeRef::new(n.doc, e);
@@ -1453,6 +1494,10 @@ fn is_html_el(d: &bf_dom::Document, n: bf_dom::NodeId, name: &str) -> bool {
 
 /// ¿Es un *listed element* (§4.10.2)? (`input type=image` no entra en `elements`.)
 fn is_listed_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> bool {
+    // E1: los *form-associated custom elements* (HTML §4.13.7).
+    if d.is_form_associated_custom_element(n) {
+        return true;
+    }
     let Some(e) = d.element(n) else { return false };
     if e.ns != Namespace::Html {
         return false;
@@ -1472,10 +1517,14 @@ fn form_owner_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> Option<bf_dom::Nod
         .element(n)
         .and_then(|e| e.attr("form"))
         .map(DomString::from)
+        && d.is_connected(n)
     {
         return d
             .get_element_by_id(&id)
             .filter(|f| is_html_el(d, *f, "form"));
+    }
+    if let Some(f) = d.parser_form_owner(n) {
+        return Some(f);
     }
     let mut cur = d.parent(n);
     while let Some(p) = cur {
@@ -1518,7 +1567,195 @@ fn selected_options_list(d: &bf_dom::Document, s: bf_dom::NodeId) -> Vec<bf_dom:
 
 fn form_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    Ok(live_collection(agent, n, 5, form_elements_list))
+    // E1: `form.elements` es un `HTMLFormControlsCollection` (§2.7.2.2).
+    let realm = agent.current_realm;
+    let key = bf_js::host::HostKey(n.key().0 ^ (5 << 52) | (1 << 62));
+    if let Some(o) = agent.host_lookup(realm, key) {
+        return Ok(Value::Object(o));
+    }
+    let class = collection_classes(agent).controls;
+    let coll = bf_dom::collections::HtmlCollection::new(
+        n.node,
+        bf_dom::collections::CollectionFilter::Computed(bf_dom::collections::ComputedList(
+            form_elements_list,
+        )),
+    );
+    Ok(Value::Object(agent.host_wrap(
+        realm,
+        key,
+        class,
+        Box::new(crate::dom::collections::HtmlCollectionData { doc: n.doc, coll }),
+    )))
+}
+
+// --- HTMLFormControlsCollection y RadioNodeList (§2.7.2.2, §2.7.2.3), E1 ---
+
+/// Las clases `HTMLFormControlsCollection` y `RadioNodeList`.
+#[derive(Debug, Clone, Copy)]
+pub struct FormCollectionClasses {
+    pub controls: HostClassId,
+    pub radio_list: HostClassId,
+}
+
+pub fn register_collections(agent: &mut Agent) {
+    if agent.embedder_data::<FormCollectionClasses>().is_some() {
+        return;
+    }
+    use crate::dom::collections as c;
+    let dc = crate::dom::classes(agent).clone();
+    let controls = agent.register_host_class(
+        HostClass::new("HTMLFormControlsCollection")
+            .parent(dc.html_collection)
+            .method("namedItem", 1, fc_named_item)
+            .exotic(bf_js::host::HostExotic {
+                length: Some(c::hc_len),
+                item: Some(c::hc_at),
+                named: Some(fc_named),
+                names: Some(c::hc_names),
+                named_enumerable: false,
+                override_builtins: false,
+            }),
+    );
+    let radio_list = agent.register_host_class(
+        HostClass::new("RadioNodeList")
+            .parent(dc.node_list)
+            .attribute("value", Some(rnl_value), Some(rnl_set_value))
+            .exotic(bf_js::host::HostExotic {
+                length: Some(c::nl_len),
+                item: Some(c::nl_at),
+                ..bf_js::host::HostExotic::default()
+            }),
+    );
+    agent.set_embedder_data(FormCollectionClasses {
+        controls,
+        radio_list,
+    });
+}
+
+fn collection_classes(agent: &Agent) -> FormCollectionClasses {
+    *agent
+        .embedder_data::<FormCollectionClasses>()
+        .expect("FormCollectionClasses")
+}
+
+/// `namedItem(name)` de `HTMLFormControlsCollection` (§2.7.2.2): null, el único elemento con
+/// ese `id` o `name`, o un `RadioNodeList` con todos ellos.
+fn fc_lookup(
+    agent: &mut Agent,
+    d: &crate::dom::collections::HtmlCollectionData,
+    key: &DomString,
+) -> Option<Value> {
+    if key.is_empty() {
+        return None;
+    }
+    let items = crate::dom::collections::hc_items(agent, d);
+    let matches: Vec<bf_dom::NodeId> = with_doc(agent, d.doc, |doc| {
+        items
+            .into_iter()
+            .filter(|&n| {
+                doc.element(n).is_some_and(|e| {
+                    e.attrs.iter().any(|a| {
+                        a.ns.is_none() && (a.name == "id" || a.name == "name") && a.value == *key
+                    })
+                })
+            })
+            .collect()
+    });
+    match matches.len() {
+        0 => None,
+        1 => Some(wrap_node(agent, NodeRef::new(d.doc, matches[0]))),
+        _ => {
+            let class = collection_classes(agent).radio_list;
+            Some(Value::Object(agent.host_create(
+                class,
+                Box::new(crate::dom::collections::NodeListData::Static {
+                    doc: d.doc,
+                    nodes: matches,
+                }),
+            )))
+        }
+    }
+}
+
+fn fc_named(
+    agent: &mut Agent,
+    o: bf_js::heap::Gc<bf_js::object::Object>,
+    name: &JsString,
+) -> Option<Value> {
+    let d = agent
+        .host_unwrap::<crate::dom::collections::HtmlCollectionData>(&Value::Object(o))
+        .cloned()?;
+    fc_lookup(agent, &d, &DomString::from_utf16(name.units()))
+}
+
+fn fc_named_item(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(d) = agent
+        .host_unwrap::<crate::dom::collections::HtmlCollectionData>(&a.this)
+        .cloned()
+    else {
+        return agent.type_error("Illegal invocation");
+    };
+    let key = webidl::to_dom_string(agent, &a.arg(0))?;
+    let key = DomString::from_utf16(key.units());
+    Ok(fc_lookup(agent, &d, &key).unwrap_or(Value::Null))
+}
+
+/// Los radios (`input type=radio`) de un `RadioNodeList`, en orden.
+fn rnl_radios(agent: &mut Agent, this: &Value) -> JsResult<(crate::DocIndex, Vec<bf_dom::NodeId>)> {
+    let Some(crate::dom::collections::NodeListData::Static { doc, nodes }) = agent
+        .host_unwrap::<crate::dom::collections::NodeListData>(this)
+        .cloned()
+    else {
+        return agent.type_error("Illegal invocation");
+    };
+    let radios = with_doc(agent, doc, |d| {
+        nodes
+            .into_iter()
+            .filter(|&n| {
+                d.element(n).is_some_and(|e| {
+                    e.ns == Namespace::Html
+                        && e.name.to_string() == "input"
+                        && e.attr("type")
+                            .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                })
+            })
+            .collect()
+    });
+    Ok((doc, radios))
+}
+
+/// `RadioNodeList.value` (§2.7.2.3): el valor del primer radio marcado ("on" sin atributo
+/// `value`), o la cadena vacía.
+fn rnl_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (doc, radios) = rnl_radios(agent, &a.this)?;
+    let v = with_doc(agent, doc, |d| {
+        radios.into_iter().find(|&r| d.checkedness(r)).map(|r| {
+            d.element(r)
+                .and_then(|e| e.attr("value"))
+                .map_or_else(|| "on".to_owned(), |v| v.to_string())
+        })
+    });
+    Ok(js_str(&v.unwrap_or_default()))
+}
+
+/// El setter: marca el primer radio cuyo `value` es el nuevo valor (o sin `value`, si es
+/// "on").
+fn rnl_set_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let v = webidl::to_dom_string(agent, &a.arg(0))?.to_string_lossy();
+    let (doc, radios) = rnl_radios(agent, &a.this)?;
+    with_doc_mut(agent, doc, |d| {
+        let hit = radios
+            .into_iter()
+            .find(|&r| match d.element(r).and_then(|e| e.attr("value")) {
+                Some(x) => x.to_string() == v,
+                None => v == "on",
+            });
+        if let Some(r) = hit {
+            d.set_checkedness(r, true);
+        }
+    });
+    mutated(agent);
+    Ok(Value::Undefined)
 }
 
 fn fieldset_elements_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

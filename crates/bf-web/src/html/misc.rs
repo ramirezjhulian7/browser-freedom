@@ -58,6 +58,7 @@ pub fn extend(name: &str, class: HostClass) -> HostClass {
             }
         }
         "HTMLCanvasElement" => super::canvas::extend_canvas(class),
+        "HTMLSlotElement" => crate::dom::shadow::extend_slot(class),
         "HTMLBaseElement" => class.attribute("href", Some(base_href), Some(set_base_href)),
         // WindowEventHandlers (HTML §8.1.8.2): los handlers de `body`/`frameset` son los de la
         // ventana (los handlers de E3 los reenvían a `window`).
@@ -389,6 +390,10 @@ fn template_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// ¿Es un control de formulario deshabilitado? ("click()" no hace nada.)
 fn is_disabled_control(agent: &Agent, n: NodeRef) -> bool {
+    // E1: un *form-associated custom element* deshabilitado (atributo o `fieldset`).
+    if super::forms::is_face(agent, n) {
+        return with_doc(agent, n.doc, |d| d.is_disabled(n.node));
+    }
     matches!(
         html_local_name(agent, n).as_deref(),
         Some("button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset")
@@ -497,7 +502,25 @@ fn focus_event(agent: &mut Agent, n: NodeRef, type_: &str, related: Option<NodeR
 
 /// "Focusing steps" (§6.6.4), sin el *focus chain* de documentos anidados.
 pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_node(agent, a)?;
+    let mut n = this_node(agent, a)?;
+    // E1: un shadow host con `delegatesFocus` pasa el foco al primer elemento enfocable de
+    // su shadow tree (HTML §6.6.4 "focus delegate"); si el foco ya está dentro, se queda.
+    if delegates_focus(agent, n) {
+        let realm = WebContextHandle::current(agent).realm;
+        let current = agent.realm_data::<Focus>(realm).and_then(|f| f.0);
+        if current.is_some_and(|c| {
+            c.doc == n.doc
+                && with_doc(agent, n.doc, |d| {
+                    d.is_shadow_including_inclusive_ancestor(n.node, c.node)
+                })
+        }) {
+            return Ok(Value::Undefined);
+        }
+        match focus_delegate(agent, n) {
+            Some(d) => n = d,
+            None => return Ok(Value::Undefined),
+        }
+    }
     if !is_focusable(agent, n) {
         return Ok(Value::Undefined);
     }
@@ -516,10 +539,56 @@ pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+/// E1: ¿Es un shadow host con `delegatesFocus`?
+fn delegates_focus(agent: &Agent, n: NodeRef) -> bool {
+    with_doc(agent, n.doc, |d| {
+        d.shadow_root(n.node)
+            .and_then(|r| d.shadow_root_data(r))
+            .is_some_and(|s| s.delegates_focus)
+    })
+}
+
+/// E1: el *focus delegate* de un host: el primer enfocable de su shadow tree en orden
+/// shadow-including (los hosts anidados con `delegatesFocus` delegan a su vez).
+fn focus_delegate(agent: &Agent, host: NodeRef) -> Option<NodeRef> {
+    let root = with_doc(agent, host.doc, |d| d.shadow_root(host.node))?;
+    let nodes = with_doc(agent, host.doc, |d| {
+        d.shadow_including_inclusive_descendants(root)
+    });
+    for n in nodes.into_iter().skip(1) {
+        let r = NodeRef::new(host.doc, n);
+        if with_doc(agent, host.doc, |d| d.element(n).is_none()) {
+            continue;
+        }
+        if delegates_focus(agent, r) {
+            if let Some(d) = focus_delegate(agent, r) {
+                return Some(d);
+            }
+            continue;
+        }
+        if is_focusable(agent, r) {
+            return Some(r);
+        }
+    }
+    None
+}
+
 /// "Unfocusing steps" (§6.6.4).
 pub fn blur(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_node(agent, a)?;
+    let mut n = this_node(agent, a)?;
     let realm = WebContextHandle::current(agent).realm;
+    // E1: paso 1: un host con `delegatesFocus` cuyo shadow tree tiene el foco pasa a ser el
+    // área enfocada.
+    let current = agent.realm_data::<Focus>(realm).and_then(|f| f.0);
+    if let Some(c) = current
+        && delegates_focus(agent, n)
+        && c.doc == n.doc
+        && with_doc(agent, n.doc, |d| {
+            d.is_shadow_including_inclusive_ancestor(n.node, c.node)
+        })
+    {
+        n = c;
+    }
     if agent.realm_data::<Focus>(realm).and_then(|f| f.0) != Some(n) {
         return Ok(Value::Undefined);
     }

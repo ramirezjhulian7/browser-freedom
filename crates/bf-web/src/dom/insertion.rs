@@ -29,6 +29,11 @@ pub fn inserted(agent: &mut Agent, doc: DocIndex, roots: &[NodeId]) {
 /// Después de insertar markup parseado (`innerHTML`…): sus `script` no se ejecutan (el
 /// parser de fragmentos los marca *already started*), solo se piden los recursos.
 pub fn inserted_markup(agent: &mut Agent, doc: DocIndex, roots: &[NodeId]) {
+    // E1: el fragment parser encola el upgrade de los custom elements que crea aunque no
+    // queden conectados (HTML §13.2.6.1 "create an element for a token", paso 7).
+    for &r in roots {
+        crate::html::custom_elements::cloned(agent, crate::NodeRef::new(doc, r));
+    }
     process(agent, doc, roots, false);
 }
 
@@ -49,7 +54,7 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
             for n in d.inclusive_descendants(r) {
                 if let Some(e) = d.element(n)
                     && e.ns == Namespace::Html
-                    && matches!(&*e.name.to_string(), "script" | "img" | "link")
+                    && matches!(&*e.name.to_string(), "script" | "img" | "link" | "style")
                 {
                     work.push(n);
                 }
@@ -76,7 +81,14 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
                 });
                 if stylesheet {
                     resource(agent, doc, el, "href", ResourceKind::Stylesheet);
+                    // E2: la hoja se carga en una tarea y dispara `load`/`error`.
+                    crate::cssom::sheets::schedule_link_load(agent, crate::NodeRef::new(doc, el));
                 }
+            }
+            // E2: la hoja de un `<style>` no tiene subrecursos que esperar: `load` en una
+            // tarea (HTML §4.2.6).
+            "style" => {
+                crate::cssom::sheets::schedule_style_load(agent, crate::NodeRef::new(doc, el))
             }
             _ => {}
         }

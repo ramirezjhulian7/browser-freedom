@@ -11,7 +11,7 @@ use bf_dom::{Document, NodeId};
 use crate::media::{MediaContext, MediaQueryList, parse_media_query_list_from};
 use crate::selectors::{
     MatchContext, NamespaceMap, PseudoClass, PseudoElement, SelectorList, Simple, Specificity,
-    matching_specificity, parse_relative_selector_list_from, parse_selector_list_from,
+    matching_specificity_in, parse_relative_selector_list_from, parse_selector_list_from,
 };
 use crate::syntax::{
     self, AtRule, Block, BlockKind, ComponentValue, Declaration, NestedItem, TokenKind,
@@ -79,6 +79,12 @@ pub struct StyleRule {
     pub selectors: SelectorList,
     pub declarations: Vec<Declaration>,
     pub nested: Vec<Rule>,
+    /// Para el CSSOM (CSS Nesting §3, §6): el `<relative-selector-list>` de una regla anidada
+    /// tal como se escribió, sin resolver contra el padre.
+    pub relative: Option<SelectorList>,
+    /// Es una *nested declarations rule* (CSS Nesting §3.2): declaraciones entre reglas
+    /// anidadas o dentro de una group rule anidada, con los selectores del padre.
+    pub nested_declarations: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,8 +153,8 @@ pub enum SupportsCondition {
         name: String,
         value: Vec<ComponentValue>,
     },
-    /// `selector(...)`: si el selector es válido.
-    Selector(bool),
+    /// `selector(...)`: si el selector es válido, y su texto (para serializar).
+    Selector(bool, String),
     /// `<general-enclosed>`: evalúa a false.
     Unknown,
 }
@@ -174,11 +180,7 @@ impl std::fmt::Display for SupportsCondition {
             SupportsCondition::Declaration { name, value } => {
                 write!(f, "({name}: {})", component_values_to_string(value))
             }
-            SupportsCondition::Selector(valid) => write!(
-                f,
-                "selector(<{}>)",
-                if *valid { "válido" } else { "inválido" }
-            ),
+            SupportsCondition::Selector(_, text) => write!(f, "selector({text})"),
             SupportsCondition::Unknown => f.write_str("(<unknown>)"),
         }
     }
@@ -191,7 +193,7 @@ impl SupportsCondition {
             SupportsCondition::And(cs) => cs.iter().all(|c| c.evaluate(is_supported)),
             SupportsCondition::Or(cs) => cs.iter().any(|c| c.evaluate(is_supported)),
             SupportsCondition::Declaration { name, value } => is_supported(name, value),
-            SupportsCondition::Selector(valid) => *valid,
+            SupportsCondition::Selector(valid, _) => *valid,
             SupportsCondition::Unknown => false,
         }
     }
@@ -444,16 +446,19 @@ impl Converter {
     fn rule(&mut self, rule: &syntax::Rule, ctx: Ctx<'_>) -> Option<Rule> {
         match rule {
             syntax::Rule::Qualified(q) => {
-                let selectors = match ctx.parent {
-                    None => parse_selector_list_from(&q.prelude, &self.ns).ok()?,
+                let (selectors, relative) = match ctx.parent {
+                    None => (parse_selector_list_from(&q.prelude, &self.ns).ok()?, None),
                     Some(parent) => {
                         let mut list =
                             parse_relative_selector_list_from(&q.prelude, &self.ns).ok()?;
+                        let relative = list.clone();
                         resolve_nested(&mut list, parent);
-                        list
+                        (list, Some(relative))
                     }
                 };
-                Some(Rule::Style(self.style_rule(selectors, &q.block, ctx)))
+                let mut rule = self.style_rule(selectors, &q.block, ctx);
+                rule.relative = relative;
+                Some(Rule::Style(rule))
             }
             syntax::Rule::At(at) => self.at_rule(at, ctx),
         }
@@ -474,6 +479,8 @@ impl Converter {
                         selectors: selectors.clone(),
                         declarations: decls.clone(),
                         nested: Vec::new(),
+                        relative: None,
+                        nested_declarations: true,
                     })),
                 }
             }
@@ -482,6 +489,8 @@ impl Converter {
             declarations: block.contents.declarations.clone(),
             selectors,
             nested,
+            relative: None,
+            nested_declarations: false,
         }
     }
 
@@ -495,6 +504,8 @@ impl Converter {
                     selectors: parent.clone(),
                     declarations: decls.to_vec(),
                     nested: Vec::new(),
+                    relative: None,
+                    nested_declarations: true,
                 })
             })
         };
@@ -739,6 +750,7 @@ impl Converter {
             ComponentValue::Function(f) if f.name.eq_ignore_ascii_case("selector") => {
                 Some(SupportsCondition::Selector(
                     parse_selector_list_from(&f.value, &self.ns).is_ok_and(|l| l.0.len() == 1),
+                    component_values_to_string(&f.value).trim().to_owned(),
                 ))
             }
             ComponentValue::Function(_) => Some(SupportsCondition::Unknown),
@@ -828,6 +840,22 @@ pub fn matching_declarations<'a>(
     supports: SupportsFn<'_>,
     ctx: &MatchContext,
 ) -> Vec<MatchedDeclaration<'a>> {
+    matching_declarations_in(doc, node, pseudo, sheets, media, supports, ctx, ctx.shadow)
+}
+
+/// E1: como [`matching_declarations`], con las hojas de un árbol de shadow (`shadow`, CSS
+/// Scoping §3).
+#[allow(clippy::too_many_arguments)]
+pub fn matching_declarations_in<'a>(
+    doc: &Document,
+    node: NodeId,
+    pseudo: Option<PseudoElement>,
+    sheets: &[&'a Stylesheet],
+    media: &MediaContext,
+    supports: SupportsFn<'_>,
+    ctx: &MatchContext,
+    shadow: crate::selectors::ShadowMatch,
+) -> Vec<MatchedDeclaration<'a>> {
     let layer_indexes = layer_indexes(sheets);
     let mut collector = Collector {
         doc,
@@ -836,6 +864,7 @@ pub fn matching_declarations<'a>(
         media,
         supports,
         ctx,
+        shadow,
         out: Vec::new(),
         source_order: 0,
     };
@@ -887,6 +916,7 @@ struct Collector<'a, 'd> {
     media: &'d MediaContext,
     supports: SupportsFn<'d>,
     ctx: &'d MatchContext,
+    shadow: crate::selectors::ShadowMatch,
     out: Vec<MatchedDeclaration<'a>>,
     source_order: usize,
 }
@@ -902,12 +932,13 @@ impl<'a> Collector<'a, '_> {
         for rule in rules {
             match rule {
                 Rule::Style(style) => {
-                    if let Some(specificity) = matching_specificity(
+                    if let Some(specificity) = matching_specificity_in(
                         &style.selectors,
                         self.doc,
                         self.node,
                         self.pseudo,
                         self.ctx,
+                        self.shadow,
                     ) {
                         let layer_index = indexes.get(layer).copied().unwrap_or(usize::MAX);
                         for declaration in &style.declarations {

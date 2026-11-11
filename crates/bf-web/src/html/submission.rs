@@ -232,7 +232,8 @@ fn submittable_controls(agent: &Agent, form: NodeRef) -> Vec<NodeRef> {
     all.into_iter()
         .map(|c| NodeRef::new(form.doc, c))
         .filter(|c| {
-            html_local_name(agent, *c).is_some_and(|n| is_submittable(&n))
+            (html_local_name(agent, *c).is_some_and(|n| is_submittable(&n))
+                || forms::is_face(agent, *c))
                 && form_owner_of(agent, *c) == Some(form)
         })
         .collect()
@@ -307,6 +308,11 @@ fn append_entries(
             })
     });
     if skip {
+        return;
+    }
+    // 5.11 (E1): un *form-associated custom element*.
+    if forms::is_face(agent, field) {
+        list.extend(super::custom_elements::face_entries(agent, field));
         return;
     }
     let ty = if local == "input" {

@@ -59,6 +59,13 @@ fn html_element_class(element: HostClassId) -> HostClass {
     );
     class
         .parent(element)
+        // E1: [HTMLConstructor] y `attachInternals()` (HTML §3.2.3, §4.13.7).
+        .constructor(super::custom_elements::html_constructor, 0)
+        .method(
+            "attachInternals",
+            0,
+            super::custom_elements::attach_internals,
+        )
         .attribute("tabIndex", Some(get_tab_index), Some(set_tab_index))
         .attribute("innerText", Some(get_inner_text), Some(set_inner_text))
         .attribute("outerText", Some(get_inner_text), Some(set_outer_text))
@@ -90,10 +97,13 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             .collect();
         for iface in INTERFACES {
             let parent = by_name[iface.parent];
-            let class = agent.register_host_class(extend(
-                iface.name,
-                HostClass::new(iface.name).parent(parent),
-            ));
+            // E1: [HTMLConstructor] (todas menos HTMLUnknownElement), para los customized
+            // built-ins.
+            let mut base = HostClass::new(iface.name).parent(parent);
+            if iface.name != "HTMLUnknownElement" {
+                base = base.constructor(super::custom_elements::html_constructor, 0);
+            }
+            let class = agent.register_host_class(extend(iface.name, base));
             by_name.insert(iface.name, class);
             reflected.extend(iface.attrs.iter().map(|a| (class, a)));
         }
@@ -112,6 +122,100 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     }
     define_reflection(agent, realm);
     define_document_colors(agent, realm);
+    define_document_collections(agent, realm);
+}
+
+// --- Las colecciones del documento (HTML §3.1.4, "DOM tree accessors") ---
+
+fn html_elements(
+    d: &bf_dom::Document,
+    root: bf_dom::NodeId,
+    f: impl Fn(&bf_dom::Element) -> bool,
+) -> Vec<bf_dom::NodeId> {
+    d.descendants(root)
+        .into_iter()
+        .filter(|&n| {
+            d.element(n)
+                .is_some_and(|e| e.ns == Namespace::Html && f(e))
+        })
+        .collect()
+}
+
+fn images_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| e.name == "img")
+}
+
+fn embeds_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| e.name == "embed")
+}
+
+fn links_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| {
+        (e.name == "a" || e.name == "area") && e.attr("href").is_some()
+    })
+}
+
+fn forms_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| e.name == "form")
+}
+
+fn scripts_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| e.name == "script")
+}
+
+fn anchors_list(d: &bf_dom::Document, root: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    html_elements(d, root, |e| e.name == "a" && e.attr("name").is_some())
+}
+
+fn applets_list(_: &bf_dom::Document, _: bf_dom::NodeId) -> Vec<bf_dom::NodeId> {
+    Vec::new()
+}
+
+/// La función que lista una colección del documento.
+type DocumentList = fn(&bf_dom::Document, bf_dom::NodeId) -> Vec<bf_dom::NodeId>;
+
+const DOCUMENT_COLLECTIONS: [(&str, DocumentList); 8] = [
+    ("images", images_list),
+    ("embeds", embeds_list),
+    ("plugins", embeds_list),
+    ("links", links_list),
+    ("forms", forms_list),
+    ("scripts", scripts_list),
+    ("anchors", anchors_list),
+    ("applets", applets_list),
+];
+
+fn document_collection(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let i = match bf_js::builtins::slots(agent, a.callee).first() {
+        Some(Value::Number(i)) => *i as usize,
+        _ => 0,
+    };
+    let (_, list) = DOCUMENT_COLLECTIONS[i];
+    // `plugins` y `embeds` son la misma colección.
+    let which = if i == 2 { 1 } else { i } as u64;
+    Ok(live_collection(agent, n, 0x40 + which, list))
+}
+
+fn define_document_collections(agent: &mut Agent, realm: RealmId) {
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let class = dom::classes(agent).document;
+    let proto = agent.host_class_objects(realm, class).prototype;
+    for (i, (name, _)) in DOCUMENT_COLLECTIONS.iter().enumerate() {
+        let g = agent.create_builtin_with_slots(
+            document_collection,
+            0,
+            &format!("get {name}"),
+            vec![Value::Number(i as f64)],
+        );
+        let _ = agent.define_own_property(
+            proto,
+            PropertyKey::from(*name),
+            PropertyDescriptor::accessor(Some(g), None, true, true),
+        );
+    }
+    agent.current_realm = saved;
 }
 
 /// Los atributos obsoletos de `Document` que reflejan los de `body` (HTML §15.3.1
@@ -370,6 +474,7 @@ pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> 
     match r {
         Ok(()) => {
             mutated(agent);
+            crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), false);
             Ok(())
         }
         Err(e) => throw_dom(agent, e),
@@ -379,8 +484,12 @@ pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> 
 /// Quita un atributo de contenido.
 pub fn remove_attr(agent: &mut Agent, n: NodeRef, name: &str) {
     let name = DomString::from(name);
+    let had = with_doc(agent, n.doc, |d| d.has_attribute(n.node, &name));
     with_doc_mut(agent, n.doc, |d| d.remove_attribute(n.node, &name));
     mutated(agent);
+    if had {
+        crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), true);
+    }
 }
 
 /// Parsea `s` contra la base del documento de `n` ("encoding-parsing-and-serializing a URL").

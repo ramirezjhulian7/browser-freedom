@@ -17,10 +17,11 @@ use bf_infra::Namespace;
 
 use crate::tokenizer::named_entities::NAMED_ENTITIES;
 
-/// El namespace de un URI; los desconocidos son `Namespace::Other`. El namespace ausente se
-/// trata como XHTML (los elementos sin namespace todavía no tienen representación propia).
+/// El namespace de un URI; los desconocidos son `Namespace::Other`. E1: el URI vacío (o un
+/// nombre sin declaración de namespace por defecto) es *null* (Namespaces in XML 1.0 §6.2,
+/// DOM §1.3), no XHTML.
 fn namespace_of(uri: &str) -> Namespace {
-    Namespace::from_uri(uri).unwrap_or(Namespace::Html)
+    Namespace::from_uri(uri).unwrap_or(Namespace::Null)
 }
 
 fn entity(name: &str) -> Option<String> {

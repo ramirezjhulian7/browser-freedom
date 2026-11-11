@@ -7,7 +7,7 @@
 //! hechos desde el CSSOM (`insertRule`, `style.setProperty` de una regla…) marcan la hoja
 //! como modificada y la cascada usa entonces su serialización.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bf_css::media::{MediaContext, parse_media_query_list};
 use bf_css::selectors::parse_selector_list;
@@ -45,6 +45,12 @@ pub struct CssRule {
 pub enum RuleKind {
     Style {
         selector: String,
+        block: DeclBlock,
+        /// Las reglas anidadas (CSS Nesting §6: `CSSStyleRule` es un `CSSGroupingRule`).
+        rules: Vec<CssRule>,
+    },
+    /// `CSSNestedDeclarations` (CSS Nesting §6.2).
+    NestedDeclarations {
         block: DeclBlock,
     },
     Media {
@@ -92,7 +98,8 @@ pub enum RuleKind {
 impl RuleKind {
     fn children(&self) -> Option<&Vec<CssRule>> {
         match self {
-            RuleKind::Media { rules, .. }
+            RuleKind::Style { rules, .. }
+            | RuleKind::Media { rules, .. }
             | RuleKind::Supports { rules, .. }
             | RuleKind::Keyframes { rules, .. }
             | RuleKind::LayerBlock { rules, .. } => Some(rules),
@@ -102,7 +109,8 @@ impl RuleKind {
 
     fn children_mut(&mut self) -> Option<&mut Vec<CssRule>> {
         match self {
-            RuleKind::Media { rules, .. }
+            RuleKind::Style { rules, .. }
+            | RuleKind::Media { rules, .. }
             | RuleKind::Supports { rules, .. }
             | RuleKind::Keyframes { rules, .. }
             | RuleKind::LayerBlock { rules, .. } => Some(rules),
@@ -113,6 +121,7 @@ impl RuleKind {
     fn block_mut(&mut self) -> Option<&mut DeclBlock> {
         match self {
             RuleKind::Style { block, .. }
+            | RuleKind::NestedDeclarations { block }
             | RuleKind::FontFace { block }
             | RuleKind::Page { block, .. }
             | RuleKind::Keyframe { block, .. } => Some(block),
@@ -134,6 +143,14 @@ pub struct Sheet {
     pub rules: Vec<CssRule>,
     pub modified: bool,
     pub constructed: bool,
+    /// La hoja de un `<link>` que no se pudo cargar (su evento es `error`).
+    pub failed: bool,
+    /// La hoja que la importa y su `@import` (CSSOM §6.1: parent CSS style sheet, owner
+    /// CSS rule).
+    pub parent: Option<SheetId>,
+    pub owner_rule: Option<RuleRef>,
+    /// El texto descargado de la hoja de un `<link>` (para la cascada).
+    pub fetched: Option<String>,
 }
 
 /// Las hojas de una ventana.
@@ -145,6 +162,15 @@ pub struct SheetStore {
     next_rule: RuleId,
     /// Las reglas quitadas de su hoja (sus wrappers siguen vivos).
     detached: HashMap<RuleId, CssRule>,
+    /// Los `<link>` "explicitly enabled" (HTML §4.6.7: se les quitó el atributo `disabled`).
+    explicitly_enabled: HashSet<NodeRef>,
+    /// La última carga pedida de cada `<link>` (las anteriores ya no disparan eventos).
+    link_loads: HashMap<NodeRef, u64>,
+    next_load: u64,
+    /// Las hojas de cada `@import` (por la regla).
+    imports: HashMap<RuleId, SheetId>,
+    /// `document.adoptedStyleSheets`: el array (fijado) que ve el autor.
+    adopted: Option<bf_js::host::HostHandle>,
 }
 
 impl SheetStore {
@@ -159,9 +185,16 @@ impl SheetStore {
         let mut out = Vec::new();
         for r in rules {
             let kind = match r {
-                Rule::Style(s) => RuleKind::Style {
-                    selector: s.selectors.to_string(),
+                Rule::Style(s) if s.nested_declarations => RuleKind::NestedDeclarations {
                     block: DeclBlock::from_declarations(&s.declarations),
+                },
+                Rule::Style(s) => RuleKind::Style {
+                    selector: s
+                        .relative
+                        .as_ref()
+                        .map_or_else(|| s.selectors.to_string(), relative_selector_text),
+                    block: DeclBlock::from_declarations(&s.declarations),
+                    rules: self.convert_nested(&s.nested),
                 },
                 Rule::Media(m) => RuleKind::Media {
                     media: media_text(&unrange(&m.queries.to_string())),
@@ -220,6 +253,35 @@ impl SheetStore {
                 kind,
             });
         }
+        out
+    }
+
+    /// Las reglas anidadas de un style rule: solo style rules, nested declarations y las
+    /// group rules condicionales y `@layer` (CSS Nesting §3.2); lo demás se descarta, también
+    /// dentro de esas group rules.
+    fn convert_nested(&mut self, rules: &[Rule]) -> Vec<CssRule> {
+        let mut out = self.convert(rules);
+        fn keep(rules: &mut Vec<CssRule>) {
+            rules.retain(|r| {
+                matches!(
+                    r.kind,
+                    RuleKind::Style { .. }
+                        | RuleKind::NestedDeclarations { .. }
+                        | RuleKind::Media { .. }
+                        | RuleKind::Supports { .. }
+                        | RuleKind::LayerBlock { .. }
+                        | RuleKind::LayerStatement { .. }
+                )
+            });
+            for r in rules.iter_mut() {
+                if !matches!(r.kind, RuleKind::Style { .. })
+                    && let Some(c) = r.kind.children_mut()
+                {
+                    keep(c);
+                }
+            }
+        }
+        keep(&mut out);
         out
     }
 
@@ -321,6 +383,28 @@ fn parent_of(rules: &[CssRule], id: RuleId, parent: Option<RuleId>) -> Option<Op
     None
 }
 
+/// El `selectorText` de una regla anidada (CSS Nesting §6.1): un selector relativo lleva el
+/// `&` delante (`> .bar` → `& > .bar`, `.foo` → `& .foo`).
+fn relative_selector_text(list: &bf_css::selectors::SelectorList) -> String {
+    let mut out = String::new();
+    for (i, sel) in list.0.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        match sel.leading {
+            Some(c) => {
+                let mut rest = sel.clone();
+                rest.leading = None;
+                out.push('&');
+                out.push_str(&c.to_string());
+                out.push_str(&rest.to_string());
+            }
+            None => out.push_str(&sel.to_string()),
+        }
+    }
+    out
+}
+
 fn layer_name(n: &bf_css::stylesheet::LayerName) -> String {
     if n.0.iter().any(|s| s.starts_with('\0')) {
         String::new()
@@ -381,17 +465,50 @@ pub fn rule_text(rule: &CssRule) -> String {
             format!("{selector} {{ {t} }}")
         }
     };
+    // CSSOM §6.4.2: cada regla hija en su línea, sin re-indentar las de varias líneas; un
+    // `CSSNestedDeclarations` vacío no se escribe (CSS Nesting §6.2).
     let group = |head: String, rules: &[CssRule]| {
         let mut s = format!("{head} {{");
         for r in rules {
+            let t = rule_text(r);
+            if t.is_empty() {
+                continue;
+            }
             s.push_str("\n  ");
-            s.push_str(&rule_text(r).replace('\n', "\n  "));
+            s.push_str(&t);
         }
         s.push_str("\n}");
         s
     };
     match &rule.kind {
-        RuleKind::Style { selector, block: b } => block(selector, b),
+        RuleKind::Style {
+            selector,
+            block: b,
+            rules,
+        } => {
+            if rules.is_empty() {
+                return block(selector, b);
+            }
+            // CSS Nesting §6.1: las declaraciones y cada regla anidada en su línea (sin
+            // re-indentar las reglas de varias líneas, como pide la spec).
+            let mut s = format!("{selector} {{");
+            let t = b.css_text();
+            if !t.is_empty() {
+                s.push_str("\n  ");
+                s.push_str(&t);
+            }
+            for r in rules {
+                let t = rule_text(r);
+                if t.is_empty() {
+                    continue;
+                }
+                s.push_str("\n  ");
+                s.push_str(&t);
+            }
+            s.push_str("\n}");
+            s
+        }
+        RuleKind::NestedDeclarations { block: b } => b.css_text(),
         RuleKind::Media { media, rules } => group(format!("@media {media}"), rules),
         RuleKind::Supports { condition, rules } => group(format!("@supports {condition}"), rules),
         RuleKind::Import {
@@ -503,7 +620,11 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                     rel.split_ascii_whitespace()
                         .any(|x| x.eq_ignore_ascii_case(t))
                 };
-                if !has("stylesheet") || !is_css_type(el.attr("type")) {
+                // Con `disabled` no hay hoja (HTML §4.6.7, "attr-link-disabled").
+                if !has("stylesheet")
+                    || !is_css_type(el.attr("type"))
+                    || el.attr("disabled").is_some()
+                {
                     continue;
                 }
                 let Some(href) = el.attr("href") else {
@@ -526,7 +647,7 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         |h: String| bf_infra::Url::parse(&h, Some(&base)).map_or(h, |u| u.serialize(false));
     // Las hojas de `<link>` nuevas o con otro `href`: su texto (HTML §4.6.7.1 "fetch and
     // process the linked resource", con el loader de la página).
-    let mut loaded: HashMap<NodeRef, String> = HashMap::new();
+    let mut loaded: HashMap<NodeRef, Option<String>> = HashMap::new();
     for f in &found {
         let Some(h) = &f.href else { continue };
         let href = resolve(h.clone());
@@ -537,8 +658,8 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                 .and_then(|id| st.sheets.get(id))
                 .is_some_and(|s| s.source.is_none() && s.href.as_deref() == Some(href.as_str()))
         };
-        if !reusable && let Some(text) = load_linked_sheet(agent, &href) {
-            loaded.insert(f.owner, text);
+        if !reusable {
+            loaded.insert(f.owner, load_linked_sheet(agent, &href));
         }
     }
     let st = &mut state(agent).sheets;
@@ -555,17 +676,22 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         let id = match reuse {
             Some(id) => id,
             None => {
+                let fetched = loaded.get(&f.owner).and_then(Option::as_deref);
+                let failed = f.source.is_none() && fetched.is_none();
                 let rules = f
                     .source
                     .as_deref()
-                    .or_else(|| loaded.get(&f.owner).map(String::as_str))
+                    .or(fetched)
                     .map_or_else(Vec::new, |t| st.parse_rules(t));
+                let disabled = f.alternate && !st.explicitly_enabled.contains(&f.owner);
                 let id = st.new_sheet(Sheet {
                     owner: Some(f.owner),
                     source: f.source,
                     href,
                     rules,
-                    disabled: f.alternate,
+                    disabled,
+                    failed,
+                    fetched: fetched.map(str::to_owned),
                     ..Sheet::default()
                 });
                 if let Some(old) = st.by_owner.insert(f.owner, id)
@@ -599,6 +725,124 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
     ids
 }
 
+/// E1: la hoja de un wrapper `CSSStyleSheet` y si fue construida (`new CSSStyleSheet()`).
+pub fn sheet_of(agent: &Agent, v: &Value) -> Option<SheetId> {
+    agent.host_unwrap::<SheetPayload>(v).map(|s| s.0)
+}
+
+/// E1: ¿Es una hoja construida? y su texto (para `adoptedStyleSheets`).
+pub fn constructed_sheet(agent: &mut Agent, id: SheetId) -> Option<(bool, String)> {
+    let s = state(agent).sheets.sheets.get(&id)?;
+    let text = if s.disabled {
+        String::new()
+    } else {
+        sheet_text(s)
+    };
+    Some((s.constructed, text))
+}
+
+/// "Fetch and process the linked resource" de un `<link rel=stylesheet>` (HTML §4.2.4,
+/// §4.6.7.1): en una tarea se carga la hoja y se dispara `load` (o `error`) en el elemento.
+/// Solo vale la última carga pedida: si cambió el `href` o el elemento salió del documento,
+/// la anterior no dispara nada.
+pub fn schedule_link_load(agent: &mut Agent, n: NodeRef) {
+    if n.doc != 0 {
+        return;
+    }
+    let st = &mut state(agent).sheets;
+    st.next_load += 1;
+    let id = st.next_load;
+    st.link_loads.insert(n, id);
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        bf_js::host::TaskSource::Networking,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            link_loaded(agent, n, id);
+            agent.current_realm = saved;
+        }),
+    );
+}
+
+/// El evento `load` de un `<style>` conectado (HTML §4.2.6, "the style element"): en una
+/// tarea, si sigue en el documento.
+pub fn schedule_style_load(agent: &mut Agent, n: NodeRef) {
+    if n.doc != 0 {
+        return;
+    }
+    let realm = WebContextHandle::current(agent).realm;
+    agent.queue_task(
+        bf_js::host::TaskSource::Networking,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            let connected = with_doc(agent, n.doc, |d| {
+                d.element(n.node).is_some_and(|e| e.is_html("style")) && d.is_connected(n.node)
+            });
+            if connected {
+                crate::dom::events::fire_event(
+                    agent,
+                    n.doc,
+                    bf_dom::events::EventTarget::Node(n.node),
+                    "load",
+                    bf_dom::events::EventInit::default(),
+                    bf_dom::events::EventKind::Event,
+                );
+            }
+            agent.current_realm = saved;
+        }),
+    );
+}
+
+fn link_loaded(agent: &mut Agent, n: NodeRef, id: u64) {
+    let st = &mut state(agent).sheets;
+    if st.link_loads.get(&n) != Some(&id) {
+        return;
+    }
+    st.link_loads.remove(&n);
+    // `sync` crea (o reutiliza) la hoja del elemento si sigue siendo una hoja activa.
+    sync(agent);
+    let st = &state(agent).sheets;
+    let Some(failed) = st
+        .by_owner
+        .get(&n)
+        .and_then(|id| st.sheets.get(id))
+        .map(|s| s.failed)
+    else {
+        return;
+    };
+    crate::dom::events::fire_event(
+        agent,
+        n.doc,
+        bf_dom::events::EventTarget::Node(n.node),
+        if failed { "error" } else { "load" },
+        bf_dom::events::EventInit::default(),
+        bf_dom::events::EventKind::Event,
+    );
+}
+
+/// Los cambios de atributos de un `<link>` que vuelven a buscar su hoja (`href`, `rel`,
+/// `type`, quitar `disabled`; HTML §4.2.4). `removed`: el atributo estaba y se quitó.
+pub fn link_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str, removed: bool) {
+    let name = name.to_ascii_lowercase();
+    if !matches!(name.as_str(), "href" | "rel" | "type" | "disabled") {
+        return;
+    }
+    let connected_link = with_doc(agent, n.doc, |d| {
+        d.element(n.node).is_some_and(|e| e.is_html("link")) && d.is_connected(n.node)
+    });
+    if name == "disabled" {
+        if !removed {
+            return;
+        }
+        state(agent).sheets.explicitly_enabled.insert(n);
+    }
+    if connected_link {
+        schedule_link_load(agent, n);
+    }
+}
+
 /// El texto de la hoja de un `<link rel=stylesheet>` (decodificada como UTF-8, CSS Syntax
 /// §3.2 sin `@charset`), o `None` si no se pudo cargar.
 fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {
@@ -618,7 +862,10 @@ fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).
 pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Vec<Stylesheet> {
-    let ids = sync(agent);
+    let mut ids = sync(agent);
+    // Las adoptadas van después de las del documento (CSSOM §6.6, "document or shadow root CSS
+    // style sheets").
+    ids.extend(adopted_ids(agent));
     let st = &state(agent).sheets;
     let mut out = Vec::new();
     for id in ids {
@@ -631,7 +878,7 @@ pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Vec<Styleshee
         }
         let text = if s.modified {
             sheet_text(s)
-        } else if let Some(src) = &s.source {
+        } else if let Some(src) = s.source.as_ref().or(s.fetched.as_ref()) {
             src.clone()
         } else {
             continue;
@@ -648,6 +895,7 @@ pub fn rule_block(agent: &mut Agent, r: RuleRef) -> Option<DeclBlock> {
     let st = &state(agent).sheets;
     match &st.rule(r)?.kind {
         RuleKind::Style { block, .. }
+        | RuleKind::NestedDeclarations { block }
         | RuleKind::FontFace { block }
         | RuleKind::Page { block, .. }
         | RuleKind::Keyframe { block, .. } => Some(block.clone()),
@@ -683,6 +931,7 @@ pub struct RuleClasses {
     pub keyframe: HostClassId,
     pub layer_block: HostClassId,
     pub layer_statement: HostClassId,
+    pub nested_declarations: HostClassId,
 }
 
 /// El payload de `StyleSheet`/`CSSStyleSheet`.
@@ -780,9 +1029,17 @@ pub fn register_classes(
             .constant("SUPPORTS_RULE", 12.0)
             .constant("FONT_FEATURE_VALUES_RULE", 14.0),
     );
+    let grouping = agent.register_host_class(
+        HostClass::new("CSSGroupingRule")
+            .parent(rule)
+            .attribute("cssRules", Some(rule_css_rules), None)
+            .method("insertRule", 1, rule_insert_rule)
+            .method("deleteRule", 1, rule_delete_rule),
+    );
+    // CSS Nesting §6: `CSSStyleRule : CSSGroupingRule`.
     let style = agent.register_host_class(
         HostClass::new("CSSStyleRule")
-            .parent(rule)
+            .parent(grouping)
             .attribute(
                 "selectorText",
                 Some(rule_selector_text),
@@ -790,12 +1047,10 @@ pub fn register_classes(
             )
             .attribute("style", Some(rule_style), Some(rule_set_style)),
     );
-    let grouping = agent.register_host_class(
-        HostClass::new("CSSGroupingRule")
+    let nested_declarations = agent.register_host_class(
+        HostClass::new("CSSNestedDeclarations")
             .parent(rule)
-            .attribute("cssRules", Some(rule_css_rules), None)
-            .method("insertRule", 1, rule_insert_rule)
-            .method("deleteRule", 1, rule_delete_rule),
+            .attribute("style", Some(rule_style), Some(rule_set_style)),
     );
     let condition = agent.register_host_class(
         HostClass::new("CSSConditionRule")
@@ -890,6 +1145,7 @@ pub fn register_classes(
             keyframe,
             layer_block,
             layer_statement,
+            nested_declarations,
         },
     )
 }
@@ -897,7 +1153,89 @@ pub fn register_classes(
 /// `partial interface Document { readonly attribute StyleSheetList styleSheets; }`
 /// (CSSOM §6.3, `DocumentOrShadowRoot`).
 pub fn document_partial() -> HostClass {
-    HostClass::new("Document").attribute("styleSheets", Some(document_style_sheets), None)
+    HostClass::new("Document")
+        .attribute("styleSheets", Some(document_style_sheets), None)
+        .attribute(
+            "adoptedStyleSheets",
+            Some(document_adopted_sheets),
+            Some(set_document_adopted_sheets),
+        )
+}
+
+/// El array de `adoptedStyleSheets` (CSSOM §6.6) del documento de la ventana.
+fn adopted_array(agent: &mut Agent) -> JsResult<Value> {
+    if let Some(h) = state(agent).sheets.adopted
+        && let Some(v) = agent.host_pinned(h)
+    {
+        return Ok(v);
+    }
+    let a = Value::Object(agent.create_array_from_list(&[])?);
+    let h = agent.host_pin(a.clone());
+    state(agent).sheets.adopted = Some(h);
+    Ok(a)
+}
+
+fn document_adopted_sheets(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    if n.doc != 0 {
+        return Ok(Value::Object(agent.create_array_from_list(&[])?));
+    }
+    adopted_array(agent)
+}
+
+/// El setter: solo hojas construidas (`NotAllowedError` si no, CSSOM §6.6).
+fn set_document_adopted_sheets(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    let v = a.arg(0);
+    let Value::Object(o) = v else {
+        return agent.type_error("adoptedStyleSheets must be a sequence of CSSStyleSheet");
+    };
+    let len = agent.length_of_array_like(o)? as u32;
+    let mut items = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let item = agent.get(o, &bf_js::value::PropertyKey::from(i), v.clone())?;
+        let Some(id) = agent.host_unwrap::<SheetPayload>(&item).map(|s| s.0) else {
+            return agent.type_error("adoptedStyleSheets must be a sequence of CSSStyleSheet");
+        };
+        if !with_sheet(agent, id, |s| s.constructed).unwrap_or(false) {
+            return crate::net::dom_error(
+                agent,
+                "NotAllowedError",
+                "Can't adopt non-constructed stylesheets.",
+            );
+        }
+        items.push(item);
+    }
+    if n.doc != 0 {
+        return Ok(Value::Undefined);
+    }
+    let arr = Value::Object(agent.create_array_from_list(&items)?);
+    let h = agent.host_pin(arr);
+    if let Some(old) = state(agent).sheets.adopted.replace(h) {
+        agent.host_unpin(old);
+    }
+    sheets_changed(agent);
+    Ok(Value::Undefined)
+}
+
+/// Las hojas adoptadas del documento, en orden (las del array que ve el autor).
+fn adopted_ids(agent: &mut Agent) -> Vec<SheetId> {
+    let Some(h) = state(agent).sheets.adopted else {
+        return Vec::new();
+    };
+    let Some(Value::Object(o)) = agent.host_pinned(h) else {
+        return Vec::new();
+    };
+    let len = agent.length_of_array_like(o).unwrap_or(0.0) as u32;
+    let mut out = Vec::new();
+    for i in 0..len {
+        if let Ok(item) = agent.get(o, &bf_js::value::PropertyKey::from(i), Value::Object(o))
+            && let Some(p) = agent.host_unwrap::<SheetPayload>(&item)
+        {
+            out.push(p.0);
+        }
+    }
+    out
 }
 
 /// `LinkStyle.sheet` (CSSOM §6.3) para `<style>` y `<link>`.
@@ -924,6 +1262,7 @@ pub fn wrap_rule(agent: &mut Agent, r: RuleRef) -> Value {
     let c = classes(agent).rules.clone();
     let class = match state(agent).sheets.rule(r).map(|x| &x.kind) {
         Some(RuleKind::Style { .. }) => c.style,
+        Some(RuleKind::NestedDeclarations { .. }) => c.nested_declarations,
         Some(RuleKind::Media { .. }) => c.media,
         Some(RuleKind::Supports { .. }) => c.supports,
         Some(RuleKind::Import { .. }) => c.import,
@@ -1035,8 +1374,11 @@ fn sheet_owner_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn sheet_parent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_sheet(agent, a)?;
-    Ok(Value::Null)
+    let id = this_sheet(agent, a)?;
+    match with_sheet(agent, id, |s| s.parent).flatten() {
+        Some(p) => Ok(wrap_sheet(agent, p)),
+        None => Ok(Value::Null),
+    }
 }
 
 fn sheet_title(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1104,12 +1446,31 @@ fn sheet_constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let mut media = String::new();
     let mut disabled = false;
     if let Value::Object(o) = opts {
+        // Los miembros de CSSStyleSheetInit en orden (WebIDL §3.2.17): baseURL, disabled,
+        // media.
+        let b = agent.get(o, &"baseURL".into(), opts.clone())?;
+        let base_url = if b.is_undefined() {
+            None
+        } else {
+            Some(str_arg(agent, &b)?)
+        };
+        let d = agent.get(o, &"disabled".into(), opts.clone())?;
+        disabled = bf_js::host::webidl::to_boolean(agent, &d);
         let m = agent.get(o, &"media".into(), opts.clone())?;
         if !m.is_undefined() {
             media = media_text(&str_arg(agent, &m)?);
         }
-        let d = agent.get(o, &"disabled".into(), opts.clone())?;
-        disabled = bf_js::host::webidl::to_boolean(agent, &d);
+        // "Parse baseURL" contra la URL base del documento; si falla, NotAllowedError.
+        if let Some(b) = base_url {
+            let doc_base = WebContextHandle::current(agent).get(agent).base.clone();
+            if bf_infra::Url::parse(&b, Some(&doc_base)).is_err() {
+                return crate::net::dom_error(
+                    agent,
+                    "NotAllowedError",
+                    "The baseURL is not a valid URL.",
+                );
+            }
+        }
     } else if !opts.is_nullish() {
         return agent.type_error("CSSStyleSheetInit must be an object");
     }
@@ -1130,8 +1491,11 @@ fn sheet_constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn sheet_owner_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_sheet(agent, a)?;
-    Ok(Value::Null)
+    let id = this_sheet(agent, a)?;
+    match with_sheet(agent, id, |s| s.owner_rule).flatten() {
+        Some(r) => Ok(wrap_rule(agent, r)),
+        None => Ok(Value::Null),
+    }
 }
 
 fn sheet_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1140,15 +1504,59 @@ fn sheet_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 /// Parsea el texto de una regla para `insertRule` ("parse a CSS rule", CSSOM §6.6.3).
-fn parse_one_rule(agent: &mut Agent, text: &str) -> Result<CssRule, DomException> {
+fn parse_one_rule(agent: &mut Agent, text: &str, nested: bool) -> Result<CssRule, DomException> {
     if bf_css::syntax::parse_rule(text).is_err() {
+        // Dentro de un style rule, unas declaraciones son un `CSSNestedDeclarations`
+        // (CSS Nesting §6.3, "insert a CSS rule" paso 2).
+        if nested {
+            let block = DeclBlock::parse(text);
+            if !block.css_text().is_empty() {
+                let st = &mut state(agent).sheets;
+                st.next_rule += 1;
+                return Ok(CssRule {
+                    id: st.next_rule,
+                    kind: RuleKind::NestedDeclarations { block },
+                });
+            }
+        }
         return Err(DomException::SyntaxError);
     }
-    let mut rules = state(agent).sheets.parse_rules(text);
+    let st = &mut state(agent).sheets;
+    if nested {
+        // Se parsea como regla anidada de un style rule cualquiera y se toma su hija (sin
+        // descartar las no anidables: `insert_rule` las rechaza con HierarchyRequestError).
+        let sheet = Stylesheet::parse(&format!("x{{{text}}}"), Origin::Author);
+        let mut rules = match sheet.rules.first() {
+            Some(Rule::Style(s)) => st.convert(&s.nested),
+            _ => Vec::new(),
+        };
+        return if rules.len() == 1 {
+            Ok(rules.remove(0))
+        } else {
+            Err(DomException::SyntaxError)
+        };
+    }
+    let mut rules = st.parse_rules(text);
     if rules.len() != 1 {
         return Err(DomException::SyntaxError);
     }
     Ok(rules.remove(0))
+}
+
+/// ¿La regla `r` está dentro de un style rule (directamente o en una group rule)?
+fn in_style_rule(st: &SheetStore, r: RuleRef) -> bool {
+    let mut cur = st.parent(r);
+    while let Some(id) = cur {
+        let pr = RuleRef {
+            sheet: r.sheet,
+            rule: id,
+        };
+        if matches!(st.rule(pr).map(|x| &x.kind), Some(RuleKind::Style { .. })) {
+            return true;
+        }
+        cur = st.parent(pr);
+    }
+    false
 }
 
 /// "Insert a CSS rule" (CSSOM §6.6.3).
@@ -1159,14 +1567,44 @@ fn insert_rule(
     index: usize,
     nested: bool,
 ) -> JsResult<Value> {
-    let rule = match parse_one_rule(agent, text) {
+    // Dentro de un style rule (o de una group rule anidada en uno) se parsea como regla
+    // anidada (CSS Nesting §6.3).
+    let in_style = match owner {
+        ListOwner::Sheet(_) => false,
+        ListOwner::Rule(r) => {
+            let st = &state(agent).sheets;
+            matches!(st.rule(r).map(|x| &x.kind), Some(RuleKind::Style { .. }))
+                || in_style_rule(st, r)
+        }
+    };
+    let rule = match parse_one_rule(agent, text, in_style) {
         Ok(r) => r,
         Err(e) => return throw_dom(agent, e),
     };
+    // CSS Nesting §3.2: dentro de un style rule solo van reglas anidables.
+    if in_style
+        && !matches!(
+            rule.kind,
+            RuleKind::Style { .. }
+                | RuleKind::NestedDeclarations { .. }
+                | RuleKind::Media { .. }
+                | RuleKind::Supports { .. }
+                | RuleKind::LayerBlock { .. }
+                | RuleKind::LayerStatement { .. }
+        )
+    {
+        return throw_dom(agent, DomException::HierarchyRequestError);
+    }
     let sheet = match owner {
         ListOwner::Sheet(s) => s,
         ListOwner::Rule(r) => r.sheet,
     };
+    // Paso 4: en una hoja construida, `@import` es un error de sintaxis.
+    if matches!(rule.kind, RuleKind::Import { .. })
+        && with_sheet(agent, sheet, |s| s.constructed).unwrap_or(false)
+    {
+        return throw_dom(agent, DomException::SyntaxError);
+    }
     let check = {
         let st = &state(agent).sheets;
         let Some(list) = st.list(owner) else {
@@ -1267,8 +1705,20 @@ fn index_arg(agent: &mut Agent, v: &Value) -> JsResult<usize> {
     Ok(bf_js::host::webidl::to_unsigned_long(agent, v)? as usize)
 }
 
+/// WebIDL §3.7.7 paso 2: faltan argumentos obligatorios → `TypeError`.
+fn require_args(agent: &mut Agent, a: &CallArgs<'_>, n: usize, what: &str) -> JsResult<()> {
+    if a.len() < n {
+        return agent.type_error(&format!(
+            "Failed to execute '{what}': {n} argument required, but only {} present.",
+            a.len()
+        ));
+    }
+    Ok(())
+}
+
 fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    require_args(agent, a, 1, "insertRule")?;
     let text = str_arg(agent, &a.arg(0))?;
     let index = index_arg(agent, &a.arg(1))?;
     insert_rule(agent, ListOwner::Sheet(id), &text, index, false)
@@ -1276,6 +1726,7 @@ fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn sheet_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Sheet(id), index)
 }
@@ -1631,8 +2082,17 @@ fn rule_set_selector_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value
         state(agent).sheets.rule(r).map(|x| &x.kind),
         Some(RuleKind::Page { .. })
     );
+    let nested = in_style_rule(&state(agent).sheets, r);
     let new = if is_page {
         Some(text.trim().to_owned())
+    } else if nested {
+        // Dentro de un style rule: `<relative-selector-list>` (CSS Nesting §3.1).
+        bf_css::selectors::parse_relative_selector_list_from(
+            &bf_css::syntax::parse_component_value_list(&text),
+            &Default::default(),
+        )
+        .ok()
+        .map(|l| relative_selector_text(&l))
     } else {
         parse_selector_list(&text, &Default::default())
             .ok()
@@ -1672,6 +2132,7 @@ fn rule_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn rule_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "insertRule")?;
     let text = str_arg(agent, &a.arg(0))?;
     let index = index_arg(agent, &a.arg(1))?;
     insert_rule(agent, ListOwner::Rule(r), &text, index, true)
@@ -1679,6 +2140,7 @@ fn rule_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn rule_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Rule(r), index)
 }
@@ -1735,10 +2197,41 @@ fn import_supports_text(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     import_field(agent, a, 2)
 }
 
-/// Las hojas importadas no se cargan: `styleSheet` es `null`.
+/// `CSSImportRule.styleSheet` (CSSOM §6.4.4): la hoja importada, cargada la primera vez con
+/// el loader de la página (URL resuelta contra la de la hoja que importa o la base del
+/// documento). Si no se pudo cargar, una hoja vacía.
 fn import_style_sheet(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    this_rule(agent, a)?;
-    Ok(Value::Null)
+    let r = this_rule(agent, a)?;
+    if let Some(&id) = state(agent).sheets.imports.get(&r.rule) {
+        return Ok(wrap_sheet(agent, id));
+    }
+    let (href, media) = match state(agent).sheets.rule(r).map(|x| &x.kind) {
+        Some(RuleKind::Import { href, media, .. }) => (href.clone(), media.clone()),
+        _ => return Ok(Value::Null),
+    };
+    let doc_base = WebContextHandle::current(agent).get(agent).base.clone();
+    let parent_href = with_sheet(agent, r.sheet, |s| s.href.clone()).flatten();
+    let base = parent_href
+        .and_then(|h| bf_infra::Url::parse(&h, None).ok())
+        .unwrap_or(doc_base);
+    let Ok(url) = bf_infra::Url::parse(&href, Some(&base)) else {
+        return Ok(Value::Null);
+    };
+    let resolved = url.serialize(false);
+    let text = load_linked_sheet(agent, &resolved);
+    let st = &mut state(agent).sheets;
+    let rules = text.as_deref().map_or_else(Vec::new, |t| st.parse_rules(t));
+    let id = st.new_sheet(Sheet {
+        href: Some(resolved),
+        media: media_text(&media),
+        rules,
+        failed: text.is_none(),
+        parent: Some(r.sheet),
+        owner_rule: Some(r),
+        ..Sheet::default()
+    });
+    st.imports.insert(r.rule, id);
+    Ok(wrap_sheet(agent, id))
 }
 
 fn namespace_field(agent: &mut Agent, a: &CallArgs<'_>, uri: bool) -> JsResult<Value> {
@@ -1857,6 +2350,7 @@ fn keyframes_append_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value>
 
 fn keyframes_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = this_rule(agent, a)?;
+    require_args(agent, a, 1, "deleteRule")?;
     let k = normalize_key(&str_arg(agent, &a.arg(0))?);
     let st = &mut state(agent).sheets;
     if let Some(list) = st.list_mut(ListOwner::Rule(r))
