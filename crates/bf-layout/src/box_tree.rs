@@ -267,8 +267,7 @@ fn propagate_body_writing_mode(
         return;
     }
     let set = |style: &mut Arc<ComputedStyle>| {
-        if style.direction != body_style.direction
-            || style.writing_mode != body_style.writing_mode
+        if style.direction != body_style.direction || style.writing_mode != body_style.writing_mode
         {
             let s = Arc::make_mut(style);
             s.direction = body_style.direction;

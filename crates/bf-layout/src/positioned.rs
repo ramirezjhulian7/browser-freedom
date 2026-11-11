@@ -75,7 +75,10 @@ impl<'a> Layout<'a> {
         if self.is_orthogonal(b) {
             let mut f = self.orthogonal_fragment(b, cb);
             let outer = f.margin_rect();
-            let x = match (inset(&s.left, Some(cb.width)), inset(&s.right, Some(cb.width))) {
+            let x = match (
+                inset(&s.left, Some(cb.width)),
+                inset(&s.right, Some(cb.width)),
+            ) {
                 (Some(l), _) => l,
                 (None, Some(r)) => cb.width - r - outer.width,
                 (None, None) => p.static_x - cb.x,

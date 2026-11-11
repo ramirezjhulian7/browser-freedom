@@ -236,7 +236,9 @@ pub fn fragment_from_physical(f: &mut Fragment, frame: Frame, origin: (f32, f32)
     }
     f.rect = rect_from_physical(f.rect, frame, origin, extent);
     f.clip = f.clip.map(|c| rect_from_physical(c, frame, origin, extent));
-    f.legend = f.legend.map(|c| rect_from_physical(c, frame, origin, extent));
+    f.legend = f
+        .legend
+        .map(|c| rect_from_physical(c, frame, origin, extent));
     f.margin = edges_from_physical(f.margin, frame);
     f.border = edges_from_physical(f.border, frame);
     f.padding = edges_from_physical(f.padding, frame);
