@@ -257,6 +257,8 @@ pub struct Document {
     custom_states: HashMap<NodeId, Vec<DomString>>,
     pub(crate) shadow: shadow::ShadowState,    // E1
     pub(crate) custom: custom::CustomState,    // E1
+    /// E1: los form owners que asoció el parser (HTML §13.2.6.1, *parser inserted flag*).
+    pub(crate) parser_form_owners: HashMap<NodeId, NodeId>,
 }
 
 impl Default for Document {
@@ -287,6 +289,7 @@ impl Document {
             custom_states: HashMap::new(),
             shadow: shadow::ShadowState::default(),    // E1
             custom: custom::CustomState::default(),    // E1
+            parser_form_owners: HashMap::new(),        // E1
         };
         doc.push(NodeData::Document);
         doc

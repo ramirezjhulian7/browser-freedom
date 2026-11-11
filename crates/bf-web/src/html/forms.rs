@@ -810,6 +810,10 @@ pub fn form_owner_of(agent: &Agent, n: NodeRef) -> Option<NodeRef> {
         });
         return f.map(|f| NodeRef::new(n.doc, f));
     }
+    // E1: el form que asoció el parser (*parser inserted flag*).
+    if let Some(f) = with_doc(agent, n.doc, |d| d.parser_form_owner(n.node)) {
+        return Some(NodeRef::new(n.doc, f));
+    }
     with_doc(agent, n.doc, |d| {
         let mut cur = d.parent(n.node);
         while let Some(p) = cur {
@@ -962,9 +966,10 @@ pub(super) fn reset_form(agent: &mut Agent, form: NodeRef, from_activation: bool
                 // E1: el "reset algorithm" de `output` (§4.10.12): el contenido pasa a ser el
                 // *default value* y el *default value override* vuelve a null.
                 Some("output") => {
-                    let default = state_mut(agent, c).value.take().unwrap_or_else(|| {
-                        with_doc(agent, c.doc, |d| d.text_content(c.node))
-                    });
+                    let default = state_mut(agent, c)
+                        .value
+                        .take()
+                        .unwrap_or_else(|| with_doc(agent, c.doc, |d| d.text_content(c.node)));
                     let s = DomString::from(default.as_str());
                     with_doc_mut(agent, c.doc, |d| {
                         let node = (!s.is_empty()).then(|| d.create_text_node(s));
@@ -1518,6 +1523,9 @@ fn form_owner_doc(d: &bf_dom::Document, n: bf_dom::NodeId) -> Option<bf_dom::Nod
             .get_element_by_id(&id)
             .filter(|f| is_html_el(d, *f, "form"));
     }
+    if let Some(f) = d.parser_form_owner(n) {
+        return Some(f);
+    }
     let mut cur = d.parent(n);
     while let Some(p) = cur {
         if is_html_el(d, p, "form") {
@@ -1736,12 +1744,12 @@ fn rnl_set_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = webidl::to_dom_string(agent, &a.arg(0))?.to_string_lossy();
     let (doc, radios) = rnl_radios(agent, &a.this)?;
     with_doc_mut(agent, doc, |d| {
-        let hit = radios.into_iter().find(|&r| {
-            match d.element(r).and_then(|e| e.attr("value")) {
+        let hit = radios
+            .into_iter()
+            .find(|&r| match d.element(r).and_then(|e| e.attr("value")) {
                 Some(x) => x.to_string() == v,
                 None => v == "on",
-            }
-        });
+            });
         if let Some(r) = hit {
             d.set_checkedness(r, true);
         }

@@ -354,3 +354,61 @@ fn aria_element_reflection() {
         "b a,,true,true,true,true,false,"
     );
 }
+
+#[test]
+fn form_controls_collection_and_reset() {
+    // HTMLFormControlsCollection.namedItem con RadioNodeList (HTML §2.7.2.2), el reset de
+    // `output` (§4.10.12) antes de `formResetCallback`, y el callback de un botón de reset en
+    // un microtask (backup element queue, §4.13.6).
+    let mut p = Page::new(
+        "<form id=f><input type=radio name=g value=x><input type=radio name=g checked>\
+         <x-c name=g></x-c><output id=o>default</output><input id=r type=reset></form>",
+    );
+    assert_eq!(
+        p.show(
+            "var log = []; customElements.define('x-c', class extends HTMLElement { \
+               static formAssociated = true; \
+               formResetCallback() { log.push(document.getElementById('o').value); } }); \
+             var f = document.getElementById('f'), g = f.elements.namedItem('g'); \
+             var r = [g instanceof RadioNodeList, g.length, f.elements['g'].length, g.value, \
+                      f.elements.namedItem('nope'), f.elements.namedItem('o').id]; \
+             g.value = 'x'; r.push(f.elements[0].checked); \
+             document.getElementById('o').value = 'updated'; \
+             f.reset(); r.push(log.join()); \
+             log = []; document.getElementById('r').click(); r.push(log.length); \
+             r.join()"
+        ),
+        "true,3,3,on,,o,true,default,0"
+    );
+    assert_eq!(p.show("log.join()"), "default");
+}
+
+#[test]
+fn parser_form_owner_and_delegates_focus_blur() {
+    // El *form element pointer* del parser (HTML §13.2.6.1) asocia los controles de una
+    // tabla con un `form` vacío; el *parser inserted flag* se pierde al sacarlos del árbol.
+    let mut p = Page::new(
+        "<table><form id=f><tr><td><input id=i></td></tr></form></table>\
+         <x-h id=h></x-h>",
+    );
+    assert_eq!(
+        p.show(
+            "var f = document.getElementById('f'), i = document.getElementById('i'); \
+             var r = [f.childNodes.length, f.elements.length, i.form === f]; \
+             var td = i.parentNode; i.remove(); td.appendChild(i); r.push(i.form); \
+             r.join()"
+        ),
+        "0,1,true,"
+    );
+    // `blur()` en un host con `delegatesFocus` quita el foco de su shadow tree (§6.6.5).
+    assert_eq!(
+        p.show(
+            "var h = document.getElementById('h'), out = 0; \
+             h.attachShadow({mode: 'open', delegatesFocus: true}).innerHTML = '<input>'; \
+             document.body.addEventListener('focusout', () => out++); \
+             h.focus(); var a = document.activeElement === h; h.blur(); \
+             [a, out, document.activeElement === document.body].join()"
+        ),
+        "true,1,true"
+    );
+}
