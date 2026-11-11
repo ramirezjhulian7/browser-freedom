@@ -966,9 +966,10 @@ pub(super) fn reset_form(agent: &mut Agent, form: NodeRef, from_activation: bool
                 // E1: el "reset algorithm" de `output` (§4.10.12): el contenido pasa a ser el
                 // *default value* y el *default value override* vuelve a null.
                 Some("output") => {
-                    let default = state_mut(agent, c).value.take().unwrap_or_else(|| {
-                        with_doc(agent, c.doc, |d| d.text_content(c.node))
-                    });
+                    let default = state_mut(agent, c)
+                        .value
+                        .take()
+                        .unwrap_or_else(|| with_doc(agent, c.doc, |d| d.text_content(c.node)));
                     let s = DomString::from(default.as_str());
                     with_doc_mut(agent, c.doc, |d| {
                         let node = (!s.is_empty()).then(|| d.create_text_node(s));
@@ -1743,12 +1744,12 @@ fn rnl_set_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = webidl::to_dom_string(agent, &a.arg(0))?.to_string_lossy();
     let (doc, radios) = rnl_radios(agent, &a.this)?;
     with_doc_mut(agent, doc, |d| {
-        let hit = radios.into_iter().find(|&r| {
-            match d.element(r).and_then(|e| e.attr("value")) {
+        let hit = radios
+            .into_iter()
+            .find(|&r| match d.element(r).and_then(|e| e.attr("value")) {
                 Some(x) => x.to_string() == v,
                 None => v == "on",
-            }
-        });
+            });
         if let Some(r) = hit {
             d.set_checkedness(r, true);
         }
