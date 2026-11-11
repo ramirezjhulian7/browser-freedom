@@ -1,6 +1,9 @@
 //! Posicionamiento (CSS 2.2 §9.3, §10.3.7 y §10.6.4): desplazamiento relativo y cajas
-//! `absolute`/`fixed`. `sticky` establece containing block como `relative` pero todavía no se
-//! desplaza (TODO(sticky): necesita scroll containers reales).
+//! `absolute`/`fixed`. `sticky` establece containing block como `relative`; su desplazamiento
+//! lo aplica `scroll.rs`. Un elemento transformado es containing block de sus descendientes
+//! absolutos y fijos (CSS Transforms 1 §3).
+
+use std::sync::Arc;
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{LengthPercentageAuto, Position};
@@ -26,7 +29,53 @@ fn inset(v: &LengthPercentageAuto, basis: Option<f32>) -> Option<f32> {
     }
 }
 
+/// ¿La caja establece containing block para sus descendientes absolutos *y fijos* por estar
+/// transformada? CSS Transforms 1 §3: "any value other than none for the transform property
+/// also causes the element to establish a containing block for all descendants. Its padding
+/// box will be used to layout for all of its absolute-position descendants, fixed-position
+/// descendants"; CSS Transforms 2 §5: lo mismo con `translate`, `rotate` y `scale`.
+///
+/// TODO(E4): `transform`, `translate`, `rotate` y `scale` todavía no son longhands de
+/// `ComputedStyle` (`bf-style/src/properties/transform.rs` está sin enlazar). Al registrarlos,
+/// el cuerpo pasa a ser `!(style.transform.is_none() && style.translate.0.is_none() &&
+/// style.rotate.0.is_none() && style.scale.0.is_none())` y se quita el `#[ignore]` de
+/// `transform_contains_absolute_and_fixed_descendants` en `bf-layout/tests/scroll.rs`; el resto
+/// (marcos de absolutos, fijos aparte, `unfix`, rejilla) ya está hecho.
+pub(crate) fn transform_contains(style: &ComputedStyle) -> bool {
+    let _ = style;
+    false
+}
+
+/// Marca como `absolute` el fragmento de una caja `fixed` cuyo containing block es un
+/// elemento transformado y no el viewport.
+pub(crate) fn unfix(f: &mut Fragment) {
+    if f.style.position == Position::Fixed {
+        let mut style = (*f.style).clone();
+        style.position = Position::Absolute;
+        f.style = Arc::new(style);
+    }
+}
+
 impl<'a> Layout<'a> {
+    /// Maqueta en el padding box `cb_rect` de un elemento transformado las cajas `fixed` de
+    /// su subárbol (CSS Transforms 1 §3). Su containing block ya no es el viewport, así que el
+    /// fragmento queda como `absolute`: no se fija al viewport al pintar ni al desplazar, y se
+    /// mueve con el scroll container que lo contenga.
+    pub(crate) fn contained_fixed(
+        &mut self,
+        pending: Vec<PendingAbs<'a>>,
+        cb_rect: Rect,
+    ) -> Vec<Fragment> {
+        pending
+            .into_iter()
+            .map(|p| {
+                let mut f = self.absolute(p, cb_rect);
+                unfix(&mut f);
+                f
+            })
+            .collect()
+    }
+
     /// Registra una caja absoluta con su posición estática.
     pub(crate) fn add_abs(&mut self, b: &'a LayoutBox, static_x: f32, static_y: f32) {
         let pending = PendingAbs {

@@ -140,6 +140,78 @@ Pausas medidas con `bf-js bench --gc` (una corrida; solo los programas que recol
 La pausa crece con lo vivo (marcado completo): `dom` tiene ~100 000 objetos vivos. Un GC
 generacional (o incremental) es lo que la bajaría.
 
+## E8: superinstrucciones y llamadas rápidas (2026-11-07)
+
+Línea base: `master` `faeb997` (la VM de E3 de arriba). Mismo arnés y mismo `ab.sh`; la
+máquina seguía con carga de otros ejecutores, así que la base sale entre 740 y 845 ms en
+`fib` (719 ms en la medición de E3) y solo valen las razones dentro de una misma tanda.
+
+`fib(30)` (`--filter fib`), mejor de N rondas alternadas, en ms:
+
+| tanda | rondas | master | E8 | speedup |
+|---|---:|---:|---:|---:|
+| 1 | 7 | 797.3 | 473.4 | 1.68× |
+| 2 | 10 | 739.7 | 448.9 | 1.65× |
+| 3 | 15 | 770.5 | 492.8 | 1.56× |
+
+Escalado a los 719 ms de la medición de E3: **~430–460 ms**. La meta de ≤ 400 ms **no** se
+alcanzó.
+
+Todos los programas, mejor de 7 rondas alternadas (tanda 3):
+
+| benchmark | master | E8 | speedup |
+|---|---:|---:|---:|
+| `alloc` | 177.7 | 153.3 | 1.16× |
+| `arrays` | 100.6 | 94.3 | 1.07× |
+| `closures` | 162.7 | 129.7 | 1.26× |
+| `concat` | 70.6 | 62.3 | 1.13× |
+| `dict` | 32.8 | 28.5 | 1.15× |
+| `dom` | 873.4 | 859.8 | 1.02× |
+| `fib` | 746.9 | 482.3 | 1.55× |
+| `json` | 44.2 | 44.9 | 0.99× |
+| `loops` | 181.9 | 141.7 | 1.28× |
+| `methods` | 178.6 | 137.2 | 1.30× |
+| `nbody` | 538.9 | 471.3 | 1.14× |
+| `poly` | 229.1 | 216.2 | 1.06× |
+| `props` | 108.4 | 114.4 | 0.95× |
+| `regexp` | 690.2 | 602.4 | 1.15× |
+| `strings` | 24.3 | 21.6 | 1.13× |
+
+Media geométrica: 1.15×. Las diferencias de ±5 % son ruido: `regexp` salió 0.86× en una
+tanda y 0.99× al repetirlo solo con 10 rondas.
+
+### Qué cambió
+
+- **Mirilla** (`compiler/mod.rs`, `compiler/bytecode.rs`): `ArgToLocal(i, s)` (copiar un
+  argumento a su local), `LocalAddInt`/`LocalSubInt` (`x + k`, `x - k` con un local y un
+  entero corto), `JumpIfNotLocalLtInt` (`x < k` + salto condicional) y un `Jump` a `Return`
+  pasa a ser `Return`. `fib` queda en 10 instrucciones por llamada.
+- **Llamadas** (`vm/interp.rs`): `Call` a una función ECMAScript simple del mismo realm y
+  `Return` de un frame en línea sin handlers ni `new` (`fast_call`, `fast_return`) no pasan
+  por `op_call`/`step` ni por `unwind_return`. En código estricto, una llamada en posición de
+  cola (§15.10.3 PrepareForTailCall) reemplaza el frame del llamador.
+- **Safepoint**: cada 256 saltos hacia atrás en vez de en cada vuelta; `vm/mod.rs` mira la
+  interrupción con `next_poll`.
+
+### Probado y descartado
+
+- `codegen-units = 1` para `bf-js` (`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`): 1.04× de media
+  (`fib` 1.13×); no compensa tocar el perfil del workspace.
+- Atender `Call`/`Return` dentro del bucle de la ráfaga (sin salir a `run_loop`): `fib` bajó
+  a 1.34× y `nbody` a 0.59× frente a `master`; el bucle más grande empeora el código que LLVM
+  genera para `fast_op`. Revertido.
+
+### Pendiente
+
+- ~270 ns por llamada de `fib`: el costo está en crear y reciclar el frame (232 bytes, tres
+  vectores de los pools, `Rc` del código) y en la salida y vuelta a la ráfaga en cada
+  `Call`/`Return`. Lo siguiente: frames sin vectores propios (una pila de valores compartida
+  con ventanas por frame).
+- La llamada rápida no pasa por el safepoint (solo los saltos hacia atrás): una recursión
+  sin bucles como `fib(45)` no mira la interrupción hasta terminar.
+- Un bucle con `var` en el código global va a ~1 µs por vuelta (5 M vueltas de
+  `s = s + i` en ~5 s) frente a ~90 ns dentro de una función. Sin diagnosticar.
+
 ## Profundidad
 
 `thousand_levels_parse_and_run` (en `tests/depth.rs`, solo en release) parsea y corre 1000

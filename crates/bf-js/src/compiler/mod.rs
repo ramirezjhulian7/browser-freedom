@@ -128,6 +128,18 @@ pub(crate) struct FnState {
     /// La última posición que es destino de un salto (E3): la mirilla no fusiona a través
     /// de ella.
     barrier: u32,
+    /// E8: el slot del DisposeCapability del scope con `using` más cercano.
+    pub dispose_slot: Option<u32>,
+}
+
+impl FnState {
+    /// E8: quita las posiciones de instrucciones que una fusión de la mirilla eliminó.
+    fn trim_positions(&mut self) {
+        let len = self.ops.len() as u32;
+        while matches!(self.positions.last(), Some((p, _)) if *p > len) {
+            self.positions.pop();
+        }
+    }
 }
 
 pub struct Codegen<'t> {
@@ -271,6 +283,7 @@ impl FnState {
             next_completion_kind: COMPLETION_RETURN + 1,
             global_lex: Vec::new(),
             barrier: 0,
+            dispose_slot: None,
         }
     }
 }
@@ -293,6 +306,9 @@ fn patch_target(op: &mut Op, t: u32) {
         // E3
         Op::AsyncIterResult { done, .. } | Op::AsyncYieldStarResult { done, .. } => *done = t,
         Op::AsyncIterClose { skip, .. } => *skip = t,
+        // E8
+        Op::DisposeAsyncStep { done, .. } => *done = t,
+        Op::JumpIfNotLocalLtInt { target, .. } => *target = t,
         _ => panic!("instrucción sin destino: {op:?}"),
     }
 }
@@ -310,6 +326,29 @@ impl<'t> Codegen<'t> {
 
     pub(crate) fn emit(&mut self, op: Op) {
         let st = self.st();
+        // E8: superinstrucciones (si nadie salta a las instrucciones que se fusionan).
+        let n = st.ops.len();
+        match op {
+            Op::InitLocal(s) if n as u32 > st.barrier => {
+                if let Some(Op::GetArg(i)) = st.ops.last().copied() {
+                    *st.ops.last_mut().expect("op") = Op::ArgToLocal(i, s);
+                    return;
+                }
+            }
+            Op::Add | Op::Sub if n >= 2 && (n - 1) as u32 > st.barrier => {
+                if let [Op::GetLocal(s), Op::Int(k)] = st.ops[n - 2..] {
+                    st.ops.pop();
+                    st.ops[n - 2] = if op == Op::Add {
+                        Op::LocalAddInt(s, k)
+                    } else {
+                        Op::LocalSubInt(s, k)
+                    };
+                    st.trim_positions();
+                    return;
+                }
+            }
+            _ => {}
+        }
         // Mirilla (E3): `Set*` seguido de `Pop` es `Init*` (guardar y sacar), si nadie salta
         // al `Pop`.
         if op == Op::Pop && st.ops.len() as u32 > st.barrier {
@@ -359,6 +398,19 @@ impl<'t> Codegen<'t> {
     /// Emite una instrucción de salto hacia `l`.
     pub(crate) fn emit_to(&mut self, op: Op, l: Label) {
         let st = self.st();
+        // E8: `x < k` como condición de un salto.
+        let n = st.ops.len();
+        if op == Op::JumpIfFalse(0)
+            && n >= 3
+            && (n - 2) as u32 > st.barrier
+            && let [Op::GetLocal(slot), Op::Int(k), Op::Lt] = st.ops[n - 3..]
+        {
+            st.ops.truncate(n - 3);
+            st.trim_positions();
+            st.patches.push((n - 3, l));
+            st.ops.push(Op::JumpIfNotLocalLtInt { slot, k, target: 0 });
+            return;
+        }
         st.patches.push((st.ops.len(), l));
         st.ops.push(op);
     }
@@ -451,6 +503,14 @@ impl<'t> Codegen<'t> {
         for (at, l) in std::mem::take(&mut st.patches) {
             let t = st.labels[l.0].expect("etiqueta sin ubicar");
             patch_target(&mut st.ops[at], t);
+        }
+        // E8: un salto a un `Return` es el mismo `Return`.
+        for i in 0..st.ops.len() {
+            if let Op::Jump(t) = st.ops[i]
+                && st.ops.get(t as usize) == Some(&Op::Return)
+            {
+                st.ops[i] = Op::Return;
+            }
         }
         let info = &self.tree.funcs[st.func];
         let has_prototype =
@@ -1029,7 +1089,8 @@ impl<'t> Codegen<'t> {
         self.prologue(&info, params, body.stmts());
         match body {
             FnBodyRef::Block(b) => {
-                self.statements(b);
+                // E8: DisposeResources al final del cuerpo (EvaluateBody).
+                self.dispose_region(crate::compiler::stmt::using_hint(b), |cg| cg.statements(b));
                 self.emit(Op::Undefined);
                 self.emit(Op::Return);
             }

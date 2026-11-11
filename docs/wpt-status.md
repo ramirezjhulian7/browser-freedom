@@ -6,7 +6,7 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 - Commit de WPT: `4ad507b28db0a636f528def9161d109fe11b93a3`
 - Condiciones: viewport 800×600, DPR 1, fondo blanco, fuentes del sistema más Ahem (`tests/wpt/fonts/Ahem.ttf`, como si estuviera instalada) y `@font-face`.
 - `.xht`/`.xhtml` se parsean como XML; el resto, como HTML.
-- `needs-js`: tests de testharness.js, manuales o con `<script>` (en el test o en la referencia).
+- `needs-js`: tests de testharness.js, manuales o con `<script>` o atributos manejadores de eventos `on*` (en el test o en la referencia).
 - `error`: pánico o recurso faltante.
 - El porcentaje se calcula sobre pass + fail + error.
 
@@ -30,6 +30,16 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
 | **Total** | 5265 | 1865 | 5173 | 4 | 12307 | 73.8% |
+
+Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
+total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`
+(`onload="…"`) cuentan como script (`needs-js`), igual que `<script>`:
+
+| Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
+|---|---:|---:|---:|---:|---:|---:|
+| css/css-overflow | 254 | 250 | 402 | 1 | 907 | 50.3% |
+| css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
+| css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
@@ -74,6 +84,12 @@ Unicode (`cargo test -p bf-layout --test unicode_conformance`, UCD 17.0.0): Bidi
   851 de los 1567 tests ejecutables de `css/css-grid` son de `grid-lanes` (masonry, 101 pasan);
   sin ellos pasan 534 de 716 (74.6%), y `css/css-grid/subgrid` 56 de 88. `css/css-sizing` (no
   está en `GROUPS`): 338 pass, 188 fail, 237 needs-js (64.3%).
+- `css/css-overflow`: falta `text-overflow` (60 fallos, con los de `line-clamp` que lo
+  combinan), `::scroll-marker`/`::scroll-button` (44), `overflow-clip-margin` (20), el
+  `line-clamp` que depende de `transform` (containing block de los fijos, 13) y ocultar las
+  absolutas tras el clamp point.
+  `css/css-position/sticky`: casi todo es testharness o desplaza con script; falla
+  `position-sticky-rtl` (scroll containers RTL, con el origen a la derecha).
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.
