@@ -8,7 +8,7 @@ Desde el subconjunto de cldr-json 48.0.0 en crates/bf-js/data/cldr-48.0.0/:
   Unicode (`-u-ca-gregorian` → `gregory`…), los time zones IANA con su nombre canónico, la
   tabla de zonas de Windows, los dígitos de cada moneda, los sistemas de numeración
   numéricos, el ciclo horario preferido por región y las reglas de plurales;
-- datos de locale solo para `en` y `es`: símbolos y patrones numéricos (decimal, porcentaje,
+- datos de locale solo para `en`, `es`, `de` y `pl`: símbolos y patrones numéricos (decimal, porcentaje,
   moneda, contable, científico y compacto), monedas, unidades y el calendario gregoriano.
 
 Uso: python -I tools/gen_intl_data.py
@@ -20,7 +20,7 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "crates", "bf-js", "data", "cldr-48.0.0")
 OUT = os.path.join(ROOT, "crates", "bf-js", "src", "builtins", "intl", "cldr.rs")
-LOCALES = ["en", "es"]
+LOCALES = ["en", "es", "de", "pl"]
 
 # ECMA-402 §6.6.2, tabla "Simple units sanctioned for use in ECMAScript".
 SANCTIONED_UNITS = [
@@ -99,6 +99,53 @@ def main():
         if len(parts) >= 3:
             regions.append((k, parts[-1]))
     out.append(pairs("LIKELY_REGION", sorted(regions), "La región probable de cada idioma (likelySubtags)."))
+    out.append("")
+    # E8: la tabla completa para Add/Remove Likely Subtags (UTS #35 §4.3), con las claves en
+    # minúsculas (`und-cyrl-ro` → `bg-Cyrl-RO`).
+    out.append(pairs("LIKELY_SUBTAGS", sorted((k.replace("_", "-").lower(), v.replace("_", "-")) for k, v in likely.items()),
+                     "likelySubtags: tag (minúsculas) → tag maximizado."))
+    out.append("")
+
+    # E8: datos de Intl.Locale (getWeekInfo, getCalendars, getTimeZones, getTextInfo).
+    days = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+    wd = load("supplemental", "weekData.json")["supplemental"]["weekData"]
+    regions_w = sorted(r for r in set(wd["firstDay"]) | set(wd["weekendStart"]) | set(wd["weekendEnd"]) if "-" not in r)
+    out.append("/// weekData: región → (firstDay, weekendStart, weekendEnd), lunes = 1 … domingo = 7.")
+    out.append("pub static WEEK_DATA: &[(&str, u8, u8, u8)] = &[")
+    for r in regions_w:
+        fd = days[wd["firstDay"].get(r, wd["firstDay"]["001"])]
+        ws = days[wd["weekendStart"].get(r, wd["weekendStart"]["001"])]
+        we = days[wd["weekendEnd"].get(r, wd["weekendEnd"]["001"])]
+        out.append(f"    ({rs(r)}, {fd}, {ws}, {we}),")
+    out.append("];")
+    out.append("")
+
+    cal_alias = {}
+    for k, v in load("bcp47", "calendar.json")["keyword"]["u"]["ca"].items():
+        if isinstance(v, dict) and v.get("_alias"):
+            cal_alias[v["_alias"]] = k
+    cp = load("supplemental", "calendarPreferenceData.json")["supplemental"]["calendarPreferenceData"]
+    out.append(pairs("CALENDAR_PREFERENCES", sorted((r, " ".join(cal_alias.get(c, c) for c in cs)) for r, cs in cp.items()),
+                     "calendarPreferenceData: región → calendarios (ids de BCP 47) separados por espacios."))
+    out.append("")
+
+    tz_kw = load("bcp47", "timezone.json")["keyword"]["u"]["tz"]
+    by_region = {}
+    for bid, info in tz_kw.items():
+        if bid.startswith("_") or not isinstance(info, dict) or info.get("_deprecated") or info.get("_preferred"):
+            continue
+        names = info.get("_alias", "").split()
+        if not names or len(bid) < 5 or not bid[:2].isalpha():
+            continue
+        primary = info.get("_iana", names[0])
+        by_region.setdefault(bid[:2].upper(), set()).add(primary)
+    out.append(pairs("TIME_ZONES_BY_REGION", sorted((r, " ".join(sorted(z))) for r, z in by_region.items()),
+                     "Zonas IANA primarias de cada región (por el prefijo de su id de BCP 47), separadas por espacios."))
+    out.append("")
+
+    sm = load("supplemental", "scriptMetadata.json")["scriptMetadata"]
+    out.append(pairs("SCRIPT_DIRECTION", sorted((s, "rtl" if m["rtl"] == "YES" else "ltr") for s, m in sm.items() if m["rtl"] in ("YES", "NO")),
+                     "scriptMetadata: script → dirección (solo los de dirección conocida)."))
     out.append("")
 
     # --- Claves Unicode (BCP 47) ---
@@ -218,6 +265,66 @@ def main():
     out.append(LOCALE_TYPES)
     for loc in LOCALES:
         out.append(locale_data(loc))
+    # E8: patrones de listas (Intl.ListFormat): (locale, tipo, [start, middle, end, 2]).
+    out.append("/// listPatterns: (locale, tipo de CLDR, [start, middle, end, 2]).")
+    out.append("pub static LIST_PATTERNS: &[(&str, &str, [&str; 4])] = &[")
+    for loc in LOCALES:
+        lp = load(loc, "listPatterns.json")["main"][loc]["listPatterns"]
+        for k in sorted(lp):
+            v = lp[k]
+            pats = ", ".join(rs(v[x]) for x in ("start", "middle", "end", "2"))
+            out.append(f"    ({rs(loc)}, {rs(k.replace('listPattern-type-', ''))}, [{pats}]),")
+    out.append("];")
+    out.append("")
+    # E8: campos relativos (Intl.RelativeTimeFormat): (locale, campo con estilo, relativos
+    # (-1, 0, 1…), futuro (categoría, patrón), pasado (categoría, patrón)).
+    out.append("/// dateFields: (locale, campo-estilo, [(n, texto)], futuro [(categoría, patrón)], pasado).")
+    out.append("pub static RELATIVE_FIELDS: &[(&str, &str, &[(i8, &str)], &[(&str, &str)], &[(&str, &str)])] = &[")
+    units = ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]
+    for loc in LOCALES:
+        fields = load(loc, "dateFields.json")["main"][loc]["dates"]["fields"]
+        for u in units:
+            for suffix in ("", "-short", "-narrow"):
+                f = fields[u + suffix]
+                rel = sorted((int(k[len("relative-type-"):]), v) for k, v in f.items() if k.startswith("relative-type-"))
+                def pats(key):
+                    return [(k.replace("relativeTimePattern-count-", ""), v) for k, v in f.get(key, {}).items()]
+                rel_s = ", ".join(f"({n}, {rs(v)})" for n, v in rel)
+                fut = ", ".join(f"({rs(c)}, {rs(v)})" for c, v in pats("relativeTime-type-future"))
+                past = ", ".join(f"({rs(c)}, {rs(v)})" for c, v in pats("relativeTime-type-past"))
+                out.append(f"    ({rs(loc)}, {rs(u + suffix)}, &[{rel_s}], &[{fut}], &[{past}]),")
+    out.append("];")
+    out.append("")
+    # E8: nombres para Intl.DisplayNames: (locale, tipo, código, nombre). Tipos: `language`,
+    # `region`, `script` (y sus variantes `-short`), `calendar`, `field` (campo-estilo de
+    # dateFields) y `pattern` (localePattern, localeSeparator).
+    out.append("/// Nombres de Intl.DisplayNames: (locale, tipo, código, nombre).")
+    out.append("pub static DISPLAY_NAMES: &[(&str, &str, &str, &str)] = &[")
+    rows = []
+    for loc in LOCALES:
+        ldn = load(loc, "localeDisplayNames.json")["main"][loc]["localeDisplayNames"]
+        for kind, fname in (("language", "languages"), ("region", "territories"), ("script", "scripts")):
+            names = load(loc, fname + ".json")["main"][loc]["localeDisplayNames"][fname]
+            for k, v in names.items():
+                if "-alt-" in k:
+                    code, alt = k.split("-alt-", 1)
+                    if alt == "short":
+                        rows.append((loc, kind + "-short", code, v))
+                else:
+                    rows.append((loc, kind, k, v))
+        for k, v in ldn["types"].get("calendar", {}).items():
+            rows.append((loc, "calendar", k, v))
+        pat = ldn["localeDisplayPattern"]
+        rows.append((loc, "pattern", "localePattern", pat["localePattern"]))
+        rows.append((loc, "pattern", "localeSeparator", pat["localeSeparator"]))
+        fields = load(loc, "dateFields.json")["main"][loc]["dates"]["fields"]
+        for k, v in fields.items():
+            if "displayName" in v:
+                rows.append((loc, "field", k, v["displayName"]))
+    for row in sorted(rows):
+        out.append("    (" + ", ".join(rs(x) for x in row) + "),")
+    out.append("];")
+    out.append("")
     out.append("pub static LOCALE_DATA: &[(&str, &LocaleData)] = &[")
     for loc in LOCALES:
         out.append(f"    ({rs(loc)}, &{loc.upper()}),")

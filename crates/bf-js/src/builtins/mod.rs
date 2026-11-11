@@ -35,6 +35,11 @@ pub mod map_set;
 pub mod promise;
 pub mod typed_array;
 pub mod weak;
+// E8
+pub mod array_from_async;
+pub mod disposable;
+pub mod temporal;
+pub mod uint8_base64;
 
 use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, Prop, PropValue};
@@ -244,4 +249,9 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     // E2: Web APIs puras de JS e Intl (después de E3: usan TypedArray y la cola de jobs).
     web::init(agent, realm);
     intl::init(agent, realm);
+    // E8: Explicit Resource Management (después de Promise y %AsyncIteratorPrototype%).
+    disposable::init(agent, realm);
+    // E8: Temporal (después de Date: agrega Date.prototype.toTemporalInstant).
+    temporal::init(agent, realm);
+    uint8_base64::init(agent, realm);
 }
