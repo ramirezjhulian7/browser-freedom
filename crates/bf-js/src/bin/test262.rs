@@ -425,7 +425,8 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for e in entries.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        // `file_type` viene del listado del directorio (sin otro stat por archivo).
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
             collect(&p, out);
         } else if p.extension().is_some_and(|x| x == "js")
             && !p.to_string_lossy().contains("_FIXTURE")
@@ -550,7 +551,11 @@ fn main() {
         std::process::exit(2);
     }
     let mut files = Vec::new();
-    collect(&test_dir, &mut files);
+    // Un filtro que es un directorio: se recorre solo ese subárbol.
+    match filter.as_ref().map(|f| test_dir.join(f)) {
+        Some(sub) if sub.is_dir() => collect(&sub, &mut files),
+        _ => collect(&test_dir, &mut files),
+    }
     files.sort();
     let rels: Vec<String> = files
         .iter()

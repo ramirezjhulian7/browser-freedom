@@ -356,6 +356,16 @@ impl<'t> Codegen<'t> {
                 other => unreachable!("binding de módulo fuera del environment: {other:?}"),
             }
         }
+        // E8: DisposeResources al final del módulo (`using` en el top-level).
+        let hint = crate::compiler::stmt::using_hint(&program.body);
+        self.dispose_region(hint, |cg| cg.module_statements(program));
+        self.emit(Op::Undefined);
+        self.emit(Op::Return);
+        let code = self.finish_fn(JsString::from("<module>"), program.span, 0);
+        (code, functions)
+    }
+
+    fn module_statements(&mut self, program: &Program) {
         for s in &program.body {
             match s {
                 Stmt::Function(_) | Stmt::Import(_) | Stmt::ExportAll { .. } => {}
@@ -387,9 +397,5 @@ impl<'t> Codegen<'t> {
                 other => self.stmt(other),
             }
         }
-        self.emit(Op::Undefined);
-        self.emit(Op::Return);
-        let code = self.finish_fn(JsString::from("<module>"), program.span, 0);
-        (code, functions)
     }
 }
