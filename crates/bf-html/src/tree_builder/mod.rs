@@ -206,6 +206,9 @@ struct TreeBuilder {
     /// El `script` cuyo end tag se acaba de procesar en el modo text: el parser corre los
     /// pasos que siguen a sacarlo de la stack (13.2.6.4.8) apenas vuelve del dispatcher.
     script_end: Option<NodeId>,
+    /// E10: los `link` HTML que el parser insertó conectados al documento y de los que el host
+    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]).
+    inserted_links: Vec<NodeId>,
     /// *Script nesting level* (13.2.4.4 "parser pause flag" y 13.2.6.4.8).
     nesting: u32,
     /// *Parser pause flag*.
@@ -242,6 +245,7 @@ impl TreeBuilder {
             stopped: false,
             errors: Vec::new(),
             script_end: None,
+            inserted_links: Vec::new(),
             nesting: 0,
             paused: false,
             insertion_point: None,
@@ -308,6 +312,7 @@ impl TreeBuilder {
             };
             self.process_token(tok);
             self.script_end = None;
+            self.inserted_links.clear();
         }
         // 13.2.7 The end: "Pop all the nodes off the stack of open elements." Después el event
         // loop corre los microtasks pendientes.
@@ -810,6 +815,14 @@ impl TreeBuilder {
             return;
         }
         self.doc.insert_before(loc.parent, element, loc.before);
+        // E10: un `link` que queda conectado (no en el contenido de un `template`) empieza a
+        // procesar su recurso (HTML §4.6.7 "becomes browsing-context connected"): se avisa al
+        // host al volver del dispatcher.
+        if self.doc.element(element).is_some_and(|e| e.is_html("link"))
+            && self.doc.is_connected(element)
+        {
+            self.inserted_links.push(element);
+        }
     }
 
     /// Insert a foreign element.

@@ -389,6 +389,15 @@ impl Document {
             .filter(|&e| self.element(e).is_some_and(|x| x.is_html("html")))
     }
 
+    /// E10: `Document.rootElement` (SVG 2 §5.14.2, `partial interface Document`): el document
+    /// element si es un `svg` del namespace SVG; si no, ninguno.
+    pub fn svg_root_element(&self) -> Option<NodeId> {
+        self.document_element().filter(|&e| {
+            self.element(e)
+                .is_some_and(|x| x.ns == Namespace::Svg && x.name == "svg")
+        })
+    }
+
     /// `Document.head`: el primer hijo `head` del html element.
     pub fn head(&self) -> Option<NodeId> {
         let html = self.html_element()?;

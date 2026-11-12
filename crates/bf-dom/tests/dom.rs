@@ -3995,3 +3995,36 @@ fn get_element_by_id_removed_subtree() {
     append(&mut doc, inner, new_el);
     assert_eq!(by_id(&doc, "heading"), None);
 }
+
+/// E10: `Document.rootElement` (SVG 2): el document element solo si es un `svg` SVG
+/// (`domparsing/DOMParser-parseFromString-xml-scripting-support-disabled.html` lo usa).
+#[test]
+fn svg_root_element() {
+    let svg_ns = Some("http://www.w3.org/2000/svg");
+    let mut doc = Document::new_xml();
+    assert_eq!(doc.svg_root_element(), None);
+    let root = doc.root();
+    let svg = elem_ns(&mut doc, svg_ns, "svg");
+    append(&mut doc, root, svg);
+    assert_eq!(doc.svg_root_element(), Some(svg));
+
+    // Un `svg` sin el namespace SVG, otro elemento SVG o un `svg` no raíz no cuentan.
+    for (ns, qname) in [
+        (None, "svg"),
+        (svg_ns, "g"),
+        (Some("http://www.w3.org/1999/xhtml"), "svg"),
+    ] {
+        let mut doc = Document::new_xml();
+        let root = doc.root();
+        let e = elem_ns(&mut doc, ns, qname);
+        append(&mut doc, root, e);
+        assert_eq!(doc.svg_root_element(), None, "{qname} en {ns:?}");
+    }
+    let mut doc = Document::new_xml();
+    let root = doc.root();
+    let g = elem_ns(&mut doc, svg_ns, "g");
+    append(&mut doc, root, g);
+    let inner = elem_ns(&mut doc, svg_ns, "svg");
+    append(&mut doc, g, inner);
+    assert_eq!(doc.svg_root_element(), None);
+}

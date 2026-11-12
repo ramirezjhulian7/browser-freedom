@@ -1556,6 +1556,10 @@ fn internals_set_validity(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value
         }
     }
     this_internals(agent, a)?.anchor = anchor;
+    // E10: la validez en el DOM para `:valid`/`:invalid` (`bf-css`, HTML §4.16.3).
+    with_doc_mut(agent, t.doc, |d| {
+        d.set_constraint_validity(t.node, Some(!any))
+    });
     Ok(Value::Undefined)
 }
 
@@ -1946,7 +1950,19 @@ fn with_states<R>(
     let Some(i) = agent.host_unwrap_mut::<Internals>(&iv) else {
         return agent.type_error("Illegal invocation");
     };
-    Ok(f(&mut i.states))
+    let r = f(&mut i.states);
+    // E10: el *states set* también en el DOM, que es lo que casa `:state()` en `bf-css`
+    // (`bf_dom::Document::custom_states`; cada cambio real invalida el estilo).
+    let states = i.states.clone();
+    with_doc_mut(agent, target.doc, |d| {
+        if !d.custom_states(target.node).iter().eq(states.iter()) {
+            d.clear_custom_states(target.node);
+            for s in states {
+                d.add_custom_state(target.node, s);
+            }
+        }
+    });
+    Ok(r)
 }
 
 fn states_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
