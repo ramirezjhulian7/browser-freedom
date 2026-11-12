@@ -1,10 +1,13 @@
 //! `<color>` de CSS Color 4: hex, colores con nombre, `transparent`, `currentcolor`, colores del
-//! sistema, `rgb()`/`rgba()` (sintaxis legacy y moderna), `hsl()`/`hsla()` y `hwb()`.
+//! sistema, `rgb()`/`rgba()` (sintaxis legacy y moderna), `hsl()`/`hsla()`, `hwb()`, `lab()`,
+//! `lch()`, `oklab()`, `oklch()` y `color()`; de CSS Color 5, `color-mix()` y `light-dark()`.
+//! Los colores de otros espacios se convierten a sRGB ([`super::color_space`]).
 
 use std::fmt;
 
 use bf_css::syntax::{ComponentValue, TokenKind};
 
+use super::color_space::{self, ColorSpace, HueMethod};
 use super::named_colors::NAMED_COLORS;
 use super::{components, fmt_number, parse_angle};
 
@@ -169,6 +172,11 @@ pub fn parse_color(v: &ComponentValue) -> Option<Color> {
                 "rgb" | "rgba" => parse_rgb(&f.value).map(Color::Rgba),
                 "hsl" | "hsla" => parse_hsl(&f.value).map(Color::Rgba),
                 "hwb" => parse_hwb(&f.value).map(Color::Rgba),
+                "lab" | "lch" | "oklab" | "oklch" => {
+                    parse_lab_like(&name, &f.value).map(Color::Rgba)
+                }
+                "color" => parse_color_function(&f.value).map(Color::Rgba),
+                "color-mix" => parse_color_mix(&f.value).map(Color::Rgba),
                 // CSS Color 5: `light-dark(<color>, <color>)`. El esquema usado es siempre
                 // `light` (no hay preferencia de esquema oscuro todavía).
                 "light-dark" => {
@@ -371,6 +379,173 @@ fn parse_hwb(values: &[ComponentValue]) -> Option<Rgba> {
         b: b * 255.0,
         a: alpha_value(alpha)?,
     })
+}
+
+/// Un canal numérico de `lab()`/`oklab()`/`color()`…: número tal cual, porcentaje escalado
+/// por `percent` (el valor de 100 %) y `none` = 0.
+fn scaled(a: Arg, percent: f64) -> Option<f64> {
+    match a {
+        Arg::Number(n) => Some(f64::from(n)),
+        Arg::Percentage(p) => Some(f64::from(p) / 100.0 * percent),
+        Arg::None => Some(0.0),
+        Arg::Angle(_) => None,
+    }
+}
+
+/// Un tono de `lch()`/`oklch()`: `none` queda como NaN (powerless).
+fn polar_hue(a: Arg) -> Option<f64> {
+    match a {
+        Arg::None => Some(f64::NAN),
+        other => hue(other).map(f64::from),
+    }
+}
+
+/// `lab()`, `lch()`, `oklab()` y `oklch()` (CSS Color 4 §9.1–§9.4), solo con la sintaxis
+/// moderna. Los porcentajes valen lo que dice la tabla de cada función.
+fn parse_lab_like(name: &str, values: &[ComponentValue]) -> Option<Rgba> {
+    let (ch, alpha, legacy) = split_args(values)?;
+    if legacy {
+        return None;
+    }
+    let alpha = f64::from(alpha_value(alpha)?);
+    let (space, coords) = match name {
+        "lab" => (
+            ColorSpace::Lab,
+            [
+                scaled(ch[0], 100.0)?.clamp(0.0, 100.0),
+                scaled(ch[1], 125.0)?,
+                scaled(ch[2], 125.0)?,
+            ],
+        ),
+        "oklab" => (
+            ColorSpace::Oklab,
+            [
+                scaled(ch[0], 1.0)?.clamp(0.0, 1.0),
+                scaled(ch[1], 0.4)?,
+                scaled(ch[2], 0.4)?,
+            ],
+        ),
+        "lch" => (
+            ColorSpace::Lch,
+            [
+                scaled(ch[0], 100.0)?.clamp(0.0, 100.0),
+                scaled(ch[1], 150.0)?.max(0.0),
+                polar_hue(ch[2])?,
+            ],
+        ),
+        _ => (
+            ColorSpace::Oklch,
+            [
+                scaled(ch[0], 1.0)?.clamp(0.0, 1.0),
+                scaled(ch[1], 0.4)?.max(0.0),
+                polar_hue(ch[2])?,
+            ],
+        ),
+    };
+    Some(color_space::to_rgba(space, coords, alpha))
+}
+
+/// `color(<colorspace-params> [ / <alpha-value> ]?)` (CSS Color 4 §10.1): los canales en
+/// números o porcentajes (100 % = 1).
+fn parse_color_function(values: &[ComponentValue]) -> Option<Rgba> {
+    let start = values.iter().position(|v| !v.is_whitespace())?;
+    let space = ColorSpace::predefined(super::ident(&values[start])?)?;
+    let (ch, alpha, legacy) = split_args(&values[start + 1..])?;
+    if legacy {
+        return None;
+    }
+    let coords = [
+        scaled(ch[0], 1.0)?,
+        scaled(ch[1], 1.0)?,
+        scaled(ch[2], 1.0)?,
+    ];
+    Some(color_space::to_rgba(
+        space,
+        coords,
+        f64::from(alpha_value(alpha)?),
+    ))
+}
+
+/// `<color-interpolation-method> = in [ <rectangular-color-space> | <polar-color-space>
+/// <hue-interpolation-method>? ]` (CSS Color 4 §12.1).
+pub fn parse_interpolation_method(items: &[&ComponentValue]) -> Option<(ColorSpace, HueMethod)> {
+    let [kw, space, rest @ ..] = items else {
+        return None;
+    };
+    if !super::is_ident(kw, "in") {
+        return None;
+    }
+    let space = ColorSpace::interpolation(super::ident(space)?)?;
+    let hue = match rest {
+        [] => HueMethod::Shorter,
+        [method, h] if space.hue_index().is_some() && super::is_ident(h, "hue") => {
+            match super::ident(method)?.to_ascii_lowercase().as_str() {
+                "shorter" => HueMethod::Shorter,
+                "longer" => HueMethod::Longer,
+                "increasing" => HueMethod::Increasing,
+                "decreasing" => HueMethod::Decreasing,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some((space, hue))
+}
+
+/// `color-mix( <color-interpolation-method>? , [ <color> && <percentage [0,100]>? ]#{2})`
+/// (CSS Color 5 §2.1; sin método, OKLab). Los porcentajes se normalizan (§2.2): si suman
+/// menos de 100 % el alfa del resultado se multiplica por la suma.
+///
+/// TODO(E2): `currentcolor` como argumento necesita un `Color` sin resolver (cambia los
+/// `match` sobre `Color` de bf-svg y bf-web); hoy la declaración es inválida.
+fn parse_color_mix(values: &[ComponentValue]) -> Option<Rgba> {
+    let groups = bf_css::syntax::split_comma_separated(values);
+    let first = components(groups.first()?);
+    let (space, hue, rest) = match first.first() {
+        Some(v) if super::is_ident(v, "in") => {
+            let (s, h) = parse_interpolation_method(&first)?;
+            (s, h, &groups[1..])
+        }
+        _ => (ColorSpace::Oklab, HueMethod::Shorter, &groups[..]),
+    };
+    let [a, b] = rest else {
+        return None;
+    };
+    let item = |g: &[ComponentValue]| -> Option<(Rgba, Option<f64>)> {
+        let pct = |v: &ComponentValue| match v.token() {
+            Some(TokenKind::Percentage(p)) if (0.0..=100.0).contains(&p.value) => Some(p.value),
+            _ => None,
+        };
+        let rgba = |v: &ComponentValue| match parse_color(v)? {
+            Color::Rgba(c) => Some(c),
+            Color::CurrentColor => None,
+        };
+        match components(g).as_slice() {
+            [c] => Some((rgba(c)?, None)),
+            [x, y] => match pct(x) {
+                Some(p) => Some((rgba(y)?, Some(p))),
+                None => Some((rgba(x)?, Some(pct(y)?))),
+            },
+            _ => None,
+        }
+    };
+    let (c1, p1) = item(a)?;
+    let (c2, p2) = item(b)?;
+    let (p1, p2) = match (p1, p2) {
+        (None, None) => (50.0, 50.0),
+        (Some(p), None) => (p, 100.0 - p),
+        (None, Some(p)) => (100.0 - p, p),
+        (Some(x), Some(y)) => (x, y),
+    };
+    let sum = p1 + p2;
+    if sum <= 0.0 {
+        return None;
+    }
+    let mut out = color_space::interpolate(space, hue, c1, c2, p2 / sum);
+    if sum < 100.0 {
+        out.a *= (sum / 100.0) as f32;
+    }
+    Some(out)
 }
 
 /// Rules for parsing a legacy color value (HTML §2.3.6.4), para `bgcolor`, `color`, etc.
