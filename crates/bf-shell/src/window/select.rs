@@ -221,8 +221,13 @@ impl TextIndex {
     pub fn highlight(&self, sel: &Selection, scroll: (f32, f32)) -> Vec<Rect> {
         let ((s, sc), (e, ec)) = sel.range();
         let mut out = Vec::new();
-        for i in s..=e.min(self.runs.len().saturating_sub(1)) {
-            let r = &self.runs[i];
+        for (i, r) in self
+            .runs
+            .iter()
+            .enumerate()
+            .take(e.saturating_add(1))
+            .skip(s)
+        {
             let a = if i == s { sc } else { 0 }.min(r.chars.len());
             let b = if i == e { ec } else { r.chars.len() }.min(r.chars.len());
             if a >= b {
@@ -243,8 +248,13 @@ impl TextIndex {
         let ((s, sc), (e, ec)) = sel.range();
         let mut out = String::new();
         let mut prev: Option<&Run> = None;
-        for i in s..=e.min(self.runs.len().saturating_sub(1)) {
-            let r = &self.runs[i];
+        for (i, r) in self
+            .runs
+            .iter()
+            .enumerate()
+            .take(e.saturating_add(1))
+            .skip(s)
+        {
             let a = if i == s { sc } else { 0 }.min(r.chars.len());
             let b = if i == e { ec } else { r.chars.len() }.min(r.chars.len());
             if let Some(p) = prev

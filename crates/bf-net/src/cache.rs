@@ -428,9 +428,13 @@ impl std::fmt::Debug for HttpCache {
     }
 }
 
-/// Dónde guarda Freedom la caché en disco: `%LOCALAPPDATA%\Freedom\cache` en Windows y
-/// `$XDG_CACHE_HOME/freedom` (o `~/.cache/freedom`) en el resto.
+/// Dónde guarda Freedom la caché en disco: `%LOCALAPPDATA%\Freedom\cache` en Windows,
+/// `~/Library/Caches/Freedom` en macOS y `$XDG_CACHE_HOME/freedom` (o `~/.cache/freedom`) en
+/// el resto.
 pub fn default_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/Freedom"));
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         return Some(PathBuf::from(local).join("Freedom").join("cache"));
     }

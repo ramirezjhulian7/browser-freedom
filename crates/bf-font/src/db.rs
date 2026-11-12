@@ -167,13 +167,45 @@ fn scan_file_inner(path: &Path) -> Option<Vec<FaceInfo>> {
     Some(faces)
 }
 
+/// Los caracteres de Mac OS Roman de `0x80` a `0xFF` (Apple, `ROMAN.TXT`; `0xDB` es `€` desde
+/// Mac OS 8.5 y `0xF0` el logotipo de Apple, `U+F8FF`). De `0x00` a `0x7F` es ASCII.
+const MAC_ROMAN_HIGH: [char; 128] = [
+    'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á', 'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è', //
+    'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ñ', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü', //
+    '†', '°', '¢', '£', '§', '•', '¶', 'ß', '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø', //
+    '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑', '∏', 'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø', //
+    '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«', '»', '…', '\u{a0}', 'À', 'Ã', 'Õ', 'Œ', 'œ', //
+    '–', '—', '“', '”', '‘', '’', '÷', '◊', 'ÿ', 'Ÿ', '⁄', '€', '‹', '›', 'ﬁ', 'ﬂ', //
+    '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á', 'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô', //
+    '\u{f8ff}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ', //
+];
+
+/// Un nombre de la plataforma Macintosh con codificación Roman (OpenType, tabla `name`:
+/// "Macintosh platform-specific encoding IDs", 0 = Roman), que `ttf-parser` no decodifica.
+/// Muchas fuentes de Apple (Helvetica, Menlo, Courier, Monaco, Geneva, Apple Color Emoji)
+/// solo traen nombres de esa plataforma; sin esto no se encuentran por familia.
+fn mac_roman_name(n: &name::Name<'_>) -> Option<String> {
+    if n.platform_id != name::PlatformId::Macintosh || n.encoding_id != 0 {
+        return None;
+    }
+    Some(
+        n.name
+            .iter()
+            .map(|&b| match b {
+                0..=0x7F => char::from(b),
+                _ => MAC_ROMAN_HIGH[usize::from(b - 0x80)],
+            })
+            .collect(),
+    )
+}
+
 fn face_info(path: &Path, index: u32, raw: &RawFace<'_>) -> Option<FaceInfo> {
     let names = name::Table::parse(raw.table(Tag::from_bytes(b"name"))?)?;
     let mut families = Vec::new();
     let mut full = Vec::new();
     let mut subfamily = String::new();
     for n in names.names {
-        let Some(s) = n.to_string() else {
+        let Some(s) = n.to_string().or_else(|| mac_roman_name(&n)) else {
             continue;
         };
         let s = s.trim().to_lowercase();
@@ -400,5 +432,32 @@ impl FontDb {
             .unwrap_or_else(|e| e.into_inner())
             .insert(c, found);
         found
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_roman_names() {
+        let mac = |bytes: &'static [u8], encoding_id| name::Name {
+            platform_id: name::PlatformId::Macintosh,
+            encoding_id,
+            language_id: 0,
+            name_id: name_id::FAMILY,
+            name: bytes,
+        };
+        assert_eq!(
+            mac_roman_name(&mac(b"Helvetica", 0)).as_deref(),
+            Some("Helvetica")
+        );
+        // 0x87 = á, 0xDB = €, 0xF0 = logotipo de Apple (zona de uso privado).
+        assert_eq!(
+            mac_roman_name(&mac(b"\x87 \xDB \xF0", 0)).as_deref(),
+            Some("á € \u{f8ff}")
+        );
+        // Otra codificación Mac (1 = japonés) no se adivina.
+        assert_eq!(mac_roman_name(&mac(b"x", 1)), None);
     }
 }

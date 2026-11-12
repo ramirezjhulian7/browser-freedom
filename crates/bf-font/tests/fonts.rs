@@ -277,3 +277,32 @@ fn shape_dir_rtl_runs() {
         rtl.first().map(|g| g.cluster)
     );
 }
+
+/// En macOS, las genéricas resuelven a las fuentes de Apple que traen solo nombres de la
+/// plataforma Macintosh (Helvetica, Menlo, Times, Courier, Apple Color Emoji).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_system_families() {
+    let Some(db) = system() else { return };
+    for family in [
+        "Helvetica",
+        "Times",
+        "Menlo",
+        "Courier",
+        "Apple Color Emoji",
+    ] {
+        assert!(!db.family(family).is_empty(), "falta la familia {family}");
+    }
+    for generic in [
+        "serif",
+        "sans-serif",
+        "monospace",
+        "system-ui",
+        "ui-monospace",
+    ] {
+        let first = bf_font::matching::generic_candidates(generic)
+            .iter()
+            .find(|f| !db.family(f).is_empty());
+        assert!(first.is_some(), "ninguna familia para {generic}");
+    }
+}
