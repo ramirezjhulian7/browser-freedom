@@ -414,6 +414,8 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
 /// Las hojas del CSSOM cambiaron: hay que volver a calcular estilos y maqueta.
 pub fn sheets_changed(agent: &mut Agent) {
     state(agent).sheets_generation += 1;
+    // E1: las `adoptedStyleSheets` siguen a sus hojas.
+    crate::dom::shadow::sync_adopted(agent);
     crate::dom::mutated(agent);
 }
 

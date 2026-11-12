@@ -599,14 +599,40 @@ impl HttpCache {
             && !matches!(mode, CacheMode::NoStore | CacheMode::Reload)
             && !request_cc.has("no-store");
         let mut validating: Option<Entry> = None;
+        // §4.3.1: guardadas que `Vary` no deja elegir (§4.1), validadas para que el servidor
+        // elija una con un 304 (p. ej. `Vary: Cookie` cuando cambia alguna cookie de sesión).
+        let mut unselected: Vec<Entry> = Vec::new();
         if readable {
-            let mut candidates: Vec<Entry> = self
-                .load(&key)
-                .into_iter()
+            let stored = self.load(&key);
+            let mut candidates: Vec<Entry> = stored
+                .iter()
                 .filter(|e| e.matches(&headers))
                 .filter(|e| serve_range(e, range, req.headers.get("range")).is_some())
+                .cloned()
                 .collect();
             candidates.sort_by(|a, b| b.response_time.total_cmp(&a.response_time));
+            if candidates.is_empty() && range.is_none() && !only_if_cached {
+                unselected = stored
+                    .into_iter()
+                    .filter(|e| {
+                        let (etag, lm) = e.validators();
+                        e.range.is_none() && (etag.is_some() || lm.is_some())
+                    })
+                    .collect();
+                unselected.sort_by(|a, b| b.response_time.total_cmp(&a.response_time));
+                let mut etags: Vec<&str> = Vec::new();
+                for etag in unselected.iter().filter_map(|e| e.validators().0) {
+                    if !etags.contains(&etag) {
+                        etags.push(etag);
+                    }
+                }
+                if !etags.is_empty() {
+                    headers.push("If-None-Match", &etags.join(", "));
+                }
+                if let Some(lm) = unselected.iter().find_map(|e| e.validators().1) {
+                    headers.push("If-Modified-Since", lm);
+                }
+            }
             if let Some(entry) = candidates.into_iter().next() {
                 let now = self.now();
                 if matches!(mode, CacheMode::ForceCache | CacheMode::OnlyIfCached) {
@@ -651,6 +677,29 @@ impl HttpCache {
             entry.response_time = response_time;
             let served = self.serve(&entry, &method, None, req, response_time);
             if self.storable(&method, &entry.response, req, mode, false) {
+                self.store(&key, entry);
+            }
+            return Ok((served, CacheUse::Revalidated));
+        }
+        if response.status == 304
+            && let Some(mut entry) = select_for_update(unselected, &response.headers)
+        {
+            let old_vary = std::mem::take(&mut entry.vary);
+            update_headers(&mut entry.response.headers, &response.headers);
+            entry.request_time = request_time;
+            entry.response_time = response_time;
+            let served = self.serve(&entry, &method, None, req, response_time);
+            // La elegida pasa a ser la variante de esta petición (sus cabeceras de `Vary`).
+            if let Some(names) = vary_names(&entry.response.headers)
+                && self.storable(&method, &entry.response, req, mode, false)
+            {
+                let mut entries = self.load(&key);
+                entries.retain(|e| e.range.is_some() || e.vary != old_vary);
+                self.remember(&key, entries, true);
+                entry.vary = names
+                    .iter()
+                    .map(|n| (n.clone(), vary_value(req.headers, n)))
+                    .collect();
                 self.store(&key, entry);
             }
             return Ok((served, CacheUse::Revalidated));
@@ -880,6 +929,29 @@ fn usable(entry: &Entry, request: &Directives, now: f64) -> bool {
         Some(None) => true,
         None => false,
     }
+}
+
+/// §4.3.4: cuál de las respuestas `stored` (la más reciente primero) actualiza un 304 que
+/// contesta a sus validadores: la del mismo `ETag` (comparación débil, RFC 9110 §8.8.3.2) o, sin
+/// él, la más reciente con el mismo `Last-Modified`. Si el 304 no trae validadores o no coincide
+/// con ninguna, la más reciente: solo pudo contestar a los validadores que mandamos, todos
+/// sacados de `stored`, y la petición no era condicional, así que un 304 no puede llegar al
+/// cliente (lo mismo que hace la validación de la variante elegida).
+fn select_for_update(mut stored: Vec<Entry>, fresh: &Headers) -> Option<Entry> {
+    let weak = |t: &str| t.trim().trim_start_matches("W/").to_owned();
+    let position = if let Some(etag) = fresh.get("etag") {
+        stored
+            .iter()
+            .position(|e| e.validators().0.is_some_and(|t| weak(t) == weak(etag)))
+    } else if let Some(lm) = fresh.get("last-modified") {
+        stored
+            .iter()
+            .position(|e| e.validators().1.is_some_and(|l| l.trim() == lm.trim()))
+    } else {
+        None
+    };
+    let position = position.unwrap_or(0);
+    (position < stored.len()).then(|| stored.swap_remove(position))
 }
 
 /// §3.2: un 304 reemplaza las cabeceras guardadas que trae (salvo las de conexión y
@@ -1314,9 +1386,65 @@ mod tests {
         let (_, u, sent) = r.get(&[("Cookie", "GeoIP=x;b=2; a=1")], d, &[], 304);
         assert_eq!(u, CacheUse::Revalidated);
         assert!(sent.get("if-modified-since").is_some());
+        // Otra cookie: ninguna variante coincide; se valida igual (§4.3.1) y un 200 se guarda
+        // como variante nueva.
         let (_, u, sent) = r.get(&[("Cookie", "a=1; b=3")], d, &vary, 200);
         assert_eq!(u, CacheUse::Network);
-        assert!(sent.get("if-modified-since").is_none());
+        assert!(sent.get("if-modified-since").is_some());
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 2);
+    }
+
+    /// §4.3.1 y §4.3.4: sin variante que coincida por `Vary`, la petición lleva los validadores
+    /// de las guardadas; el 304 elige la del mismo `ETag`, la sirve y pasa a ser la variante de
+    /// las cabeceras nuevas (no se acumulan variantes). Es el caso de los gadgets de Wikipedia,
+    /// con `Vary: Cookie` y cookies `WMF-Last-Access` que cambian cada día.
+    #[test]
+    fn vary_mismatch_validates_stored_variants() {
+        let r = rig(None);
+        let d = Default::default();
+        let respond = |etag| {
+            [
+                ("Cache-Control", "private, max-age=0, must-revalidate"),
+                ("ETag", etag),
+                ("Vary", "Cookie"),
+            ]
+        };
+        r.get(&[("Cookie", "a=1")], d, &respond("\"v1\""), 200);
+        r.advance(1);
+        r.get(&[("Cookie", "a=2")], d, &respond("W/\"v2\""), 200);
+        r.advance(1);
+        let (res, u, sent) = r.get(&[("Cookie", "a=3")], d, &[("ETag", "\"v2\"")], 304);
+        assert_eq!(sent.get("if-none-match"), Some("W/\"v2\", \"v1\""));
+        assert_eq!((u, res.status), (CacheUse::Revalidated, 200));
+        assert_eq!(res.body, b"cuerpo");
+        let stored = r.cache.load(&HttpCache::key(&r.url, true));
+        assert_eq!(stored.len(), 2);
+        // La de `a=2` ahora es la de `a=3`: coincide y se valida sola.
+        let (_, u, sent) = r.get(&[("Cookie", "a=3")], d, &[], 304);
+        assert_eq!(u, CacheUse::Revalidated);
+        assert_eq!(sent.get("if-none-match"), Some("\"v2\""));
+        // Solo con `Last-Modified` (como `action=raw` de MediaWiki).
+        let r = rig(None);
+        let lm = "Tue, 14 Nov 2023 21:56:40 GMT";
+        let vary = [
+            (
+                "Cache-Control",
+                "private, s-maxage=0, max-age=0, must-revalidate",
+            ),
+            ("Last-Modified", lm),
+            ("Vary", "Accept-Encoding,Cookie"),
+        ];
+        r.get(&[("Cookie", "WMF-Last-Access=10-Nov-2026")], d, &vary, 200);
+        let (res, u, sent) = r.get(&[("Cookie", "WMF-Last-Access=11-Nov-2026")], d, &[], 304);
+        assert_eq!(sent.get("if-modified-since"), Some(lm));
+        assert_eq!(
+            (u, res.body.as_slice()),
+            (CacheUse::Revalidated, &b"cuerpo"[..])
+        );
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 1);
+        // `only-if-cached` sin variante que coincida sigue siendo un 504.
+        let (res, u, _) = r.get(&[("Cookie", "x=1")], CacheMode::OnlyIfCached, &[], 200);
+        assert_eq!((u, res.status), (CacheUse::Unavailable, 504));
     }
 
     #[test]

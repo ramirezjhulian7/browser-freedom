@@ -210,7 +210,84 @@ tanda y 0.99× al repetirlo solo con 10 rondas.
 - La llamada rápida no pasa por el safepoint (solo los saltos hacia atrás): una recursión
   sin bucles como `fib(45)` no mira la interrupción hasta terminar.
 - Un bucle con `var` en el código global va a ~1 µs por vuelta (5 M vueltas de
-  `s = s + i` en ~5 s) frente a ~90 ns dentro de una función. Sin diagnosticar.
+  `s = s + i` en ~5 s) frente a ~90 ns dentro de una función. Resuelto en la sección
+  siguiente.
+
+## E8: globales con inline cache y argumentos directos (2026-11-12)
+
+Línea base: la rama `army/e8` en `b18235d` (`master` `caba13e` + el FINAL de `BF_FULL`, sin
+cambios en la VM), compilada en release antes de estos cambios. Mismo `ab.sh`, mejor de 5
+rondas alternadas, máquina con carga de otros ejecutores (~30 procesos de rustc). Dos
+programas nuevos en `crates/bf-js/bench/`: `globals.js` (2 M vueltas de `s = s + i` con
+`var` en el código global) y `calls.js` (3 M llamadas a `add(a, b)` desde un bucle).
+
+| benchmark | base ms | E8 ms | speedup |
+|---|---:|---:|---:|
+| `alloc` | 141.0 | 144.5 | 0.98× |
+| `arrays` | 92.1 | 89.8 | 1.03× |
+| `calls` | 764.4 | 642.2 | 1.19× |
+| `closures` | 129.0 | 126.2 | 1.02× |
+| `concat` | 60.1 | 63.0 | 0.95× |
+| `dict` | 27.4 | 28.3 | 0.97× |
+| `dom` | 779.8 | 759.6 | 1.03× |
+| `fib` | 467.2 | 363.2 | 1.29× |
+| `globals` | 2062.7 | 295.4 | 6.98× |
+| `json` | 44.5 | 39.9 | 1.12× |
+| `loops` | 150.5 | 136.7 | 1.10× |
+| `methods` | 150.2 | 126.9 | 1.18× |
+| `nbody` | 431.8 | 439.8 | 0.98× |
+| `poly` | 191.3 | 183.7 | 1.04× |
+| `props` | 99.0 | 98.1 | 1.01× |
+| `regexp` | 599.5 | 575.0 | 1.04× |
+| `strings` | 21.9 | 21.1 | 1.04× |
+
+Media geométrica: 1.18× (1.07× sin `globals`). Las diferencias de ±5 % son ruido (ver la
+tanda anterior); `json` y `loops` no tocan nada de lo cambiado.
+
+Por operación (mejor de 7 rondas, con variantes del bucle de `calls.js` sin la llamada, con
+una llamada vacía `nop()` y con `add(s, i)`):
+
+| qué | antes | ahora |
+|---|---:|---:|
+| vuelta del bucle global con `var` (`globals`) | ~1 030 ns | ~150 ns |
+| llamada + vuelta de `add(s, i)` (`calls` menos el bucle sin llamada) | ~150 ns | ~110 ns |
+| llamada de `fib` (30: 1 664 079 llamadas, con su cuerpo) | ~280 ns | ~218 ns |
+
+`fib(30)` queda en 363 ms en esta tanda: por primera vez debajo de la meta de 400 ms, aunque
+la base de esta tanda (467 ms) no es comparable con los 719 ms de la medición de E3.
+
+### Qué cambió
+
+- **Globales** (`vm/interp.rs`, `fast_op`): la causa del ~1 µs era que la asignación a una
+  global (`s = …`, `i++`) iba entera por el camino general: `ResolveGlobalRef` buscaba el
+  nombre en el registro declarativo y en el objeto global (HasProperty), y `PutRef` repetía
+  la búsqueda en SetMutableBinding y en `[[Set]]`; solo la lectura (`GetGlobal`) tenía
+  inline cache. Ahora `ResolveGlobalRef`, `GetRefValue` y `PutRef` usan la misma cache
+  `Ic::Global` (shape del objeto global + cantidad de bindings léxicos) dentro de la ráfaga:
+  si acierta, el binding es una propiedad propia del objeto global (§9.1.1.4), ResolveBinding
+  da el Global Environment sin buscar, y PutValue (§9.1.1.4.5 → OrdinarySet) es escribir el
+  valor de una propiedad de datos escribible. Un accessor, una propiedad no escribible, un
+  shape distinto (borrada o agregada) o un `let` global nuevo van al camino general.
+- **Argumentos directos** (`compiler/bytecode.rs` `direct_args`, `fast_call`): si una
+  función solo lee sus argumentos en el prólogo de `ArgToLocal` (sin `arguments`, rest,
+  valores por defecto ni `GetArg`), la llamada rápida los copia directo a los locales y
+  empieza después del prólogo: sin el vector `args` del pool (sacarlo, llenarlo y
+  devolverlo) ni las instrucciones del prólogo. `recycle_into` ya no guarda en el pool
+  vectores sin reserva.
+- Tests: `global_assignment_fast_path_keeps_the_semantics` y `direct_args_fast_call` en
+  `tests/host.rs` (propiedad que pasa a no escribible o a accessor a mitad de un bucle
+  caliente, borrada entre ResolveBinding y PutValue, tapada por un `let` de un script
+  posterior; menos y más argumentos que parámetros, parámetros repetidos, `arguments`, rest,
+  valores por defecto, llamadas de cola).
+
+### Pendiente
+
+- Lo que queda de la llamada (~110 ns): crear y reciclar el frame (232 bytes, dos vectores de
+  los pools, `Rc` del código) y la salida y vuelta a la ráfaga en cada `Call`/`Return`. Lo
+  siguiente sigue siendo una pila de valores compartida con ventanas por frame.
+- El bucle global sigue ~1.5× más lento que dentro de una función: cada acceso consulta la
+  cache (`RefCell` de la tabla, shape del objeto global) y apila la referencia en
+  `FrameRare::refs`.
 
 ## Profundidad
 
