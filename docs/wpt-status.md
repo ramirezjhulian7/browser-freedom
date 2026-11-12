@@ -44,9 +44,10 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 
 | Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
 |---|---:|---:|---:|---:|---:|---:|
-| css/css-overflow | 312 | 193 | 402 | 0 | 907 | 61.8% |
+| css/css-overflow | 316 | 189 | 402 | 0 | 907 | 62.6% |
 | css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
 | css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
+| css/css-images (`object-fit*`, `object-position*`) | 179 | 4 | 26 | 0 | 209 | 97.8% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
@@ -110,6 +111,20 @@ prueba usa `currentcolor` dentro de `color-mix()`, que todavía no se admite. Lo
 perfil de color (`tagged-images-*`), `contrast-color()` y los `deprecated-sameas-*` (colores
 del sistema obsoletos). Las math functions, `env()` y `@property` se miden sobre todo con
 testharness (`needs-js`); sus pruebas propias están en `bf-style/tests/modern.rs`.
+
+## E5: abspos en flex, `safe` y lanes (2026-11-12, ronda 4)
+
+Mismo comando sobre `army/e5` con `master` `d6540e8`; "antes" es el FINAL `4762047`.
+
+| Directorio | 4762047 | army/e5 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/css-flexbox | 699/949 (73.7 %) | 724/949 (76.3 %) | 478 | 0 |
+| css/css-grid | 1054/1567 (67.3 %) | 1102/1567 (70.3 %) | 913 | 2 |
+| css/css-grid/grid-lanes | 518/851 (60.9 %) | 565/851 (66.4 %) | – | – |
+
+Pasan de "pass" a "fail" `css-flexbox/align-items-007` (los SVG de E7 se pintan y uno sin
+`width`/`height` llega con 300×150 de tamaño natural), `flex-abspos-align-self-safe-outer-cb-003`
+(tentative) y `grid-lanes-grid-item-self-baseline-002b` (escritura vertical).
 
 ## Tests con expectativa dudosa
 

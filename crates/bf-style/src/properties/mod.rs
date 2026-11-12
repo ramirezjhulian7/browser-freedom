@@ -7,6 +7,7 @@ pub mod clamp; // E12
 pub mod effects; // E7
 pub mod gradient; // E4
 pub mod grid; // E4
+pub mod object; // E12
 pub mod overflow; // E12
 pub mod shorthands;
 pub mod transform; // E4
@@ -24,6 +25,7 @@ use effects::{
     BorderImageOutset, BorderImageRepeat, BorderImageSlice, BorderImageWidth, ClipPath, Filter,
     Isolation, MixBlendMode,
 }; // E7
+use object::{ObjectFit, ObjectPosition}; // E12
 use overflow::{OverflowClipMargin, TextOverflow};
 use types::*;
 
@@ -241,12 +243,12 @@ longhands! {
     FlexGrow "flex-grow" flex_grow: NonNegativeNumber = "0", inherited: false, animatable: true;
     FlexShrink "flex-shrink" flex_shrink: NonNegativeNumber = "1", inherited: false, animatable: true;
     FlexBasis "flex-basis" flex_basis: FlexBasis = "auto", inherited: false, animatable: true;
-    JustifyContent "justify-content" justify_content: ContentAlign = "normal", inherited: false, animatable: false;
-    AlignContent "align-content" align_content: ContentAlign = "normal", inherited: false, animatable: false;
-    AlignItems "align-items" align_items: ItemAlign = "normal", inherited: false, animatable: false;
-    AlignSelf "align-self" align_self: ItemAlign = "auto", inherited: false, animatable: false;
-    JustifyItems "justify-items" justify_items: ItemAlign = "normal", inherited: false, animatable: false;
-    JustifySelf "justify-self" justify_self: ItemAlign = "auto", inherited: false, animatable: false;
+    JustifyContent "justify-content" justify_content: Aligned<ContentAlign> = "normal", inherited: false, animatable: false;
+    AlignContent "align-content" align_content: Aligned<ContentAlign> = "normal", inherited: false, animatable: false;
+    AlignItems "align-items" align_items: Aligned<ItemAlign> = "normal", inherited: false, animatable: false;
+    AlignSelf "align-self" align_self: Aligned<ItemAlign> = "auto", inherited: false, animatable: false;
+    JustifyItems "justify-items" justify_items: Aligned<ItemAlign> = "normal", inherited: false, animatable: false;
+    JustifySelf "justify-self" justify_self: Aligned<ItemAlign> = "auto", inherited: false, animatable: false;
     Order "order" order: Integer = "0", inherited: false, animatable: true;
     RowGap "row-gap" row_gap: Gap = "normal", inherited: false, animatable: true;
     ColumnGap "column-gap" column_gap: Gap = "normal", inherited: false, animatable: true;
@@ -279,6 +281,9 @@ longhands! {
     // E12: CSS Overflow 3 §5 y §3.2 (`overflow-clip-margin` se anima de forma discreta).
     TextOverflowP "text-overflow" text_overflow: TextOverflow = "clip", inherited: false, animatable: false;
     OverflowClipMarginP "overflow-clip-margin" overflow_clip_margin: OverflowClipMargin = "0px", inherited: false, animatable: false;
+    // E12: CSS Images 3 §5.5 y §5.6.
+    ObjectFitP "object-fit" object_fit: ObjectFit = "fill", inherited: false, animatable: false;
+    ObjectPositionP "object-position" object_position: ObjectPosition = "50% 50%", inherited: false, animatable: false;
     // E5: tamaño intrínseco (CSS Sizing 4 §5 y §7) y contención de tamaño (CSS Containment 2).
     AspectRatio "aspect-ratio" aspect_ratio: AspectRatio = "auto", inherited: false, animatable: true;
     Contain "contain" contain: Contain = "none", inherited: false, animatable: false;

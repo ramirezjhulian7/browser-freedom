@@ -367,6 +367,12 @@ legend[align=right i] {
 /* §15.4.1 Embedded content */
 iframe { border: 2px inset; }
 video { object-fit: contain; }
+/* E12: el contenido reemplazado se recorta al content box salvo con `overflow: visible`
+   (CSS Overflow 4 y CSS Images 3 §5.5; como Blink y WebKit). */
+img, video, canvas, embed, object {
+  overflow: clip;
+  overflow-clip-margin: content-box;
+}
 
 /* §15.4.2 Images */
 img:is([sizes="auto" i], [sizes^="auto," i]) {

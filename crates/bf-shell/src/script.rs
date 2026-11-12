@@ -251,9 +251,13 @@ impl WebHooks for ShellWeb {
         }
     }
 
-    // E2: IndexedDB en `%APPDATA%\freedom\idb\<origen>\` (`$HOME/.freedom/idb` fuera de
-    // Windows).
+    // E2: IndexedDB en `%APPDATA%\freedom\idb\<origen>\`
+    // (`~/Library/Application Support/Freedom/idb` en macOS, `$HOME/.freedom/idb` en el resto).
     fn storage_dir(&self) -> Option<PathBuf> {
+        if cfg!(target_os = "macos") {
+            return std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join("Library/Application Support/Freedom/idb"));
+        }
         std::env::var_os("APPDATA")
             .map(|d| PathBuf::from(d).join("freedom"))
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".freedom")))
@@ -393,14 +397,20 @@ impl BomHooks for ShellBom {
 }
 
 /// El archivo del `localStorage` de `origin`: `%APPDATA%\freedom\storage\<origen>.json`
-/// (`$HOME/.freedom/storage` fuera de Windows). Los orígenes opacos no se guardan.
+/// (`~/Library/Application Support/Freedom/storage` en macOS, `$HOME/.freedom/storage` en el
+/// resto). Los orígenes opacos no se guardan.
 fn storage_path(origin: &str) -> Option<PathBuf> {
     if origin == "null" {
         return None;
     }
-    let base = std::env::var_os("APPDATA")
-        .map(|d| PathBuf::from(d).join("freedom"))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".freedom")))?;
+    let base = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support/Freedom"))
+    } else {
+        std::env::var_os("APPDATA")
+            .map(|d| PathBuf::from(d).join("freedom"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".freedom")))
+    }?;
     let name: String = origin
         .chars()
         .map(|c| {

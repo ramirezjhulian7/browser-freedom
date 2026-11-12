@@ -765,10 +765,7 @@ impl Agent {
                 a.length_writable = false;
             }
         }
-        if final_len != new_len {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(final_len == new_len)
     }
 
     /// ArraySpeciesCreate (§10.4.2.3).

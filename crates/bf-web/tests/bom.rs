@@ -1407,7 +1407,8 @@ fn performance_observer_api_and_errors() {
 // E1: un nodo o un rango de otra ventana (otro realm, otra arena de nodos) da un error del
 // DOM, o la respuesta del DOM para "otra raíz", en vez de resolverse contra la arena de esta
 // ventana: antes era un pánico (`bf-dom` `Document::get`, índice fuera de rango, o
-// `Document::live_range`).
+// `Document::live_range`). Adoptarlo e insertarlo sí funciona: ver
+// `nodes_move_between_windows`.
 #[test]
 fn nodes_and_ranges_of_another_window_do_not_panic() {
     // E4: una operación de la interfaz de esta ventana aplicada a un objeto del marco corre en
@@ -1424,11 +1425,7 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
                var mine = document.getElementById('a'), theirs = fd.getElementById('b'); \
                var out = []; \
                function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
-               out.push(err(function () { fd.adoptNode(mine); })); \
                out.push(err(function () { fd.importNode(mine, true); })); \
-               out.push(err(function () { document.body.appendChild(theirs); })); \
-               out.push(err(function () { theirs.appendChild(mine); })); \
-               out.push(err(function () { mine.append(theirs); })); \
                out.push(mine.contains(theirs), mine.isSameNode(theirs), \
                         document.isSameNode(fd), mine.isEqualNode(theirs)); \
                var p1 = mine.compareDocumentPosition(theirs), p2 = theirs.compareDocumentPosition(mine); \
@@ -1446,8 +1443,117 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
                return out.join(); \
              })()"
         ),
-        "NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError,\
-         NotSupportedError,false,false,false,false,true,WrongDocumentError,\
+        "NotSupportedError,false,false,false,false,true,WrongDocumentError,\
          WrongDocumentError,false,false,NotSupportedError,0,ok,,uno"
+    );
+}
+
+// E1: "adopt" (DOM §4.5) entre ventanas: `adoptNode` y las inserciones (`appendChild`,
+// `insertBefore`, `replaceChild`, `append`…) de un nodo del documento de otra ventana lo mueven
+// a la arena de esta. Es el mismo objeto (`adoptNode(n) === n`), sus hijos con wrapper siguen
+// siendo sus hijos, y sus listeners y event handlers siguen andando (el atributo `onclick` se
+// compila con la ventana del documento nuevo, HTML §8.1.8.1); sus métodos corren en la ventana
+// que ahora tiene el nodo (el wrapper toma el prototipo de allí, como en Gecko).
+#[test]
+fn nodes_move_between_windows() {
+    let mut p = framed(
+        "<p id=a onclick=\"window.hits.push('handler')\">uno</p>\
+         <iframe id=f srcdoc=\"<p id=b>dos</p><p id=c>tres</p>\"></iframe>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "(function () { \
+               window.hits = []; \
+               var fw = document.getElementById('f').contentWindow, fd = fw.document; \
+               fw.hits = []; \
+               var mine = document.getElementById('a'), text = mine.firstChild; \
+               var theirs = fd.getElementById('b'), tres = fd.getElementById('c'); \
+               mine.addEventListener('click', function () { window.hits.push('listener'); }); \
+               var out = []; \
+               function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+               out.push(fd.adoptNode(mine) === mine, mine.ownerDocument === fd, \
+                        mine.parentNode === null, document.getElementById('a') === null, \
+                        text.parentNode === mine, text.ownerDocument === fd, \
+                        mine instanceof fw.HTMLParagraphElement, mine.textContent); \
+               fd.body.appendChild(mine); \
+               out.push(fd.getElementById('a') === mine, mine.parentNode === fd.body); \
+               mine.click(); \
+               out.push(window.hits.join('+'), fw.hits.join('+')); \
+               document.body.appendChild(theirs); \
+               out.push(theirs.ownerDocument === document, document.getElementById('b') === theirs, \
+                        fd.getElementById('b') === null, theirs.textContent); \
+               mine.append(theirs); \
+               out.push(theirs.parentNode === mine, fd.getElementById('b') === theirs); \
+               document.body.insertBefore(tres, document.body.firstChild); \
+               out.push(document.body.firstChild === tres); \
+               var x = document.createElement('i'); document.body.appendChild(x); \
+               fd.body.replaceChild(x, mine); \
+               out.push(x.ownerDocument === fd, mine.parentNode === null, \
+                        document.body.contains(x)); \
+               out.push(err(function () { fd.adoptNode(document); }), \
+                        err(function () { document.body.appendChild(fd); }), \
+                        err(function () { fd.body.appendChild(document.documentElement); })); \
+               return out.join(); \
+             })()"
+        ),
+        "true,true,true,true,true,true,true,uno,true,true,listener,handler,\
+         true,true,true,dos,true,true,true,true,true,false,\
+         NotSupportedError,HierarchyRequestError,ok"
+    );
+}
+
+// E1: `document.open()`/`write()` dentro de un listener (aquí un `onclick`) envuelve el documento
+// prestado en un parser; antes ese documento se perdía y el resto del dispatch y del script
+// corría sobre un documento vacío (pánico de índice en `bf-dom` con el siguiente `NodeId`).
+#[test]
+fn document_write_in_a_listener_keeps_the_document() {
+    let mut p = Page::scripted(
+        "<body><p id=a>uno</p><button id=b onclick=\"document.open(); \
+         document.write('<p id=n>nuevo</p>'); document.close()\">b</button>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'); var b = document.getElementById('b'); \
+             b.click(); var n = document.getElementById('n'); \
+             [a.textContent, b.textContent, n !== null && n.textContent, \
+              document.body !== null].join()"
+        ),
+        "uno,b,nuevo,true"
+    );
+}
+
+// E1: un marco que navega reusa su realm; el documento viejo sale de `documents[0]` con sus
+// wrappers (antes un nodo viejo `(0, id)` se resolvía en la arena del documento nuevo, más
+// chico: pánico de índice) y un `Range` viejo queda colapsado en vez de un pánico.
+#[test]
+fn frame_navigation_retires_the_old_document() {
+    let big = format!(
+        "<div id=big>{}</div><p id=last>fin</p>",
+        "<span>x</span>".repeat(200)
+    );
+    let mut p = framed(
+        "<iframe id=f src=/uno.html></iframe>",
+        &[
+            ("https://example.test/uno.html", &big),
+            ("https://example.test/dos.html", "<p>dos</p>"),
+        ],
+    );
+    p.eval(
+        "var f = document.getElementById('f'); var old = f.contentDocument; \
+         var last = old.getElementById('last'); var r = old.createRange(); \
+         r.selectNodeContents(last); f.src = '/dos.html';",
+    );
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show(
+            "var nd = f.contentDocument; \
+             [last.textContent, last.ownerDocument === old, nd !== old, nd.body.textContent, \
+              last.compareDocumentPosition(nd.body) & 1, old.getElementById('last') === last, \
+              String(r.startContainer === nd || r.startContainer === old)].join()"
+        ),
+        "fin,true,true,dos,1,true,true"
     );
 }

@@ -192,14 +192,16 @@ fn inline_svg_in_html() {
 #[test]
 fn markers_on_vertices() {
     // Un cuadrado de 4×4 centrado en cada extremo de la línea; el del final, girado con ella
-    // (orient=auto) sigue cubriendo el mismo punto.
+    // (orient=auto) sigue cubriendo el mismo punto. El espacio antes de cada `\` del literal
+    // importa: la continuación se come la sangría de la línea siguiente, y dos atributos
+    // pegados son un error fatal de XML (§3.1) que deja la `polyline` fuera del árbol.
     let p = raster(
         &format!(
             "<svg {SVG_NS} width='40' height='40'>\
              <marker id='m' markerWidth='4' markerHeight='4' refX='2' refY='2' orient='auto' markerUnits='userSpaceOnUse'>\
              <rect width='4' height='4' fill='red'/></marker>\
-             <polyline points='5,5 35,5 35,35' fill='none' stroke='blue' stroke-width='0.5'\
-              marker-start='url(#m)' marker-mid='url(#m)' marker-end='url(#m)'/></svg>"
+             <polyline points='5,5 35,5 35,35' fill='none' stroke='blue' stroke-width='0.5' \
+             marker-start='url(#m)' marker-mid='url(#m)' marker-end='url(#m)'/></svg>"
         ),
         40,
         40,

@@ -46,9 +46,9 @@ pub fn register(agent: &mut Agent) {
     );
     agent.host_extend_class(
         c.document,
-        HostClass::new("Document")
-            .attribute("adoptedStyleSheets", Some(adopted_get), Some(adopted_set))
-            .static_method("parseHTMLUnsafe", 1, parse_html_unsafe),
+        // `Document.adoptedStyleSheets` es de E2 (`cssom/sheets.rs::document_partial`, lo lee
+        // la cascada por `document_sheets`); aquí solo el de `ShadowRoot`.
+        HostClass::new("Document").static_method("parseHTMLUnsafe", 1, parse_html_unsafe),
     );
 }
 
@@ -497,16 +497,14 @@ fn slot_assign(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- adoptedStyleSheets (CSSOM §6.2, DocumentOrShadowRoot) ---
 
-/// El array de `adoptedStyleSheets` de cada documento o shadow root.
+/// El array de `adoptedStyleSheets` de cada shadow root (el del documento es de E2).
 #[derive(Debug, Default)]
 struct Adopted(std::collections::HashMap<NodeRef, bf_js::host::HostHandle>);
 
-/// El documento o shadow root de `this`.
+/// El shadow root de `this`.
 fn this_root(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
     let n = this_node(agent, a)?;
-    let ok = with_doc(agent, n.doc, |d| {
-        d.is_shadow_root(n.node) || matches!(d.get(n.node).data, NodeData::Document)
-    });
+    let ok = with_doc(agent, n.doc, |d| d.is_shadow_root(n.node));
     if !ok {
         return agent.type_error("Illegal invocation");
     }
@@ -571,7 +569,8 @@ fn adopted_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// Copia al documento el texto de las `adoptedStyleSheets` (lo lee la cascada).
+/// Copia a cada shadow root el texto de sus `adoptedStyleSheets` (lo lee la cascada por
+/// `loader::shadow_tree_stylesheets`).
 pub fn sync_adopted(agent: &mut Agent) {
     let realm = crate::WebContextHandle::current(agent).realm;
     let Some(entries) = agent

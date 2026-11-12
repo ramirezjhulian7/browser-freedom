@@ -207,6 +207,52 @@ fn clip_radii(f: &Fragment, clip: &Rect) -> Radii {
     )
 }
 
+/// E12: el tamaño concreto del objeto de un reemplazado (CSS Images 3 §5.5) con sus
+/// dimensiones naturales (ancho, alto, proporción) en un content box `area`.
+fn object_size(
+    fit: bf_style::properties::object::ObjectFit,
+    natural: (Option<f32>, Option<f32>, Option<f32>),
+    area: (f32, f32),
+) -> (f32, f32) {
+    use bf_style::properties::object::ObjectFit;
+    let (aw, ah) = area;
+    let ratio = natural.2.filter(|r| *r > 0.0 && r.is_finite());
+    let contain = |r: f32| {
+        if aw / ah > r {
+            (ah * r, ah)
+        } else {
+            (aw, aw / r)
+        }
+    };
+    let cover = |r: f32| {
+        if aw / ah > r {
+            (aw, aw / r)
+        } else {
+            (ah * r, ah)
+        }
+    };
+    // Dimensionado por defecto sin tamaño especificado (§5.3.2).
+    let default = || match (natural.0, natural.1, ratio) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some(r)) => (w, w / r),
+        (None, Some(h), Some(r)) => (h * r, h),
+        (Some(w), None, None) => (w, ah),
+        (None, Some(h), None) => (aw, h),
+        (None, None, Some(r)) => contain(r),
+        (None, None, None) => area,
+    };
+    match fit {
+        ObjectFit::Fill => area,
+        ObjectFit::Contain => ratio.map_or(area, contain),
+        ObjectFit::Cover => ratio.map_or(area, cover),
+        ObjectFit::None => default(),
+        ObjectFit::ScaleDown => {
+            let (n, c) = (default(), ratio.map_or(area, contain));
+            if n.0 * n.1 <= c.0 * c.1 { n } else { c }
+        }
+    }
+}
+
 /// Radios de la border box (CSS Backgrounds 3 §5).
 fn border_radii(style: &ComputedStyle, rect: &Rect) -> Radii {
     let r = |c: &bf_style::properties::types::CornerRadius| {
@@ -929,29 +975,63 @@ impl<'a> Builder<'a> {
             self.frame_content(f, clip, list, scroll);
             return;
         }
-        let rect = f.content_rect();
-        // E7: los SVG se rasterizan al tamaño del content box.
-        let Some(image) = f.node.and_then(|n| {
-            self.images
-                .for_node_at(n, rect.width, rect.height, Some(self.fonts))
-        }) else {
+        let content = f.content_rect();
+        let Some(url) = f.node.and_then(|n| self.images.element_url.get(&n)) else {
             return;
         };
-        if rect.width > 0.0 && rect.height > 0.0 {
-            // E4: el contenido reemplazado se recorta a la curva interior del content box
-            // (CSS Backgrounds 3 §5.3).
-            let radii = border_radii(&f.style, &f.rect).shrink(&Edges {
-                top: f.border.top + f.padding.top,
-                right: f.border.right + f.padding.right,
-                bottom: f.border.bottom + f.padding.bottom,
-                left: f.border.left + f.padding.left,
-            });
-            let mut clip = clip.clone();
-            if !radii.is_zero() {
-                clip.push(Clip { rect, radii });
-            }
-            self.emit(&clip, DisplayItem::Image { rect, image });
+        if !(content.width > 0.0 && content.height > 0.0) {
+            return;
         }
+        // E12: `object-fit` y `object-position` (CSS Images 3 §5.5 y §5.6): el tamaño
+        // concreto del objeto y su sitio en el content box.
+        let natural = match self.images.svgs.get(url) {
+            Some(svg) => {
+                let i = svg.intrinsic();
+                let ratio = i.ratio.or(match (i.width, i.height) {
+                    (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(w / h),
+                    _ => None,
+                });
+                (i.width, i.height, ratio)
+            }
+            None => match self.images.for_url(url) {
+                Some(p) => {
+                    let (w, h) = (p.width() as f32, p.height() as f32);
+                    (Some(w), Some(h), Some(w / h))
+                }
+                None => return,
+            },
+        };
+        let (w, h) = object_size(f.style.object_fit, natural, (content.width, content.height));
+        if !(w > 0.0 && h > 0.0) {
+            return;
+        }
+        let pos = &f.style.object_position;
+        let rect = Rect::new(
+            content.x + pos.0.resolve(content.width - w),
+            content.y + pos.1.resolve(content.height - h),
+            w,
+            h,
+        );
+        // E7: los SVG se rasterizan al tamaño concreto del objeto.
+        let Some(image) = self.images.image_at(url, w, h, Some(self.fonts)) else {
+            return;
+        };
+        // E12: el objeto se recorta por el borde de recorte del elemento (la hoja UA da
+        // `overflow: clip` con `overflow-clip-margin: content-box`), con su curva (CSS
+        // Backgrounds 3 §5.3); con `overflow: visible`, ni siquiera por los radios
+        // (`overflow-img-border-radius`).
+        let mut clip = clip.clone();
+        if let Some(edge) = f.clip {
+            let radii = clip_radii(f, &edge);
+            let inside = edge.x <= rect.x
+                && edge.y <= rect.y
+                && rect.right() <= edge.right()
+                && rect.bottom() <= edge.bottom();
+            if !inside || !radii.is_zero() {
+                clip.push(Clip { rect: edge, radii });
+            }
+        }
+        self.emit(&clip, DisplayItem::Image { rect, image });
     }
 
     /// E4: el documento de un `<iframe>` (HTML §4.8.5): su lista, desplazada al content box

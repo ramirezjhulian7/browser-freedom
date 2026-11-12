@@ -299,6 +299,14 @@ fn url_from_input(input: &str) -> Option<Url> {
         || (s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
         || std::path::Path::new(s).exists();
     if path_like {
+        // `~` es la carpeta personal, como en una terminal de Unix.
+        if let Some(rest) = s.strip_prefix('~')
+            && (rest.is_empty() || rest.starts_with(['/', '\\']))
+            && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        {
+            let path = std::path::PathBuf::from(home).join(rest.trim_start_matches(['/', '\\']));
+            return bf_infra::url_from_arg(&path.to_string_lossy());
+        }
         return bf_infra::url_from_arg(s);
     }
     let has_scheme = s.split_once(':').is_some_and(|(scheme, rest)| {
@@ -4372,11 +4380,26 @@ mod tests {
             href("motor de navegador").as_deref(),
             Some("https://www.google.com/search?q=motor+de+navegador")
         );
+        // Una ruta absoluta del sistema es un archivo: con letra de unidad en Windows, desde
+        // `/` en Unix (macOS, Linux). En Unix `C:\\…` es un nombre relativo, no una unidad.
+        #[cfg(windows)]
         assert!(
             href("C:\\Windows\\x.html")
                 .unwrap()
                 .starts_with("file:///C:/Windows/x.html")
         );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                href("/tmp/una carpeta/x.html").as_deref(),
+                Some("file:///tmp/una%20carpeta/x.html")
+            );
+            let home = std::env::var("HOME").unwrap();
+            assert_eq!(
+                href("~/x.html").as_deref(),
+                Some(format!("file://{home}/x.html").replace(' ', "%20").as_str())
+            );
+        }
         assert_eq!(href(""), None);
     }
 

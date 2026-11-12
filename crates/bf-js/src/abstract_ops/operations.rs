@@ -58,12 +58,24 @@ impl Agent {
     ) -> JsResult<()> {
         let o = match base {
             Value::Object(o) => *o,
+            Value::Undefined | Value::Null => {
+                let what = if base.is_null() { "null" } else { "undefined" };
+                return self.type_error(&format!(
+                    "Cannot set properties of {what} (setting '{key}')"
+                ));
+            }
             other => self.to_object(other)?,
         };
         let ok = self.set(o, key.clone(), v, base.clone())?;
         if !ok && strict {
+            let d = self.describe(base);
             return self.type_error(&format!(
-                "Cannot assign to read only property '{key}' of object"
+                "Cannot assign to read only property '{key}' of {} '{d}'",
+                if base.is_object() {
+                    "object"
+                } else {
+                    "primitive"
+                }
             ));
         }
         Ok(())

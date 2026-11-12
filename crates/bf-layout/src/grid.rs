@@ -32,9 +32,9 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BoxSizing, ContentAlign, Direction, Display, Gap, GridLine, GridTemplate, GridTemplateAreas,
-    ItemAlign, MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames, TrackBreadth,
-    TrackListItem, TrackSize, has_intrinsic_auto_repeat,
+    Aligned, BoxSizing, ContentAlign, Direction, Display, Gap, GridLine, GridTemplate,
+    GridTemplateAreas, ItemAlign, MaxSize, Overflow, Position, RepeatCount, Size, SubgridNames,
+    TrackBreadth, TrackListItem, TrackSize, has_intrinsic_auto_repeat,
 };
 
 use crate::block::{
@@ -1455,13 +1455,21 @@ fn track_positions(
     tracks: &[Track],
     gap: f32,
     container: f32,
-    align: ContentAlign,
+    align: Aligned<ContentAlign>,
 ) -> (Vec<f32>, Vec<f32>) {
     let n = tracks.iter().filter(|t| !t.collapsed).count();
     let free = container - total_size(tracks, gap);
     let nf = n as f32;
-    let (start, between) = match align {
-        ContentAlign::End | ContentAlign::FlexEnd | ContentAlign::Right => (free, 0.0),
+    // E5: `safe` con desbordamiento alinea como `start` (CSS Box Alignment 3 §4.4).
+    let value = if align.is_safe() && free < 0.0 {
+        ContentAlign::Start
+    } else {
+        align.value
+    };
+    let (start, between) = match value {
+        ContentAlign::End | ContentAlign::FlexEnd | ContentAlign::Right | ContentAlign::FlowEnd => {
+            (free, 0.0)
+        }
         ContentAlign::Center => (free / 2.0, 0.0),
         ContentAlign::SpaceBetween if n > 1 && free > 0.0 => (0.0, free / (nf - 1.0)),
         ContentAlign::SpaceAround if n > 0 && free > 0.0 => (free / nf / 2.0, free / nf),
@@ -1507,22 +1515,30 @@ fn line_pos(starts: &[f32], ends: &[f32], l: usize, start: bool) -> f32 {
 // Alineación propia (§10.3 y §10.4)
 // ---------------------------------------------------------------------------------------------
 
-fn self_align(item: ItemAlign, container: ItemAlign, replaced: bool) -> ItemAlign {
-    let a = if item == ItemAlign::Auto {
+/// Alineación propia resuelta (con su `safe`/`unsafe`).
+type SelfAlign = Aligned<ItemAlign>;
+
+fn self_align(item: SelfAlign, container: SelfAlign, replaced: bool) -> SelfAlign {
+    let a = if item.value == ItemAlign::Auto {
         container
     } else {
         item
     };
-    match a {
+    let value = match a.value {
         // `normal` es `stretch` salvo en los reemplazados (con relación de aspecto): `start`.
         ItemAlign::Auto | ItemAlign::Normal if replaced => ItemAlign::Start,
         ItemAlign::Auto | ItemAlign::Normal => ItemAlign::Stretch,
         a => a,
-    }
+    };
+    Aligned { value, ..a }
 }
 
-fn align_offset(a: ItemAlign, free: f32) -> f32 {
-    match a {
+fn align_offset(a: SelfAlign, free: f32) -> f32 {
+    // E5: `safe` con desbordamiento alinea como `start` (CSS Box Alignment 3 §4.4).
+    if a.is_safe() && free < 0.0 {
+        return 0.0;
+    }
+    match a.value {
         // `last baseline` sin baseline compartida cae a `safe end` (CSS Box Alignment 3 §9.3).
         ItemAlign::End
         | ItemAlign::FlexEnd
@@ -1537,27 +1553,28 @@ fn align_offset(a: ItemAlign, free: f32) -> f32 {
 
 /// E5: `left`/`right` no son válidos en `align-self`/`align-items` (CSS Box Alignment 3
 /// §6.1): cuentan como la declaración inválida, `auto`.
-fn block_axis(a: ItemAlign) -> ItemAlign {
-    match a {
-        ItemAlign::Left | ItemAlign::Right => ItemAlign::Auto,
-        a => a,
+fn block_axis(a: SelfAlign) -> SelfAlign {
+    match a.value {
+        ItemAlign::Left | ItemAlign::Right => ItemAlign::Auto.into(),
+        _ => a,
     }
 }
 
 /// E5: en rtl el desplazamiento inline se refleja en el área; `left`/`right` son físicos y se
 /// intercambian antes para que el reflejo los deje en su sitio.
-fn physical(a: ItemAlign, rtl: bool) -> ItemAlign {
-    match a {
+fn physical(a: SelfAlign, rtl: bool) -> SelfAlign {
+    let value = match a.value {
         ItemAlign::Left if rtl => ItemAlign::Right,
         ItemAlign::Right if rtl => ItemAlign::Left,
-        a => a,
-    }
+        v => v,
+    };
+    Aligned { value, ..a }
 }
 
 /// Reparte el espacio libre `free` de un eje (área menos el margin box con los márgenes `auto`
 /// a 0) entre los márgenes `auto` (§10.2) o con la alineación. Devuelve el desplazamiento del
 /// margin box desde el inicio del área y los márgenes usados.
-fn place_in_area(free: f32, m0: Option<f32>, m1: Option<f32>, align: ItemAlign) -> (f32, f32, f32) {
+fn place_in_area(free: f32, m0: Option<f32>, m1: Option<f32>, align: SelfAlign) -> (f32, f32, f32) {
     match (m0, m1) {
         (None, None) => {
             let h = free.max(0.0) / 2.0;
@@ -1642,8 +1659,12 @@ fn abs_align_offset(
         matches!(v, bf_style::properties::types::LengthPercentageAuto::Auto)
     };
     let m = f.margin_rect();
-    let offset = |item: ItemAlign, cont: ItemAlign, free: f32| {
-        let a = if item == ItemAlign::Auto { cont } else { item };
+    let offset = |item: SelfAlign, cont: SelfAlign, free: f32| {
+        let a = if item.value == ItemAlign::Auto {
+            cont
+        } else {
+            item
+        };
         align_offset(a, free)
     };
     let dx = if auto(&s.left) && auto(&s.right) {
@@ -2360,7 +2381,7 @@ impl<'a> Layout<'a> {
             row_gap,
             row_space,
             limits,
-            stretch_content(cs.align_content),
+            stretch_content(cs.align_content.value),
         );
         let rows_total = total_size(&grid.rows, row_gap);
         let content_h = cb.height.unwrap_or_else(|| rows_total.min(hmax).max(hmin));
@@ -2389,7 +2410,7 @@ impl<'a> Layout<'a> {
                 row_gap,
                 Space::Definite(content_h),
                 (content_h, content_h),
-                stretch_content(cs.align_content),
+                stretch_content(cs.align_content.value),
             );
             row_gap
         } else {
@@ -2651,7 +2672,7 @@ impl<'a> Layout<'a> {
             Space::Definite(width),
             (width, width),
             matches!(
-                cs.justify_content,
+                cs.justify_content.value,
                 ContentAlign::Normal | ContentAlign::Stretch
             ),
         );

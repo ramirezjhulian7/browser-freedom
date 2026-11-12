@@ -183,17 +183,23 @@ impl<'a> Layout<'a> {
             && top.is_some()
             && bottom.is_some()
             && !replaced;
-        let (mut fragment, _) =
-            self.box_contents(b, cb, x, 0.0, content_w, margins, &mut scratch, false);
-        let mut border_h = fragment.rect.height;
-        if height_from_insets {
-            let content_h = (cb_rect.height
+        let inset_h = height_from_insets.then(|| {
+            (cb_rect.height
                 - top.unwrap_or(0.0)
                 - bottom.unwrap_or(0.0)
                 - margins.top
                 - margins.bottom
                 - edges_v)
-                .max(0.0);
+                .max(0.0)
+        });
+        // E5: el alto que dan los insets es definido para el contenido (CSS Position 3 §4.1;
+        // p. ej. los ítems de un contenedor flex absoluto se estiran a él).
+        self.forced_height = inset_h;
+        let (mut fragment, _) =
+            self.box_contents(b, cb, x, 0.0, content_w, margins, &mut scratch, false);
+        self.forced_height = None;
+        let mut border_h = fragment.rect.height;
+        if let Some(content_h) = inset_h {
             border_h = content_h + edges_v;
             fragment.rect.height = border_h;
         }

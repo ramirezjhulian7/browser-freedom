@@ -489,7 +489,12 @@ fn focus_event(agent: &mut Agent, n: NodeRef, type_: &str, related: Option<NodeR
         cancelable: false,
         composed: true,
     };
-    let related_target = related.map(|r| EventTarget::Node(r.node));
+    // E1: el foco puede pasar entre documentos (uno de `DOMParser` conectado); un
+    // `relatedTarget` de otro documento no se resuelve en la arena de `n` (DOM §2.5 lo
+    // retargetearía igual a sí mismo, pero aquí solo cabe su `NodeId`).
+    let related_target = related
+        .filter(|r| r.doc == n.doc)
+        .map(|r| EventTarget::Node(r.node));
     fire_event(
         agent,
         n.doc,

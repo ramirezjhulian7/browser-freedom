@@ -289,6 +289,25 @@ la base de esta tanda (467 ms) no es comparable con los 719 ms de la medición d
   cache (`RefCell` de la tabla, shape del objeto global) y apila la referencia en
   `FrameRare::refs`.
 
+## Pila de valores compartida (diseño, sin hacer)
+
+Pedido en la ronda 4 del 2026-11-12 (~110 ns por llamada). No se hizo; el diseño:
+
+- `Agent::values: Vec<Value>` única. Cada `Frame` guarda `base` (sus locales en
+  `values[base..base + num_locals]`) y `sp0` (su pila de operandos empieza en
+  `base + num_locals`); `Frame::stack`/`locals` desaparecen (`push`/`pop`/`peek` y los
+  `GetLocal`/`SetLocal` indexan la pila compartida). `Option<Value>` de los locales (TDZ)
+  pasa a un `Value` centinela interno.
+- Llamada rápida: los argumentos ya están en la pila del llamador; con `direct_args` el
+  frame nuevo empieza (`base`) donde estaba el primer argumento, sin copiar nada; sin
+  `direct_args`, `args` se arma con una copia de esa ventana. `Return` trunca `values` a
+  la base del callee menos 2 (función y `this`) y empuja el resultado.
+- Generadores y async: al suspender, la ventana del frame se copia a un `Vec` propio del
+  generador (como hoy se guarda el `Frame` entero) y al reanudar se vuelve a empujar.
+- Riesgo: 130 accesos a `stack`, 47 a `locals` y 62 a `args` en `vm/`, los handlers de
+  `try` (guardan `stack_len`) y el GC (las raíces pasan a ser `values`). Medir con
+  `bench/calls.js` y `fib.js` por A/B como en las secciones de arriba.
+
 ## Profundidad
 
 `thousand_levels_parse_and_run` (en `tests/depth.rs`, solo en release) parsea y corre 1000

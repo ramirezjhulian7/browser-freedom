@@ -7,7 +7,7 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
-use crate::dom::adopt::prepare_insert;
+use crate::dom::adopt::{arg_node_any, prepare_insert};
 use crate::dom::insertion::{inserted, roots_of};
 use crate::dom::mixins;
 use crate::dom::{
@@ -424,7 +424,7 @@ fn is_default_namespace(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
 
 fn insert_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
-    let node = arg_node(
+    let node = arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'insertBefore' on 'Node': parameter 1",
@@ -449,7 +449,7 @@ fn insert_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn append_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
-    let node = arg_node(
+    let node = arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'appendChild' on 'Node': parameter 1",
@@ -464,7 +464,7 @@ fn append_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn replace_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
-    let node = arg_node(
+    let node = arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'replaceChild' on 'Node': parameter 1",

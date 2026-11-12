@@ -906,6 +906,70 @@ fn webidl_sequence_conversion() {
     );
     let err = e.eval_err("Node.create(41, 'x').sumLongs(5)");
     assert!(err.message.starts_with("TypeError"), "{}", err.message);
+    // E8: el error de conversión dice la operación, la interfaz y el valor.
+    assert!(
+        err.message.contains(
+            "Failed to execute 'sumLongs' on 'Element': The provided value 5 cannot be \
+             converted to a sequence."
+        ),
+        "{}",
+        err.message
+    );
+    // Fuera de la operación (el error de un callback de JS) no lleva el prefijo.
+    let err = e.eval_err("Node.create(41, 'x').sumLongs({ [Symbol.iterator]() { null.boom; } })");
+    assert!(
+        err.message
+            .contains("Cannot read properties of null (reading 'boom')")
+            && !err.message.contains("Failed to execute"),
+        "{}",
+        err.message
+    );
+}
+
+/// E8: los TypeError de la VM dicen qué valor y qué operación fallaron.
+#[test]
+fn error_messages_name_the_value_and_operation() {
+    let mut e = Env::new();
+    let mut msg = |src: &str| e.eval_err(src).message;
+    let cases = [
+        (
+            "var u; u.y = 1",
+            "Cannot set properties of undefined (setting 'y')",
+        ),
+        (
+            "var n = null; n['k'] = 1",
+            "Cannot set properties of null (setting 'k')",
+        ),
+        ("var {a} = null", "Cannot destructure 'null' as it is null."),
+        (
+            "class A extends 5 {}",
+            "Class extends value 5 is not a constructor or null",
+        ),
+        (
+            "'x' in 5",
+            "Cannot use 'in' operator to search for \"x\" in 5",
+        ),
+        (
+            "'use strict'; Object.freeze({a: 1}).a = 2",
+            "Cannot assign to read only property 'a' of object '#<Object>'",
+        ),
+        (
+            "Object.setPrototypeOf(Object.preventExtensions({}), {})",
+            "Object.setPrototypeOf: #<Object> is not extensible",
+        ),
+        ("Symbol.prototype.toString.call(1)", "1 is not a Symbol"),
+        ("[...{}]", "#<Object> is not iterable"),
+        ("class Foo {} [...new Foo()]", "#<Foo> is not iterable"),
+        ("var f = 10n; f()", "f is not a function"),
+        ("new Promise(5)", "is not a function"),
+        ("Promise.resolve.call(undefined)", "TypeError"),
+        ("[...10n]", "10n is not iterable"),
+        ("[...Symbol('s')]", "Symbol(s) is not iterable"),
+    ];
+    for (src, want) in cases {
+        let m = msg(src);
+        assert!(m.contains(want), "{src}: {m}");
+    }
 }
 
 // --- Rutas rápidas de la VM (E8): globales con inline cache y argumentos directos ---

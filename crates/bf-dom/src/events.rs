@@ -333,7 +333,8 @@ impl Event {
         }
     }
 
-    fn set_related_target(&mut self, t: Option<EventTarget>) {
+    /// (E1: público para que `bf-web` quite un `relatedTarget` de otro documento.)
+    pub fn set_related_target(&mut self, t: Option<EventTarget>) {
         match &mut self.kind {
             EventKind::Mouse(m) => m.related_target = t,
             EventKind::Focus { related_target } => *related_target = t,
@@ -1167,6 +1168,48 @@ impl Document {
     pub fn move_listeners(&mut self, from: EventTarget, other: &mut Document, to: EventTarget) {
         if let Some(list) = self.listeners.map.remove(&from) {
             other.listeners.map.entry(to).or_default().extend(list);
+        }
+    }
+
+    /// E1: los ids de los listeners de script de `target`, sin los quitados.
+    pub fn script_listener_ids(&self, target: EventTarget) -> Vec<u64> {
+        let Some(list) = self.listeners.map.get(&target) else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter(|e| !e.removed.load(Ordering::Relaxed))
+            .filter_map(|e| match e.callback {
+                Listener::Script(id) => Some(id),
+                Listener::Native(_) => None,
+            })
+            .collect()
+    }
+
+    /// E1: como [`Document::move_listeners`], pero `remap` traduce cada callback de script
+    /// (sus ids son de la ventana del documento: al pasar a la de otra ventana cambian; `None`
+    /// lo descarta). Los que ya se quitaron (flag *removed*) no se mueven.
+    pub fn move_listeners_remapped(
+        &mut self,
+        from: EventTarget,
+        other: &mut Document,
+        to: EventTarget,
+        mut remap: impl FnMut(u64) -> Option<u64>,
+    ) {
+        let Some(list) = self.listeners.map.remove(&from) else {
+            return;
+        };
+        let dest = other.listeners.map.entry(to).or_default();
+        for mut e in list {
+            if e.removed.load(Ordering::Relaxed) {
+                continue;
+            }
+            if let Listener::Script(id) = e.callback {
+                match remap(id) {
+                    Some(n) => e.callback = Listener::Script(n),
+                    None => continue,
+                }
+            }
+            dest.push(e);
         }
     }
 }

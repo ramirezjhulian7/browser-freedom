@@ -181,12 +181,23 @@ pub const UNCLIPPED_HALF: f32 = 4.0e6;
 ///   encoge, como en `overflow-clip-margin-016`/`017`).
 /// - En un scroll container, el borde es la padding box: `overflow-clip-margin` solo puede
 ///   encogerlo (`overflow-clip-margin-018`..`020`) y `border-box` se ignora (`021`/`022`).
+/// - En los reemplazados, cualquier valor distinto de `visible` es `clip`; la hoja UA les
+///   da `overflow: clip` con `overflow-clip-margin: content-box` (CSS Images 3 §5.5).
 /// - Un eje `visible` no recorta (`overflow-x: clip` solo recorta en horizontal, `clip-002`):
 ///   en ese eje el rectángulo se extiende [`UNCLIPPED_HALF`] a cada lado.
 pub fn overflow_clip(f: &Fragment, forced: bool) -> Option<Rect> {
     use bf_style::properties::overflow::VisualBox;
     let style = &f.style;
     let (mut x, mut y) = used_overflow(style);
+    // Los reemplazados nunca son scroll containers: `hidden`/`scroll`/`auto` recortan como
+    // `clip` (`overflow-img-scroll-replaced`).
+    if f.kind == FragmentKind::Replaced {
+        for o in [&mut x, &mut y] {
+            if o.is_scrollable() {
+                *o = Overflow::Clip;
+            }
+        }
+    }
     if style.contain.paint {
         for o in [&mut x, &mut y] {
             if *o == Overflow::Visible {

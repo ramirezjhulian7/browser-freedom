@@ -67,6 +67,7 @@ fn now_zoned_date_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
         TemporalData::ZonedDateTime {
             ns: system_ns(),
             tz,
+            cal: super::Cal::Iso,
         },
         None,
     )
@@ -74,12 +75,12 @@ fn now_zoned_date_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
 
 fn now_plain_date_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let tz = zone_arg(agent, &a.arg(0))?;
-    agent.temporal_create_date_time(date_time_for(&tz, system_ns()), None)
+    agent.temporal_create_date_time(date_time_for(&tz, system_ns()), super::Cal::Iso, None)
 }
 
 fn now_plain_date_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let tz = zone_arg(agent, &a.arg(0))?;
-    agent.temporal_create_date(date_time_for(&tz, system_ns()).date, None)
+    agent.temporal_create_date(date_time_for(&tz, system_ns()).date, super::Cal::Iso, None)
 }
 
 fn now_plain_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

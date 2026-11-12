@@ -2,7 +2,8 @@
 //! ([`backend`]) y `navigator.storage` (`StorageManager`, Storage Standard §4). **Dueño: E2.**
 //!
 //! Los datos van a `<storage_dir>/<origen>/` ([`crate::WebHooks::storage_dir`], que el shell
-//! apunta a `%APPDATA%\freedom\idb\`); sin directorio, quedan en memoria del agente.
+//! apunta a `%APPDATA%\freedom\idb\` en Windows, a `~/Library/Application Support/Freedom/idb/`
+//! en macOS y a `$HOME/.freedom/idb/` en el resto); sin directorio, quedan en memoria del agente.
 
 pub mod backend;
 pub mod idb;

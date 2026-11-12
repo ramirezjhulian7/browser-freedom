@@ -1037,9 +1037,10 @@ impl Agent {
                 let r = self.pop();
                 let l = self.pop();
                 let Value::Object(o) = r else {
-                    return self.type_error(
-                        "Cannot use 'in' operator to search for a key in a non-object",
-                    );
+                    let (k, d) = (self.describe(&l), self.describe(&r));
+                    return self.type_error(&format!(
+                        "Cannot use 'in' operator to search for {k} in {d}"
+                    ));
                 };
                 let k = self.to_property_key(&l)?;
                 let v = self.has_property(o, &k)?;
@@ -1149,11 +1150,11 @@ impl Agent {
             }
             Op::CheckCoercible(d) => {
                 let v = self.peek(d as usize).clone();
+                // RequireObjectCoercible del valor de un patrón de objeto.
                 if v.is_nullish() {
-                    return self.type_error(&format!(
-                        "Cannot set properties of {}",
-                        if v.is_null() { "null" } else { "undefined" }
-                    ));
+                    let what = if v.is_null() { "null" } else { "undefined" };
+                    return self
+                        .type_error(&format!("Cannot destructure '{what}' as it is {what}."));
                 }
             }
             Op::PrepareElem => {
@@ -1235,7 +1236,7 @@ impl Agent {
                 let key = self.pop();
                 let obj = self.pop();
                 if obj.is_nullish() {
-                    return self.nullish_access(&obj, &key);
+                    return self.nullish_access_as(&obj, &key, true);
                 }
                 let k = self.to_property_key(&key)?;
                 self.put_value_of(&obj, k, v.clone(), strict)?;
@@ -1945,8 +1946,10 @@ impl Agent {
                             (pp, Value::Object(o))
                         }
                         _ => {
-                            return self
-                                .type_error("Class extends value is not a constructor or null");
+                            return self.type_error(&format!(
+                                "Class extends value {} is not a constructor or null",
+                                self.describe(&sup)
+                            ));
                         }
                     }
                 } else {
@@ -2221,13 +2224,24 @@ impl Agent {
     }
 
     fn nullish_access<T>(&mut self, obj: &Value, key: &Value) -> JsResult<T> {
+        self.nullish_access_as(obj, key, false)
+    }
+
+    /// "Cannot read/set properties of undefined (reading/setting 'k')" (como V8).
+    fn nullish_access_as<T>(&mut self, obj: &Value, key: &Value, setting: bool) -> JsResult<T> {
         let what = if obj.is_null() { "null" } else { "undefined" };
         let k = match key {
             Value::String(s) => s.to_string_lossy(),
             Value::Number(n) => crate::abstract_ops::number::number_to_string(*n).to_string_lossy(),
+            Value::Symbol(_) => self.describe(key),
             _ => String::from("?"),
         };
-        self.type_error(&format!("Cannot read properties of {what} (reading '{k}')"))
+        let (verb, ing) = if setting {
+            ("set", "setting")
+        } else {
+            ("read", "reading")
+        };
+        self.type_error(&format!("Cannot {verb} properties of {what} ({ing} '{k}')"))
     }
 
     /// El nombre de una función a partir de una clave de propiedad (SetFunctionName).

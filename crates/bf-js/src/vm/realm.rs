@@ -148,6 +148,7 @@ intrinsics!(
     async_disposable_stack_ctor,
     async_disposable_stack_prototype,
     temporal_duration_prototype,
+    shadow_realm_prototype,
     temporal_instant_prototype,
     temporal_plain_date_prototype,
     temporal_plain_time_prototype,
