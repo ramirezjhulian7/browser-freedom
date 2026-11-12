@@ -192,9 +192,17 @@ fn evaluate(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("ShadowRealm.prototype.evaluate requires a string");
     };
     let caller = agent.current_realm;
-    // Los errores de sintaxis son del realm que llama.
-    let code = agent.compile_script_text(&src.to_string_lossy(), "ShadowRealm.evaluate")?;
-    let r = in_realm(agent, eval_realm, |agent| agent.script_evaluation(code));
+    // Los errores de sintaxis son del realm que llama (§3.1.1 paso 3).
+    agent.compile_script_text(&src.to_string_lossy(), "ShadowRealm.evaluate")?;
+    // Pasos 5–19: como un `eval` indirecto en el otro realm: las variables van al objeto
+    // global y las declaraciones léxicas a un entorno nuevo de cada evaluación.
+    let r = in_realm(agent, eval_realm, |agent| {
+        agent.perform_eval(
+            &Value::String(src),
+            false,
+            crate::compiler::EvalFlags::default(),
+        )
+    });
     let v = wrap_throw(agent, caller, r, "ShadowRealm evaluation threw")?;
     get_wrapped_value(agent, caller, v)
 }

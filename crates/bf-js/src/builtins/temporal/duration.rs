@@ -377,8 +377,8 @@ impl Agent {
     ) -> JsResult<IsoDate> {
         if !cal.is_iso() {
             return match cal.add(date, d, reject) {
-                Ok(r) => Ok(r),
-                Err(()) => self.range_error("the date does not exist or is out of range"),
+                Some(r) => Ok(r),
+                None => self.range_error("the date does not exist or is out of range"),
             };
         }
         let (y, m) = iso::balance_year_month(

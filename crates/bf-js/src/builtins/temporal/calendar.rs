@@ -403,16 +403,16 @@ impl Cal {
         Some(c.num)
     }
 
-    /// ConstrainMonthCode: `Err` si el código no está en el año y `reject`.
-    pub fn constrain_code(self, y: i64, c: MonthCode, reject: bool) -> Result<MonthCode, ()> {
+    /// ConstrainMonthCode: `None` si el código no está en el año y `reject`.
+    pub fn constrain_code(self, y: i64, c: MonthCode, reject: bool) -> Option<MonthCode> {
         if self.ordinal_of(y, c).is_some() {
-            return Ok(c);
+            return Some(c);
         }
         if reject {
-            return Err(());
+            return None;
         }
         // Hebreo (skip-forward): M05L → M06.
-        Ok(MonthCode::common(6))
+        Some(MonthCode::common(6))
     }
 
     /// CalendarISOToDate.
@@ -623,7 +623,7 @@ impl Cal {
         }
         let mut d = day;
         // Saltos grandes de días: años enteros primero (el resultado es el mismo).
-        if d > 400 || d < -400 {
+        if !(-400..=400).contains(&d) {
             let date = self.from_cal(y, m as u8, 1).add_days(d - 1);
             let c = self.to_cal(date);
             return (c.year, c.month, c.day);
@@ -652,37 +652,37 @@ impl Cal {
         (y, m as u8, d as u8)
     }
 
-    /// NonISODateAdd. `Err(())`: RangeError (reject o fuera de rango).
-    pub fn add(self, date: IsoDate, d: DateDuration, reject: bool) -> Result<IsoDate, ()> {
+    /// NonISODateAdd. `None`: RangeError (reject o fuera de rango).
+    pub fn add(self, date: IsoDate, d: DateDuration, reject: bool) -> Option<IsoDate> {
         let parts = self.to_cal(date);
         let y0 = parts.year + d.years;
         if !(-300_000..=300_000).contains(&y0) {
-            return Err(());
+            return None;
         }
         let code = self.constrain_code(y0, parts.code, reject)?;
         let m0 = i64::from(self.ordinal_of(y0, code).expect("código constreñido"));
         let months = m0 + d.months + 1;
         if !(-4_000_000..=4_000_000).contains(&months) {
-            return Err(());
+            return None;
         }
         let (ey, em, eday) = self.balance(y0, months, 0);
         let regulated = if parts.day <= eday {
             parts.day
         } else if reject {
-            return Err(());
+            return None;
         } else {
             eday
         };
         let days = i64::from(regulated) + 7 * d.weeks + d.days;
         if days.abs() > 200_000_000 {
-            return Err(());
+            return None;
         }
         let start = self.from_cal(ey, em, 1);
         let result = start.add_days(days - 1);
         if !iso::date_within_limits(result) {
-            return Err(());
+            return None;
         }
-        Ok(result)
+        Some(result)
     }
 
     /// NonISODateSurpasses con las partes ya calculadas.

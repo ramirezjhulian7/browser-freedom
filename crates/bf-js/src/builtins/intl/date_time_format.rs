@@ -1042,7 +1042,13 @@ impl DateTimeFormat {
             .iter()
             .any(|(k, v)| v.is_some() && required.contains(k));
         if need_defaults {
-            if !inherit_all && self.options.iter().any(|(_, v)| v.is_some()) {
+            // Pidió campos de fecha u hora, pero ninguno de este tipo (`era` y
+            // `timeZoneName` solos no cuentan).
+            let any_present = self
+                .options
+                .iter()
+                .any(|(k, v)| v.is_some() && (DATE_OPTS.contains(k) || TIME_OPTS.contains(k)));
+            if !inherit_all && any_present {
                 return None;
             }
             for k in defaults {

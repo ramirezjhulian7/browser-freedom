@@ -777,7 +777,7 @@ impl Agent {
         let y = y as i64;
         if let Some(code) = &f.month_code {
             let c = calendar::MonthCode::parse(code).expect("monthCode validado");
-            if cal.constrain_code(y, c, reject).is_err() {
+            if cal.constrain_code(y, c, reject).is_none() {
                 return self.range_error(&format!("{code} does not exist in year {y}"));
             }
         }
@@ -904,8 +904,8 @@ impl Agent {
                 Some(s) => {
                     let c = calendar::MonthCode::parse(s).expect("monthCode validado");
                     match cal.constrain_code(y, c, reject) {
-                        Ok(c) => c,
-                        Err(()) => {
+                        Some(c) => c,
+                        None => {
                             return self.range_error(&format!("{s} does not exist in year {y}"));
                         }
                     }
