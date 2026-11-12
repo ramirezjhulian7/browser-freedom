@@ -21,19 +21,21 @@ pub fn decode(bytes: &[u8]) -> Result<Image, ImageError> {
     // Un JPEG de un solo componente (escala de grises, ITU T.81 §A.2) sale como luminancia
     // aunque se pida RGBA: `zune-jpeg` cambia el espacio de salida al leer el SOF. Se expande
     // según el espacio que de verdad entregó.
-    let out = decoder
-        .get_output_colorspace()
-        .unwrap_or(ColorSpace::RGBA);
+    let out = decoder.get_output_colorspace().unwrap_or(ColorSpace::RGBA);
     let rgba = match out {
         ColorSpace::RGBA => pixels,
         ColorSpace::Luma => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         ColorSpace::LumaA => pixels
-            .chunks_exact(2)
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[g, a]| [g, g, g, a])
             .collect(),
         ColorSpace::RGB => pixels
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
             .collect(),
         _ => return Err(crate::invalid("espacio de color de salida inesperado")),
     };

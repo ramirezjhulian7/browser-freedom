@@ -78,8 +78,8 @@ fn jpeg_grayscale() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/jpeg");
     for name in ["gray-17x9.jpg", "gray-17x9-progressive.jpg"] {
         let bytes = std::fs::read(dir.join(name)).unwrap();
-        let img = bf_image::decode(&bytes, Some("image/jpeg"))
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let img =
+            bf_image::decode(&bytes, Some("image/jpeg")).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!((img.width, img.height), (17, 9), "{name}");
         assert_eq!(img.rgba.len(), 17 * 9 * 4, "{name}");
         let px = |x: usize, y: usize| {
@@ -89,7 +89,10 @@ fn jpeg_grayscale() {
         for (x, v) in [(2, 40u8), (14, 220)] {
             let [r, g, b, a] = px(x, 4);
             assert!(r == g && g == b && a == 255, "{name}: ({r}, {g}, {b}, {a})");
-            assert!(r.abs_diff(v) <= 3, "{name}: ({x}, 4) = {r}, se esperaba {v}");
+            assert!(
+                r.abs_diff(v) <= 3,
+                "{name}: ({x}, 4) = {r}, se esperaba {v}"
+            );
         }
     }
 }

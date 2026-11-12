@@ -111,6 +111,28 @@ fn shader(paint: &Paint, opacity: f32) -> Option<Shader<'static>> {
     }
 }
 
+/// Filtro con el que se muestrea la tesela de un `pattern`, dada la transformación de la
+/// tesela (en píxeles) al dispositivo. La tesela ya está rasterizada a la resolución de
+/// destino (`Raster::pattern_tile`), así que el muestreo es casi 1:1 y el filtro tiene que
+/// interpolar: el bicúbico de tiny-skia (Mitchell) no lo hace y, aun en el centro exacto de
+/// cada texel, mezcla 1/18 de los vecinos, lo que deja costuras en los bordes de las celdas.
+/// Si cada texel cae exactamente en un píxel (ejes alineados, escala ±1 y desplazamiento
+/// entero, como con un `scale(-1, 1)`), vecino más próximo; si no, bilineal.
+fn tile_quality(t: &Transform) -> FilterQuality {
+    let near = |v: f32, to: f32| (v - to).abs() < 1e-3;
+    let unit_aligned = near(t.kx, 0.0)
+        && near(t.ky, 0.0)
+        && near(t.sx.abs(), 1.0)
+        && near(t.sy.abs(), 1.0)
+        && near(t.tx, t.tx.round())
+        && near(t.ty, t.ty.round());
+    if unit_aligned {
+        FilterQuality::Nearest
+    } else {
+        FilterQuality::Bilinear
+    }
+}
+
 /// Escala de una transformación en cada eje (longitud de las columnas).
 fn axis_scales(t: &Transform) -> (f32, f32) {
     (t.sx.hypot(t.ky), t.kx.hypot(t.sy))
@@ -390,7 +412,7 @@ impl Raster<'_> {
                 Some(tiny_skia::Pattern::new(
                     tile.as_ref(),
                     SpreadMode::Repeat,
-                    FilterQuality::Bicubic,
+                    tile_quality(&ts.pre_concat(*t)),
                     opacity.clamp(0.0, 1.0),
                     *t,
                 ))
