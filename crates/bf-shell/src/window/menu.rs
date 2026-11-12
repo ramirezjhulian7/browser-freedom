@@ -1,6 +1,7 @@
 //! Menú contextual (clic derecho): un documento HTML de la interfaz, maquetado y pintado por
 //! el motor, que se compone encima de la página en [`super::App::frame`].
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bf_font::FontDb;
@@ -38,16 +39,16 @@ pub enum MenuAction {
 }
 
 pub struct MenuItem {
-    pub label: &'static str,
+    pub label: Cow<'static, str>,
     /// `None` es un separador.
     pub action: Option<MenuAction>,
     pub enabled: bool,
 }
 
 impl MenuItem {
-    pub fn new(label: &'static str, action: MenuAction) -> MenuItem {
+    pub fn new(label: impl Into<Cow<'static, str>>, action: MenuAction) -> MenuItem {
         MenuItem {
-            label,
+            label: label.into(),
             action: Some(action),
             enabled: true,
         }
@@ -60,7 +61,7 @@ impl MenuItem {
 
     pub fn separator() -> MenuItem {
         MenuItem {
-            label: "",
+            label: Cow::Borrowed(""),
             action: None,
             enabled: false,
         }
@@ -129,7 +130,7 @@ impl Menu {
                 .and_then(|l| l.split_once(" ("))
             {
                 Some((l, k)) => (l, k),
-                None => (item.label, ""),
+                None => (&*item.label, ""),
             };
             html.push_str(&format!(
                 "<span id=\"mi-{i}\" class=\"{class}\"><span class=\"l\">{}</span><span class=\"k\">{}</span></span>",

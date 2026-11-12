@@ -17,6 +17,8 @@ use bf_paint::{DisplayItem, DisplayList, Radii};
 use bf_style::values::color::Rgba;
 use winit::keyboard::{Key, NamedKey};
 
+use super::keys;
+
 use super::chrome::{UiDoc, UrlField};
 use super::icons::{Icon, icon};
 use super::select::Selection;
@@ -300,7 +302,9 @@ impl App {
     /// Las teclas con la barra abierta; devuelve si se usaron.
     pub(super) fn find_key(&mut self, key: &Key, text: Option<&str>) -> bool {
         let shift = self.modifiers.shift_key();
-        let ctrl = self.modifiers.control_key();
+        let primary = keys::primary(self.modifiers, keys::MAC);
+        let edit = keys::edit_command(key, self.modifiers, keys::MAC);
+        let command = keys::blocks_text(self.modifiers, keys::MAC);
         let Some(bar) = &mut self.find else {
             return false;
         };
@@ -309,7 +313,7 @@ impl App {
                 self.step_find(!shift);
                 return true;
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("g") => {
+            Key::Character(c) if primary && c.eq_ignore_ascii_case("g") => {
                 self.step_find(!shift);
                 return true;
             }
@@ -333,18 +337,18 @@ impl App {
             Key::Named(NamedKey::Home) => field.home(shift),
             Key::Named(NamedKey::End) => field.end(shift),
             Key::Named(NamedKey::Space) => field.insert(" "),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => field.select_all(),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::SelectAll) => field.select_all(),
+            Key::Character(_) if edit == Some(keys::EditCommand::Copy) => {
                 if let Some(t) = field.selected_text() {
                     set_clipboard(&t);
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Paste) => {
                 if let Some(t) = super::clipboard_text() {
                     field.paste(&t);
                 }
             }
-            _ if ctrl || self.modifiers.alt_key() => return false,
+            _ if command => return false,
             _ => match text {
                 Some(t) if !t.chars().any(char::is_control) => field.insert(t),
                 // Con el foco en la barra, las demás teclas no desplazan la página.

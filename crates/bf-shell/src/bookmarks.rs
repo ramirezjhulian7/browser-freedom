@@ -513,11 +513,12 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
-/// `Ctrl+D` en la ventana: guarda `url` en los marcadores o la quita si ya estaba. Devuelve el
-/// aviso para la línea de estado.
-pub fn toggle_page(url: &str, title: &str) -> String {
+/// `Ctrl+D` (`⌘D` en macOS) en la ventana: guarda `url` en los marcadores o la quita si ya
+/// estaba. Devuelve el aviso para la línea de estado; `key` es el atajo tal como se escribe en
+/// esta plataforma.
+pub fn toggle_page(url: &str, title: &str, key: &str) -> String {
     if global().toggle(url, title, profile::now()) {
-        format!("Guardado en marcadores: {title} · Ctrl+D lo quita")
+        format!("Guardado en marcadores: {title} · {key} lo quita")
     } else {
         "Quitado de los marcadores".to_owned()
     }

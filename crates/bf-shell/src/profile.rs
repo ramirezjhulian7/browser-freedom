@@ -1,12 +1,12 @@
 //! El perfil del usuario: la carpeta donde Freedom guarda el historial, los marcadores y las
 //! descargas (`%LOCALAPPDATA%\Freedom` en Windows, `~/Library/Application Support/Freedom` en
-//! macOS, `$XDG_DATA_HOME/freedom` o `~/.local/share/freedom` en los demás), y el formato de texto propio de esos archivos: un
-//! registro por línea, campos separados por tabulador, con `\\`, `\t`, `\n` y `\r` escapados.
-//! Las líneas que empiezan con `#` son comentarios.
+//! macOS, `$XDG_DATA_HOME/freedom` o `~/.local/share/freedom` en los demás), y el formato de
+//! texto propio de esos archivos: un registro por línea, campos separados por tabulador, con
+//! `\\`, `\t`, `\n` y `\r` escapados. Las líneas que empiezan con `#` son comentarios.
 //!
-//! `FREEDOM_PROFILE` cambia la carpeta (pruebas, perfiles aparte). Las sesiones sin ventana
-//! (`freedom session`) no tocan el perfil salvo que esa variable esté puesta
-//! ([`set_ephemeral`]).
+//! `FREEDOM_PROFILE` cambia la carpeta (pruebas, perfiles aparte); `bf_net::data_dir` la usa
+//! también para las cookies y la lista HSTS. Las sesiones sin ventana (`freedom session`) no
+//! tocan el perfil salvo que esa variable esté puesta ([`set_ephemeral`]).
 
 use std::io;
 use std::path::{Path, PathBuf};

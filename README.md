@@ -45,6 +45,8 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 - **Ir a un sitio o buscar:** escribe en la barra de arriba (o directamente en la página de
   inicio) y presiona `Intro`. Si lo que escribes no parece una dirección, Freedom lo busca en
   Google.
+- **En macOS** los atajos usan `Cmd` (⌘) donde Windows y Linux usan `Ctrl`: `⌘T`, `⌘C`,
+  `⌘L`… La tabla de abajo tiene las dos columnas.
 - **Pestañas:** `Ctrl+T` abre una y `Ctrl+W` la cierra. El clic central o `Ctrl+clic` en un
   enlace lo abre en otra pestaña.
 - **Copiar y pegar:** arrastra para seleccionar texto; doble clic selecciona una palabra y
@@ -53,17 +55,25 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 - **Zoom:** `Ctrl` `+`, `Ctrl` `−` y `Ctrl` `0`, o `Ctrl` + rueda del ratón.
 - **Tema claro u oscuro:** Freedom sigue el de tu sistema.
 
-| Atajo | Qué hace |
-|---|---|
-| `Ctrl+L` | Ir a la barra de direcciones |
-| `Ctrl+T` · `Ctrl+W` | Pestaña nueva · cerrar pestaña |
-| `Ctrl+Tab` · `Ctrl+1…9` | Cambiar de pestaña |
-| `Alt+←` · `Alt+→` | Atrás · adelante |
-| `Ctrl+R` · `F5` | Recargar |
-| `Esc` | Detener la carga |
-| `Ctrl+H` | Página de inicio |
-| `Ctrl+A` · `Ctrl+C` · `Ctrl+V` | Seleccionar todo · copiar · pegar |
-| `Espacio` · `Mayús+Espacio` | Bajar · subir una pantalla |
+| Windows y Linux | macOS | Qué hace |
+|---|---|---|
+| `Ctrl+L` | `⌘L` | Ir a la barra de direcciones |
+| `Ctrl+T` · `Ctrl+W` | `⌘T` · `⌘W` | Pestaña nueva · cerrar pestaña |
+| `Ctrl+N` | `⌘N` | Ventana nueva |
+| `Ctrl+Tab` · `Ctrl+1…9` | `⌃Tab` · `⌘1…9` | Cambiar de pestaña |
+| `Alt+←` · `Alt+→` | `⌘[` · `⌘]` | Atrás · adelante |
+| `Ctrl+R` · `F5` | `⌘R` · `F5` | Recargar |
+| `Esc` | `Esc` | Detener la carga |
+| `Alt+Inicio` | `⇧⌘H` | Página de inicio |
+| `Ctrl+H` · `Ctrl+J` | `⌘Y` · `⌘J` | Historial · descargas |
+| `Ctrl+D` · `Ctrl+Shift+B` | `⌘D` · `⇧⌘B` | Guardar marcador · ver los marcadores |
+| `Ctrl+F` | `⌘F` | Buscar en la página |
+| `Ctrl++` · `Ctrl+−` · `Ctrl+0` | `⌘+` · `⌘−` · `⌘0` | Acercar · alejar · tamaño normal |
+| `Ctrl+A` · `Ctrl+C` · `Ctrl+V` | `⌘A` · `⌘C` · `⌘V` | Seleccionar todo · copiar · pegar |
+| `Espacio` · `Mayús+Espacio` | `Espacio` · `⇧+Espacio` | Bajar · subir una pantalla |
+
+En macOS el historial va en `⌘Y` porque `⌘H` oculta la aplicación (y `⌘Q` la cierra), como en
+cualquier programa del Mac.
 
 ### Tu privacidad
 
@@ -72,13 +82,12 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
   fecha de caducidad) se conservan hasta que caducan, como en cualquier navegador, así que
   algunas sesiones iniciadas en los sitios siguen abiertas al volver.
 - Freedom guarda en tu equipo, como cualquier navegador:
-  - las cookies persistentes y la lista de sitios que exigen HTTPS (HSTS), en
-    `%LOCALAPPDATA%\Freedom` (`cookies.txt`, `hsts.txt`) en Windows o en
-    `~/.local/share/freedom` en macOS y Linux;
-  - la caché de páginas e imágenes descargadas (hasta 512 MB), en `%LOCALAPPDATA%\Freedom\cache`
-    en Windows o en `~/.cache/freedom` en macOS y Linux;
-  - el almacenamiento local de los sitios (`localStorage` e IndexedDB), en
-    `%APPDATA%\freedom` (Windows) o en `~/.freedom` (macOS y Linux).
+  - las cookies persistentes y la lista de sitios que exigen HTTPS (HSTS), en la carpeta del
+    perfil (`cookies.txt`, `hsts.txt`);
+  - la caché de páginas e imágenes descargadas (hasta 512 MB);
+  - el almacenamiento local de los sitios (`localStorage` e IndexedDB).
+
+  Las carpetas de cada sistema están en [Plataformas](#plataformas).
 
   Para borrar todo eso, elimina esas carpetas con Freedom cerrado. Fuera de eso, Freedom solo
   escribe archivos cuando tú lo pides, como al guardar una imagen.
@@ -361,6 +370,49 @@ cargo build --workspace --release
 
 El ejecutable queda en `target/release/freedom` (`freedom.exe` en Windows).
 
+## Plataformas
+
+Freedom compila y funciona en Windows, macOS y Linux con el mismo código; lo que cambia es
+dónde guarda sus datos, los atajos y las fuentes.
+
+| Qué | Windows | macOS | Linux |
+|---|---|---|---|
+| Perfil: historial, marcadores, descargas, opciones, sesión, cookies, HSTS | `%LOCALAPPDATA%\Freedom` | `~/Library/Application Support/Freedom` | `$XDG_DATA_HOME/freedom` o `~/.local/share/freedom` |
+| Caché HTTP | `%LOCALAPPDATA%\Freedom\cache` | `~/Library/Caches/Freedom` | `$XDG_CACHE_HOME/freedom` o `~/.cache/freedom` |
+| `localStorage` · IndexedDB | `%APPDATA%\freedom\{storage,idb}` | `~/Library/Application Support/Freedom/{storage,idb}` | `~/.freedom/{storage,idb}` |
+| Descargas y capturas | `%USERPROFILE%\Downloads` | `~/Downloads` | `XDG_DOWNLOAD_DIR` o `~/Downloads` |
+| "Ver en carpeta" | Explorador, con el archivo seleccionado | Finder, con el archivo seleccionado (`open -R`) | la carpeta (`xdg-open`) |
+| Fuentes | `%WINDIR%\Fonts` y las del usuario | `/System/Library/Fonts` (con `Supplemental`), `/Library/Fonts`, `~/Library/Fonts` | `/usr/share/fonts`, `/usr/local/share/fonts`, `~/.fonts`, `~/.local/share/fonts` |
+
+`FREEDOM_PROFILE` cambia la carpeta del perfil (también la de las cookies y HSTS) y
+`FREEDOM_DOWNLOADS` la de descargas, en cualquier sistema.
+
+**Atajos.** El modificador primario es `Cmd` (⌘) en macOS y `Ctrl` en Windows y Linux; la tabla
+está en `crates/bf-shell/src/window/keys.rs` y los menús y las páginas internas escriben cada
+atajo como se usa en el sistema (`Ctrl+D` o `⌘D`). `Ctrl+Tab` cambia de pestaña en todos. En
+macOS `⌘H` y `⌘Q` son del sistema (ocultar y salir), por eso el historial es `⌘Y`, y atrás y
+adelante son `⌘[` y `⌘]` (`⌥←`/`⌥→` mueven el cursor por palabras). En las sesiones sin
+ventana, `key:mod+t` usa el primario del sistema (`key:ctrl+…` y `key:cmd+…` son literales).
+
+**Pantallas Retina y de alta densidad.** La ventana se pinta en píxeles físicos (el factor de
+escala de la pantalla por el zoom), y ese producto es el `devicePixelRatio` de la página.
+
+**Varios worktrees de git.** WPT y test262 pesan varios GB y no se versionan: en un worktree
+nuevo se enlazan los del checkout principal en vez de descargarlos otra vez.
+
+```sh
+git worktree add ../browser-freedom-otro -b otra-rama
+cd ../browser-freedom-otro
+git submodule update --init                       # html5lib-tests, css-parsing-tests, test262-parser-tests
+ln -s "$(git rev-parse --path-format=absolute --git-common-dir)/../tests/wpt" tests/wpt
+ln -s "$(git rev-parse --path-format=absolute --git-common-dir)/../tests/test262" tests/test262
+# `.gitignore` ignora las carpetas `tests/wpt/` y `tests/test262/`, no un enlace con ese nombre:
+printf 'tests/wpt\ntests/test262\n' >> "$(git rev-parse --git-common-dir)/info/exclude"
+```
+
+Los enlaces son de solo lectura en la práctica: el checkout principal es el que se actualiza
+con `tools/fetch-wpt.sh` y `tools/fetch-test262.sh`.
+
 ## Uso
 
 `<url>` es una URL `http(s)://`, `file://`, `data:` o `about:`, o una ruta local.
@@ -383,7 +435,7 @@ freedom dump-style pagina.html --selector "nav a"
 freedom dump-layout pagina.html --width 800 --system-fonts
 
 # La lógica de la ventana sin abrir una: un PNG por paso (con el cromo) y el estado en stdout
-freedom session about:home "type:google.com" "key:enter" "key:ctrl+i" "key:f12"     "move:600,300" -o sesion
+freedom session about:home "type:google.com" "key:enter" "key:mod+i" "key:f12"     "move:600,300" -o sesion
 ```
 
 ### La interfaz
@@ -495,7 +547,7 @@ ventana nunca se bloquea.
 |---|---|---|
 | html5lib-tests (tokenizador) | `tests/html5lib-tests` | submódulo de git |
 | css-parsing-tests | `tests/css-parsing-tests` | submódulo de git |
-| WPT: `html/syntax/parsing`, `url/resources` y los reftests de CSS | `tests/wpt` | `tools/fetch-wpt.sh` o `tools/fetch-wpt.ps1` |
+| WPT: `css`, `html`, `svg`, `dom`, `url`, `fetch`, `xhr`, `IndexedDB`, `workers`… (lista en `tools/fetch-wpt.sh`) | `tests/wpt` | `tools/fetch-wpt.sh` o `tools/fetch-wpt.ps1` |
 | test262-parser-tests | `tests/test262-parser-tests` | submódulo de git |
 | test262 (`harness`, `test/language`, `test/built-ins`, `test/annexB`, `test/intl402`) | `tests/test262` | `tools/fetch-test262.sh` o `tools/fetch-test262.ps1` |
 

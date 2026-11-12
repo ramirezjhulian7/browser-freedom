@@ -17,6 +17,7 @@ use bf_paint::{Page, PageContext, prepare_page};
 
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, Meta, fetch_document};
 use crate::theme::Theme;
+use crate::window::keys;
 
 pub const STYLE: &str = include_str!("../pages/style.css");
 /// La marca sola, ámbar sobre transparente (256 px), para las páginas internas de los dos temas.
@@ -64,40 +65,46 @@ pub const STATUS: &str = include_str!("../pages/status.html");
 /// El estado de compatibilidad al compilar (lo regenera la corrida de reftests).
 const WPT_STATUS: &str = include_str!("../../../docs/wpt-status.md");
 
-/// Los atajos de la ventana para el uso diario (se muestran en `about:home`).
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+L", "Ir a la barra de dirección"),
-    ("Ctrl+T · Ctrl+W", "Pestaña nueva y cerrar pestaña"),
-    ("Ctrl+N", "Ventana nueva"),
-    ("Ctrl+Tab · Ctrl+1…9", "Cambiar de pestaña"),
+/// Los atajos de la ventana para el uso diario (se muestran en `about:home`): cómo se escriben
+/// en Windows y Linux, en macOS si cambian más que el modificador (`""`: igual), y qué hacen.
+/// `Mod` es el modificador primario (`Ctrl`, `Cmd` en macOS); la tabla que los ejecuta está en
+/// `window::keys`.
+pub const SHORTCUTS: &[(&str, &str, &str)] = &[
+    ("Mod+L", "", "Ir a la barra de dirección"),
+    ("Mod+T · Mod+W", "", "Pestaña nueva y cerrar pestaña"),
+    ("Mod+N", "", "Ventana nueva"),
+    ("Ctrl+Tab · Mod+1…9", "", "Cambiar de pestaña"),
     (
-        "Clic central · Ctrl+clic",
+        "Clic central · Mod+clic",
+        "",
         "Abrir un enlace en otra pestaña",
     ),
-    ("Alt+← · Alt+→", "Atrás y adelante"),
-    ("Ctrl+R · F5", "Recargar"),
-    ("Esc", "Detener la carga"),
-    ("Alt+Inicio", "Página de inicio"),
-    ("Ctrl+H · Ctrl+J", "Historial y descargas"),
+    ("Alt+← · Alt+→", "Mod+[ · Mod+]", "Atrás y adelante"),
+    ("Mod+R · F5", "", "Recargar"),
+    ("Esc", "", "Detener la carga"),
+    ("Alt+Inicio", "Mod+Shift+H", "Página de inicio"),
+    ("Mod+H · Mod+J", "Mod+Y · Mod+J", "Historial y descargas"),
     (
-        "Ctrl+D · Ctrl+Shift+B",
+        "Mod+D · Mod+Shift+B",
+        "",
         "Guardar marcador y ver los marcadores",
     ),
-    ("Ctrl+F", "Buscar en la página"),
+    ("Mod+F", "", "Buscar en la página"),
     (
-        "Ctrl++ · Ctrl+− · Ctrl+0",
+        "Mod++ · Mod+− · Mod+0",
+        "",
         "Acercar, alejar y tamaño normal",
     ),
-    ("Ctrl+A · Ctrl+C", "Seleccionar todo y copiar"),
-    ("Espacio · Mayús+Espacio", "Página abajo y arriba"),
+    ("Mod+A · Mod+C", "", "Seleccionar todo y copiar"),
+    ("Espacio · Mayús+Espacio", "", "Página abajo y arriba"),
 ];
 
 /// Las herramientas para quien desarrolla páginas o el navegador (`about:home`, aparte).
-pub const DEV_SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+I", "Panel del motor"),
-    ("F12", "Superposición de cajas"),
-    ("Ctrl+S", "Guardar un PNG de la ventana"),
-    ("Ctrl+Shift+D", "Volcar el layout"),
+pub const DEV_SHORTCUTS: &[(&str, &str, &str)] = &[
+    ("Mod+I", "", "Panel del motor"),
+    ("F12", "", "Superposición de cajas"),
+    ("Mod+S", "", "Guardar un PNG de la ventana"),
+    ("Mod+Shift+D", "", "Volcar el layout"),
 ];
 
 /// Cuántos sitios más visitados muestra la página de pestaña nueva (dos filas de cuatro).
@@ -126,13 +133,30 @@ pub fn escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Reemplaza cada `{{clave}}` de `template` por su valor.
+/// Reemplaza cada `{{key:Mod+D}}` de `template` por el atajo escrito como en esta plataforma
+/// (`Ctrl+D`, `⌘D` en macOS; ver [`keys::label`]) y cada `{{clave}}` por su valor. Los atajos
+/// se resuelven antes que los valores: el texto de una página nunca se toma por un atajo.
 pub fn fill(template: &str, vars: &[(&str, String)]) -> String {
-    let mut out = template.to_owned();
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{key:") {
+        let Some(len) = rest[start..].find("}}") else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&escape(&shortcut(&rest[start + 6..start + len])));
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
     for (key, value) in vars {
         out = out.replace(&format!("{{{{{key}}}}}"), value);
     }
     out
+}
+
+/// Un atajo (`Mod+D`) escrito como en esta plataforma.
+pub fn shortcut(spec: &str) -> String {
+    keys::label(spec, keys::MAC)
 }
 
 /// Una página interna con el tema y el estilo común.
@@ -633,9 +657,12 @@ fn bookmarks(url: &Url, ctx: &LoadContext) -> String {
             );
             if items.is_empty() {
                 let empty = if name.is_empty() {
-                    "Todavía no hay marcadores. Pulsa Ctrl+D en una página para guardarla."
+                    format!(
+                        "Todavía no hay marcadores. Pulsa {} en una página para guardarla.",
+                        shortcut("Mod+D")
+                    )
                 } else {
-                    "Carpeta vacía."
+                    "Carpeta vacía.".to_owned()
                 };
                 let _ = write!(folders, "<p class=\"empty\">{empty}</p>");
             }
@@ -880,11 +907,16 @@ fn home(ctx: &LoadContext) -> String {
         recent =
             "<p class=\"empty\">Todavía no visitaste ninguna página en esta sesión.</p>".into();
     }
-    let keys = |list: &[(&str, &str)]| {
+    let keys = |list: &[(&str, &str, &str)]| {
         let mut out = String::new();
-        for (k, d) in list {
+        for (other, mac, d) in list {
+            let spec = if keys::MAC && !mac.is_empty() {
+                mac
+            } else {
+                other
+            };
             // Cada combinación en su tecla: "Ctrl+R · F5" son dos.
-            let chips: String = k
+            let chips: String = keys::label(spec, keys::MAC)
                 .split(" · ")
                 .map(|c| format!("<span class=\"kbd\">{}</span>", escape(c)))
                 .collect();
@@ -1023,9 +1055,11 @@ fn engine(url: &Url, ctx: &LoadContext) -> String {
         .ok()
     });
     let Some(target) = target else {
-        let body = "<div class=\"section\"><p>Abre <code>about:engine</code> desde una página (o pulsa \
-                    <b>Ctrl+I</b>) para ver su reporte, o escribe <code>about:engine?https://…</code>.</p></div>"
-            .to_owned();
+        let body = format!(
+            "<div class=\"section\"><p>Abre <code>about:engine</code> desde una página (o pulsa \
+             <b>{}</b>) para ver su reporte, o escribe <code>about:engine?https://…</code>.</p></div>",
+            escape(&shortcut("Mod+I"))
+        );
         return themed(
             ENGINE,
             &ctx.theme,
