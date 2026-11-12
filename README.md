@@ -67,12 +67,21 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 
 ### Tu privacidad
 
-- El historial y las cookies existen solo mientras Freedom está abierto y se borran al
-  cerrarlo (por eso, al volver a abrirlo, las sesiones iniciadas en los sitios se cierran).
-- Lo único que queda en tu equipo es el almacenamiento local que guardan algunos sitios
-  (`localStorage`), como en cualquier navegador: en `%APPDATA%\freedom\storage` (Windows) o
-  en `~/.freedom/storage` (macOS y Linux). Para borrarlo, elimina esa carpeta. Fuera de eso,
-  Freedom solo escribe archivos cuando tú lo pides, como al guardar una imagen.
+- El historial existe solo mientras Freedom está abierto y se borra al cerrarlo. Las cookies
+  de sesión también se borran al cerrar; las cookies persistentes (las que el sitio guarda con
+  fecha de caducidad) se conservan hasta que caducan, como en cualquier navegador, así que
+  algunas sesiones iniciadas en los sitios siguen abiertas al volver.
+- Freedom guarda en tu equipo, como cualquier navegador:
+  - las cookies persistentes y la lista de sitios que exigen HTTPS (HSTS), en
+    `%LOCALAPPDATA%\Freedom` (`cookies.txt`, `hsts.txt`) en Windows o en
+    `~/.local/share/freedom` en macOS y Linux;
+  - la caché de páginas e imágenes descargadas (hasta 512 MB), en `%LOCALAPPDATA%\Freedom\cache`
+    en Windows o en `~/.cache/freedom` en macOS y Linux;
+  - el almacenamiento local de los sitios (`localStorage` e IndexedDB), en
+    `%APPDATA%\freedom` (Windows) o en `~/.freedom` (macOS y Linux).
+
+  Para borrar todo eso, elimina esas carpetas con Freedom cerrado. Fuera de eso, Freedom solo
+  escribe archivos cuando tú lo pides, como al guardar una imagen.
 - No envía datos de uso: solo se conecta a los sitios que visitas (y a Google cuando buscas).
 - Se presenta ante los sitios como lo que es, Freedom: no se hace pasar por Chrome ni por
   otro navegador.
