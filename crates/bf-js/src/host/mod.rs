@@ -735,6 +735,33 @@ impl Agent {
         Some(o)
     }
 
+    /// E1: pasa el wrapper de `old` en el realm `from` al realm `to` con la clave `new` (un
+    /// nodo que el embebedor movió a la arena de otra ventana, DOM §4.5 "adopt"): el objeto es
+    /// el mismo, pero queda registrado en `to` y, si su prototipo era el de su clase en `from`,
+    /// toma el de su clase en `to` (como hace Gecko al adoptar entre globales), para que sus
+    /// métodos corran en la ventana que ahora tiene el nodo. Un prototipo puesto por script (una
+    /// subclase) se conserva. Devuelve el wrapper si existía.
+    pub fn host_transplant(
+        &mut self,
+        (from, old): (RealmId, HostKey),
+        (to, new): (RealmId, HostKey),
+    ) -> Option<Gc<Object>> {
+        let o = self.host_lookup(from, old)?;
+        let ObjectKind::Host(h) = &mut self.heap[o].kind else {
+            return None;
+        };
+        h.key = Some(new);
+        let class = h.class;
+        self.host.wrappers.remove(&(from, old));
+        let from_proto = instantiate(self, from, class).prototype;
+        if self.heap[o].proto == Some(from_proto) {
+            let to_proto = instantiate(self, to, class).prototype;
+            self.heap[o].proto = Some(to_proto);
+        }
+        self.host.wrappers.insert((to, new), o);
+        Some(o)
+    }
+
     /// El wrapper de `key` en `realm`: el existente (y `payload` se descarta) o uno nuevo de
     /// la clase `class`.
     pub fn host_wrap(

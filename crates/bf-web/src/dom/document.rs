@@ -9,7 +9,6 @@ use bf_js::value::Value;
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
-use crate::dom::adopt::adopt_into;
 use crate::dom::collections::static_node_list;
 use crate::dom::element::{
     get_elements_by_class_name, get_elements_by_tag_name, get_elements_by_tag_name_ns,
@@ -432,12 +431,13 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn adopt_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let n = arg_node(
+    // E1: también un nodo del documento de otra ventana.
+    let n = crate::dom::adopt::arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'adoptNode' on 'Document': parameter 1",
     )?;
-    let r = adopt_into(agent, n, doc)?;
+    let r = crate::dom::adopt::adopt_arg(agent, n, doc)?;
     Ok(wrap_node(agent, r))
 }
 

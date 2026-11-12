@@ -330,10 +330,29 @@ pub fn unwrap_node(agent: &Agent, v: &Value) -> Option<NodeRef> {
 /// marco que navegó en el mismo realm, un documento perdido) no debe llegar a `bf-dom`, donde
 /// un `NodeId` fuera de rango es un pánico (`Document::get`).
 fn in_arena(agent: &Agent, n: NodeRef) -> bool {
+    in_arena_of(agent, agent.current_realm, n)
+}
+
+fn in_arena_of(agent: &Agent, realm: bf_js::vm::RealmId, n: NodeRef) -> bool {
     agent
-        .realm_data::<crate::WebContext>(agent.current_realm)
+        .realm_data::<crate::WebContext>(realm)
         .and_then(|ctx| ctx.documents.get(n.doc as usize))
         .is_some_and(|d| n.node.index() < d.doc().node_count())
+}
+
+/// E1: la ventana (realm) de un wrapper de nodo de otra ventana y su nodo allí (`None` si `v`
+/// no es uno, o si su nodo ya no cabe en la arena de su documento). Es el realm en cuya tabla
+/// de identidad está registrado el wrapper.
+pub fn foreign_home(agent: &Agent, v: &Value) -> Option<(bf_js::vm::RealmId, NodeRef)> {
+    let n = agent.host_unwrap::<NodeRef>(v).copied()?;
+    let Value::Object(o) = v else {
+        return None;
+    };
+    (0..agent.realms.len())
+        .filter(|&r| r != agent.current_realm)
+        .find(|&r| agent.host_lookup(r, n.key()) == Some(*o))
+        .filter(|&r| in_arena_of(agent, r, n))
+        .map(|r| (r, n))
 }
 
 /// E1: ¿`v` es el wrapper de un nodo de otra ventana (un `<iframe>`, el padre)? Un
@@ -355,9 +374,10 @@ fn foreign(agent: &Agent, v: &Value, n: NodeRef) -> bool {
     agent.host_lookup(agent.current_realm, n.key()) != Some(*o)
 }
 
-/// E1: el error para un nodo de otra ventana donde el DOM lo admitiría (adoptarlo, insertarlo,
-/// usarlo de boundary point): mover nodos entre las arenas de dos `WebContext` no está hecho,
-/// y es mejor un `NotSupportedError` que resolverlo contra la arena equivocada.
+/// E1: el error para un nodo de otra ventana donde el DOM lo admitiría y aquí no se adopta
+/// (usarlo de boundary point, `setAttributeNode`, `insertNode`…; `adoptNode` y las inserciones
+/// de `Node` y de los mixins sí lo adoptan, ver [`adopt::adopt_foreign`]): es mejor un
+/// `NotSupportedError` que resolverlo contra la arena equivocada.
 pub fn throw_foreign_node<T>(agent: &mut Agent) -> JsResult<T> {
     let e = exception::create(
         agent,

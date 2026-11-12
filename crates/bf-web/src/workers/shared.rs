@@ -88,7 +88,7 @@ impl SharedEntry {
     pub(crate) fn release(&self) {
         let _ = self
             .clients
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1));
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1));
         self.inbox.signal().signal();
     }
 }

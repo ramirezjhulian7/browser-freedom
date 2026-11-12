@@ -291,7 +291,7 @@ fn this_target(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(DocIndex, Event
 }
 
 /// El id de listener de un callback (siempre el mismo para el mismo objeto).
-fn listener_id(agent: &mut Agent, cb: Gc<Object>) -> u64 {
+pub(crate) fn listener_id(agent: &mut Agent, cb: Gc<Object>) -> u64 {
     if let Some(id) = state(agent).listener_ids.get(&cb) {
         return *id;
     }

@@ -70,12 +70,10 @@ pub fn document_loaded(agent: &mut Agent, realm: bf_js::vm::RealmId) {
 /// El evento `load` del documento de `realm` (`loadEventStart`/`End`).
 pub fn load_finished(agent: &mut Agent, realm: bf_js::vm::RealmId) {
     let now = epoch_ms();
-    if let Some(s) = agent.realm_data_mut::<super::BomState>(realm) {
-        for f in [&mut s.timing.load_event] {
-            if *f == 0.0 {
-                *f = now;
-            }
-        }
+    if let Some(s) = agent.realm_data_mut::<super::BomState>(realm)
+        && s.timing.load_event == 0.0
+    {
+        s.timing.load_event = now;
     }
 }
 
