@@ -317,13 +317,35 @@ impl<'a> Layout<'a> {
     /// §7.3) y devuelve su fragmento en el marco en curso, con la esquina de su margin box en
     /// el origen. `cb` es el containing block en el marco en curso.
     pub(crate) fn orthogonal_fragment(&mut self, b: &LayoutBox, cb: Cb) -> Fragment {
-        self.orthogonal_fragment_with(b, cb, cb.width)
+        self.orthogonal_fragment_with(b, cb, cb.width, (None, None))
+    }
+
+    /// E5: [`Layout::orthogonal_fragment`] para un ítem de grid con tamaños de contenido
+    /// impuestos por su contenedor, en el marco en curso: `content_w` (ancho, el tamaño de
+    /// bloque de `b`) y `height` (alto, su tamaño inline, si se estira). Sin `height`, el
+    /// tamaño inline es fit-content como en cualquier raíz ortogonal (§7.3).
+    pub(crate) fn orthogonal_item_fragment(
+        &mut self,
+        b: &LayoutBox,
+        cb: Cb,
+        content_w: f32,
+        height: Option<f32>,
+    ) -> Fragment {
+        self.orthogonal_fragment_with(b, cb, cb.width, (height, Some(content_w)))
     }
 
     /// [`Layout::orthogonal_fragment`] con los porcentajes de márgenes y paddings de `b`
     /// resueltos contra `pct_basis`: el tamaño inline de su containing block, que está en el
-    /// marco del padre (CSS Writing Modes 4 §7.2, CSS Box 4 §5), no en el suyo.
-    fn orthogonal_fragment_with(&mut self, b: &LayoutBox, cb: Cb, pct_basis: f32) -> Fragment {
+    /// marco del padre (CSS Writing Modes 4 §7.2, CSS Box 4 §5), no en el suyo. `forced` son
+    /// los tamaños de contenido impuestos (inline, bloque) en el marco de `b`, solo si los
+    /// ejes se cruzan.
+    fn orthogonal_fragment_with(
+        &mut self,
+        b: &LayoutBox,
+        cb: Cb,
+        pct_basis: f32,
+        forced: (Option<f32>, Option<f32>),
+    ) -> Fragment {
         let parent = self.frame;
         let own = Frame::of(&b.style);
         let mut inner = b.clone();
@@ -366,14 +388,21 @@ impl<'a> Layout<'a> {
         // `width: auto` en un flujo cruzado: fit-content con ese espacio (§7.3).
         let mut avail = cb_inner;
         if crossed && inner.style.width == bf_style::properties::types::Size::Auto {
-            let w = sub.fit_width(&inner, cb_inner, ml + mr);
+            let w = match forced.0 {
+                Some(w) => w,
+                None => sub.fit_width(&inner, cb_inner, ml + mr),
+            };
             let st = &inner.style;
             let edges = crate::block::border_edges(st).horizontal()
                 + crate::block::padding_edges(st, inline).horizontal();
             avail.width = w + edges + ml + mr;
         }
+        if crossed {
+            sub.forced_height = forced.1;
+        }
         let mut floats = FloatContext::default();
         let (mut f, _) = sub.block_in(&inner, cb_inner, avail, mt, &mut floats, false);
+        sub.forced_height = None;
         let border_box = f.rect;
         for p in sub.abs_frames.pop().unwrap_or_default() {
             let a = sub.absolute(p, border_box);
@@ -461,7 +490,7 @@ impl<'a> Layout<'a> {
             height: self.pct_height_basis,
         };
         // Al medir, los porcentajes de márgenes y paddings (cíclicos) cuentan como cero.
-        let f = self.orthogonal_fragment_with(b, cb, 0.0);
+        let f = self.orthogonal_fragment_with(b, cb, 0.0, (None, None));
         let w = (f.rect.width - f.border.left - f.border.right - f.padding.left - f.padding.right)
             .max(0.0);
         (w, w)

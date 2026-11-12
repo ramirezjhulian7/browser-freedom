@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- CSS Writing Modes 4 §7.3: un ítem de grid vertical es la raíz de un flujo ortogonal. Con `justify-self: start` y `align-self: start`, su tamaño inline (alto) es fit-content en el alto del área (60px) y su ancho, el de su contenido; estirado (lo inicial), ocupa el área de 100×60 (CSS Grid 1 §6.2). -->
+<style>body{margin:0} .g{display:grid;grid:60px/100px 100px} .v{writing-mode:vertical-rl} .s{place-self:start}</style>
+<div class=g><div class="v s">ab cd</div><div class=v>ef</div></div>
+<!-- expect
+Block <html> 0,0 800×60
+  Block <body> 0,0 800×60
+    Block <div.g> 0,0 800×60
+      InlineBlock <div.v.s> 0,0 16×40
+        Line 0,0 16×40
+          Text "ab cd" 0,0 16×40
+      InlineBlock <div.v> 100,0 100×60
+        Line 184,0 16×60
+          Text "ef" 184,0 16×16
+-->
