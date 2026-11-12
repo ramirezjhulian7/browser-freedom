@@ -63,6 +63,22 @@ Las ganancias de `css-flexbox` vienen de E5 (integrado desde `master`), no de E9
 Unicode (`cargo test -p bf-layout --test unicode_conformance`, UCD 17.0.0): BidiTest
 770241/770241, BidiCharacterTest 91707/91707, LineBreakTest 19338/19338.
 
+## E5: flexbox rtl, propiedades lógicas inline y lanes con subgrid (2026-11-12)
+
+Medido con `REFTEST_GROUPS=css/css-flexbox,css/css-grid cargo test -p bf-paint --test wpt_reftests_groups -- --ignored --test-threads=4`
+sobre `army/e5` con `master` `caba13e` integrado (mismo WPT y condiciones que la tabla de
+arriba). La columna `master` es la medición de la rama sin los cambios de la ronda (2026-11-10,
+`master` `f61201f`).
+
+| Directorio | master | army/e5 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/css-flexbox | 633/949 (66.7 %) | 699/949 (73.7 %) | 478 | 0 |
+| css/css-grid | 959/1567 (61.2 %) | 1054/1567 (67.3 %) | 913 | 2 |
+| css/css-grid/grid-lanes | 425/851 (49.9 %) | 518/851 (60.9 %) | – | – |
+
+Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte con
+`writing-mode` vertical pasaba por casualidad.
+
 ## Tests con expectativa dudosa
 
 - `css/CSS2/text/letter-spacing-080.xht`: el test pide `letter-spacing: 6em` con `font: 20px`

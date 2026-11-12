@@ -105,7 +105,8 @@ fn resolved_align(item: &ComputedStyle, container: &ComputedStyle) -> ItemAlign 
     };
     match a {
         ItemAlign::Auto | ItemAlign::Normal => ItemAlign::Stretch,
-        ItemAlign::LastBaseline => ItemAlign::FlexEnd,
+        ItemAlign::LastBaseline | ItemAlign::FlowEnd => ItemAlign::FlexEnd,
+        ItemAlign::FlowStart => ItemAlign::FlexStart,
         a => a,
     }
 }
@@ -310,9 +311,7 @@ impl<'a> Layout<'a> {
                         .width_for_keyword(b, &kw, available, cb.width)
                         .unwrap_or(available),
                     // E5: con wrap, fit-content (§9.4 paso 7); se estira con la línea.
-                    None if align == ItemAlign::Stretch && !auto_cross_margin && !wrap => {
-                        available
-                    }
+                    None if align == ItemAlign::Stretch && !auto_cross_margin && !wrap => available,
                     None => self.item_fit_width(b, available),
                 }
                 .min(wmax)
@@ -683,9 +682,7 @@ impl<'a> Layout<'a> {
         } else {
             None
         };
-        if !wrap
-            && let (Some((lo, hi)), Some(line)) = (cross_limits, lines.first_mut())
-        {
+        if !wrap && let (Some((lo, hi)), Some(line)) = (cross_limits, lines.first_mut()) {
             line.cross = line.cross.min(hi).max(lo);
         }
         // E5: `visibility: collapse` (§4.4 y §9.4 paso 9).
@@ -1115,7 +1112,8 @@ impl<'a> Layout<'a> {
                         cmax = cmax.min(ob);
                     }
                     let (lo, hi) = width_limits(s, 0.0, bp);
-                    let pct_min = matches!(&s.min_width, Size::LengthPercentage(lp) if lp.has_percentage());
+                    let pct_min =
+                        matches!(&s.min_width, Size::LengthPercentage(lp) if lp.has_percentage());
                     let pct_max = matches!(&s.max_width,
                         bf_style::properties::types::MaxSize::LengthPercentage(lp) if lp.has_percentage());
                     let lo = if pct_min { 0.0 } else { lo + bp + mh };

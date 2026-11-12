@@ -170,9 +170,17 @@ struct Entry {
 /// registran con el lado físico de `direction: ltr` y se mueven al opuesto si el elemento es
 /// `rtl`.
 fn is_logical_inline(name: &str) -> bool {
-    ["margin-inline", "padding-inline", "inset-inline", "border-inline"]
-        .iter()
-        .any(|p| name.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p)))
+    [
+        "margin-inline",
+        "padding-inline",
+        "inset-inline",
+        "border-inline",
+    ]
+    .iter()
+    .any(|p| {
+        name.get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p))
+    })
 }
 
 /// Longhands físicos izquierda/derecha que comparten una propiedad lógica del eje inline.

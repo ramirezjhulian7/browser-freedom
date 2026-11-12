@@ -1528,6 +1528,7 @@ fn align_offset(a: ItemAlign, free: f32) -> f32 {
         | ItemAlign::FlexEnd
         | ItemAlign::SelfEnd
         | ItemAlign::Right
+        | ItemAlign::FlowEnd
         | ItemAlign::LastBaseline => free,
         ItemAlign::Center => free / 2.0,
         _ => 0.0,
