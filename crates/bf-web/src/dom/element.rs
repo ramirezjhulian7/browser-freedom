@@ -208,6 +208,7 @@ fn set_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = with_doc_mut(agent, n.doc, |d| d.set_attribute(n.node, &name, value));
     let v = done(agent, r)?;
     crate::dom::events::content_attribute_changed(agent, n, &name);
+    crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), false);
     Ok(v)
 }
 
@@ -230,9 +231,13 @@ fn set_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn remove_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let name = to_dom_string(agent, &a.arg(0))?;
+    let had = with_doc(agent, n.doc, |d| d.has_attribute(n.node, &name));
     with_doc_mut(agent, n.doc, |d| d.remove_attribute(n.node, &name));
     mutated(agent);
     crate::dom::events::content_attribute_changed(agent, n, &name);
+    if had {
+        crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), true);
+    }
     Ok(Value::Undefined)
 }
 
