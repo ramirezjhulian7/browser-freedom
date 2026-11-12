@@ -4,13 +4,17 @@
 //! `testPropertyOfStrings` se comprueba con [`bf_js::regexp::Regex`]. Es la misma verificación
 //! que hacen los tests en JavaScript (`harness/regExpUtils.js`), sin el costo de construir
 //! strings de un millón de code points en el intérprete. Sin `tests/test262` (ver
-//! `tools/fetch-test262`), el test no hace nada.
+//! `tools/fetch-test262`), el test no hace nada. Sin `BF_FULL`, comprueba una muestra
+//! determinista (1 de cada [`SAMPLE_STEP`] archivos en orden de nombre); con `BF_FULL=1`, todos.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 use bf_js::regexp::Regex;
+
+/// Sin `BF_FULL`, se comprueba 1 de cada `SAMPLE_STEP` archivos.
+const SAMPLE_STEP: usize = 50;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -312,6 +316,10 @@ fn test262_property_escapes() {
         }
     }
     files.sort();
+    if std::env::var_os("BF_FULL").is_none() {
+        files = files.into_iter().step_by(SAMPLE_STEP).collect();
+        eprintln!("muestra 1 de cada {SAMPLE_STEP} archivos; BF_FULL=1 corre todos");
+    }
     // Los archivos se reparten entre hilos (cada uno arma strings de un millón de code
     // points).
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());

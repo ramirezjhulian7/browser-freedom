@@ -225,6 +225,16 @@ struct LanesSetup<'a> {
 }
 
 impl LanesSetup<'_> {
+    /// E5: nombres de línea que hereda un subgrid del ítem `i` en las pistas `span` del eje de
+    /// rejilla. Un subgrid auto-colocado no los hereda (su posición no se conoce al dimensionar;
+    /// WPT `grid-subgridded-to-grid-lanes/line-names/*-line-names-016`): solo líneas sin nombre.
+    fn subgrid_names(&self, i: usize, span: (usize, usize)) -> Vec<Vec<String>> {
+        match self.items[i].1 {
+            Placement::Auto(_) => vec![Vec::new(); span.1.saturating_sub(span.0) + 1],
+            Placement::Definite(..) => span_line_names(&self.axis, self.before, span),
+        }
+    }
+
     /// Span (en pistas) de un ítem auto-colocado.
     fn auto_span(&self, span: i32) -> usize {
         (span.max(1) as usize).min(self.tracks.len().max(1))
@@ -323,6 +333,12 @@ impl<'a> Layout<'a> {
             }
         }
         children.sort_by_key(|c| c.style.order.0);
+        // E5: un ítem subgrid de un contenedor grid lanes solo hereda el eje de rejilla (CSS
+        // Grid 3, "subgrids"): en el de apilado `subgrid` cuenta como sin pistas heredadas.
+        for c in &children {
+            self.subgrid_mask
+                .insert(*c as *const LayoutBox as usize, (!rows, rows));
+        }
         let axis = explicit_axis(template, &cs.grid_template_areas, !rows, space, gap);
         let hyp = self.lanes_hypothetical_sizes(
             container,
@@ -572,22 +588,43 @@ impl<'a> Layout<'a> {
             cols: setup.tracks.clone(),
             rows: vec![Track::new(&TrackSize::AUTO, None)],
             abs: Vec::new(),
-            col_axis: explicit_axis(
-                &GridTemplate::None,
-                &GridTemplateAreas::None,
-                true,
-                RepeatSpace {
-                    size: None,
-                    min: None,
-                    basis: None,
-                },
-                0.0,
-            ),
+            // E5: con los nombres de línea del eje (para los subgrids).
+            col_axis: setup.axis.clone(),
             row_axis: empty_axis(),
             col_before: setup.before,
             row_before: 0,
             sub: SubgridParent::default(),
         }
+    }
+
+    /// E5: ítems que dimensionan las columnas de la rejilla falsa de `lanes_fake_grid`: cada
+    /// subgrid en las columnas recibe los nombres de línea de su posición (§9 de Grid 2; un
+    /// auto-colocado aparece en cada posición posible) y se sustituye por sus ítems.
+    fn lanes_column_items(
+        &mut self,
+        setup: &LanesSetup<'a>,
+        grid: &Grid<'a>,
+        gap: f32,
+        basis: f32,
+    ) -> Vec<GridItem<'a>> {
+        let mut out = Vec::with_capacity(grid.items.len());
+        // `grid.items` sigue el orden de `sizing_spans` (ver `lanes_fake_grid`).
+        for (it, (i, _)) in grid.items.iter().zip(setup.sizing_spans()) {
+            if self.sub_axes(it.b).0 {
+                let entry = SubgridParent {
+                    cols: Some(SubgridAxis {
+                        names: setup.subgrid_names(i, it.col),
+                        sizes: Vec::new(),
+                        gap,
+                    }),
+                    rows: None,
+                };
+                self.subgrids
+                    .insert(it.b as *const LayoutBox as usize, entry);
+            }
+            self.push_axis_item(it.clone(), true, None, basis, &mut out, 0);
+        }
+        out
     }
 
     /// Ancho de contenido y márgenes de un ítem en el eje de apilado inline (filas como eje de
@@ -646,7 +683,24 @@ impl<'a> Layout<'a> {
             let col_gap = gap_px(&cs.column_gap, Some(cb.width));
             let row_gap = gap_px(&cs.row_gap, cb.height);
             let mut grid = self.lanes_fake_grid(&setup);
-            let (starts, ends) = self.size_grid_columns(container, &mut grid, cb.width, col_gap);
+            // Como `size_grid_columns`, con los subgrids sustituidos por sus ítems.
+            let items = self.lanes_column_items(&setup, &grid, col_gap, cb.width);
+            let contribs: Vec<Contrib> = items
+                .iter()
+                .map(|it| self.column_contrib(it, &grid.cols, col_gap, None))
+                .collect();
+            size_tracks(
+                &mut grid.cols,
+                &contribs,
+                col_gap,
+                Space::Definite(cb.width),
+                (cb.width, cb.width),
+                matches!(
+                    cs.justify_content,
+                    ContentAlign::Normal | ContentAlign::Stretch
+                ),
+            );
+            let (starts, ends) = track_positions(&grid.cols, col_gap, cb.width, cs.justify_content);
             let n = setup.tracks.len();
             let mut run = Running::new(
                 n,
@@ -657,6 +711,9 @@ impl<'a> Layout<'a> {
             );
             // Posición de apilado y tamaño exterior de cada fragmento.
             let mut stack: Vec<(f32, f32)> = Vec::new();
+            // E5: pistas finales y datos para volver a maquetar (estirado en el apilado).
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let mut relayout: Vec<(Cb, f32, f32, Edges, f32)> = Vec::new();
             for (i, (b, p)) in setup.items.iter().enumerate() {
                 let b = *b;
                 let s = &b.style;
@@ -698,11 +755,28 @@ impl<'a> Layout<'a> {
                     height: cb.height,
                 };
                 let x = cb.x + x0 + dx + ml;
+                // E5: un subgrid recibe los nombres y tamaños de las pistas que ocupa.
+                if self.sub_axes(b).0 {
+                    let sizes =
+                        subgrid_track_sizes(s, (c0, c1), (&starts, &ends), col_gap, cb.width, true)
+                            .unwrap_or_default();
+                    let entry = SubgridParent {
+                        cols: Some(SubgridAxis {
+                            names: setup.subgrid_names(i, (c0, c1)),
+                            sizes,
+                            gap: col_gap,
+                        }),
+                        rows: None,
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                }
                 let mut f = self.grid_item_fragment(b, item_cb, (x, cb.y + mt), w, None, margins);
                 if f.kind == FragmentKind::Block {
                     f.kind = FragmentKind::InlineBlock;
                 }
                 let outer = f.rect.height + mt + mb;
+                let mut hole_dx = 0.0;
+                let mut span = (c0, c1);
                 let y = match run.find_hole(c1 - c0, outer).filter(|_| auto) {
                     Some((t, start)) => {
                         // Hueco anterior (§4.3): el ítem va en esa pista.
@@ -713,11 +787,15 @@ impl<'a> Layout<'a> {
                         } else {
                             x1
                         };
-                        f.translate(x1 - x0, 0.0);
+                        hole_dx = x1 - x0;
+                        f.translate(hole_dx, 0.0);
+                        span = (t, t + (c1 - c0));
                         start
                     }
                     None => run.commit(c0, c1, outer, auto),
                 };
+                spans.push(span);
+                relayout.push((item_cb, x, w, margins, hole_dx));
                 f.translate(0.0, y);
                 let key = (y, c0, i);
                 if first.is_none_or(|k| key.0 < k.0 || (key.0 == k.0 && key.1 < k.1)) {
@@ -727,6 +805,49 @@ impl<'a> Layout<'a> {
                 out.push(f);
             }
             let range = run.range_end();
+            // E5: alineación del último ítem de cada pista en el eje de apilado.
+            let frees = stacking_free_space(&spans, &stack, n, range);
+            for (i, free) in frees.into_iter().enumerate() {
+                if free <= 0.0 {
+                    continue;
+                }
+                let b = setup.items[i].0;
+                let s = &b.style;
+                let a = match block_axis(s.align_self) {
+                    ItemAlign::Auto => block_axis(cs.align_items),
+                    a => a,
+                };
+                let (item_cb, x, w, margins, hole_dx) = relayout[i];
+                let auto_m = margin_value(&s.margin_top, item_cb.width).is_none()
+                    || margin_value(&s.margin_bottom, item_cb.width).is_none();
+                if a == ItemAlign::Stretch && s.height == Size::Auto && !auto_m {
+                    let bp_v =
+                        border_edges(s).vertical() + padding_edges(s, item_cb.width).vertical();
+                    let h = (stack[i].1 + free - margins.top - margins.bottom - bp_v).max(0.0);
+                    let (hlo, hhi) = height_limits(s, item_cb.height, bp_v);
+                    let h = h.min(hhi).max(hlo);
+                    let mut f = self.grid_item_fragment(
+                        b,
+                        item_cb,
+                        (x, cb.y + margins.top),
+                        w,
+                        Some(h),
+                        margins,
+                    );
+                    if f.kind == FragmentKind::Block {
+                        f.kind = FragmentKind::InlineBlock;
+                    }
+                    f.translate(hole_dx, stack[i].0);
+                    stack[i].1 = f.rect.height + margins.top + margins.bottom;
+                    out[i] = f;
+                    continue;
+                }
+                let shift = stacking_shift(a, free, fill_reverse);
+                if shift != 0.0 {
+                    out[i].translate(0.0, shift);
+                    stack[i].0 += shift;
+                }
+            }
             content_h = cb.height.unwrap_or_else(|| range.min(hmax).max(hmin));
             let off = stacking_offset(cs.align_content, content_h, range, fill_reverse);
             for (f, (y, outer)) in out.iter_mut().zip(&stack) {
@@ -764,7 +885,33 @@ impl<'a> Layout<'a> {
                     area_w: None,
                     empty: false,
                 };
-                let (c, _) = self.row_contrib(&it, cs, &tracks, row_gap, w + bp_h + ml + mr);
+                let outer_w = w + bp_h + ml + mr;
+                // E5: un subgrid en las filas recibe los nombres de línea de esta posición y
+                // lo sustituyen sus ítems (con sus columnas propias en su ancho).
+                if self.sub_axes(b).1 {
+                    let entry = SubgridParent {
+                        cols: None,
+                        rows: Some(SubgridAxis {
+                            names: setup.subgrid_names(i, span),
+                            sizes: Vec::new(),
+                            gap: row_gap,
+                        }),
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                    let it = GridItem {
+                        area_w: Some(outer_w),
+                        ..it
+                    };
+                    let mut expanded = Vec::new();
+                    self.push_axis_item(it, false, None, cb.width, &mut expanded, 0);
+                    for e in &expanded {
+                        let aw = e.area_w.unwrap_or(outer_w);
+                        let (c, _) = self.row_contrib(e, cs, &tracks, row_gap, aw);
+                        contribs.push(c);
+                    }
+                    continue;
+                }
+                let (c, _) = self.row_contrib(&it, cs, &tracks, row_gap, outer_w);
                 contribs.push(c);
             }
             let stretch = matches!(
@@ -814,6 +961,8 @@ impl<'a> Layout<'a> {
                 dense(cs),
             );
             let mut stack: Vec<(f32, f32)> = Vec::new();
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let mut relayout: Vec<(Cb, f32, f32, Option<f32>, Edges)> = Vec::new();
             for (i, (b, p)) in setup.items.iter().enumerate() {
                 let b = *b;
                 let s = &b.style;
@@ -850,8 +999,34 @@ impl<'a> Layout<'a> {
                     block_axis(cs.align_items),
                     has_ratio(b),
                 );
-                let forced = if align == ItemAlign::Stretch
-                    && matches!(s.height, Size::Auto)
+                // E5: un subgrid en las filas recibe los tamaños de las pistas que ocupa y se
+                // estira siempre, con los márgenes `auto` a 0 (§9 de Grid 2).
+                let sub_rows = self.sub_axes(b).1;
+                let (mt, mb) = if sub_rows {
+                    let sizes = subgrid_track_sizes(
+                        s,
+                        (r0, r1),
+                        (&starts, &ends),
+                        row_gap,
+                        cb.width,
+                        false,
+                    )
+                    .unwrap_or_default();
+                    let entry = SubgridParent {
+                        cols: None,
+                        rows: Some(SubgridAxis {
+                            names: setup.subgrid_names(i, (r0, r1)),
+                            sizes,
+                            gap: row_gap,
+                        }),
+                    };
+                    self.subgrids.insert(b as *const LayoutBox as usize, entry);
+                    (mt.or(Some(0.0)), mb.or(Some(0.0)))
+                } else {
+                    (mt, mb)
+                };
+                let forced = if (align == ItemAlign::Stretch || sub_rows)
+                    && (matches!(s.height, Size::Auto) || sub_rows)
                     && mt.is_some()
                     && mb.is_some()
                 {
@@ -883,6 +1058,8 @@ impl<'a> Layout<'a> {
                 if f.kind == FragmentKind::Block {
                     f.kind = FragmentKind::InlineBlock;
                 }
+                spans.push((r0, r1));
+                relayout.push((item_cb, x, y, forced, margins));
                 let free_v = ah - f.rect.height - mt.unwrap_or(0.0) - mb.unwrap_or(0.0);
                 let (dy, mt_used, mb_used) = place_in_area(free_v, mt, mb, align);
                 let shift = dy + mt_used - mt.unwrap_or(0.0);
@@ -899,6 +1076,50 @@ impl<'a> Layout<'a> {
                 out.push(f);
             }
             let range = run.range_end();
+            // E5: alineación del último ítem de cada pista en el eje de apilado (inline).
+            let frees = stacking_free_space(&spans, &stack, n, range);
+            for (i, free) in frees.into_iter().enumerate() {
+                if free <= 0.0 {
+                    continue;
+                }
+                let b = setup.items[i].0;
+                let s = &b.style;
+                let a = match s.justify_self {
+                    ItemAlign::Auto => cs.justify_items,
+                    a => a,
+                };
+                // `left`/`right` son físicos: con el flujo de derecha a izquierda se invierten.
+                let a = match a {
+                    ItemAlign::Left => ItemAlign::Start,
+                    ItemAlign::Right => ItemAlign::End,
+                    a => a,
+                };
+                let mirrored = rtl != fill_reverse;
+                let (item_cb, x, y, forced, margins) = relayout[i];
+                let auto_m = margin_value(&s.margin_left, cb.width).is_none()
+                    || margin_value(&s.margin_right, cb.width).is_none();
+                if a == ItemAlign::Stretch && s.width == Size::Auto && !auto_m {
+                    let w = widths[i].0 + free;
+                    let bp_h =
+                        border_edges(s).horizontal() + padding_edges(s, cb.width).horizontal();
+                    let (wlo, whi) = width_limits(s, cb.width, bp_h);
+                    let w = w.min(whi).max(wlo);
+                    let mut f = self.grid_item_fragment(b, item_cb, (x, y), w, forced, margins);
+                    if f.kind == FragmentKind::Block {
+                        f.kind = FragmentKind::InlineBlock;
+                    }
+                    let dy = out[i].rect.y - f.rect.y;
+                    f.translate(0.0, dy);
+                    stack[i].1 = w + bp_h + margins.left + margins.right;
+                    out[i] = f;
+                    continue;
+                }
+                let shift = stacking_shift(a, free, mirrored);
+                if shift != 0.0 {
+                    out[i].translate(shift, 0.0);
+                    stack[i].0 += shift;
+                }
+            }
             let off = stacking_offset(cs.justify_content, cb.width, range, fill_reverse);
             for (f, (x, outer)) in out.iter_mut().zip(&stack) {
                 // En rtl el flujo va de derecha a izquierda; `fill-reverse` lo invierte.
@@ -1054,8 +1275,8 @@ impl<'a> Layout<'a> {
             let gap = gap_px(&cs.column_gap, None);
             let tracks = setup.tracks.clone();
             let grid = self.lanes_fake_grid(&setup);
-            let contribs: Vec<Contrib> = grid
-                .items
+            let items = self.lanes_column_items(&setup, &grid, gap, 0.0);
+            let contribs: Vec<Contrib> = items
                 .iter()
                 .map(|it| self.column_contrib(it, &tracks, gap, None))
                 .collect();
@@ -1101,5 +1322,60 @@ impl<'a> Layout<'a> {
             *size = run.range_end();
         }
         (sizes[0], sizes[1].max(sizes[0]))
+    }
+}
+
+/// E5: alineación propia en el eje de apilado (CSS Grid 3, "alignment in the stacking axis"):
+/// el último ítem de cada pista se alinea en el espacio que queda hasta el final del rango de
+/// apilado. `spans` son las pistas de cada ítem y `stack` su posición de apilado y su tamaño
+/// exterior. Devuelve, por ítem, el espacio libre de su contenedor de alineación (0 si no es
+/// el último de todas sus pistas).
+fn stacking_free_space(
+    spans: &[(usize, usize)],
+    stack: &[(f32, f32)],
+    n: usize,
+    range: f32,
+) -> Vec<f32> {
+    let mut last: Vec<Option<(f32, usize)>> = vec![None; n];
+    for (i, (&(y, outer), &(t0, t1))) in stack.iter().zip(spans).enumerate() {
+        for l in last.iter_mut().take(t1.min(n)).skip(t0) {
+            if l.is_none_or(|(e, _)| y + outer >= e) {
+                *l = Some((y + outer, i));
+            }
+        }
+    }
+    spans
+        .iter()
+        .enumerate()
+        .map(|(i, &(t0, t1))| {
+            let is_last = t0 < t1.min(n)
+                && last[t0..t1.min(n)]
+                    .iter()
+                    .all(|l| l.is_some_and(|(_, j)| j == i));
+            if is_last {
+                (range - stack[i].0 - stack[i].1).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// E5: desplazamiento en el eje de apilado (en el sentido del flujo) de un ítem con alineación
+/// `a` y espacio libre `free`; con el flujo invertido el inicio físico es el final del flujo.
+fn stacking_shift(a: ItemAlign, free: f32, flow_reversed: bool) -> f32 {
+    match a {
+        ItemAlign::Center => free / 2.0,
+        // `flow-start`/`flow-end` siguen el flujo de apilado aunque esté invertido.
+        ItemAlign::FlowEnd => free,
+        ItemAlign::End | ItemAlign::FlexEnd | ItemAlign::SelfEnd | ItemAlign::LastBaseline => {
+            if flow_reversed {
+                0.0
+            } else {
+                free
+            }
+        }
+        ItemAlign::Start | ItemAlign::FlexStart | ItemAlign::SelfStart if flow_reversed => free,
+        _ => 0.0,
     }
 }
