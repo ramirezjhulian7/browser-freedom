@@ -3603,9 +3603,9 @@ fn fixed_ancestry(root: Option<&Fragment>, target: &Fragment) -> bool {
 /// entre las ventanas).
 impl App {
     /// La red compartida por las ventanas, con las opciones del perfil que viven en ella (E4:
-    /// cookies de terceros).
+    /// cookies de terceros). E6: con la caché HTTP, HSTS y las cookies persistentes en disco.
     fn shared_net() -> Arc<NetLoader> {
-        let net = NetLoader::new();
+        let net = NetLoader::with_disk_cache();
         net.fetcher
             .cookies
             .set_block_third_party(crate::settings::global().block_third_party_cookies);

@@ -20,9 +20,8 @@ use crate::script::{Engine, PageEnv, parse_with_scripts};
 use crate::theme::Theme;
 
 /// Los subrecursos de un documento (hojas, imágenes, fuentes) en memoria, para que volver a
-/// hacer estilo y layout (al redimensionar o hacer zoom) no los pida de nuevo a la red.
-///
-/// TODO(http-cache): reemplazar por la caché HTTP de `bf-net` (RFC 9111).
+/// hacer estilo y layout (al redimensionar o hacer zoom) no los pida de nuevo a la red. Es la
+/// memoria del documento; entre documentos y sesiones está la caché HTTP de `bf-net` (RFC 9111).
 pub struct CachedLoader {
     pub net: Arc<NetLoader>,
     entries: Mutex<HashMap<String, Option<Resource>>>,
@@ -205,10 +204,11 @@ pub struct LoadContext {
 }
 
 impl LoadContext {
-    /// El contexto de la línea de comandos: red nueva, fuentes del sistema, 1024×768.
+    /// El contexto de la línea de comandos: red nueva (con la caché HTTP en disco), fuentes del
+    /// sistema, 1024×768.
     pub fn cli() -> LoadContext {
         LoadContext {
-            net: Arc::new(NetLoader::new()),
+            net: Arc::new(NetLoader::with_disk_cache()),
             fonts: FontDb::system(),
             viewport: Size {
                 width: 1024.0,
@@ -229,7 +229,7 @@ pub fn load(arg: &str) -> Result<Loaded, String> {
         return Ok(internal::page(&url, &LoadContext::cli()));
     }
     let mut engine = Engine::stderr();
-    let net = Arc::new(NetLoader::new());
+    let net = Arc::new(NetLoader::with_disk_cache());
     let env = PageEnv::cli(net.clone());
     let loaded = fetch_document_with(&url, net, None, Some((&mut engine, &env)))
         .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
