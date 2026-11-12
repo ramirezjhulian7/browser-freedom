@@ -35,7 +35,9 @@ struct WebFace {
 }
 
 type FamilyKey = (String, u32, bool);
-type ShapeKey = (FamilyKey, u32, String);
+/// Familia, tamaño, texto y dirección (`None`: la que adivina el shaper; `Some(rtl)`: la del
+/// run bidi).
+type ShapeKey = (FamilyKey, u32, String, Option<bool>);
 
 /// Fuentes de un documento.
 pub struct Fonts {
@@ -308,6 +310,78 @@ impl Fonts {
             .collect()
     }
 
+    /// Shaping con caché por familia, tamaño, texto y dirección (ver [`ShapeKey`]).
+    fn shape_impl(&self, text: &str, request: &FontRequest<'_>, rtl: Option<bool>) -> Vec<Glyph> {
+        let fkey: FamilyKey = (
+            format!("{:?}", request.family.0),
+            request.weight.to_bits(),
+            request.italic,
+        );
+        let key: ShapeKey = (fkey, request.size.to_bits(), text.to_owned(), rtl);
+        if let Some(g) = lock(&self.shaped).get(&key) {
+            return g.as_ref().clone();
+        }
+        let families = self.resolve(request);
+        let fallback = self.primary(request).map_or(NO_FONT, |(k, _)| k);
+        // Runs de la misma cara. Los controles (tab, salto de línea) se dan forma como
+        // espacios: el layout decide su ancho.
+        // E9: además, runs de un solo script (UAX #24), para darle al shaper el script del
+        // segmento y elegir el fallback por script.
+        let mut runs: Vec<(usize, usize, FontKey, bf_layout::unicode::Script)> = Vec::new();
+        for (sstart, send, script) in bf_layout::unicode::script_runs(text) {
+            for (i, c) in text[sstart..send].char_indices() {
+                let i = sstart + i;
+                let end = i + c.len_utf8();
+                let c = if c.is_control() { ' ' } else { c };
+                if let Some(last) = runs.last_mut()
+                    && last.3 == script
+                    && continues_cluster(c)
+                    && self.covers(last.2, c)
+                {
+                    last.1 = end;
+                    continue;
+                }
+                let k = self
+                    .font_for(&families, c, script.tag())
+                    .unwrap_or(fallback);
+                match runs.last_mut() {
+                    Some(last) if last.2 == k && last.3 == script => last.1 = end,
+                    _ => runs.push((i, end, k, script)),
+                }
+            }
+        }
+        // Un run bidi RTL sale en orden visual: los runs de fuente/script, de atrás adelante.
+        if rtl == Some(true) {
+            runs.reverse();
+        }
+        let mut glyphs = Vec::with_capacity(text.len());
+        for (start, end, k, script) in runs {
+            // Los controles se sustituyen por espacios y eso puede cambiar la longitud en
+            // bytes (U+0085, U+009D… ocupan 2). `map[offset_en_run] = offset_en_text`, para
+            // que `Glyph::cluster` indexe `text` siempre en un límite de carácter.
+            let mut run = String::with_capacity(end - start);
+            let mut map = Vec::with_capacity(end - start + 1);
+            for (i, c) in text[start..end].char_indices() {
+                let c = if c.is_control() { ' ' } else { c };
+                map.resize(run.len(), start + i);
+                map.push(start + i);
+                run.push(c);
+            }
+            map.resize(run.len() + 1, end);
+            self.shape_run(
+                &run,
+                k,
+                request.size,
+                &map,
+                Some(script.tag()),
+                rtl,
+                &mut glyphs,
+            );
+        }
+        lock(&self.shaped).insert(key, Arc::new(glyphs.clone()));
+        glyphs
+    }
+
     /// La "first available font" (CSS Fonts 4 §5): la primera cuya cobertura incluye U+0020.
     fn primary(&self, request: &FontRequest<'_>) -> Option<(FontKey, Arc<LoadedFace>)> {
         let families = self.resolve(request);
@@ -318,22 +392,60 @@ impl Fonts {
             .and_then(|k| self.face(k).map(|f| (k, f)))
     }
 
-    fn font_for(&self, families: &[Vec<FontKey>], c: char) -> Option<FontKey> {
+    /// Cara para `c`: la primera de las familias pedidas que lo cubra; si no, E9: las
+    /// familias de fallback del script de `script` (matching::script_fallback), y por último el
+    /// fallback por carácter de la base de datos.
+    fn font_for(&self, families: &[Vec<FontKey>], c: char, script: &str) -> Option<FontKey> {
         families
             .iter()
             .flatten()
             .copied()
             .find(|&k| self.covers(k, c))
+            .or_else(|| {
+                matching::script_fallback(script).iter().find_map(|name| {
+                    self.db
+                        .family(name)
+                        .iter()
+                        .map(|&i| FontKey(i as u32))
+                        .find(|&k| self.covers(k, c))
+                })
+            })
             .or_else(|| self.db.fallback(c).map(|i| FontKey(i as u32)))
     }
 
     /// `map[i]` es el offset en el texto original del byte `i` de `text` (ver `shape`).
-    fn shape_run(&self, text: &str, key: FontKey, size: f32, map: &[usize], out: &mut Vec<Glyph>) {
+    /// E9: `script` (etiqueta ISO 15924) y `rtl` fijan las propiedades del segmento; sin ellos
+    /// las adivina rustybuzz.
+    #[allow(clippy::too_many_arguments)]
+    fn shape_run(
+        &self,
+        text: &str,
+        key: FontKey,
+        size: f32,
+        map: &[usize],
+        script: Option<&str>,
+        rtl: Option<bool>,
+        out: &mut Vec<Glyph>,
+    ) {
         let face = self.face(key);
         let shaped = face.as_ref().and_then(|f| {
             let rb = rustybuzz::Face::from_slice(&f.data, f.index)?;
             let mut buffer = rustybuzz::UnicodeBuffer::new();
             buffer.push_str(text);
+            if let Some(script) = script
+                .filter(|t| !matches!(*t, "Zyyy" | "Zinh" | "Zzzz"))
+                .map(|t| rustybuzz::ttf_parser::Tag::from_bytes_lossy(t.as_bytes()))
+                .and_then(rustybuzz::Script::from_iso15924_tag)
+            {
+                buffer.set_script(script);
+            }
+            if let Some(rtl) = rtl {
+                buffer.set_direction(if rtl {
+                    rustybuzz::Direction::RightToLeft
+                } else {
+                    rustybuzz::Direction::LeftToRight
+                });
+            }
             buffer.guess_segment_properties();
             Some((rustybuzz::shape(&rb, &[], buffer), f.units_per_em))
         });
@@ -379,54 +491,11 @@ impl FontProvider for Fonts {
     }
 
     fn shape(&self, text: &str, request: &FontRequest<'_>) -> Vec<Glyph> {
-        let fkey: FamilyKey = (
-            format!("{:?}", request.family.0),
-            request.weight.to_bits(),
-            request.italic,
-        );
-        let key: ShapeKey = (fkey, request.size.to_bits(), text.to_owned());
-        if let Some(g) = lock(&self.shaped).get(&key) {
-            return g.as_ref().clone();
-        }
-        let families = self.resolve(request);
-        let fallback = self.primary(request).map_or(NO_FONT, |(k, _)| k);
-        // Runs de la misma cara. Los controles (tab, salto de línea) se dan forma como
-        // espacios: el layout decide su ancho.
-        let mut runs: Vec<(usize, usize, FontKey)> = Vec::new();
-        for (i, c) in text.char_indices() {
-            let end = i + c.len_utf8();
-            let c = if c.is_control() { ' ' } else { c };
-            if let Some(last) = runs.last_mut()
-                && continues_cluster(c)
-                && self.covers(last.2, c)
-            {
-                last.1 = end;
-                continue;
-            }
-            let k = self.font_for(&families, c).unwrap_or(fallback);
-            match runs.last_mut() {
-                Some(last) if last.2 == k => last.1 = end,
-                _ => runs.push((i, end, k)),
-            }
-        }
-        let mut glyphs = Vec::with_capacity(text.len());
-        for (start, end, k) in runs {
-            // Los controles se sustituyen por espacios y eso puede cambiar la longitud en
-            // bytes (U+0085, U+009D… ocupan 2). `map[offset_en_run] = offset_en_text`, para
-            // que `Glyph::cluster` indexe `text` siempre en un límite de carácter.
-            let mut run = String::with_capacity(end - start);
-            let mut map = Vec::with_capacity(end - start + 1);
-            for (i, c) in text[start..end].char_indices() {
-                let c = if c.is_control() { ' ' } else { c };
-                map.resize(run.len(), start + i);
-                map.push(start + i);
-                run.push(c);
-            }
-            map.resize(run.len() + 1, end);
-            self.shape_run(&run, k, request.size, &map, &mut glyphs);
-        }
-        lock(&self.shaped).insert(key, Arc::new(glyphs.clone()));
-        glyphs
+        self.shape_impl(text, request, None)
+    }
+
+    fn shape_dir(&self, text: &str, request: &FontRequest<'_>, rtl: bool) -> Vec<Glyph> {
+        self.shape_impl(text, request, Some(rtl))
     }
 
     fn vertical_fit_enabled(&self) -> bool {
