@@ -670,10 +670,50 @@ fn tls_bad_certificate_is_a_tls_error() {
     let f = Fetcher::new();
     let u = Url::parse(&format!("https://127.0.0.1:{port}/"), None).unwrap();
     match f.fetch(&u, &FetchOptions::default()) {
-        Err(bf_net::FetchError::Tls(_)) => {}
+        Err(e @ bf_net::FetchError::Tls(_)) => {
+            // E6: con el motivo, para la página de error.
+            assert_eq!(
+                e.kind(),
+                bf_net::NetErrorKind::Tls(bf_net::TlsReason::UnknownIssuer)
+            );
+        }
         other => panic!("se esperaba un error de TLS: {other:?}"),
     }
     server.join().unwrap();
+}
+
+/// E6: RFC 9113 §9.1.1 (*connection reuse*): `https://localhost:<p>` y `https://127.0.0.1:<p>`
+/// resuelven a la misma IP y el certificado vale para los dos nombres: la segunda petición va
+/// por la conexión h2 de la primera.
+#[test]
+fn h2_connection_is_coalesced_across_origins() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let stream = tls_accept(&listener, tls_server_config(&[b"h2", b"http/1.1"]));
+        let mut s = Server::handshake(stream, &[]);
+        let mut authorities = Vec::new();
+        for _ in 0..2 {
+            let r = s.request(false);
+            authorities.push(r.get(":authority").unwrap().to_owned());
+            s.respond(r.id, "200", &[], b"ok");
+        }
+        authorities
+    });
+    let f = test_fetcher();
+    for host in ["localhost", "127.0.0.1"] {
+        let u = Url::parse(&format!("https://{host}:{port}/"), None).unwrap();
+        let res = f.fetch(&u, &FetchOptions::default()).unwrap();
+        assert_eq!(
+            (res.protocol, res.body.as_slice()),
+            (Protocol::H2, &b"ok"[..])
+        );
+    }
+    assert_eq!(
+        server.join().unwrap(),
+        [format!("localhost:{port}"), format!("127.0.0.1:{port}")]
+    );
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
 }
 
 /// E6: HSTS (RFC 6797) de punta a punta. Una respuesta por TLS con `Strict-Transport-Security`

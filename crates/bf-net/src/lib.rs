@@ -13,6 +13,7 @@
 pub mod blob; // E2: el almacén de URLs blob:
 pub mod cache;
 pub mod cookies;
+mod error;
 mod eyeballs;
 pub mod hpack;
 pub mod hsts;
@@ -26,8 +27,8 @@ pub mod websocket; // E2: cliente WebSocket (RFC 6455)
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use bf_infra::resource::load_local;
@@ -36,6 +37,7 @@ use bf_url::{Host, Url};
 
 pub use cache::{CacheMode, CacheUse, HttpCache};
 pub use cookies::CookieJar;
+pub use error::{FetchError, NetErrorKind, TlsError, TlsReason};
 pub use hsts::HstsStore;
 pub use http::Headers;
 pub use referrer::ReferrerPolicy;
@@ -48,47 +50,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 20;
 const MAX_BODY: u64 = 64 << 20;
-
-#[derive(Debug)]
-pub enum FetchError {
-    UnsupportedScheme(String),
-    InvalidUrl,
-    Io(io::Error),
-    /// No se pudo resolver el nombre del host.
-    Dns(io::Error),
-    /// Se agotó el tiempo de conexión o de lectura.
-    Timeout,
-    Tls(String),
-    TooManyRedirects,
-    /// `file:` o `data:` que no se pudo leer.
-    NotFound,
-}
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FetchError::UnsupportedScheme(s) => write!(f, "esquema no soportado: {s}"),
-            FetchError::InvalidUrl => f.write_str("URL inválida"),
-            FetchError::Io(e) => write!(f, "error de red: {e}"),
-            FetchError::Dns(e) => write!(f, "no se pudo resolver el host: {e}"),
-            FetchError::Timeout => f.write_str("se agotó el tiempo de espera"),
-            FetchError::Tls(e) => write!(f, "error de TLS: {e}"),
-            FetchError::TooManyRedirects => f.write_str("demasiadas redirecciones"),
-            FetchError::NotFound => f.write_str("recurso no encontrado"),
-        }
-    }
-}
-
-impl std::error::Error for FetchError {}
-
-impl From<io::Error> for FetchError {
-    fn from(e: io::Error) -> Self {
-        match e.kind() {
-            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => FetchError::Timeout,
-            _ => FetchError::Io(e),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -222,6 +183,61 @@ impl Write for Stream {
 
 type PoolKey = (String, u16, bool);
 
+/// La IP de una conexión h2 por TLS y la cadena de certificados que presentó el servidor.
+type H2Peer = (IpAddr, Vec<rustls_pki_types::CertificateDer<'static>>);
+
+/// Conexiones HTTP/1.1 a la vez con un origen (`host`, puerto, TLS), como los navegadores (RFC
+/// 9112 §9.4 pide limitarlas; Chrome y Firefox usan 6). Las peticiones de más esperan a que
+/// una quede libre y la reutilizan (keep-alive, RFC 9112 §9.3).
+pub const MAX_CONNECTIONS_PER_HOST: usize = 6;
+
+/// Las conexiones HTTP/1.1 de un [`Fetcher`].
+#[derive(Default)]
+struct H1Pool {
+    /// Libres para reutilizar.
+    idle: HashMap<PoolKey, Vec<BufReader<Stream>>>,
+    /// Abiertas (libres, en uso o abriéndose), por origen.
+    open: HashMap<PoolKey, usize>,
+}
+
+/// Un lugar en el pool de un origen: una conexión libre o el permiso de abrir una.
+enum Slot {
+    Idle(BufReader<Stream>),
+    New,
+}
+
+/// Mientras vive, ocupa un lugar del pool: al soltarse sin devolver la conexión, el lugar
+/// queda libre para la siguiente petición en espera.
+struct SlotGuard<'a> {
+    fetcher: &'a Fetcher,
+    key: &'a PoolKey,
+    held: bool,
+}
+
+impl SlotGuard<'_> {
+    /// La conexión vuelve al pool, libre.
+    fn keep(mut self, conn: BufReader<Stream>) {
+        self.held = false;
+        let mut pool = self.fetcher.lock_pool();
+        pool.idle.entry(self.key.clone()).or_default().push(conn);
+        drop(pool);
+        self.fetcher.pool_free.notify_all();
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.held {
+            let mut pool = self.fetcher.lock_pool();
+            if let Some(n) = pool.open.get_mut(self.key) {
+                *n = n.saturating_sub(1);
+            }
+            drop(pool);
+            self.fetcher.pool_free.notify_all();
+        }
+    }
+}
+
 /// Una configuración de cliente TLS con `roots` y la lista ALPN `alpn`.
 fn make_tls_config(roots: rustls::RootCertStore, alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -256,23 +272,13 @@ fn tls_config_h2() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
-/// Un error de E/S del handshake: si viene de rustls, es un error de TLS.
-fn tls_error(e: io::Error) -> FetchError {
-    if e.get_ref()
-        .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
-    {
-        return FetchError::Tls(e.to_string());
-    }
-    FetchError::from(e)
-}
-
 fn server_name(host: &str) -> Result<rustls_pki_types::ServerName<'static>, FetchError> {
     rustls_pki_types::ServerName::try_from(
         host.trim_start_matches('[')
             .trim_end_matches(']')
             .to_owned(),
     )
-    .map_err(|e| FetchError::Tls(e.to_string()))
+    .map_err(|e| FetchError::Tls(TlsError::new(TlsReason::Other, e.to_string())))
 }
 
 /// Conexión TCP con Happy Eyeballs (RFC 8305, [`eyeballs`]): las direcciones de las dos
@@ -299,7 +305,7 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Stream, FetchError> {
         return Ok(Stream::Plain(tcp));
     }
     let conn = rustls::ClientConnection::new(tls_config(), server_name(host)?)
-        .map_err(|e| FetchError::Tls(e.to_string()))?;
+        .map_err(|e| FetchError::Tls(TlsError::from_rustls(&e)))?;
     Ok(Stream::Tls(Box::new(rustls::StreamOwned::new(conn, tcp))))
 }
 
@@ -343,9 +349,15 @@ pub fn accept_language() -> String {
 /// Cliente HTTP con pool de conexiones y jarra de cookies.
 #[derive(Default)]
 pub struct Fetcher {
-    pool: Mutex<HashMap<PoolKey, Vec<BufReader<Stream>>>>,
+    /// HTTP/1.1: conexiones libres y abiertas por origen, a lo sumo
+    /// [`MAX_CONNECTIONS_PER_HOST`]; las peticiones de más esperan en `pool_free`.
+    pool: Mutex<H1Pool>,
+    pool_free: Condvar,
     /// HTTP/2: una conexión por origen, compartida por todas las peticiones (RFC 9113 §9.1).
     h2: Mutex<HashMap<PoolKey, Arc<http2::Connection>>>,
+    /// RFC 9113 §9.1.1: la IP y la cadena de certificados de cada conexión h2 por TLS, para
+    /// reutilizarla con otro origen (*connection coalescing*).
+    h2_peers: Mutex<HashMap<PoolKey, H2Peer>>,
     /// Orígenes que pidieron HTTP/1.1 (`HTTP_1_1_REQUIRED`).
     h1_only: Mutex<HashSet<PoolKey>>,
     /// Orígenes que negociaron HTTP/1.1: sus conexiones se abren en paralelo.
@@ -360,6 +372,8 @@ pub struct Fetcher {
     /// Raíces de confianza propias (en vez de las de webpki-roots): configuraciones TLS
     /// con y sin `h2`.
     tls: Option<(Arc<rustls::ClientConfig>, Arc<rustls::ClientConfig>)>,
+    /// Esas raíces, para verificar el certificado de una conexión h2 con otro nombre.
+    roots: Option<Arc<rustls::RootCertStore>>,
     /// Registro de las peticiones (para el panel del motor).
     log: Mutex<Vec<LogEntry>>,
     /// La caché HTTP (RFC 9111); `None`: sin caché.
@@ -407,8 +421,9 @@ impl Fetcher {
         Fetcher {
             tls: Some((
                 make_tls_config(store.clone(), &[b"h2", b"http/1.1"]),
-                make_tls_config(store, &[b"http/1.1"]),
+                make_tls_config(store.clone(), &[b"http/1.1"]),
             )),
+            roots: Some(Arc::new(store)),
             ..Fetcher::default()
         }
     }
@@ -435,16 +450,134 @@ impl Fetcher {
             (None, false) => tls_config(),
         };
         let mut conn = rustls::ClientConnection::new(config, server_name(host)?)
-            .map_err(|e| FetchError::Tls(e.to_string()))?;
+            .map_err(|e| FetchError::Tls(TlsError::from_rustls(&e)))?;
         while conn.is_handshaking() {
-            conn.complete_io(&mut tcp).map_err(tls_error)?;
+            conn.complete_io(&mut tcp).map_err(error::tls_io_error)?;
         }
         if conn.alpn_protocol() == Some(b"h2") {
+            let certs = conn
+                .peer_certificates()
+                .map(|c| c.iter().map(|c| c.clone().into_owned()).collect())
+                .unwrap_or_default();
+            if let Ok(peer) = tcp.peer_addr() {
+                self.h2_peers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key.clone(), (peer.ip(), certs));
+            }
             let transport = http2::Transport::Tls(Box::new(conn), tcp);
             return Ok(Opened::H2(http2::start(transport)?));
         }
         let stream = rustls::StreamOwned::new(conn, tcp);
         Ok(Opened::H1(Stream::Tls(Box::new(stream))))
+    }
+
+    fn lock_pool(&self) -> MutexGuard<'_, H1Pool> {
+        self.pool.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Un lugar en el pool HTTP/1.1 de `key`: una conexión libre (si `reuse`) o el permiso de
+    /// abrir una si hay menos de [`MAX_CONNECTIONS_PER_HOST`]; si no, espera. Sin `reuse` (las
+    /// libres pueden estar cerradas), con el pool lleno se cierra una libre para abrir otra.
+    fn h1_slot<'a>(&'a self, key: &'a PoolKey, reuse: bool) -> (Slot, SlotGuard<'a>) {
+        let mut pool = self.lock_pool();
+        let guard = SlotGuard {
+            fetcher: self,
+            key,
+            held: true,
+        };
+        loop {
+            if reuse && let Some(c) = pool.idle.get_mut(key).and_then(Vec::pop) {
+                return (Slot::Idle(c), guard);
+            }
+            let open = pool.open.entry(key.clone()).or_default();
+            if *open < MAX_CONNECTIONS_PER_HOST {
+                *open += 1;
+                return (Slot::New, guard);
+            }
+            if !reuse && pool.idle.get_mut(key).and_then(Vec::pop).is_some() {
+                return (Slot::New, guard);
+            }
+            pool = self.pool_free.wait(pool).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Cuántas conexiones HTTP/1.1 hay abiertas con el origen de `url` (libres o en uso).
+    pub fn open_connections(&self, url: &Url) -> usize {
+        let tls = url.scheme == "https";
+        let Some(host) = url.host.as_ref().map(ToString::to_string) else {
+            return 0;
+        };
+        let key: PoolKey = (host, url.port.unwrap_or(if tls { 443 } else { 80 }), tls);
+        self.lock_pool().open.get(&key).copied().unwrap_or(0)
+    }
+
+    /// RFC 9113 §9.1.1 (*connection reuse*): una conexión h2 por TLS abierta con otro origen
+    /// sirve para el `https` de `key` si `host` resuelve a la IP a la que está conectada y su
+    /// certificado es válido para `host` (se verifica de nuevo, con las mismas raíces). Se
+    /// apunta también con `key`.
+    fn coalesce(&self, host: &str, key: &PoolKey) -> Option<Arc<http2::Connection>> {
+        use rustls::client::danger::ServerCertVerifier as _;
+        let candidates: Vec<(PoolKey, H2Peer)> = self
+            .h2_peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(k, _)| k.1 == key.1 && k.2 && *k != key)
+            .map(|(k, p)| (k.clone(), p.clone()))
+            .collect();
+        if !key.2 || candidates.is_empty() {
+            return None;
+        }
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let addrs: Vec<IpAddr> = (bare, key.1)
+            .to_socket_addrs()
+            .ok()?
+            .map(|a| a.ip())
+            .collect();
+        let name = server_name(host).ok()?;
+        let verifier = self.verifier()?;
+        for (other, (ip, certs)) in candidates {
+            let Some((end_entity, intermediates)) = certs.split_first() else {
+                continue;
+            };
+            if !addrs.contains(&ip) {
+                continue;
+            }
+            let Some(conn) = self.h2_connection(&other) else {
+                continue;
+            };
+            let now = rustls_pki_types::UnixTime::now();
+            if verifier
+                .verify_server_cert(end_entity, intermediates, &name, &[], now)
+                .is_ok()
+            {
+                self.h2
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key.clone(), conn.clone());
+                return Some(conn);
+            }
+        }
+        None
+    }
+
+    /// El verificador de certificados de este `Fetcher` (sus raíces o las de webpki-roots).
+    fn verifier(&self) -> Option<Arc<rustls::client::WebPkiServerVerifier>> {
+        let build = |roots: Arc<rustls::RootCertStore>| {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+                .build()
+                .ok()
+        };
+        match &self.roots {
+            Some(roots) => build(roots.clone()),
+            None => {
+                static WEB: OnceLock<Option<Arc<rustls::client::WebPkiServerVerifier>>> =
+                    OnceLock::new();
+                WEB.get_or_init(|| build(Arc::new(web_roots()))).clone()
+            }
+        }
     }
 
     /// La conexión HTTP/2 viva con `key`, si hay.
@@ -675,17 +808,7 @@ impl Fetcher {
         for (n, v) in &extra.headers.0 {
             headers.push(n, v);
         }
-        let target = {
-            let mut t = url.path_string();
-            if t.is_empty() {
-                t.push('/');
-            }
-            if let Some(q) = &url.query {
-                t.push('?');
-                t.push_str(q);
-            }
-            t
-        };
+        let target = request_target(url);
         let response = match &self.cache {
             None => self.send(url, extra, &headers, &target)?,
             Some(cache) => {
@@ -697,7 +820,7 @@ impl Fetcher {
                     credentials: extra.credentials,
                 };
                 let mut protocol = Protocol::Local;
-                let (r, used) = cache.fetch(&req, |h| {
+                let (r, used) = cache.fetch_mut(&req, |h| {
                     let r = self.send(url, extra, h, &target)?;
                     protocol = r.protocol;
                     Ok::<_, FetchError>(cache::CacheResponse {
@@ -707,6 +830,9 @@ impl Fetcher {
                         body: r.body,
                     })
                 })?;
+                for rv in cache.take_revalidations() {
+                    self.revalidate_in_background(cache.clone(), rv);
+                }
                 // Fetch §4.5: `only-if-cached` sin nada guardado es un error de red.
                 if used == CacheUse::Unavailable && extra.cache == CacheMode::OnlyIfCached {
                     return Err(FetchError::Io(io::Error::other(
@@ -731,6 +857,43 @@ impl Fetcher {
         };
         self.record(method, url, &response);
         Ok(response)
+    }
+
+    /// RFC 5861 §3: valida `rv` en otro hilo, con un `Fetcher` propio (las mismas raíces TLS y
+    /// el mismo h2c; sus conexiones aparte). Las cabeceras son las de la petición original
+    /// (cookies incluidas); las `Set-Cookie` y `Strict-Transport-Security` de la validación no
+    /// llegan a la jarra ni a la lista HSTS de este `Fetcher`.
+    fn revalidate_in_background(&self, cache: HttpCache, rv: cache::Revalidation) {
+        let tls = self.tls.clone();
+        let roots = self.roots.clone();
+        let h2_prior_knowledge = self.h2_prior_knowledge;
+        std::thread::spawn(move || {
+            let bg = Fetcher {
+                tls,
+                roots,
+                h2_prior_knowledge,
+                ..Fetcher::default()
+            };
+            let none = Headers::default();
+            let extra = HttpExtra {
+                method: "GET",
+                body: None,
+                headers: &none,
+                credentials: rv.credentials,
+                cache: CacheMode::NoCache,
+                referrer_policy: ReferrerPolicy::Default,
+            };
+            let target = request_target(&rv.url);
+            let _ = cache.revalidate(&rv, |h| {
+                let r = bg.send(&rv.url, &extra, h, &target)?;
+                Ok::<_, FetchError>(cache::CacheResponse {
+                    status: r.status,
+                    status_text: r.status_text,
+                    headers: r.headers,
+                    body: r.body,
+                })
+            });
+        });
     }
 
     /// Un salto por la red (HTTP/2 si hay conexión o se negocia, si no HTTP/1.1) con
@@ -783,24 +946,45 @@ impl Fetcher {
                             .insert(key.clone());
                     }
                     Err(http2::Error::Timeout) => return Err(FetchError::Timeout),
-                    Err(e) => return Err(FetchError::Io(io::Error::other(e.to_string()))),
+                    // La causa, para la página de error: la conexión que se cae es un corte;
+                    // un error de protocolo o un flujo reiniciado, una respuesta inválida.
+                    Err(http2::Error::Io(e)) => return Err(FetchError::from(e)),
+                    Err(e @ http2::Error::Lost) => {
+                        return Err(FetchError::Io(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            e.to_string(),
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(FetchError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            e.to_string(),
+                        )));
+                    }
                 }
                 self.forget_h2(&key, &conn);
                 continue;
             }
-            let pooled = if !fresh {
-                self.pool
+            if tls
+                && !self
+                    .h1_only
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .get_mut(&key)
-                    .and_then(Vec::pop)
-            } else {
-                None
-            };
-            let reused = pooled.is_some();
-            let mut conn = match pooled {
-                Some(c) => c,
-                None => {
+                    .contains(&key)
+                && !self
+                    .h1_known
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&key)
+                && self.coalesce(&host, &key).is_some()
+            {
+                continue;
+            }
+            let (slot, guard) = self.h1_slot(&key, !fresh);
+            let reused = matches!(slot, Slot::Idle(_));
+            let mut conn = match slot {
+                Slot::Idle(c) => c,
+                Slot::New => {
                     // Primer contacto con un origen que puede hablar h2: una conexión a la
                     // vez, para que las peticiones simultáneas compartan la que se abra.
                     let may_h2 = (tls || self.h2_prior_knowledge)
@@ -880,12 +1064,9 @@ impl Fetcher {
                 Err(e) => return Err(e),
             };
             if keep {
-                self.pool
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .entry(key.clone())
-                    .or_default()
-                    .push(conn);
+                guard.keep(conn);
+            } else {
+                drop(guard);
             }
             let status = (head.status, head.reason);
             return self.finish(url, extra, status, head.headers, raw, Protocol::Http11);
@@ -895,6 +1076,19 @@ impl Fetcher {
             "la conexión se cerró",
         )))
     }
+}
+
+/// El *request-target* en forma de origen (RFC 9112 §3.2.1): ruta y consulta.
+fn request_target(url: &Url) -> String {
+    let mut t = url.path_string();
+    if t.is_empty() {
+        t.push('/');
+    }
+    if let Some(q) = &url.query {
+        t.push('?');
+        t.push_str(q);
+    }
+    t
 }
 
 // --- E2: peticiones con método, cabeceras y modo de redirección arbitrarios (para fetch() y
