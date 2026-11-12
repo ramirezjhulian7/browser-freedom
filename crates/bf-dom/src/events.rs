@@ -1,6 +1,6 @@
 //! Eventos (DOM §2): `Event` y sus subclases como datos, `EventTarget` (nodos, `Window` y
 //! objetos no-nodo como `AbortSignal`), `addEventListener`/`removeEventListener` y el dispatch
-//! de §2.9 (sin shadow trees: no hay retargeting ni slots).
+//! de §2.9, con el *retargeting* de los shadow trees y los slots (E1).
 //!
 //! Los listeners nativos son closures de Rust; los de script son un handle opaco que el motor
 //! JavaScript resuelve con [`ScriptHost`]. La *activation behavior* de `a`, `area`, `input` y
@@ -113,7 +113,14 @@ pub struct EventInit {
 #[derive(Debug, Clone, PartialEq)]
 struct PathEntry {
     invocation_target: EventTarget,
+    /// E1: *invocation-target-in-shadow-tree*.
+    in_shadow_tree: bool,
     shadow_adjusted_target: Option<EventTarget>,
+    /// E1: el `relatedTarget` retargeteado para esta entrada.
+    related_target: Option<EventTarget>,
+    /// E1: *root-of-closed-tree* y *slot-in-closed-tree* (para `composedPath`).
+    root_of_closed_tree: bool,
+    slot_in_closed_tree: bool,
 }
 
 /// `Event`.
@@ -140,6 +147,9 @@ pub struct Event {
     /// E2: "legacy-output did listeners throw" (DOM §2.9): algún listener lanzó durante el
     /// último dispatch (lo usa IndexedDB para abortar la transacción).
     pub listeners_threw: bool,
+    /// E1: el *invocation-target-in-shadow-tree* de la entrada que se está invocando
+    /// (`window.event` es `undefined` entonces).
+    in_shadow_tree: bool,
 }
 
 fn now_ms() -> f64 {
@@ -169,6 +179,7 @@ impl Event {
             dispatch: false,
             path: Vec::new(),
             listeners_threw: false,
+            in_shadow_tree: false,
         }
     }
 
@@ -254,12 +265,80 @@ impl Event {
         self.dispatch
     }
 
-    /// `composedPath()` (§2.2): sin shadow trees, los invocation targets del path en orden.
+    /// `composedPath()` (§2.2): los invocation targets del path, sin los de los árboles
+    /// cerrados que no ve el current target (E1).
     pub fn composed_path(&self) -> Vec<EventTarget> {
-        if self.path.is_empty() || self.current_target.is_none() {
+        let path = &self.path;
+        let Some(current) = self.current_target else {
+            return Vec::new();
+        };
+        if path.is_empty() {
             return Vec::new();
         }
-        self.path.iter().map(|p| p.invocation_target).collect()
+        let mut composed = std::collections::VecDeque::from([current]);
+        let mut current_index = 0usize;
+        let mut hidden_level = 0i32;
+        for index in (0..path.len()).rev() {
+            if path[index].root_of_closed_tree {
+                hidden_level += 1;
+            }
+            if path[index].invocation_target == current {
+                current_index = index;
+                break;
+            }
+            if path[index].slot_in_closed_tree {
+                hidden_level -= 1;
+            }
+        }
+        let (mut level, mut max) = (hidden_level, hidden_level);
+        for index in (0..current_index).rev() {
+            if path[index].root_of_closed_tree {
+                level += 1;
+            }
+            if level <= max {
+                composed.push_front(path[index].invocation_target);
+            }
+            if path[index].slot_in_closed_tree {
+                level -= 1;
+                max = max.min(level);
+            }
+        }
+        let (mut level, mut max) = (hidden_level, hidden_level);
+        for entry in &path[current_index + 1..] {
+            if entry.slot_in_closed_tree {
+                level += 1;
+            }
+            if level <= max {
+                composed.push_back(entry.invocation_target);
+            }
+            if entry.root_of_closed_tree {
+                level -= 1;
+                max = max.min(level);
+            }
+        }
+        composed.into()
+    }
+
+    /// E1: ¿El listener que corre está en un shadow tree?
+    pub fn invocation_target_in_shadow_tree(&self) -> bool {
+        self.in_shadow_tree
+    }
+
+    /// E1: el `relatedTarget` (de `MouseEvent` o `FocusEvent`).
+    pub fn related_target(&self) -> Option<EventTarget> {
+        match &self.kind {
+            EventKind::Mouse(m) => m.related_target,
+            EventKind::Focus { related_target } => *related_target,
+            _ => None,
+        }
+    }
+
+    fn set_related_target(&mut self, t: Option<EventTarget>) {
+        match &mut self.kind {
+            EventKind::Mouse(m) => m.related_target = t,
+            EventKind::Focus { related_target } => *related_target = t,
+            _ => {}
+        }
     }
 
     /// ¿Es un `MouseEvent`?
@@ -529,7 +608,23 @@ impl Document {
                 NodeData::Document if n == self.root() => {
                     (event.type_ != "load").then_some(EventTarget::Window)
                 }
-                _ => self.parent(n).map(EventTarget::Node),
+                // E1: el de un shadow root es su host, salvo que el evento no sea `composed`
+                // y el shadow root sea la raíz del primer target del path.
+                _ if self.is_shadow_root(n) => {
+                    let first = event.path.first().map(|p| p.invocation_target);
+                    let own_root =
+                        matches!(first, Some(EventTarget::Node(f)) if self.tree_root(f) == n);
+                    if !event.composed && own_root {
+                        None
+                    } else {
+                        self.shadow_host(n).map(EventTarget::Node)
+                    }
+                }
+                // E1: un slottable asignado sube a su slot.
+                _ => self
+                    .assigned_slot(n)
+                    .or_else(|| self.parent(n))
+                    .map(EventTarget::Node),
             },
             EventTarget::Object(id) => self.listeners.object_parents.get(&id).copied(),
             EventTarget::Window => None,
@@ -613,68 +708,130 @@ impl Document {
     ) -> bool {
         // 1.
         event.dispatch = true;
+        // 2.
+        let target_override = target_override.unwrap_or(target);
         // 3.
         let mut activation_target: Option<NodeId> = None;
-        // 5.2.
-        event.path.push(PathEntry {
-            invocation_target: target,
-            shadow_adjusted_target: Some(target_override.unwrap_or(target)),
-        });
-        // 5.3-5.4.
-        let is_activation_event = event.is_mouse_event() && event.type_ == "click";
-        if is_activation_event
-            && let EventTarget::Node(n) = target
-            && self.has_activation_behavior(n)
-        {
-            activation_target = Some(n);
-        }
-        // 5.7-5.8.
-        let mut parent = self.event_parent(target, event);
-        while let Some(p) = parent {
-            if let EventTarget::Window = p {
-                event.path.push(PathEntry {
-                    invocation_target: p,
-                    shadow_adjusted_target: None,
-                });
-            } else {
-                if is_activation_event
-                    && event.bubbles
-                    && activation_target.is_none()
-                    && let EventTarget::Node(n) = p
-                    && self.has_activation_behavior(n)
-                {
-                    activation_target = Some(n);
-                }
-                event.path.push(PathEntry {
-                    invocation_target: p,
-                    shadow_adjusted_target: None,
-                });
+        let mut legacy_state = None;
+        // 4. E1: el `relatedTarget` retargeteado contra el target.
+        let original_related = event.related_target();
+        let related = self.retarget(original_related, target);
+        let mut clear_targets = false;
+        // 5.
+        if Some(target) != related || Some(target) == original_related {
+            // 5.2.
+            self.append_to_event_path(event, target, Some(target_override), related, false);
+            // 5.3-5.4.
+            let is_activation_event = event.is_mouse_event() && event.type_ == "click";
+            if is_activation_event
+                && let EventTarget::Node(n) = target
+                && self.has_activation_behavior(n)
+            {
+                activation_target = Some(n);
             }
-            parent = self.event_parent(p, event);
-        }
-        // 5.11.
-        let legacy_state = activation_target.map(|a| self.legacy_pre_activation(a));
-        // 5.12: captura, del final al principio.
-        let path = event.path.clone();
-        for i in (0..path.len()).rev() {
-            event.event_phase = if path[i].shadow_adjusted_target.is_some() {
-                EventPhase::AtTarget
-            } else {
-                EventPhase::Capturing
+            // 5.5-5.6.
+            let mut slottable = match target {
+                EventTarget::Node(n) if self.assigned_slot(n).is_some() => Some(n),
+                _ => None,
             };
-            self.invoke(i, event, Phase::Capturing, host);
-        }
-        // 5.13: burbujeo.
-        for (i, entry) in path.iter().enumerate() {
-            if entry.shadow_adjusted_target.is_some() {
-                event.event_phase = EventPhase::AtTarget;
-            } else {
-                if !event.bubbles {
-                    continue;
+            let mut slot_in_closed_tree = false;
+            let mut current_target = target;
+            // 5.7-5.8.
+            let mut parent = self.event_parent(target, event);
+            while let Some(p) = parent {
+                // 5.8.1.
+                if slottable.is_some() {
+                    slottable = None;
+                    if let EventTarget::Node(pn) = p
+                        && let Some(d) = self.shadow_root_data(self.tree_root(pn))
+                        && d.mode == crate::shadow::ShadowRootMode::Closed
+                    {
+                        slot_in_closed_tree = true;
+                    }
                 }
-                event.event_phase = EventPhase::Bubbling;
+                // 5.8.2.
+                if let EventTarget::Node(pn) = p
+                    && self.assigned_slot(pn).is_some()
+                {
+                    slottable = Some(pn);
+                }
+                // 5.8.3.
+                let related = self.retarget(original_related, p);
+                // 5.8.5.
+                let target_root_is_ancestor = match (p, current_target) {
+                    (EventTarget::Window, _) => true,
+                    (EventTarget::Node(pn), EventTarget::Node(tn)) => {
+                        self.is_shadow_including_inclusive_ancestor(self.tree_root(tn), pn)
+                    }
+                    (EventTarget::Node(_), _) => true,
+                    (EventTarget::Object(_), _) => true,
+                };
+                if target_root_is_ancestor {
+                    if is_activation_event
+                        && event.bubbles
+                        && activation_target.is_none()
+                        && let EventTarget::Node(n) = p
+                        && self.has_activation_behavior(n)
+                    {
+                        activation_target = Some(n);
+                    }
+                    self.append_to_event_path(event, p, None, related, slot_in_closed_tree);
+                } else if Some(p) == related {
+                    // 5.8.6.
+                    parent = None;
+                } else {
+                    // 5.8.7.
+                    current_target = p;
+                    if is_activation_event
+                        && activation_target.is_none()
+                        && let EventTarget::Node(n) = p
+                        && self.has_activation_behavior(n)
+                    {
+                        activation_target = Some(n);
+                    }
+                    self.append_to_event_path(event, p, Some(p), related, slot_in_closed_tree);
+                }
+                // 5.8.8-5.8.9.
+                if parent.is_some() {
+                    parent = self.event_parent(p, event);
+                }
+                slot_in_closed_tree = false;
             }
-            self.invoke(i, event, Phase::Bubbling, host);
+            // 5.9-5.10.
+            if let Some(last) = event
+                .path
+                .iter()
+                .rev()
+                .find(|e| e.shadow_adjusted_target.is_some())
+            {
+                let in_shadow = |t: Option<EventTarget>| matches!(t, Some(EventTarget::Node(n)) if self.is_shadow_root(self.tree_root(n)));
+                clear_targets =
+                    in_shadow(last.shadow_adjusted_target) || in_shadow(last.related_target);
+            }
+            // 5.11.
+            legacy_state = activation_target.map(|a| self.legacy_pre_activation(a));
+            // 5.12: captura, del final al principio.
+            let path = event.path.clone();
+            for i in (0..path.len()).rev() {
+                event.event_phase = if path[i].shadow_adjusted_target.is_some() {
+                    EventPhase::AtTarget
+                } else {
+                    EventPhase::Capturing
+                };
+                self.invoke(i, event, Phase::Capturing, host);
+            }
+            // 5.13: burbujeo.
+            for (i, entry) in path.iter().enumerate() {
+                if entry.shadow_adjusted_target.is_some() {
+                    event.event_phase = EventPhase::AtTarget;
+                } else {
+                    if !event.bubbles {
+                        continue;
+                    }
+                    event.event_phase = EventPhase::Bubbling;
+                }
+                self.invoke(i, event, Phase::Bubbling, host);
+            }
         }
         // 6-9.
         event.event_phase = EventPhase::None;
@@ -683,6 +840,12 @@ impl Document {
         event.dispatch = false;
         event.stop_propagation = false;
         event.stop_immediate_propagation = false;
+        event.in_shadow_tree = false;
+        // 10.
+        if clear_targets {
+            event.target = None;
+            event.set_related_target(None);
+        }
         // 11.
         if let Some(a) = activation_target {
             if !event.canceled {
@@ -694,6 +857,33 @@ impl Document {
         !event.canceled
     }
 
+    /// E1: "Append to an event path".
+    fn append_to_event_path(
+        &self,
+        event: &mut Event,
+        invocation_target: EventTarget,
+        shadow_adjusted_target: Option<EventTarget>,
+        related_target: Option<EventTarget>,
+        slot_in_closed_tree: bool,
+    ) {
+        let (in_shadow_tree, root_of_closed_tree) = match invocation_target {
+            EventTarget::Node(n) => (
+                self.is_shadow_root(self.tree_root(n)),
+                self.shadow_root_data(n)
+                    .is_some_and(|d| d.mode == crate::shadow::ShadowRootMode::Closed),
+            ),
+            _ => (false, false),
+        };
+        event.path.push(PathEntry {
+            invocation_target,
+            in_shadow_tree,
+            shadow_adjusted_target,
+            related_target,
+            root_of_closed_tree,
+            slot_in_closed_tree,
+        });
+    }
+
     /// "Invoke" (§2.9) para la entrada `i` del path.
     fn invoke(&mut self, i: usize, event: &mut Event, phase: Phase, host: &mut dyn ScriptHost) {
         // 1. El target es el de la última entrada con shadow-adjusted target hasta `i`.
@@ -701,10 +891,14 @@ impl Document {
             .iter()
             .rev()
             .find_map(|p| p.shadow_adjusted_target);
+        // 2. E1.
+        let related = event.path[i].related_target;
+        event.set_related_target(related);
         // 4.
         if event.stop_propagation {
             return;
         }
+        event.in_shadow_tree = event.path[i].in_shadow_tree;
         // 5-6.
         let current = event.path[i].invocation_target;
         event.current_target = Some(current);

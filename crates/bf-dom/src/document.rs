@@ -91,9 +91,10 @@ pub enum HtmlElementKind {
     Unknown,
 }
 
-/// ¿Es un "valid custom element name" (HTML §4.13.2)? Aproximación: empieza con una letra
-/// ASCII minúscula, contiene `-`, sin mayúsculas ASCII y no es un nombre reservado.
-fn is_valid_custom_element_name(name: &str) -> bool {
+/// ¿Es un "valid custom element name" (HTML §4.13.2)? Empieza con una minúscula ASCII,
+/// contiene `-`, no tiene mayúsculas ASCII, es un *valid element local name* (DOM §1.4: tras
+/// una letra ASCII, nada de NUL, espacios ASCII, `/` ni `>`) y no es un nombre reservado.
+pub fn is_valid_custom_element_name(name: &str) -> bool {
     const RESERVED: [&str; 8] = [
         "annotation-xml",
         "color-profile",
@@ -106,7 +107,10 @@ fn is_valid_custom_element_name(name: &str) -> bool {
     ];
     name.starts_with(|c: char| c.is_ascii_lowercase())
         && name.contains('-')
-        && !name.chars().any(|c| c.is_ascii_uppercase())
+        && !name.chars().any(|c| {
+            c.is_ascii_uppercase()
+                || matches!(c, '\0' | '\t' | '\n' | '\x0C' | '\r' | ' ' | '/' | '>')
+        })
         && !RESERVED.contains(&name)
 }
 
@@ -341,7 +345,8 @@ impl Document {
 
     /// `Document.importNode(node, subtree)`.
     pub fn import_node(&mut self, node: NodeId, subtree: bool) -> Result<NodeId, DomException> {
-        if matches!(self.get(node).data, NodeData::Document) {
+        // E1: ni los documentos ni los shadow roots se importan.
+        if matches!(self.get(node).data, NodeData::Document) || self.is_shadow_root(node) {
             return Err(DomException::NotSupportedError);
         }
         Ok(self.clone_node(node, subtree))
@@ -351,6 +356,10 @@ impl Document {
     pub fn adopt_node(&mut self, node: NodeId) -> Result<NodeId, DomException> {
         if matches!(self.get(node).data, NodeData::Document) {
             return Err(DomException::NotSupportedError);
+        }
+        // E1: un shadow root no se adopta.
+        if self.is_shadow_root(node) {
+            return Err(DomException::HierarchyRequestError);
         }
         // Un fragmento que es template contents (con host) no se adopta.
         if self.template_host(node).is_some() {

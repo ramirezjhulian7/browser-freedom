@@ -38,6 +38,7 @@ fn parse_from_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             let opts = bf_html::ParseOptions {
                 scripting: false,
                 iframe_srcdoc: false,
+                allow_declarative_shadow_roots: false, // E1: DOMParser no los permite.
             };
             let (mut d, _) = bf_html::parse_document(&text, &opts);
             d.content_type = "text/html".into();
