@@ -284,6 +284,34 @@ fn custom_state_set_is_setlike() {
     );
 }
 
+/// E10: `CustomStateSet` y `setValidity()` llegan al DOM, así que `:state()` y
+/// `:valid`/`:invalid` casan (HTML §4.13.7.4, §4.16.3).
+#[test]
+fn custom_states_and_validity_match_selectors() {
+    let mut p = Page::new("<form id=f><fieldset id=fs><v-ctl id=v></v-ctl></fieldset></form>");
+    assert_eq!(
+        p.show(
+            "class V extends HTMLElement { static formAssociated = true; \
+               constructor() { super(); this.i = this.attachInternals(); } }; \
+             customElements.define('v-ctl', V); \
+             var v = document.getElementById('v'), f = document.getElementById('f'), \
+                 fs = document.getElementById('fs'), r = []; \
+             v.i.states.add('open'); \
+             r.push(v.matches(':state(open)'), v.matches(':state(Open)')); \
+             v.i.states.delete('open'); r.push(v.matches(':state(open)')); \
+             v.i.states.add('a'); v.i.states.add('b'); v.i.states.clear(); \
+             r.push(v.matches(':state(a)')); \
+             r.push(v.matches(':valid'), f.matches(':valid'), fs.matches(':valid')); \
+             v.i.setValidity({customError: true}, 'mal'); \
+             r.push(v.matches(':invalid'), f.matches(':invalid'), fs.matches(':invalid'), \
+                    document.querySelectorAll(':invalid').length); \
+             v.i.setValidity({}); r.push(v.matches(':valid'), f.matches(':valid')); \
+             r.join()"
+        ),
+        "true,false,false,false,true,true,true,true,true,true,3,true,true"
+    );
+}
+
 #[test]
 fn form_associated_custom_elements() {
     let mut p = Page::new(

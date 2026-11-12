@@ -1782,7 +1782,9 @@ fn content_element(
 
 /// Las "attribute change steps" de los atributos `on…` (HTML §8.1.8.1) para un cambio hecho
 /// desde script: el valor IDL deja de valer (el atributo de contenido manda o, si se quitó,
-/// el handler queda en `null`) y el listener del handler se registra.
+/// el handler queda en `null`) y el listener del handler se registra. Solo cuentan los
+/// atributos sin namespace (paso 1): los de `setAttributeNS` con namespace no llegan aquí, y
+/// el handler se compila del atributo con namespace nulo.
 pub fn content_attribute_changed(agent: &mut Agent, n: NodeRef, name: &DomString) {
     let lower = name.as_lossy_str().to_ascii_lowercase();
     let Some(raw) = lower.strip_prefix("on") else {
@@ -1837,7 +1839,8 @@ fn handler_value(
     let st = state(agent).handlers.get(&key).cloned().unwrap_or_default();
     let attr_name: DomString = format!("on{type_}").into();
     let el = content_element(agent, doc, target, type_);
-    let attr = el.and_then(|e| crate::with_doc(agent, doc, |d| d.get_attribute(e, &attr_name)));
+    let attr =
+        el.and_then(|e| crate::with_doc(agent, doc, |d| d.get_attribute_ns(e, None, &attr_name)));
     // Un atributo de contenido nuevo o cambiado reemplaza al valor IDL.
     let changed = match (&attr, &st.compiled) {
         (Some(a), Some((src, _))) => a != src,
@@ -1959,7 +1962,7 @@ pub fn sync_content_handlers(
             _ => None,
         };
         while let Some(n) = cur {
-            if d.element(n).is_some() && d.has_attribute(n, &attr_name) {
+            if d.element(n).is_some() && d.has_attribute_ns(n, None, &attr_name) {
                 out.push(EventTarget::Node(n));
             }
             cur = d.parent(n);
@@ -1967,7 +1970,7 @@ pub fn sync_content_handlers(
         if (matches!(target, EventTarget::Window) || matches!(target, EventTarget::Node(_)))
             && BODY_WINDOW_HANDLERS.contains(&type_.as_lossy_str())
             && let Some(b) = d.body()
-            && d.has_attribute(b, &attr_name)
+            && d.has_attribute_ns(b, None, &attr_name)
         {
             out.push(EventTarget::Window);
         }
@@ -2005,7 +2008,7 @@ fn handler_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let key = (doc, target, type_.clone());
     let attr = content_element(agent, doc, target, &type_).and_then(|e| {
         let name: DomString = format!("on{type_}").into();
-        crate::with_doc(agent, doc, |d| d.get_attribute(e, &name))
+        crate::with_doc(agent, doc, |d| d.get_attribute_ns(e, None, &name))
     });
     let entry: &mut HandlerState = state(agent).handlers.entry(key).or_default();
     entry.idl = Some(h);
@@ -2316,9 +2319,11 @@ fn target_has_content_handler(d: &Document, target: EventTarget, type_: &DomStri
         EventTarget::Node(n) => d.element(n).is_some_and(|e| {
             // Los handlers de ventana de `body`/`frameset` son de la ventana.
             !(body_handler && (e.is_html("body") || e.is_html("frameset")))
-                && d.has_attribute(n, &attr)
+                && d.has_attribute_ns(n, None, &attr)
         }),
-        EventTarget::Window => body_handler && d.body().is_some_and(|b| d.has_attribute(b, &attr)),
+        EventTarget::Window => {
+            body_handler && d.body().is_some_and(|b| d.has_attribute_ns(b, None, &attr))
+        }
         EventTarget::Object(_) => false,
     }
 }
