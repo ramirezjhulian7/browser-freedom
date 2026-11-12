@@ -43,6 +43,26 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 
+## E9: bidi, cortes de línea y shaping por script (2026-11-10)
+
+Medido con `REFTEST_GROUPS=css/CSS2/bidi-text,css/css-text,css/css-writing-modes,css/css-flexbox,css/CSS2/text,css/CSS2/linebox cargo test -p bf-paint --test wpt_reftests_groups -- --ignored --nocapture`
+sobre `army/e9` con `master` `f61201f` integrado (mismo WPT y condiciones que la tabla de
+arriba). La columna `master faeb997` es la línea base de E9 (2026-11-07). Los tres primeros
+grupos aún no están en `GROUPS` de `reftest.rs` (E7 los añade en su rama).
+
+| Directorio | master faeb997 | army/e9 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/CSS2/bidi-text | 56/105 (53.3 %) | 83/105 (79.0 %) | 3 | 0 |
+| css/css-text | 465/1372 (33.9 %) | 812/1372 (59.2 %) | 490 | 0 |
+| css/css-writing-modes | 136/1103 (12.3 %) | 196/1103 (17.8 %) | 201 | 0 |
+| css/css-flexbox | 608/949 (64.1 %) | 634/949 (66.8 %) | 478 | 0 |
+| css/CSS2/text | 350/381 (91.9 %) | 358/381 (94.0 %) | 182 | 0 |
+| css/CSS2/linebox | 176/190 (92.1 %) | 177/190 (92.7 %) | 53 | 1 |
+
+Las ganancias de `css-flexbox` vienen de E5 (integrado desde `master`), no de E9. Conformidad
+Unicode (`cargo test -p bf-layout --test unicode_conformance`, UCD 17.0.0): BidiTest
+770241/770241, BidiCharacterTest 91707/91707, LineBreakTest 19338/19338.
+
 ## Tests con expectativa dudosa
 
 - `css/CSS2/text/letter-spacing-080.xht`: el test pide `letter-spacing: 6em` con `font: 20px`
