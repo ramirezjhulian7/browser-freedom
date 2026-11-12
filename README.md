@@ -79,13 +79,14 @@ Para abrir una página o un archivo directamente: `freedom https://es.wikipedia.
 
 ### Qué funciona y qué todavía no
 
-- **Funciona:** páginas hechas con HTML y CSS, con su texto, imágenes PNG, JPEG y GIF,
-  tablas y la mayoría de los diseños; enlaces, pestañas, atrás y adelante; formularios
-  simples (buscar, escribir y enviar); zoom; copiar y pegar; los scripts de las páginas, con
+- **Funciona:** páginas hechas con HTML y CSS, con su texto, imágenes PNG, JPEG, GIF y APNG
+  animados, WebP, BMP, ICO y SVG, tablas y la mayoría de los diseños (también texto de derecha
+  a izquierda, como árabe y hebreo); enlaces, pestañas, atrás y adelante; formularios simples
+  (buscar, escribir y enviar); zoom; copiar y pegar; los scripts de las páginas, con buena
   parte de las funciones del navegador que usan.
-- **Todavía no:** buena parte de las funciones de JavaScript que usan los sitios, video y
-  audio, imágenes WebP y SVG, favoritos, historial que se conserve al cerrar y descargas de
-  archivos. El plan está en
+- **Todavía no:** parte de las funciones de JavaScript que usan los sitios, animaciones y
+  transformaciones de CSS, video y audio, imágenes AVIF, favoritos, historial que se conserve
+  al cerrar y descargas de archivos. El plan está en
   [`docs/roadmap.md`](docs/roadmap.md).
 
 ### ¿Algo no funciona?
@@ -108,10 +109,14 @@ ejecutable se llama `freedom` y es el binario del paquete `bf-shell`.
 
 La **fase 1** está cerrada: el navegador carga y muestra páginas reales sin JavaScript (Google,
 Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, enlaces,
-historial, scroll y zoom. La **fase 2** está en curso: el motor de JavaScript (`bf-js`) ya
-ejecuta los scripts de las páginas en un hilo por pestaña, y las interfaces del DOM, de HTML,
-del navegador y del CSSOM (`bf-web`) se están completando. El plan está en
-[`docs/roadmap.md`](docs/roadmap.md).
+historial, scroll y zoom. La **fase 2** está en curso: el motor de JavaScript (`bf-js`) pasa el
+95.3 % de test262 y ejecuta los scripts de las páginas en un hilo por pestaña, con workers;
+las interfaces del DOM (con Shadow DOM y custom elements), de HTML, del navegador, de red y
+del CSSOM (`bf-web`) se están completando. De las **fases 3 y 4** ya están tablas, grid,
+tamaños intrínsecos, bidi y cortes de línea de Unicode, encodings multibyte, HTTP/2 con caché
+HTTP en disco, SVG y WebP, y scroll containers con `sticky`; faltan, entre otros, `transform`
+y las animaciones de CSS, la escritura vertical y AVIF. Lo hecho y lo que falta, apartado por
+apartado y con sus cifras, está en [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Estado por subsistema
 
@@ -121,18 +126,18 @@ del navegador y del CSSOM (`bf-web`) se están completando. El plan está en
 | Tree construction | HTML §13.2.6, §13.4 | WPT `html/syntax/parsing` | **3900** pasan, 0 fallan (4 omitidos) |
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan (7 omitidos: encoders multibyte) |
-| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, UI 4, Selectors 4 | WPT reftests (17 directorios) | **5162 / 7134 ejecutables (72.4%)** |
-| APIs web | DOM, HTML, URL, Encoding, Console | WPT testharness.js (10 directorios, [`docs/wpt-status.md`](docs/wpt-status.md)) | **84 553 / 90 353 subtests (93.6%)** sin los encodings multibyte |
+| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, UI 4, Selectors 4, SVG 2 | WPT reftests (17 directorios) | **5583 / 7585 ejecutables (73.6%)** |
+| APIs web | DOM, Shadow DOM, HTML, URL, Encoding, Console | WPT testharness.js (12 directorios, [`docs/wpt-status.md`](docs/wpt-status.md)) | **163 951 / 181 458 subtests (90.4%)** sin `encoding/legacy-mb-*` |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.3%**; total **84.2%** (43 121 / 51 220) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.95%**; total **95.3%** (48 791 / 51 220) |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
 - *omitidos*: casos de scripting o de encodings multibyte.
-- Los encodings multibyte (japonés, coreano y chino) se reconocen pero todavía se decodifican
-  como windows-1252 (fase 3), así que sus subtests de testharness casi no pasan: con ellos, el
-  total es 84 680 / 857 668.
+- Los encodings multibyte (japonés, coreano y chino) ya se decodifican y codifican; lo que no
+  pasa de `encoding/legacy-mb-*` son los tests que cargan un `<iframe>` o envían un formulario
+  a uno. Con ellos, el total es 381 570 / 949 176 subtests.
 
 Detalle de los reftests por directorio (fuente: [`docs/wpt-status.md`](docs/wpt-status.md)):
 
@@ -150,16 +155,19 @@ Detalle de los reftests por directorio (fuente: [`docs/wpt-status.md`](docs/wpt-
 | css/CSS2/borders | 498 | 6 | 258 | 98.8% |
 | css/CSS2/tables | 246 | 4 | 889 | 98.4% |
 | css/css-backgrounds | 321 | 295 | 334 | 52.0% |
-| css/css-flexbox | 603 | 346 | 478 | 63.5% |
+| css/css-flexbox | 633 | 316 | 478 | 66.7% |
 | css/css-tables | 102 | 36 | 164 | 73.9% |
-| css/css-grid | 562 | 992 | 913 | 35.9% |
+| css/css-grid | 635 | 930 | 913 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 67.0% |
 | css/selectors | 107 | 13 | 404 | 89.2% |
+| svg | 318 | 133 | 971 | 70.5% |
 
 `needs-js` son los reftests con `<script>` o testharness.js: el harness de reftests todavía no
 los ejecuta. Los de testharness.js de las APIs web se miden aparte (fila «APIs web» de la
-tabla de estado). En `css/css-grid`, 939 de los tests ejecutables son de `grid-lanes` o
-`subgrid`, que todavía no están; sin ellos pasan 434 de 628 (69.1%).
+tabla de estado). Mediciones posteriores por grupo (mismo WPT, en `docs/wpt-status.md`):
+`css/css-flexbox` 699 / 949 (73.7%) y `css/css-grid` 1054 / 1567 (67.3%, con `grid-lanes`
+518 / 851) tras E5; `css/css-overflow` 61.8% y `css/css-position/sticky` 10 / 11 (E12);
+`css/CSS2/bidi-text` 79.0% y `css/css-text` 59.2% (E9).
 
 ### Qué implementa cada crate
 
