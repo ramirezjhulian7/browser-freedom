@@ -87,11 +87,11 @@ impl Agent {
                     self.temporal_overflow_of(options)?;
                     return Ok(t);
                 }
-                Some(TemporalData::PlainDateTime(dt)) => {
+                Some(TemporalData::PlainDateTime(dt, _)) => {
                     self.temporal_overflow_of(options)?;
                     return Ok(dt.time);
                 }
-                Some(TemporalData::ZonedDateTime { ns, tz }) => {
+                Some(TemporalData::ZonedDateTime { ns, tz, .. }) => {
                     let dt = super::date_time_for(&tz, ns);
                     self.temporal_overflow_of(options)?;
                     return Ok(dt.time);

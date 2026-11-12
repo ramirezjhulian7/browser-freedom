@@ -1,9 +1,10 @@
 //! Temporal (ECMA-262 2026, §§ Temporal): el objeto `Temporal`, los internal slots de sus
 //! tipos y las operaciones compartidas: zonas horarias (UTC y offsets fijos: sin base de
-//! datos IANA, como un motor sin ECMA-402 completo), el calendario ISO 8601 (el único
-//! disponible), los property bags (PrepareCalendarFields, CalendarResolveFields,
+//! datos IANA, como un motor sin ECMA-402 completo), los calendarios (ISO 8601 y los de
+//! [`calendar`]), los property bags (PrepareCalendarFields, CalendarResolveFields,
 //! CalendarMergeFields) y la conversión de los tipos.
 
+pub mod calendar;
 pub mod duration;
 pub mod instant;
 pub mod iso;
@@ -30,30 +31,47 @@ use duration::Duration;
 use iso::{IsoDate, IsoDateTime, NS_PER_DAY, Time};
 use parse::TzId;
 
-/// Los internal slots de un objeto de Temporal (todos con el calendario "iso8601").
+pub use calendar::Cal;
+
+/// Los internal slots de un objeto de Temporal (`[[Calendar]]` en los que lo tienen).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemporalData {
     /// `[[EpochNanoseconds]]`.
     Instant(i128),
     /// `[[ISODate]]`.
-    PlainDate(IsoDate),
+    PlainDate(IsoDate, Cal),
     /// `[[Time]]`.
     PlainTime(Time),
     /// `[[ISODateTime]]`.
-    PlainDateTime(IsoDateTime),
+    PlainDateTime(IsoDateTime, Cal),
     /// `[[ISODate]]` con el día de referencia.
-    PlainYearMonth(IsoDate),
+    PlainYearMonth(IsoDate, Cal),
     /// `[[ISODate]]` con el año de referencia.
-    PlainMonthDay(IsoDate),
-    /// `[[EpochNanoseconds]]` y `[[TimeZone]]`.
+    PlainMonthDay(IsoDate, Cal),
+    /// `[[EpochNanoseconds]]`, `[[TimeZone]]` y `[[Calendar]]`.
     ZonedDateTime {
         ns: i128,
         tz: String,
+        cal: Cal,
     },
     Duration(Duration),
 }
 
-/// El único calendario disponible.
+impl TemporalData {
+    /// El `[[Calendar]]` del objeto, si tiene.
+    pub fn calendar(&self) -> Option<Cal> {
+        match self {
+            TemporalData::PlainDate(_, c)
+            | TemporalData::PlainDateTime(_, c)
+            | TemporalData::PlainYearMonth(_, c)
+            | TemporalData::PlainMonthDay(_, c)
+            | TemporalData::ZonedDateTime { cal: c, .. } => Some(*c),
+            _ => None,
+        }
+    }
+}
+
+/// El identificador del calendario ISO 8601.
 pub const ISO8601: &str = "iso8601";
 
 /// El TemporalData de un valor, si es un objeto de Temporal.
@@ -75,11 +93,11 @@ pub fn create(
 ) -> JsResult<Value> {
     let proto: fn(&Intrinsics) -> Gc<Object> = match &data {
         TemporalData::Instant(_) => |i| i.temporal_instant_prototype,
-        TemporalData::PlainDate(_) => |i| i.temporal_plain_date_prototype,
+        TemporalData::PlainDate(..) => |i| i.temporal_plain_date_prototype,
         TemporalData::PlainTime(_) => |i| i.temporal_plain_time_prototype,
-        TemporalData::PlainDateTime(_) => |i| i.temporal_plain_date_time_prototype,
-        TemporalData::PlainYearMonth(_) => |i| i.temporal_plain_year_month_prototype,
-        TemporalData::PlainMonthDay(_) => |i| i.temporal_plain_month_day_prototype,
+        TemporalData::PlainDateTime(..) => |i| i.temporal_plain_date_time_prototype,
+        TemporalData::PlainYearMonth(..) => |i| i.temporal_plain_year_month_prototype,
+        TemporalData::PlainMonthDay(..) => |i| i.temporal_plain_month_day_prototype,
         TemporalData::ZonedDateTime { .. } => |i| i.temporal_zoned_date_time_prototype,
         TemporalData::Duration(_) => |i| i.temporal_duration_prototype,
     };
@@ -317,24 +335,18 @@ impl Agent {
 
     // --- Calendario ---
 
-    /// CanonicalizeCalendar: solo "iso8601".
-    pub fn temporal_canonicalize_calendar(&mut self, id: &str) -> JsResult<()> {
-        if id.eq_ignore_ascii_case(ISO8601) {
-            Ok(())
-        } else {
-            self.range_error(&format!("Unsupported calendar: {id}"))
+    /// CanonicalizeCalendar.
+    pub fn temporal_canonicalize_calendar(&mut self, id: &str) -> JsResult<Cal> {
+        match Cal::from_id(id) {
+            Some(c) => Ok(c),
+            None => self.range_error(&format!("Unsupported calendar: {id}")),
         }
     }
 
     /// ToTemporalCalendarIdentifier.
-    pub fn to_temporal_calendar(&mut self, v: &Value) -> JsResult<()> {
-        if let Some(d) = data_of(self, v)
-            && !matches!(
-                d,
-                TemporalData::Instant(_) | TemporalData::PlainTime(_) | TemporalData::Duration(_)
-            )
-        {
-            return Ok(());
+    pub fn to_temporal_calendar(&mut self, v: &Value) -> JsResult<Cal> {
+        if let Some(c) = data_of(self, v).and_then(|d| d.calendar()) {
+            return Ok(c);
         }
         let Value::String(s) = v else {
             return self.type_error("calendar must be a string");
@@ -369,26 +381,21 @@ impl Agent {
     }
 
     /// GetTemporalCalendarIdentifierWithISODefault.
-    pub fn temporal_calendar_with_default(&mut self, item: Gc<Object>) -> JsResult<()> {
-        if data_of(self, &Value::Object(item)).is_some_and(|d| {
-            !matches!(
-                d,
-                TemporalData::Instant(_) | TemporalData::PlainTime(_) | TemporalData::Duration(_)
-            )
-        }) {
-            return Ok(());
+    pub fn temporal_calendar_with_default(&mut self, item: Gc<Object>) -> JsResult<Cal> {
+        if let Some(c) = data_of(self, &Value::Object(item)).and_then(|d| d.calendar()) {
+            return Ok(c);
         }
         let c = self.get(item, &PropertyKey::from("calendar"), Value::Object(item))?;
         if c.is_undefined() {
-            return Ok(());
+            return Ok(Cal::Iso);
         }
         self.to_temporal_calendar(&c)
     }
 
     /// La validación de un argumento `calendar` de un constructor.
-    pub fn temporal_calendar_arg(&mut self, v: &Value) -> JsResult<()> {
+    pub fn temporal_calendar_arg(&mut self, v: &Value) -> JsResult<Cal> {
         match v {
-            Value::Undefined => Ok(()),
+            Value::Undefined => Ok(Cal::Iso),
             Value::String(s) => {
                 let s = s.to_string_lossy();
                 self.temporal_canonicalize_calendar(&s)
@@ -421,6 +428,8 @@ impl Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Day,
+    Era,
+    EraYear,
     Hour,
     Microsecond,
     Millisecond,
@@ -434,8 +443,10 @@ pub enum Field {
     Year,
 }
 
-const FIELD_ORDER: [(Field, &str); 12] = [
+const FIELD_ORDER: [(Field, &str); 14] = [
     (Field::Day, "day"),
+    (Field::Era, "era"),
+    (Field::EraYear, "eraYear"),
     (Field::Hour, "hour"),
     (Field::Microsecond, "microsecond"),
     (Field::Millisecond, "millisecond"),
@@ -462,6 +473,8 @@ pub const TIME_FIELDS: &[Field] = &[
 /// Calendar Fields Record (None: unset).
 #[derive(Debug, Clone, Default)]
 pub struct Fields {
+    pub era: Option<String>,
+    pub era_year: Option<f64>,
     pub year: Option<f64>,
     pub month: Option<f64>,
     pub month_code: Option<String>,
@@ -483,13 +496,15 @@ pub enum Required<'a> {
 }
 
 impl Fields {
-    /// ISODateToFields.
-    pub fn from_date(d: IsoDate, year: bool, day: bool) -> Fields {
+    /// ISODateToFields (con CalendarISOToDate del calendario). Sin año (un month-day) va
+    /// solo el código de mes: el mes ordinal depende del año.
+    pub fn from_date(cal: Cal, d: IsoDate, year: bool, day: bool) -> Fields {
+        let c = cal.to_cal(d);
         Fields {
-            year: year.then_some(f64::from(d.year)),
-            month: Some(f64::from(d.month)),
-            month_code: Some(format!("M{:02}", d.month)),
-            day: day.then_some(f64::from(d.day)),
+            year: year.then_some(c.year as f64),
+            month: year.then_some(f64::from(c.month)),
+            month_code: Some(c.code.text()),
+            day: day.then_some(f64::from(c.day)),
             ..Fields::default()
         }
     }
@@ -503,11 +518,25 @@ impl Fields {
         self.nanosecond = Some(f64::from(t.nanosecond));
     }
 
-    /// CalendarMergeFields (ISO 8601: month y monthCode se reemplazan juntos).
-    pub fn merge(mut self, add: Fields) -> Fields {
-        if add.month.is_some() || add.month_code.is_some() {
+    /// CalendarMergeFields con CalendarFieldKeysToIgnore: `month` y `monthCode` se reemplazan
+    /// juntos; con eras, `era`, `eraYear` y `year` también; en un calendario con eras a mitad
+    /// de año (japonés), `day`, `month` y `monthCode` invalidan además la era.
+    pub fn merge(mut self, cal: Cal, add: Fields) -> Fields {
+        let month_keys = add.month.is_some() || add.month_code.is_some();
+        let year_keys = add.era.is_some() || add.era_year.is_some() || add.year.is_some();
+        // Las claves de `self` que se ignoran (y quedan como en `add`, presentes o no).
+        let ignore_era = (cal.has_eras() && year_keys)
+            || (cal.has_mid_year_eras() && (month_keys || add.day.is_some()));
+        if month_keys {
             self.month = add.month;
             self.month_code = add.month_code;
+        }
+        if cal.has_eras() && year_keys {
+            self.year = add.year;
+        }
+        if ignore_era {
+            self.era = add.era;
+            self.era_year = add.era_year;
         }
         macro_rules! m {
             ($($f:ident),*) => { $( if add.$f.is_some() { self.$f = add.$f; } )* };
@@ -541,17 +570,22 @@ impl Fields {
 }
 
 impl Agent {
-    /// PrepareCalendarFields (ISO 8601: sin campos extra).
+    /// PrepareCalendarFields: con CalendarExtraFields (`era` y `eraYear` si se piden campos
+    /// de año y el calendario tiene eras).
     pub fn temporal_prepare_fields(
         &mut self,
+        cal: Cal,
         item: Gc<Object>,
         names: &[Field],
         required: Required<'_>,
     ) -> JsResult<Fields> {
         let mut f = Fields::default();
         let mut any = false;
+        let extra = cal.has_eras() && names.contains(&Field::Year);
         for (field, prop) in FIELD_ORDER {
-            if !names.contains(&field) {
+            let wanted =
+                names.contains(&field) || (extra && matches!(field, Field::Era | Field::EraYear));
+            if !wanted {
                 continue;
             }
             let v = self.get(item, &PropertyKey::from(prop), Value::Object(item))?;
@@ -565,7 +599,9 @@ impl Agent {
             }
             any = true;
             match field {
+                Field::Era => f.era = Some(self.to_string(&v)?.to_string_lossy()),
                 Field::Year
+                | Field::EraYear
                 | Field::Hour
                 | Field::Minute
                 | Field::Second
@@ -575,6 +611,7 @@ impl Agent {
                     let n = self.to_integer_with_truncation(&v)?;
                     match field {
                         Field::Year => f.year = Some(n),
+                        Field::EraYear => f.era_year = Some(n),
                         Field::Hour => f.hour = Some(n),
                         Field::Minute => f.minute = Some(n),
                         Field::Second => f.second = Some(n),
@@ -616,8 +653,11 @@ impl Agent {
         Ok(f)
     }
 
-    /// CalendarResolveFields (ISO 8601). `kind`: 0 date, 1 year-month, 2 month-day.
-    pub fn temporal_resolve_fields(&mut self, f: &mut Fields, kind: u8) -> JsResult<()> {
+    /// CalendarResolveFields. `kind`: 0 date, 1 year-month, 2 month-day.
+    pub fn temporal_resolve_fields(&mut self, cal: Cal, f: &mut Fields, kind: u8) -> JsResult<()> {
+        if !cal.is_iso() {
+            return self.temporal_resolve_fields_non_iso(cal, f, kind);
+        }
         if kind != 2 && f.year.is_none() {
             return self.type_error("year is required");
         }
@@ -671,9 +711,111 @@ impl Agent {
         Ok((y, m, d))
     }
 
+    /// NonISOResolveFields.
+    fn temporal_resolve_fields_non_iso(
+        &mut self,
+        cal: Cal,
+        f: &mut Fields,
+        kind: u8,
+    ) -> JsResult<()> {
+        let needs_year = kind != 2 || f.month_code.is_none() || f.month.is_some();
+        let needs_day = kind != 1;
+        if needs_year && f.year.is_none() && (f.era.is_none() || f.era_year.is_none()) {
+            return self.type_error("year (or era and eraYear) is required");
+        }
+        if f.era.is_some() != f.era_year.is_some() {
+            return self.type_error("era and eraYear must be given together");
+        }
+        if needs_day && f.day.is_none() {
+            return self.type_error("day is required");
+        }
+        if f.month.is_none() && f.month_code.is_none() {
+            return self.type_error("month or monthCode is required");
+        }
+        if let (Some(era), Some(era_year)) = (f.era.take(), f.era_year.take()) {
+            let Some(era) = cal.canonical_era(&era) else {
+                return self
+                    .range_error(&format!("Invalid era for the {} calendar: {era}", cal.id()));
+            };
+            let y = cal.year_for_era(era, era_year as i64) as f64;
+            if let Some(year) = f.year
+                && year != y
+            {
+                return self.range_error("year and era/eraYear do not agree");
+            }
+            f.year = Some(y);
+        }
+        if let Some(code) = f.month_code.clone() {
+            let parsed = calendar::MonthCode::parse(&code).filter(|c| cal.valid_code(*c));
+            let Some(c) = parsed else {
+                return self.range_error(&format!(
+                    "Invalid monthCode for the {} calendar: {code}",
+                    cal.id()
+                ));
+            };
+            if let Some(y) = f.year {
+                let y = y as i64;
+                let c = cal.constrain_code(y, c, false).unwrap_or(c);
+                let m = f64::from(cal.ordinal_of(y, c).unwrap_or(c.num));
+                if let Some(month) = f.month
+                    && month != m
+                {
+                    return self.range_error("month and monthCode do not agree");
+                }
+                f.month = Some(m);
+            }
+        }
+        Ok(())
+    }
+
+    /// NonISOCalendarDateToISO.
+    fn temporal_non_iso_to_iso(&mut self, cal: Cal, f: &Fields, reject: bool) -> JsResult<IsoDate> {
+        let y = f.year.expect("year");
+        if y.abs() > 400_000.0 {
+            return self.range_error("date is outside the representable range");
+        }
+        let y = y as i64;
+        if let Some(code) = &f.month_code {
+            let c = calendar::MonthCode::parse(code).expect("monthCode validado");
+            if cal.constrain_code(y, c, reject).is_err() {
+                return self.range_error(&format!("{code} does not exist in year {y}"));
+            }
+        }
+        let miy = f64::from(cal.months_in_year(y));
+        let mut m = f.month.expect("month");
+        if m > miy {
+            if reject {
+                return self.range_error("month is out of range");
+            }
+            m = miy;
+        }
+        let m = m as u8;
+        let dim = f64::from(cal.days_in_month(y, m));
+        let mut d = f.day.unwrap_or(1.0);
+        if d > dim {
+            if reject {
+                return self.range_error("day is out of range");
+            }
+            d = dim;
+        }
+        let r = cal.from_cal(y, m, d as u8);
+        if !iso::date_within_limits(r) {
+            return self.range_error("date is outside the representable range");
+        }
+        Ok(r)
+    }
+
     /// CalendarDateFromFields.
-    pub fn temporal_date_from_fields(&mut self, mut f: Fields, reject: bool) -> JsResult<IsoDate> {
-        self.temporal_resolve_fields(&mut f, 0)?;
+    pub fn temporal_date_from_fields(
+        &mut self,
+        cal: Cal,
+        mut f: Fields,
+        reject: bool,
+    ) -> JsResult<IsoDate> {
+        self.temporal_resolve_fields(cal, &mut f, 0)?;
+        if !cal.is_iso() {
+            return self.temporal_non_iso_to_iso(cal, &f, reject);
+        }
         let (y, m, d) = self.temporal_regulate_date(
             f.year.expect("year"),
             f.month.expect("month"),
@@ -689,10 +831,19 @@ impl Agent {
     /// CalendarYearMonthFromFields.
     pub fn temporal_year_month_from_fields(
         &mut self,
+        cal: Cal,
         mut f: Fields,
         reject: bool,
     ) -> JsResult<IsoDate> {
-        self.temporal_resolve_fields(&mut f, 1)?;
+        self.temporal_resolve_fields(cal, &mut f, 1)?;
+        if !cal.is_iso() {
+            f.day = Some(1.0);
+            let r = self.temporal_non_iso_to_iso(cal, &f, reject)?;
+            if !iso::year_month_within_limits(r.year.into(), r.month.into()) {
+                return self.range_error("year-month is outside the representable range");
+            }
+            return Ok(r);
+        }
         let (y, m, _) = self.temporal_regulate_date(
             f.year.expect("year"),
             f.month.expect("month"),
@@ -708,10 +859,14 @@ impl Agent {
     /// CalendarMonthDayFromFields.
     pub fn temporal_month_day_from_fields(
         &mut self,
+        cal: Cal,
         mut f: Fields,
         reject: bool,
     ) -> JsResult<IsoDate> {
-        self.temporal_resolve_fields(&mut f, 2)?;
+        self.temporal_resolve_fields(cal, &mut f, 2)?;
+        if !cal.is_iso() {
+            return self.temporal_non_iso_month_day(cal, f, reject);
+        }
         let year = f.year.unwrap_or(1972.0);
         let (_, m, d) = self.temporal_regulate_date(
             year,
@@ -720,6 +875,58 @@ impl Agent {
             reject,
         )?;
         Ok(IsoDate::new(1972, m, d))
+    }
+
+    /// NonISOMonthDayToISOReferenceDate.
+    fn temporal_non_iso_month_day(
+        &mut self,
+        cal: Cal,
+        f: Fields,
+        reject: bool,
+    ) -> JsResult<IsoDate> {
+        let mut day = f.day.expect("day");
+        let (code, dim) = if let Some(y) = f.year {
+            if y.abs() > 400_000.0 {
+                return self.range_error("date is outside the representable range");
+            }
+            let y = y as i64;
+            let miy = cal.months_in_year(y);
+            let mut m = f.month.expect("month");
+            if m > f64::from(miy) {
+                if reject {
+                    return self.range_error("month is out of range");
+                }
+                m = f64::from(miy);
+            }
+            let m = m as u8;
+            let code = match &f.month_code {
+                None => cal.code_of(y, m),
+                Some(s) => {
+                    let c = calendar::MonthCode::parse(s).expect("monthCode validado");
+                    match cal.constrain_code(y, c, reject) {
+                        Ok(c) => c,
+                        Err(()) => {
+                            return self.range_error(&format!("{s} does not exist in year {y}"));
+                        }
+                    }
+                }
+            };
+            (code, cal.days_in_month(y, m))
+        } else {
+            let c = calendar::MonthCode::parse(f.month_code.as_deref().expect("monthCode"))
+                .expect("monthCode validado");
+            (c, cal.max_days_in_code(c))
+        };
+        if day > f64::from(dim) {
+            if reject {
+                return self.range_error("day is out of range");
+            }
+            day = f64::from(dim);
+        }
+        match cal.month_day_reference(code, day as u8) {
+            Some(d) => Ok(d),
+            None => self.range_error("no reference date for this month and day"),
+        }
     }
 
     /// RegulateTime.
@@ -743,11 +950,12 @@ impl Agent {
     /// InterpretTemporalDateTimeFields.
     pub fn temporal_date_time_from_fields(
         &mut self,
+        cal: Cal,
         f: Fields,
         reject: bool,
     ) -> JsResult<IsoDateTime> {
         let tv = f.time_values();
-        let date = self.temporal_date_from_fields(f, reject)?;
+        let date = self.temporal_date_from_fields(cal, f, reject)?;
         let time = self.temporal_regulate_time(tv, reject)?;
         Ok(IsoDateTime { date, time })
     }
@@ -800,11 +1008,12 @@ impl Agent {
 }
 
 /// FormatCalendarAnnotation.
-pub fn calendar_annotation(show: &str) -> &'static str {
+pub fn calendar_annotation(cal: Cal, show: &str) -> String {
     match show {
-        "always" => "[u-ca=iso8601]",
-        "critical" => "[!u-ca=iso8601]",
-        _ => "",
+        "never" => String::new(),
+        "auto" if cal.is_iso() => String::new(),
+        "critical" => format!("[!u-ca={}]", cal.id()),
+        _ => format!("[u-ca={}]", cal.id()),
     }
 }
 

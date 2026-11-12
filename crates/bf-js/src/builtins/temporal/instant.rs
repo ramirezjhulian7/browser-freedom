@@ -298,5 +298,6 @@ fn instant_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn to_zoned_date_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let ns = this_instant(agent, &a.this, "toZonedDateTimeISO")?;
     let tz = agent.to_temporal_time_zone(&a.arg(0))?;
-    create(agent, TemporalData::ZonedDateTime { ns, tz }, None)
+    let cal = super::Cal::Iso;
+    create(agent, TemporalData::ZonedDateTime { ns, tz, cal }, None)
 }

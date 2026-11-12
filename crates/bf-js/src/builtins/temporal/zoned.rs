@@ -5,7 +5,7 @@ use super::options::{RoundingMode, Unit, UnitGroup, UnitOption, div_to_f64, roun
 use super::parse::{self, Goal};
 use super::plain_time::time_field;
 use super::{
-    DATE_FIELDS, Field, Fields, ISO8601, Required, TIME_FIELDS, TemporalData, bigint_to_i128,
+    Cal, DATE_FIELDS, Field, Fields, ISO8601, Required, TIME_FIELDS, TemporalData, bigint_to_i128,
     bigint_value, calendar_annotation, class, create, data_of, date_time_for, getters, js_str,
 };
 use crate::builtins::FnEntry;
@@ -15,26 +15,26 @@ use crate::value::Value;
 use crate::vm::function::{CallArgs, NativeFn};
 use crate::vm::{Agent, JsResult};
 
-fn this_zdt(agent: &mut Agent, this: &Value, method: &str) -> JsResult<(i128, String)> {
+fn this_zdt(agent: &mut Agent, this: &Value, method: &str) -> JsResult<(i128, String, Cal)> {
     match super::this_data(agent, this, "ZonedDateTime", method, |d| {
         matches!(d, TemporalData::ZonedDateTime { .. })
     })? {
-        TemporalData::ZonedDateTime { ns, tz } => Ok((ns, tz)),
+        TemporalData::ZonedDateTime { ns, tz, cal } => Ok((ns, tz, cal)),
         _ => unreachable!(),
     }
 }
 
-fn this_date_part(agent: &mut Agent, this: &Value, method: &str) -> JsResult<IsoDate> {
-    let (ns, tz) = this_zdt(agent, this, method)?;
-    Ok(date_time_for(&tz, ns).date)
+fn this_date_part(agent: &mut Agent, this: &Value, method: &str) -> JsResult<(IsoDate, Cal)> {
+    let (ns, tz, cal) = this_zdt(agent, this, method)?;
+    Ok((date_time_for(&tz, ns).date, cal))
 }
 
 macro_rules! date_getters {
     ($($name:literal => $f:ident),* $(,)?) => {
         $(
             fn $f(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-                let d = this_date_part(agent, &a.this, $name)?;
-                Ok(super::plain_date::calendar_field(d, $name))
+                let (d, cal) = this_date_part(agent, &a.this, $name)?;
+                Ok(super::plain_date::calendar_field(d, cal, $name))
             }
         )*
         const DATE_G: &[(&str, NativeFn)] = &[$(($name, $f)),*];
@@ -54,7 +54,7 @@ macro_rules! time_getters {
     ($($name:literal => $f:ident),* $(,)?) => {
         $(
             fn $f(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-                let (ns, tz) = this_zdt(agent, &a.this, $name)?;
+                let (ns, tz, _) = this_zdt(agent, &a.this, $name)?;
                 Ok(time_field(date_time_for(&tz, ns).time, $name))
             }
         )*
@@ -108,39 +108,47 @@ pub fn init(agent: &mut Agent, temporal: Gc<Object>) -> Gc<Object> {
     proto
 }
 
-fn zdt_value(agent: &mut Agent, ns: i128, tz: String) -> JsResult<Value> {
-    create(agent, TemporalData::ZonedDateTime { ns, tz }, None)
+fn zdt_value(agent: &mut Agent, ns: i128, tz: String, cal: Cal) -> JsResult<Value> {
+    create(agent, TemporalData::ZonedDateTime { ns, tz, cal }, None)
 }
 
 impl Agent {
     /// ToTemporalZonedDateTime.
-    pub fn to_temporal_zoned(&mut self, item: &Value, options: &Value) -> JsResult<(i128, String)> {
+    pub fn to_temporal_zoned(
+        &mut self,
+        item: &Value,
+        options: &Value,
+    ) -> JsResult<(i128, String, Cal)> {
         let mut exact = false;
         let mut match_minutes = false;
-        let (date, time, tz, offset, o) = if let Value::Object(item_o) = item {
-            if let Some(TemporalData::ZonedDateTime { ns, tz }) = data_of(self, item) {
+        let (date, time, tz, offset, o, cal) = if let Value::Object(item_o) = item {
+            if let Some(TemporalData::ZonedDateTime { ns, tz, cal }) = data_of(self, item) {
                 let o = self.temporal_options_object(options)?;
                 self.temporal_disambiguation(o)?;
                 self.temporal_offset_option(o, "reject")?;
                 self.temporal_overflow(o)?;
-                return Ok((ns, tz));
+                return Ok((ns, tz, cal));
             }
             let item_o = *item_o;
-            self.temporal_calendar_with_default(item_o)?;
+            let cal = self.temporal_calendar_with_default(item_o)?;
             let mut names = DATE_FIELDS.to_vec();
             names.extend_from_slice(TIME_FIELDS);
             names.push(Field::Offset);
             names.push(Field::TimeZone);
-            let f =
-                self.temporal_prepare_fields(item_o, &names, Required::List(&[Field::TimeZone]))?;
+            let f = self.temporal_prepare_fields(
+                cal,
+                item_o,
+                &names,
+                Required::List(&[Field::TimeZone]),
+            )?;
             let tz = f.time_zone.clone().expect("timeZone requerido");
             let offset = f.offset.clone();
             let o = self.temporal_options_object(options)?;
             self.temporal_disambiguation(o)?;
             let offset_option = self.temporal_offset_option(o, "reject")?;
             let reject = self.temporal_overflow(o)?;
-            let dt = self.temporal_date_time_from_fields(f, reject)?;
-            (dt.date, Some(dt.time), tz, offset, offset_option)
+            let dt = self.temporal_date_time_from_fields(cal, f, reject)?;
+            (dt.date, Some(dt.time), tz, offset, offset_option, cal)
         } else {
             let Value::String(s) = item else {
                 return self.type_error("zoned date-time must be an object or a string");
@@ -154,14 +162,15 @@ impl Agent {
             if r.z {
                 exact = true;
             }
-            self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
+            let cal =
+                self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
             match_minutes = !r.offset_sub_minute;
             let o = self.temporal_options_object(options)?;
             self.temporal_disambiguation(o)?;
             let offset_option = self.temporal_offset_option(o, "reject")?;
             self.temporal_overflow(o)?;
             let date = IsoDate::new(r.year.unwrap_or(0), r.month, r.day.unwrap_or(1));
-            (date, r.time, tz, r.offset.clone(), offset_option)
+            (date, r.time, tz, r.offset.clone(), offset_option, cal)
         };
         let offset_ns = if exact {
             None
@@ -178,7 +187,7 @@ impl Agent {
             &o,
             match_minutes,
         )?;
-        Ok((ns, tz))
+        Ok((ns, tz, cal))
     }
 }
 
@@ -203,38 +212,38 @@ fn zdt_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         parse::TzId::Offset(m) => iso::format_offset_minutes(m),
         parse::TzId::Name(_) => agent.to_temporal_time_zone(&js_str(&s))?,
     };
-    agent.temporal_calendar_arg(&a.arg(2))?;
-    create(agent, TemporalData::ZonedDateTime { ns, tz }, Some(nt))
+    let cal = agent.temporal_calendar_arg(&a.arg(2))?;
+    create(agent, TemporalData::ZonedDateTime { ns, tz, cal }, Some(nt))
 }
 
 fn zdt_from(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = agent.to_temporal_zoned(&a.arg(0), &a.arg(1))?;
-    zdt_value(agent, ns, tz)
+    let (ns, tz, cal) = agent.to_temporal_zoned(&a.arg(0), &a.arg(1))?;
+    zdt_value(agent, ns, tz, cal)
 }
 
 fn zdt_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (one, _) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
-    let (two, _) = agent.to_temporal_zoned(&a.arg(1), &Value::Undefined)?;
+    let (one, _, _) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
+    let (two, _, _) = agent.to_temporal_zoned(&a.arg(1), &Value::Undefined)?;
     Ok(Value::Number(f64::from(iso::sign_i128(one - two))))
 }
 
 fn g_time_zone_id(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (_, tz) = this_zdt(agent, &a.this, "timeZoneId")?;
+    let (_, tz, _) = this_zdt(agent, &a.this, "timeZoneId")?;
     Ok(js_str(&tz))
 }
 
 fn g_epoch_ms(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, _) = this_zdt(agent, &a.this, "epochMilliseconds")?;
+    let (ns, _, _) = this_zdt(agent, &a.this, "epochMilliseconds")?;
     Ok(Value::Number(ns.div_euclid(1_000_000) as f64))
 }
 
 fn g_epoch_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, _) = this_zdt(agent, &a.this, "epochNanoseconds")?;
+    let (ns, _, _) = this_zdt(agent, &a.this, "epochNanoseconds")?;
     Ok(bigint_value(agent, ns))
 }
 
 fn g_hours_in_day(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "hoursInDay")?;
+    let (ns, tz, _) = this_zdt(agent, &a.this, "hoursInDay")?;
     let today = date_time_for(&tz, ns).date;
     let tomorrow = today.add_days(1);
     let t0 = agent.temporal_start_of_day(&tz, today)?;
@@ -243,18 +252,18 @@ fn g_hours_in_day(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn g_offset_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (_, tz) = this_zdt(agent, &a.this, "offsetNanoseconds")?;
+    let (_, tz, _) = this_zdt(agent, &a.this, "offsetNanoseconds")?;
     Ok(Value::Number(super::offset_ns(&tz) as f64))
 }
 
 fn g_offset(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (_, tz) = this_zdt(agent, &a.this, "offset")?;
+    let (_, tz, _) = this_zdt(agent, &a.this, "offset")?;
     Ok(js_str(&iso::format_offset_ns(super::offset_ns(&tz) as i64)))
 }
 
 /// Temporal.ZonedDateTime.prototype.with ( temporalZonedDateTimeLike [ , options ] ).
 fn zdt_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "with")?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "with")?;
     let like = a.arg(0);
     if !agent.temporal_is_partial(&like)? {
         return agent.type_error("with() requires a partial zoned date-time object");
@@ -264,20 +273,20 @@ fn zdt_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let offset = super::offset_ns(&tz);
     let dt = date_time_for(&tz, ns);
-    let mut fields = Fields::from_date(dt.date, true, true);
+    let mut fields = Fields::from_date(cal, dt.date, true, true);
     fields.set_time(dt.time);
     fields.offset = Some(iso::format_offset_ns(offset as i64));
     let mut names = DATE_FIELDS.to_vec();
     names.extend_from_slice(TIME_FIELDS);
     names.push(Field::Offset);
-    let partial = agent.temporal_prepare_fields(o, &names, Required::Partial)?;
-    let merged = fields.merge(partial);
+    let partial = agent.temporal_prepare_fields(cal, o, &names, Required::Partial)?;
+    let merged = fields.merge(cal, partial);
     let opts = agent.temporal_options_object(&a.arg(1))?;
     agent.temporal_disambiguation(opts)?;
     let offset_option = agent.temporal_offset_option(opts, "prefer")?;
     let reject = agent.temporal_overflow(opts)?;
     let off = merged.offset.clone();
-    let r = agent.temporal_date_time_from_fields(merged, reject)?;
+    let r = agent.temporal_date_time_from_fields(cal, merged, reject)?;
     let new_offset =
         i128::from(parse::parse_offset_ns(off.as_deref().unwrap_or("+00:00")).unwrap_or(0));
     let ns = agent.temporal_interpret_offset(
@@ -290,11 +299,11 @@ fn zdt_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         &offset_option,
         false,
     )?;
-    zdt_value(agent, ns, tz)
+    zdt_value(agent, ns, tz, cal)
 }
 
 fn zdt_with_plain_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "withPlainTime")?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "withPlainTime")?;
     let dt = date_time_for(&tz, ns);
     let r = if a.arg(0).is_undefined() {
         agent.temporal_start_of_day(&tz, dt.date)?
@@ -308,31 +317,31 @@ fn zdt_with_plain_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             },
         )?
     };
-    zdt_value(agent, r, tz)
+    zdt_value(agent, r, tz, cal)
 }
 
 fn zdt_with_time_zone(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, _) = this_zdt(agent, &a.this, "withTimeZone")?;
+    let (ns, _, cal) = this_zdt(agent, &a.this, "withTimeZone")?;
     let tz = agent.to_temporal_time_zone(&a.arg(0))?;
-    zdt_value(agent, ns, tz)
+    zdt_value(agent, ns, tz, cal)
 }
 
 fn zdt_with_calendar(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "withCalendar")?;
-    agent.to_temporal_calendar(&a.arg(0))?;
-    zdt_value(agent, ns, tz)
+    let (ns, tz, _) = this_zdt(agent, &a.this, "withCalendar")?;
+    let cal = agent.to_temporal_calendar(&a.arg(0))?;
+    zdt_value(agent, ns, tz, cal)
 }
 
 /// AddDurationToZonedDateTime.
 fn add(agent: &mut Agent, a: &CallArgs<'_>, subtract: bool) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, if subtract { "subtract" } else { "add" })?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, if subtract { "subtract" } else { "add" })?;
     let mut d = agent.to_temporal_duration(&a.arg(0))?;
     if subtract {
         d = d.negated();
     }
     let reject = agent.temporal_overflow_of(&a.arg(1))?;
-    let r = agent.temporal_add_zoned(ns, &tz, d.internal(), reject)?;
-    zdt_value(agent, r, tz)
+    let r = agent.temporal_add_zoned(cal, ns, &tz, d.internal(), reject)?;
+    zdt_value(agent, r, tz, cal)
 }
 
 fn zdt_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -345,8 +354,12 @@ fn zdt_subtract(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// DifferenceTemporalZonedDateTime.
 fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, if since { "since" } else { "until" })?;
-    let (other, other_tz) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, if since { "since" } else { "until" })?;
+    let (other, other_tz, other_cal) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
+    if cal != other_cal {
+        return agent
+            .range_error("cannot compute the difference between dates of different calendars");
+    }
     let o = agent.temporal_options_object(&a.arg(1))?;
     let (largest, smallest, increment, mode) = agent.temporal_difference_settings(
         since,
@@ -373,8 +386,8 @@ fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Valu
     if ns == other {
         return agent.temporal_create_duration([0.0; 10], None);
     }
-    let d =
-        agent.temporal_diff_zoned_rounding(ns, other, &tz, largest, increment, smallest, mode)?;
+    let d = agent
+        .temporal_diff_zoned_rounding(cal, ns, other, &tz, largest, increment, smallest, mode)?;
     finish(agent, d, Unit::Hour)
 }
 
@@ -388,7 +401,7 @@ fn zdt_since(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// Temporal.ZonedDateTime.prototype.round ( roundTo ).
 fn zdt_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "round")?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "round")?;
     let round_to = super::duration::string_or_options(agent, &a.arg(0), "smallestUnit")?;
     let increment = agent.temporal_rounding_increment(round_to)?;
     let mode = agent.temporal_rounding_mode(round_to, RoundingMode::HalfExpand)?;
@@ -403,7 +416,7 @@ fn zdt_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     agent.temporal_validate_increment(increment, max, inclusive)?;
     if unit == Unit::Nanosecond && increment == 1 {
-        return zdt_value(agent, ns, tz);
+        return zdt_value(agent, ns, tz, cal);
     }
     let dt = date_time_for(&tz, ns);
     let r = if unit == Unit::Day {
@@ -425,14 +438,14 @@ fn zdt_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             false,
         )?
     };
-    zdt_value(agent, r, tz)
+    zdt_value(agent, r, tz, cal)
 }
 
 fn zdt_equals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "equals")?;
-    let (other, other_tz) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "equals")?;
+    let (other, other_tz, other_cal) = agent.to_temporal_zoned(&a.arg(0), &Value::Undefined)?;
     Ok(Value::Boolean(
-        ns == other && super::time_zone_equals(&tz, &other_tz),
+        ns == other && super::time_zone_equals(&tz, &other_tz) && cal == other_cal,
     ))
 }
 
@@ -441,6 +454,7 @@ fn zdt_equals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn zdt_string(
     ns: i128,
     tz: &str,
+    cal: Cal,
     precision: Precision,
     show_calendar: &str,
     show_tz: &str,
@@ -461,13 +475,13 @@ fn zdt_string(
         let flag = if show_tz == "critical" { "!" } else { "" };
         s.push_str(&format!("[{flag}{tz}]"));
     }
-    s.push_str(calendar_annotation(show_calendar));
+    s.push_str(&calendar_annotation(cal, show_calendar));
     s
 }
 
 /// Temporal.ZonedDateTime.prototype.toString ( [ options ] ).
 fn zdt_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toString")?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "toString")?;
     let o = agent.temporal_options_object(&a.arg(0))?;
     let show_calendar = agent.temporal_show_calendar(o)?;
     let digits = agent.temporal_fractional_digits(o)?;
@@ -491,6 +505,7 @@ fn zdt_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(js_str(&zdt_string(
         ns,
         &tz,
+        cal,
         precision,
         &show_calendar,
         &show_tz,
@@ -501,10 +516,11 @@ fn zdt_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     )))
 }
 
-fn default_string(ns: i128, tz: &str) -> String {
+fn default_string(ns: i128, tz: &str, cal: Cal) -> String {
     zdt_string(
         ns,
         tz,
+        cal,
         Precision::Auto,
         "auto",
         "auto",
@@ -516,20 +532,20 @@ fn default_string(ns: i128, tz: &str) -> String {
 }
 
 fn zdt_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&default_string(ns, &tz)))
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "toLocaleString")?;
+    Ok(js_str(&default_string(ns, &tz, cal)))
 }
 
 fn zdt_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toJSON")?;
-    Ok(js_str(&default_string(ns, &tz)))
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "toJSON")?;
+    Ok(js_str(&default_string(ns, &tz, cal)))
 }
 
 fn zdt_start_of_day(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "startOfDay")?;
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "startOfDay")?;
     let d = date_time_for(&tz, ns).date;
     let r = agent.temporal_start_of_day(&tz, d)?;
-    zdt_value(agent, r, tz)
+    zdt_value(agent, r, tz, cal)
 }
 
 /// Temporal.ZonedDateTime.prototype.getTimeZoneTransition ( directionParam ).
@@ -545,17 +561,17 @@ fn zdt_get_time_zone_transition(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult
 }
 
 fn zdt_to_instant(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, _) = this_zdt(agent, &a.this, "toInstant")?;
+    let (ns, _, _) = this_zdt(agent, &a.this, "toInstant")?;
     agent.temporal_create_instant(ns, None)
 }
 
 fn zdt_to_plain_date(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toPlainDate")?;
-    agent.temporal_create_date(date_time_for(&tz, ns).date, None)
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "toPlainDate")?;
+    agent.temporal_create_date(date_time_for(&tz, ns).date, cal, None)
 }
 
 fn zdt_to_plain_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toPlainTime")?;
+    let (ns, tz, _) = this_zdt(agent, &a.this, "toPlainTime")?;
     create(
         agent,
         TemporalData::PlainTime(date_time_for(&tz, ns).time),
@@ -564,6 +580,6 @@ fn zdt_to_plain_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn zdt_to_plain_date_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (ns, tz) = this_zdt(agent, &a.this, "toPlainDateTime")?;
-    agent.temporal_create_date_time(date_time_for(&tz, ns), None)
+    let (ns, tz, cal) = this_zdt(agent, &a.this, "toPlainDateTime")?;
+    agent.temporal_create_date_time(date_time_for(&tz, ns), cal, None)
 }

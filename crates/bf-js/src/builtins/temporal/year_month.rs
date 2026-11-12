@@ -5,8 +5,8 @@ use super::iso::{self, IsoDate, IsoDateTime, Time};
 use super::options::{Unit, UnitGroup};
 use super::parse::{self, Goal};
 use super::{
-    Field, Fields, ISO8601, Required, TemporalData, calendar_annotation, class, create, data_of,
-    getters, js_str,
+    Cal, Field, Fields, ISO8601, Required, TemporalData, calendar_annotation, class, create,
+    data_of, getters, js_str,
 };
 use crate::builtins::FnEntry;
 use crate::heap::Gc;
@@ -17,11 +17,11 @@ use crate::vm::{Agent, JsResult};
 
 const YM_FIELDS: &[Field] = &[Field::Year, Field::Month, Field::MonthCode];
 
-fn this_ym(agent: &mut Agent, this: &Value, method: &str) -> JsResult<IsoDate> {
+fn this_ym(agent: &mut Agent, this: &Value, method: &str) -> JsResult<(IsoDate, Cal)> {
     match super::this_data(agent, this, "PlainYearMonth", method, |d| {
-        matches!(d, TemporalData::PlainYearMonth(_))
+        matches!(d, TemporalData::PlainYearMonth(..))
     })? {
-        TemporalData::PlainYearMonth(d) => Ok(d),
+        TemporalData::PlainYearMonth(d, c) => Ok((d, c)),
         _ => unreachable!(),
     }
 }
@@ -30,8 +30,8 @@ macro_rules! ym_getters {
     ($($name:literal => $f:ident),* $(,)?) => {
         $(
             fn $f(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-                let d = this_ym(agent, &a.this, $name)?;
-                Ok(super::plain_date::calendar_field(d, $name))
+                let (d, cal) = this_ym(agent, &a.this, $name)?;
+                Ok(super::plain_date::calendar_field(d, cal, $name))
             }
         )*
         const G: &[(&str, NativeFn)] = &[$(($name, $f)),*];
@@ -71,26 +71,31 @@ impl Agent {
     fn temporal_create_year_month(
         &mut self,
         d: IsoDate,
+        cal: Cal,
         new_target: Option<Gc<Object>>,
     ) -> JsResult<Value> {
         if !iso::year_month_within_limits(d.year.into(), d.month.into()) {
             return self.range_error("year-month is outside the representable range");
         }
-        create(self, TemporalData::PlainYearMonth(d), new_target)
+        create(self, TemporalData::PlainYearMonth(d, cal), new_target)
     }
 
     /// ToTemporalYearMonth.
-    pub fn to_temporal_year_month(&mut self, item: &Value, options: &Value) -> JsResult<IsoDate> {
+    pub fn to_temporal_year_month(
+        &mut self,
+        item: &Value,
+        options: &Value,
+    ) -> JsResult<(IsoDate, Cal)> {
         if let Value::Object(o) = item {
-            if let Some(TemporalData::PlainYearMonth(d)) = data_of(self, item) {
+            if let Some(TemporalData::PlainYearMonth(d, c)) = data_of(self, item) {
                 self.temporal_overflow_of(options)?;
-                return Ok(d);
+                return Ok((d, c));
             }
             let o = *o;
-            self.temporal_calendar_with_default(o)?;
-            let f = self.temporal_prepare_fields(o, YM_FIELDS, Required::List(&[]))?;
+            let cal = self.temporal_calendar_with_default(o)?;
+            let f = self.temporal_prepare_fields(cal, o, YM_FIELDS, Required::List(&[]))?;
             let reject = self.temporal_overflow_of(options)?;
-            return self.temporal_year_month_from_fields(f, reject);
+            return Ok((self.temporal_year_month_from_fields(cal, f, reject)?, cal));
         }
         let Value::String(s) = item else {
             return self.type_error("year-month must be an object or a string");
@@ -99,13 +104,25 @@ impl Agent {
         let Some(r) = parse::parse_iso_date_time(&s, &[Goal::YearMonth]) else {
             return self.range_error(&format!("Invalid year-month: {s}"));
         };
-        self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
+        let cal = self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
         self.temporal_overflow_of(options)?;
         let y = r.year.unwrap_or(0);
         if !iso::year_month_within_limits(y, r.month) {
             return self.range_error("year-month is outside the representable range");
         }
-        Ok(IsoDate::new(y, r.month, 1))
+        if cal.is_iso() {
+            return Ok((IsoDate::new(y, r.month, 1), cal));
+        }
+        // Fuera de ISO, el string tiene la fecha completa (YYYY-MM-DD[u-ca=…]).
+        let Some(day) = r.day else {
+            return self.range_error(&format!(
+                "A year-month string needs a day with the {} calendar",
+                cal.id()
+            ));
+        };
+        let d = IsoDate::new(y, r.month, day);
+        let f = Fields::from_date(cal, d, true, false);
+        Ok((self.temporal_year_month_from_fields(cal, f, false)?, cal))
     }
 }
 
@@ -116,7 +133,7 @@ fn ym_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let y = agent.to_integer_with_truncation(&a.arg(0))?;
     let m = agent.to_integer_with_truncation(&a.arg(1))?;
-    agent.temporal_calendar_arg(&a.arg(2))?;
+    let cal = agent.temporal_calendar_arg(&a.arg(2))?;
     let ref_day = if a.arg(3).is_undefined() {
         1.0
     } else {
@@ -125,23 +142,24 @@ fn ym_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if !iso::within_i32(y as i64) || !iso::is_valid_date(y as i64, m as i64, ref_day as i64) {
         return agent.range_error("invalid year-month");
     }
-    agent.temporal_create_year_month(IsoDate::new(y as i64, m as i64, ref_day as i64), Some(nt))
+    let d = IsoDate::new(y as i64, m as i64, ref_day as i64);
+    agent.temporal_create_year_month(d, cal, Some(nt))
 }
 
 fn ym_from(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = agent.to_temporal_year_month(&a.arg(0), &a.arg(1))?;
-    agent.temporal_create_year_month(d, None)
+    let (d, cal) = agent.to_temporal_year_month(&a.arg(0), &a.arg(1))?;
+    agent.temporal_create_year_month(d, cal, None)
 }
 
 fn ym_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let one = agent.to_temporal_year_month(&a.arg(0), &Value::Undefined)?;
-    let two = agent.to_temporal_year_month(&a.arg(1), &Value::Undefined)?;
+    let (one, _) = agent.to_temporal_year_month(&a.arg(0), &Value::Undefined)?;
+    let (two, _) = agent.to_temporal_year_month(&a.arg(1), &Value::Undefined)?;
     Ok(Value::Number(f64::from(iso::compare_date(one, two))))
 }
 
 /// Temporal.PlainYearMonth.prototype.with ( temporalYearMonthLike [ , options ] ).
 fn ym_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "with")?;
+    let (d, cal) = this_ym(agent, &a.this, "with")?;
     let like = a.arg(0);
     if !agent.temporal_is_partial(&like)? {
         return agent.type_error("with() requires a partial year-month object");
@@ -149,17 +167,17 @@ fn ym_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Value::Object(o) = like else {
         unreachable!()
     };
-    let fields = Fields::from_date(d, true, false);
-    let partial = agent.temporal_prepare_fields(o, YM_FIELDS, Required::Partial)?;
-    let merged = fields.merge(partial);
+    let fields = Fields::from_date(cal, d, true, false);
+    let partial = agent.temporal_prepare_fields(cal, o, YM_FIELDS, Required::Partial)?;
+    let merged = fields.merge(cal, partial);
     let reject = agent.temporal_overflow_of(&a.arg(1))?;
-    let r = agent.temporal_year_month_from_fields(merged, reject)?;
-    agent.temporal_create_year_month(r, None)
+    let r = agent.temporal_year_month_from_fields(cal, merged, reject)?;
+    agent.temporal_create_year_month(r, cal, None)
 }
 
 /// AddDurationToYearMonth.
 fn add(agent: &mut Agent, a: &CallArgs<'_>, subtract: bool) -> JsResult<Value> {
-    let ym = this_ym(agent, &a.this, if subtract { "subtract" } else { "add" })?;
+    let (ym, cal) = this_ym(agent, &a.this, if subtract { "subtract" } else { "add" })?;
     let mut d = agent.to_temporal_duration(&a.arg(0))?;
     if subtract {
         d = d.negated();
@@ -168,13 +186,14 @@ fn add(agent: &mut Agent, a: &CallArgs<'_>, subtract: bool) -> JsResult<Value> {
     if d.0[2..].iter().any(|v| *v != 0.0) {
         return agent.range_error("only years and months can be added to a PlainYearMonth");
     }
-    let mut fields = Fields::from_date(ym, true, false);
+    let mut fields = Fields::from_date(cal, ym, true, false);
     fields.day = Some(1.0);
-    let start = agent.temporal_date_from_fields(fields, false)?;
+    let start = agent.temporal_date_from_fields(cal, fields, false)?;
     let dd = agent.temporal_date_duration_without_time(&d)?;
-    let added = agent.temporal_date_add(start, dd, reject)?;
-    let r = agent.temporal_year_month_from_fields(Fields::from_date(added, true, false), reject)?;
-    agent.temporal_create_year_month(r, None)
+    let added = agent.temporal_date_add(cal, start, dd, reject)?;
+    let f = Fields::from_date(cal, added, true, false);
+    let r = agent.temporal_year_month_from_fields(cal, f, reject)?;
+    agent.temporal_create_year_month(r, cal, None)
 }
 
 fn ym_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -187,8 +206,12 @@ fn ym_subtract(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// DifferenceTemporalPlainYearMonth.
 fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Value> {
-    let ym = this_ym(agent, &a.this, if since { "since" } else { "until" })?;
-    let other = agent.to_temporal_year_month(&a.arg(0), &Value::Undefined)?;
+    let (ym, cal) = this_ym(agent, &a.this, if since { "since" } else { "until" })?;
+    let (other, other_cal) = agent.to_temporal_year_month(&a.arg(0), &Value::Undefined)?;
+    if cal != other_cal {
+        return agent
+            .range_error("cannot compute the difference between dates of different calendars");
+    }
     let o = agent.temporal_options_object(&a.arg(1))?;
     let (largest, smallest, increment, mode) = agent.temporal_difference_settings(
         since,
@@ -201,13 +224,13 @@ fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Valu
     if ym == other {
         return agent.temporal_create_duration([0.0; 10], None);
     }
-    let mut f1 = Fields::from_date(ym, true, false);
+    let mut f1 = Fields::from_date(cal, ym, true, false);
     f1.day = Some(1.0);
-    let this_date = agent.temporal_date_from_fields(f1, false)?;
-    let mut f2 = Fields::from_date(other, true, false);
+    let this_date = agent.temporal_date_from_fields(cal, f1, false)?;
+    let mut f2 = Fields::from_date(cal, other, true, false);
     f2.day = Some(1.0);
-    let other_date = agent.temporal_date_from_fields(f2, false)?;
-    let mut dd = super::duration::date_until(this_date, other_date, largest);
+    let other_date = agent.temporal_date_from_fields(cal, f2, false)?;
+    let mut dd = super::duration::date_until(cal, this_date, other_date, largest);
     dd.weeks = 0;
     dd.days = 0;
     let mut d = Internal { date: dd, time: 0 };
@@ -221,6 +244,7 @@ fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Valu
             time: Time::MIDNIGHT,
         };
         d = agent.temporal_round_relative(
+            cal,
             d,
             start.epoch_ns(),
             end.epoch_ns(),
@@ -248,47 +272,47 @@ fn ym_since(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn ym_equals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "equals")?;
+    let this = this_ym(agent, &a.this, "equals")?;
     let other = agent.to_temporal_year_month(&a.arg(0), &Value::Undefined)?;
-    Ok(Value::Boolean(d == other))
+    Ok(Value::Boolean(this == other))
 }
 
 /// TemporalYearMonthToString.
-fn ym_string(d: IsoDate, show: &str) -> String {
+fn ym_string(d: IsoDate, cal: Cal, show: &str) -> String {
     let mut s = format!("{}-{:02}", iso::pad_year(d.year), d.month);
-    if show == "always" || show == "critical" {
+    if show == "always" || show == "critical" || !cal.is_iso() {
         s.push_str(&format!("-{:02}", d.day));
     }
-    s.push_str(calendar_annotation(show));
+    s.push_str(&calendar_annotation(cal, show));
     s
 }
 
 fn ym_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "toString")?;
+    let (d, cal) = this_ym(agent, &a.this, "toString")?;
     let o = agent.temporal_options_object(&a.arg(0))?;
     let show = agent.temporal_show_calendar(o)?;
-    Ok(js_str(&ym_string(d, &show)))
+    Ok(js_str(&ym_string(d, cal, &show)))
 }
 
 fn ym_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&ym_string(d, "auto")))
+    let (d, cal) = this_ym(agent, &a.this, "toLocaleString")?;
+    Ok(js_str(&ym_string(d, cal, "auto")))
 }
 
 fn ym_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "toJSON")?;
-    Ok(js_str(&ym_string(d, "auto")))
+    let (d, cal) = this_ym(agent, &a.this, "toJSON")?;
+    Ok(js_str(&ym_string(d, cal, "auto")))
 }
 
 /// Temporal.PlainYearMonth.prototype.toPlainDate ( item ).
 fn ym_to_plain_date(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_ym(agent, &a.this, "toPlainDate")?;
+    let (d, cal) = this_ym(agent, &a.this, "toPlainDate")?;
     let Value::Object(o) = a.arg(0) else {
         return agent.type_error("toPlainDate() requires an object with a day");
     };
-    let fields = Fields::from_date(d, true, false);
-    let input = agent.temporal_prepare_fields(o, &[Field::Day], Required::List(&[]))?;
-    let merged = fields.merge(input);
-    let r = agent.temporal_date_from_fields(merged, false)?;
-    agent.temporal_create_date(r, None)
+    let fields = Fields::from_date(cal, d, true, false);
+    let input = agent.temporal_prepare_fields(cal, o, &[Field::Day], Required::List(&[]))?;
+    let merged = fields.merge(cal, input);
+    let r = agent.temporal_date_from_fields(cal, merged, false)?;
+    agent.temporal_create_date(r, cal, None)
 }

@@ -5,6 +5,7 @@
 //! (RoundRelativeDuration: NudgeToCalendarUnit, NudgeToZonedTime, NudgeToDayOrTime,
 //! BubbleRelativeDuration; TotalRelativeDuration).
 
+use super::calendar::Cal;
 use super::iso::{self, IsoDate, IsoDateTime, MAX_TIME_DURATION, NS_PER_DAY, Time};
 use super::options::{
     RoundingMode, Unit, UnitGroup, UnitOption, div_to_f64, integer_string, round_to_increment,
@@ -366,13 +367,20 @@ impl Agent {
 
     // --- Calendario ISO 8601 ---
 
-    /// CalendarDateAdd (ISO 8601).
+    /// CalendarDateAdd (NonISODateAdd fuera de ISO 8601).
     pub fn temporal_date_add(
         &mut self,
+        cal: Cal,
         date: IsoDate,
         d: DateDuration,
         reject: bool,
     ) -> JsResult<IsoDate> {
+        if !cal.is_iso() {
+            return match cal.add(date, d, reject) {
+                Ok(r) => Ok(r),
+                Err(()) => self.range_error("the date does not exist or is out of range"),
+            };
+        }
         let (y, m) = iso::balance_year_month(
             i64::from(date.year) + d.years,
             i64::from(date.month) + d.months,
@@ -406,8 +414,11 @@ impl Agent {
     }
 }
 
-/// CalendarDateUntil (ISO 8601).
-pub fn date_until(one: IsoDate, two: IsoDate, largest: Unit) -> DateDuration {
+/// CalendarDateUntil (NonISODateUntil fuera de ISO 8601).
+pub fn date_until(cal: Cal, one: IsoDate, two: IsoDate, largest: Unit) -> DateDuration {
+    if !cal.is_iso() {
+        return cal.until(one, two, largest);
+    }
     let sign = -i64::from(iso::compare_date(one, two));
     if sign == 0 {
         return DateDuration::default();
@@ -472,7 +483,12 @@ fn epoch_for(agent: &mut Agent, tz: Option<&str>, dt: IsoDateTime) -> JsResult<i
 }
 
 /// DifferenceISODateTime.
-pub fn difference_iso_date_time(a: IsoDateTime, b: IsoDateTime, largest: Unit) -> Internal {
+pub fn difference_iso_date_time(
+    cal: Cal,
+    a: IsoDateTime,
+    b: IsoDateTime,
+    largest: Unit,
+) -> Internal {
     let mut time = difference_time(a.time, b.time);
     let time_sign = iso::sign_i128(time);
     let date_sign = iso::compare_date(b.date, a.date);
@@ -482,7 +498,7 @@ pub fn difference_iso_date_time(a: IsoDateTime, b: IsoDateTime, largest: Unit) -
         time -= i128::from(time_sign) * NS_PER_DAY;
     }
     let date_largest = Unit::Day.larger(largest);
-    let mut dd = date_until(a.date, adjusted, date_largest);
+    let mut dd = date_until(cal, a.date, adjusted, date_largest);
     if largest != date_largest {
         time += i128::from(dd.days) * NS_PER_DAY;
         dd.days = 0;
@@ -515,6 +531,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     fn nudge_to_calendar_unit(
         &mut self,
+        cal: Cal,
         sign: i64,
         d: Internal,
         origin_ns: i128,
@@ -533,9 +550,9 @@ impl Agent {
             Unit::Month => trunc(d.date.months),
             Unit::Week => {
                 let ym = self.temporal_adjust_date_duration(d.date, 0, Some(0), None)?;
-                let weeks_start = self.temporal_date_add(dt.date, ym, false)?;
+                let weeks_start = self.temporal_date_add(cal, dt.date, ym, false)?;
                 let weeks_end = weeks_start.add_days(d.date.days);
-                let until = date_until(weeks_start, weeks_end, Unit::Week);
+                let until = date_until(cal, weeks_start, weeks_end, Unit::Week);
                 trunc(d.date.weeks + until.weeks)
             }
             _ => trunc(d.date.days),
@@ -554,7 +571,7 @@ impl Agent {
             if dd.sign() == 0 {
                 return Ok(origin_ns);
             }
-            let date = agent.temporal_date_add(dt.date, dd, false)?;
+            let date = agent.temporal_date_add(cal, dt.date, dd, false)?;
             epoch_for(
                 agent,
                 tz,
@@ -629,6 +646,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     fn nudge_to_zoned_time(
         &mut self,
+        cal: Cal,
         sign: i64,
         d: Internal,
         dt: IsoDateTime,
@@ -637,7 +655,7 @@ impl Agent {
         unit: Unit,
         mode: RoundingMode,
     ) -> JsResult<Nudge> {
-        let start = self.temporal_date_add(dt.date, d.date, false)?;
+        let start = self.temporal_date_add(cal, dt.date, d.date, false)?;
         let end_date = start.add_days(sign);
         let start_ns = self.temporal_epoch_ns_for(
             tz,
@@ -720,6 +738,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     fn bubble_relative_duration(
         &mut self,
+        cal: Cal,
         sign: i64,
         mut d: Internal,
         nudged_ns: i128,
@@ -753,7 +772,7 @@ impl Agent {
                     self.temporal_adjust_date_duration(d.date, 0, Some(d.date.weeks + sign), None)?
                 }
             };
-            let end = self.temporal_date_add(dt.date, end_d, false)?;
+            let end = self.temporal_date_add(cal, dt.date, end_d, false)?;
             let end_ns = epoch_for(
                 self,
                 tz,
@@ -779,6 +798,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn temporal_round_relative(
         &mut self,
+        cal: Cal,
         d: Internal,
         origin_ns: i128,
         dest_ns: i128,
@@ -793,11 +813,11 @@ impl Agent {
         let sign = if d.sign() < 0 { -1 } else { 1 };
         let nudge = if irregular {
             self.nudge_to_calendar_unit(
-                sign, d, origin_ns, dest_ns, dt, tz, increment, smallest, mode,
+                cal, sign, d, origin_ns, dest_ns, dt, tz, increment, smallest, mode,
             )?
             .0
         } else if let Some(tz) = tz {
-            self.nudge_to_zoned_time(sign, d, dt, tz, increment, smallest, mode)?
+            self.nudge_to_zoned_time(cal, sign, d, dt, tz, increment, smallest, mode)?
         } else {
             self.nudge_to_day_or_time(d, dest_ns, largest, increment, smallest, mode)?
         };
@@ -805,6 +825,7 @@ impl Agent {
         if nudge.expanded && smallest != Unit::Week {
             let start_unit = smallest.larger(Unit::Day);
             result = self.bubble_relative_duration(
+                cal,
                 sign,
                 result,
                 nudge.nudged_ns,
@@ -821,6 +842,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn temporal_total_relative(
         &mut self,
+        cal: Cal,
         d: Internal,
         origin_ns: i128,
         dest_ns: i128,
@@ -831,6 +853,7 @@ impl Agent {
         if unit.is_calendar() || (tz.is_some() && unit == Unit::Day) {
             let sign = if d.sign() < 0 { -1 } else { 1 };
             let (_, total) = self.nudge_to_calendar_unit(
+                cal,
                 sign,
                 d,
                 origin_ns,
@@ -852,6 +875,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn temporal_diff_date_time_rounding(
         &mut self,
+        cal: Cal,
         a: IsoDateTime,
         b: IsoDateTime,
         largest: Unit,
@@ -865,11 +889,12 @@ impl Agent {
         if !iso::date_time_within_limits(a) || !iso::date_time_within_limits(b) {
             return self.range_error("date-time is outside the representable range");
         }
-        let diff = difference_iso_date_time(a, b, largest);
+        let diff = difference_iso_date_time(cal, a, b, largest);
         if smallest == Unit::Nanosecond && increment == 1 {
             return Ok(diff);
         }
         self.temporal_round_relative(
+            cal,
             diff,
             a.epoch_ns(),
             b.epoch_ns(),
@@ -885,6 +910,7 @@ impl Agent {
     /// DifferencePlainDateTimeWithTotal.
     pub fn temporal_diff_date_time_total(
         &mut self,
+        cal: Cal,
         a: IsoDateTime,
         b: IsoDateTime,
         unit: Unit,
@@ -895,16 +921,17 @@ impl Agent {
         if !iso::date_time_within_limits(a) || !iso::date_time_within_limits(b) {
             return self.range_error("date-time is outside the representable range");
         }
-        let diff = difference_iso_date_time(a, b, unit);
+        let diff = difference_iso_date_time(cal, a, b, unit);
         if unit == Unit::Nanosecond {
             return Ok(diff.time as f64);
         }
-        self.temporal_total_relative(diff, a.epoch_ns(), b.epoch_ns(), a, None, unit)
+        self.temporal_total_relative(cal, diff, a.epoch_ns(), b.epoch_ns(), a, None, unit)
     }
 
     /// DifferenceZonedDateTime.
     pub fn temporal_diff_zoned(
         &mut self,
+        cal: Cal,
         ns1: i128,
         ns2: i128,
         tz: &str,
@@ -946,7 +973,12 @@ impl Agent {
         let Some((intermediate, time)) = found else {
             return self.range_error("could not compute the difference");
         };
-        let dd = date_until(start.date, intermediate.date, largest.larger(Unit::Day));
+        let dd = date_until(
+            cal,
+            start.date,
+            intermediate.date,
+            largest.larger(Unit::Day),
+        );
         Ok(Internal { date: dd, time })
     }
 
@@ -954,6 +986,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn temporal_diff_zoned_rounding(
         &mut self,
+        cal: Cal,
         ns1: i128,
         ns2: i128,
         tz: &str,
@@ -965,12 +998,13 @@ impl Agent {
         if !largest.is_date() {
             return self.temporal_diff_instant(ns1, ns2, increment, smallest, mode);
         }
-        let diff = self.temporal_diff_zoned(ns1, ns2, tz, largest)?;
+        let diff = self.temporal_diff_zoned(cal, ns1, ns2, tz, largest)?;
         if smallest == Unit::Nanosecond && increment == 1 {
             return Ok(diff);
         }
         let dt = super::date_time_for(tz, ns1);
         self.temporal_round_relative(
+            cal,
             diff,
             ns1,
             ns2,
@@ -986,6 +1020,7 @@ impl Agent {
     /// DifferenceZonedDateTimeWithTotal.
     pub fn temporal_diff_zoned_total(
         &mut self,
+        cal: Cal,
         ns1: i128,
         ns2: i128,
         tz: &str,
@@ -994,9 +1029,9 @@ impl Agent {
         if !unit.is_date() {
             return Ok(div_to_f64(ns2 - ns1, unit.nanos()));
         }
-        let diff = self.temporal_diff_zoned(ns1, ns2, tz, unit)?;
+        let diff = self.temporal_diff_zoned(cal, ns1, ns2, tz, unit)?;
         let dt = super::date_time_for(tz, ns1);
-        self.temporal_total_relative(diff, ns1, ns2, dt, Some(tz), unit)
+        self.temporal_total_relative(cal, diff, ns1, ns2, dt, Some(tz), unit)
     }
 
     /// DifferenceInstant.
@@ -1030,6 +1065,7 @@ impl Agent {
     /// AddZonedDateTime.
     pub fn temporal_add_zoned(
         &mut self,
+        cal: Cal,
         ns: i128,
         tz: &str,
         d: Internal,
@@ -1039,7 +1075,7 @@ impl Agent {
             return self.temporal_add_instant(ns, d.time);
         }
         let dt = super::date_time_for(tz, ns);
-        let added = self.temporal_date_add(dt.date, d.date, reject)?;
+        let added = self.temporal_date_add(cal, dt.date, d.date, reject)?;
         let inter = IsoDateTime {
             date: added,
             time: dt.time,
@@ -1113,8 +1149,8 @@ impl Agent {
 /// El relativeTo de Duration.round/total/compare.
 pub enum RelativeTo {
     None,
-    Plain(IsoDate),
-    Zoned { ns: i128, tz: String },
+    Plain(IsoDate, Cal),
+    Zoned { ns: i128, tz: String, cal: Cal },
 }
 
 impl Agent {
@@ -1130,25 +1166,27 @@ impl Agent {
         }
         let mut exact = false;
         let mut match_minutes = false;
-        let (date, time, tz, offset) = if let Value::Object(o) = v {
+        let (date, time, tz, offset, cal) = if let Value::Object(o) = v {
             match data_of(self, &v) {
-                Some(TemporalData::ZonedDateTime { ns, tz }) => {
-                    return Ok(RelativeTo::Zoned { ns, tz });
+                Some(TemporalData::ZonedDateTime { ns, tz, cal }) => {
+                    return Ok(RelativeTo::Zoned { ns, tz, cal });
                 }
-                Some(TemporalData::PlainDate(d)) => return Ok(RelativeTo::Plain(d)),
-                Some(TemporalData::PlainDateTime(dt)) => return Ok(RelativeTo::Plain(dt.date)),
+                Some(TemporalData::PlainDate(d, c)) => return Ok(RelativeTo::Plain(d, c)),
+                Some(TemporalData::PlainDateTime(dt, c)) => {
+                    return Ok(RelativeTo::Plain(dt.date, c));
+                }
                 _ => {}
             }
-            self.temporal_calendar_with_default(o)?;
+            let cal = self.temporal_calendar_with_default(o)?;
             let mut names = super::DATE_FIELDS.to_vec();
             names.extend_from_slice(super::TIME_FIELDS);
             names.push(Field::Offset);
             names.push(Field::TimeZone);
-            let f = self.temporal_prepare_fields(o, &names, Required::List(&[]))?;
+            let f = self.temporal_prepare_fields(cal, o, &names, Required::List(&[]))?;
             let tz = f.time_zone.clone();
             let offset = f.offset.clone();
-            let dt = self.temporal_date_time_from_fields(f, false)?;
-            (dt.date, Some(dt.time), tz, offset)
+            let dt = self.temporal_date_time_from_fields(cal, f, false)?;
+            (dt.date, Some(dt.time), tz, offset, cal)
         } else {
             let Value::String(s) = &v else {
                 return self.type_error("relativeTo must be an object or a string");
@@ -1175,16 +1213,17 @@ impl Agent {
                     Some(tz)
                 }
             };
-            if let Some(c) = &r.calendar {
-                self.temporal_canonicalize_calendar(c)?;
-            }
+            let cal = match &r.calendar {
+                Some(c) => self.temporal_canonicalize_calendar(c)?,
+                None => Cal::Iso,
+            };
             let date = IsoDate::new(r.year.unwrap_or(0), r.month, r.day.unwrap_or(1));
             let offset = if tz.is_some() { r.offset.clone() } else { None };
-            (date, r.time, tz, offset)
+            (date, r.time, tz, offset, cal)
         };
         let Some(tz) = tz else {
             self.temporal_check_date(date)?;
-            return Ok(RelativeTo::Plain(date));
+            return Ok(RelativeTo::Plain(date, cal));
         };
         let offset_ns = offset.map(|o| i128::from(super::parse::parse_offset_ns(&o).unwrap_or(0)));
         let ns = self.temporal_interpret_offset(
@@ -1197,7 +1236,7 @@ impl Agent {
             "reject",
             match_minutes,
         )?;
-        Ok(RelativeTo::Zoned { ns, tz })
+        Ok(RelativeTo::Zoned { ns, tz, cal })
     }
 }
 
@@ -1281,20 +1320,20 @@ fn duration_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let (lu1, lu2) = (one.default_largest_unit(), two.default_largest_unit());
     let (d1, d2) = (one.internal(), two.internal());
-    if let RelativeTo::Zoned { ns, tz } = &rel
+    if let RelativeTo::Zoned { ns, tz, cal } = &rel
         && (lu1.is_date() || lu2.is_date())
     {
-        let after1 = agent.temporal_add_zoned(*ns, tz, d1, false)?;
-        let after2 = agent.temporal_add_zoned(*ns, tz, d2, false)?;
+        let after1 = agent.temporal_add_zoned(*cal, *ns, tz, d1, false)?;
+        let after2 = agent.temporal_add_zoned(*cal, *ns, tz, d2, false)?;
         return Ok(Value::Number(f64::from(iso::sign_i128(after1 - after2))));
     }
     let (days1, days2) = if lu1.is_calendar() || lu2.is_calendar() {
-        let RelativeTo::Plain(date) = rel else {
+        let RelativeTo::Plain(date, cal) = rel else {
             return agent.range_error("relativeTo is required for comparing calendar units");
         };
         (
-            agent.temporal_date_duration_days(d1.date, date)?,
-            agent.temporal_date_duration_days(d2.date, date)?,
+            agent.temporal_date_duration_days(cal, d1.date, date)?,
+            agent.temporal_date_duration_days(cal, d2.date, date)?,
         )
     } else {
         (one.0[3] as i64, two.0[3] as i64)
@@ -1306,12 +1345,17 @@ fn duration_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 impl Agent {
     /// DateDurationDays.
-    fn temporal_date_duration_days(&mut self, d: DateDuration, rel: IsoDate) -> JsResult<i64> {
+    fn temporal_date_duration_days(
+        &mut self,
+        cal: Cal,
+        d: DateDuration,
+        rel: IsoDate,
+    ) -> JsResult<i64> {
         let ymw = self.temporal_adjust_date_duration(d, 0, None, None)?;
         if ymw.sign() == 0 {
             return Ok(d.days);
         }
-        let later = self.temporal_date_add(rel, ymw, false)?;
+        let later = self.temporal_date_add(cal, rel, ymw, false)?;
         Ok(d.days + later.epoch_days() - rel.epoch_days())
     }
 }
@@ -1454,11 +1498,11 @@ fn duration_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.range_error("roundingIncrement must be 1 for this rounding");
     }
     match rel {
-        RelativeTo::Zoned { ns, tz } => {
+        RelativeTo::Zoned { ns, tz, cal } => {
             let internal = d.internal();
-            let target = agent.temporal_add_zoned(ns, &tz, internal, false)?;
+            let target = agent.temporal_add_zoned(cal, ns, &tz, internal, false)?;
             let r = agent.temporal_diff_zoned_rounding(
-                ns, target, &tz, largest, increment, smallest, mode,
+                cal, ns, target, &tz, largest, increment, smallest, mode,
             )?;
             let lu = if largest.is_date() {
                 Unit::Hour
@@ -1468,11 +1512,11 @@ fn duration_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             let r = agent.temporal_from_internal(r, lu)?;
             agent.temporal_create_duration(r.0, None)
         }
-        RelativeTo::Plain(date) => {
+        RelativeTo::Plain(date, cal) => {
             let internal = d.internal_24h();
             let (days, target_time) = iso::balance_time(internal.time);
             let dd = agent.temporal_adjust_date_duration(internal.date, days, None, None)?;
-            let target_date = agent.temporal_date_add(date, dd, false)?;
+            let target_date = agent.temporal_date_add(cal, date, dd, false)?;
             let start = IsoDateTime {
                 date,
                 time: Time::MIDNIGHT,
@@ -1482,7 +1526,7 @@ fn duration_round(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 time: target_time,
             };
             let r = agent.temporal_diff_date_time_rounding(
-                start, target, largest, increment, smallest, mode,
+                cal, start, target, largest, increment, smallest, mode,
             )?;
             let r = agent.temporal_from_internal(r, largest)?;
             agent.temporal_create_duration(r.0, None)
@@ -1522,16 +1566,17 @@ fn duration_total(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.range_error("unit is required");
     };
     let total = match rel {
-        RelativeTo::Zoned { ns, tz } => {
-            let target = agent.temporal_add_zoned(ns, &tz, d.internal(), false)?;
-            agent.temporal_diff_zoned_total(ns, target, &tz, unit)?
+        RelativeTo::Zoned { ns, tz, cal } => {
+            let target = agent.temporal_add_zoned(cal, ns, &tz, d.internal(), false)?;
+            agent.temporal_diff_zoned_total(cal, ns, target, &tz, unit)?
         }
-        RelativeTo::Plain(date) => {
+        RelativeTo::Plain(date, cal) => {
             let internal = d.internal_24h();
             let (days, target_time) = iso::balance_time(internal.time);
             let dd = agent.temporal_adjust_date_duration(internal.date, days, None, None)?;
-            let target_date = agent.temporal_date_add(date, dd, false)?;
+            let target_date = agent.temporal_date_add(cal, date, dd, false)?;
             agent.temporal_diff_date_time_total(
+                cal,
                 IsoDateTime {
                     date,
                     time: Time::MIDNIGHT,
