@@ -311,6 +311,13 @@ fn legacy_factory_functions() {
     );
 }
 
+/// Un WebP sin pérdida (VP8L) de 1×1 píxel.
+const WEBP_1X1: &str = "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+
+/// Solo la cabecera `ftyp` de un AVIF: el motor no decodifica AVIF (da `error`).
+const AVIF_HEADER: &str =
+    "data:image/avif;base64,AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADybWV0YQ==";
+
 #[test]
 fn new_image_preloads_and_fires_load_or_error() {
     let mut p = Page::new(DOC);
@@ -325,13 +332,20 @@ fn new_image_preloads_and_fires_load_or_error() {
          var twice = new Image(); twice.onload = () => log.push('load twice'); \
          twice.onerror = () => log.push('error twice'); twice.src = 'data:text/plain,x'; \
          twice.src = '{PNG_3X2}'; \
+         var webp = new Image(); webp.onload = () => log.push('load webp ' + webp.naturalWidth + 'x' + webp.naturalHeight); \
+         webp.onerror = () => log.push('error webp'); webp.src = '{WEBP_1X1}'; \
+         var avif = new Image(); avif.onload = () => log.push('load avif'); \
+         avif.onerror = () => log.push('error avif'); avif.src = '{AVIF_HEADER}'; \
          log.push('sync');"
     ));
     // Nada se dispara de forma síncrona.
     assert_eq!(p.show("log.join('|')"), "sync");
     let _ = p.rt.run_until_idle();
     let log = p.show("log.slice().sort().join('|')");
-    assert_eq!(log, "error bad|error empty|load 3x2 true|load twice|sync");
+    assert_eq!(
+        log,
+        "error avif|error bad|error empty|load 3x2 true|load twice|load webp 1x1|sync"
+    );
     // La carga queda como recurso en la línea de tiempo.
     assert_eq!(
         p.show(

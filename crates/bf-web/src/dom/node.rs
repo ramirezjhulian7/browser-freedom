@@ -306,7 +306,12 @@ fn is_equal_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if crate::dom::is_foreign_node(agent, &a.arg(0)) {
         return Ok(Value::Boolean(false));
     }
-    let Some(o) = arg_opt_node(agent, &a.arg(0), "Failed to execute 'isEqualNode' on 'Node': parameter 1")? else {
+    let Some(o) = arg_opt_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'isEqualNode' on 'Node': parameter 1",
+    )?
+    else {
         return Ok(Value::Boolean(false));
     };
     if o.doc != n.doc {
@@ -323,7 +328,11 @@ fn is_same_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if crate::dom::is_foreign_node(agent, &a.arg(0)) {
         return Ok(Value::Boolean(false));
     }
-    let o = arg_opt_node(agent, &a.arg(0), "Failed to execute 'isSameNode' on 'Node': parameter 1")?;
+    let o = arg_opt_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'isSameNode' on 'Node': parameter 1",
+    )?;
     Ok(Value::Boolean(o == Some(n)))
 }
 
@@ -343,7 +352,11 @@ fn compare_document_position(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Va
             document_position::DISCONNECTED | document_position::IMPLEMENTATION_SPECIFIC | order;
         return Ok(Value::Number(f64::from(r)));
     }
-    let o = arg_node(agent, &a.arg(0), "Failed to execute 'compareDocumentPosition' on 'Node': parameter 1")?;
+    let o = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'compareDocumentPosition' on 'Node': parameter 1",
+    )?;
     let r = if o.doc == n.doc {
         with_doc(agent, n.doc, |d| {
             d.compare_document_position(n.node, o.node)
@@ -367,7 +380,11 @@ fn contains(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if crate::dom::is_foreign_node(agent, &a.arg(0)) {
         return Ok(Value::Boolean(false));
     }
-    let o = arg_opt_node(agent, &a.arg(0), "Failed to execute 'contains' on 'Node': parameter 1")?;
+    let o = arg_opt_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'contains' on 'Node': parameter 1",
+    )?;
     let r = match o {
         Some(o) if o.doc == n.doc => with_doc(agent, n.doc, |d| d.contains(n.node, Some(o.node))),
         _ => false,

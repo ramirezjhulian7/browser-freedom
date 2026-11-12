@@ -1076,7 +1076,11 @@ fn intersects_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if crate::dom::is_foreign_node(agent, &a.arg(0)) {
         return Ok(Value::Boolean(false));
     }
-    let n = arg_node(agent, &a.arg(0), "Failed to execute 'intersectsNode' on 'Range': parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'intersectsNode' on 'Range': parameter 1",
+    )?;
     let r = range_bounds(agent, doc, id);
     if n.doc != doc {
         return Ok(Value::Boolean(false));
