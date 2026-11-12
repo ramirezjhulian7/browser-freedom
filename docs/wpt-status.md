@@ -29,11 +29,11 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| svg (E7, 2026-11-07) | 286 | 168 | 968 | 0 | 1422 | 63.0% |
-| **Total** | 5551 | 2033 | 6141 | 4 | 13729 | 73.2% |
+| svg (E7, 2026-11-12) | 318 | 133 | 971 | 0 | 1422 | 70.5% |
+| **Total** | 5583 | 1998 | 6144 | 4 | 13729 | 73.6% |
 
-La fila `svg` se midió aparte el 2026-11-07 en `army/e7` con el mismo commit de WPT
-(`cargo test --release -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
+La fila `svg` se midió aparte el 2026-11-12 en `army/e7` con el mismo commit de WPT
+(`cargo test -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
 filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo) y el resto es del
 2026-10-20.
 
