@@ -1,6 +1,6 @@
 //! El perfil del usuario: la carpeta donde Freedom guarda el historial, los marcadores y las
-//! descargas (`%LOCALAPPDATA%\Freedom` en Windows, `$XDG_DATA_HOME/freedom` o
-//! `~/.local/share/freedom` en los demás), y el formato de texto propio de esos archivos: un
+//! descargas (`%LOCALAPPDATA%\Freedom` en Windows, `~/Library/Application Support/Freedom` en
+//! macOS, `$XDG_DATA_HOME/freedom` o `~/.local/share/freedom` en los demás), y el formato de texto propio de esos archivos: un
 //! registro por línea, campos separados por tabulador, con `\\`, `\t`, `\n` y `\r` escapados.
 //! Las líneas que empiezan con `#` son comentarios.
 //!
@@ -30,6 +30,10 @@ pub fn dir() -> Option<PathBuf> {
     let env = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
     if cfg!(windows) {
         return env("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Freedom"));
+    }
+    if cfg!(target_os = "macos") {
+        // La misma carpeta que `bf_net::data_dir` (cookies y HSTS).
+        return env("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/Freedom"));
     }
     env("XDG_DATA_HOME")
         .map(PathBuf::from)

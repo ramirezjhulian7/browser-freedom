@@ -1533,10 +1533,16 @@ impl Fetcher {
     }
 }
 
-/// Dónde guarda Freedom sus datos (HSTS, cookies): `%LOCALAPPDATA%\Freedom` en Windows y
-/// `$XDG_DATA_HOME/freedom` (o `~/.local/share/freedom`) en el resto.
+/// Dónde guarda Freedom sus datos (HSTS, cookies): `%LOCALAPPDATA%\Freedom` en Windows,
+/// `~/Library/Application Support/Freedom` en macOS y `$XDG_DATA_HOME/freedom` (o
+/// `~/.local/share/freedom`) en el resto. Es la carpeta del perfil de `bf-shell`
+/// (`profile::dir`): si cambia una, cambia la otra.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
+    if cfg!(target_os = "macos") {
+        return std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support/Freedom"));
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         return Some(PathBuf::from(local).join("Freedom"));
     }
@@ -1566,7 +1572,7 @@ impl NetLoader {
     }
 
     /// Con la caché HTTP en memoria y en disco, en [`cache::default_dir`]
-    /// (`%LOCALAPPDATA%\Freedom\cache` en Windows).
+    /// (`%LOCALAPPDATA%\Freedom\cache` en Windows, `~/Library/Caches/Freedom` en macOS).
     /// El perfil en disco: la caché HTTP en [`cache::default_dir`] y, en [`data_dir`], la
     /// lista HSTS (`hsts.txt`) y las cookies persistentes (`cookies.txt`).
     pub fn with_disk_cache() -> NetLoader {
