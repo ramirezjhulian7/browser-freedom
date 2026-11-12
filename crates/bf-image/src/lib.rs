@@ -1,12 +1,25 @@
-//! Decodificación de imágenes: sniffing de firmas (MIME Sniffing §6.1) y PNG, JPEG y GIF
-//! (primer cuadro) a RGBA8 premultiplicado.
+//! Decodificación de imágenes: sniffing de firmas (MIME Sniffing §6.1) y los formatos bitmap a
+//! RGBA8 premultiplicado. PNG, JPEG y GIF usan los códecs permitidos (`png`, `zune-jpeg`,
+//! `gif`); BMP, ICO y WebP (VP8L, VP8 y `ALPH`) son decodificadores propios escritos desde sus
+//! specs. [`decode_frames`] da los fotogramas de GIF y APNG animados.
 //!
-//! TODO(roadmap): SVG, WebP, AVIF, ICO/BMP y animación de GIF/APNG.
+//! El SVG no es un bitmap: `bf-svg` lo interpreta y `bf-paint` lo rasteriza al tamaño pedido.
+//!
+//! TODO(roadmap): AVIF (diseño en `docs/pendiente/e7.md`).
 
 #![forbid(unsafe_code)]
 
+mod anim;
+mod bmp;
+mod gif;
+mod ico;
+mod jpeg;
+mod png;
+mod webp;
+
 use std::fmt;
-use std::io::Cursor;
+
+pub use anim::{Blend, Dispose, Frame, ImageFrames};
 
 /// Imagen decodificada: RGBA8 con alfa premultiplicado, filas de arriba a abajo.
 #[derive(Clone, PartialEq, Eq)]
@@ -40,6 +53,11 @@ impl fmt::Display for ImageError {
 
 impl std::error::Error for ImageError {}
 
+/// Error de decodificación con un mensaje fijo.
+pub(crate) fn invalid(msg: &str) -> ImageError {
+    ImageError::Decode(msg.to_owned())
+}
+
 /// Contadores de decodificación de un documento: qué se decodificó, qué formatos no tienen
 /// decodificador todavía y qué falló.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,8 +70,9 @@ pub struct DecodeStats {
 }
 
 impl DecodeStats {
-    /// Registra el resultado de un [`decode`].
-    pub fn record(&mut self, result: &Result<Image, ImageError>) {
+    /// Registra el resultado de un [`decode`] (o de cualquier decodificación que devuelva
+    /// [`ImageError`]).
+    pub fn record<T>(&mut self, result: &Result<T, ImageError>) {
         match result {
             Ok(_) => self.decoded += 1,
             Err(ImageError::Unsupported(kind)) => *self.unsupported.entry(kind).or_default() += 1,
@@ -82,13 +101,36 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
         Some("image/jpeg")
     } else if bytes.len() >= 12 && &bytes[4..12] == b"ftypavif" {
         Some("image/avif")
+    } else if is_svg(bytes) {
+        Some("image/svg+xml")
     } else {
-        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
-        head.contains("<svg").then_some("image/svg+xml")
+        None
     }
 }
 
-fn premultiply(rgba: &mut [u8]) {
+/// ¿Parece un documento SVG? (`<svg` en los primeros 512 bytes, tras un posible prólogo XML.)
+pub fn is_svg(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
+    head.contains("<svg")
+}
+
+/// El tipo de la imagen: la firma manda sobre `mime_hint` (como en los navegadores).
+pub fn kind(bytes: &[u8], mime_hint: Option<&str>) -> Option<&'static str> {
+    sniff(bytes).or_else(|| {
+        mime_hint.map(|m| match m.split(';').next().unwrap_or("").trim() {
+            "image/png" | "image/apng" => "image/png",
+            "image/jpeg" | "image/jpg" => "image/jpeg",
+            "image/gif" => "image/gif",
+            "image/webp" => "image/webp",
+            "image/bmp" | "image/x-bmp" | "image/x-ms-bmp" => "image/bmp",
+            "image/x-icon" | "image/vnd.microsoft.icon" => "image/x-icon",
+            "image/svg+xml" => "image/svg+xml",
+            _ => "unknown",
+        })
+    })
+}
+
+pub(crate) fn premultiply(rgba: &mut [u8]) {
     for px in rgba.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         if a != 255 {
@@ -99,124 +141,36 @@ fn premultiply(rgba: &mut [u8]) {
     }
 }
 
-fn check_size(w: u32, h: u32) -> Result<(), ImageError> {
+pub(crate) fn check_size(w: u32, h: u32) -> Result<(), ImageError> {
+    if w == 0 || h == 0 {
+        return Err(invalid("tamaño cero"));
+    }
     if u64::from(w) * u64::from(h) > MAX_PIXELS {
-        return Err(ImageError::Decode("demasiado grande".into()));
+        return Err(invalid("demasiado grande"));
     }
     Ok(())
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
-    let err = |e: png::DecodingError| ImageError::Decode(e.to_string());
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(err)?;
-    let (w, h) = (reader.info().width, reader.info().height);
-    check_size(w, h)?;
-    let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(err)?;
-    let data = &buf[..info.buffer_size()];
-    let n = (w * h) as usize;
-    let mut rgba = Vec::with_capacity(n * 4);
-    match info.color_type {
-        png::ColorType::Rgba => rgba.extend_from_slice(data),
-        png::ColorType::Rgb => {
-            for p in data.as_chunks::<3>().0 {
-                rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
-            }
-        }
-        png::ColorType::GrayscaleAlpha => {
-            for p in data.as_chunks::<2>().0 {
-                rgba.extend_from_slice(&[p[0], p[0], p[0], p[1]]);
-            }
-        }
-        png::ColorType::Grayscale => {
-            for &g in data {
-                rgba.extend_from_slice(&[g, g, g, 255]);
-            }
-        }
-        png::ColorType::Indexed => return Err(ImageError::Decode("paleta sin expandir".into())),
-    }
-    rgba.truncate(n * 4);
-    rgba.resize(n * 4, 0);
-    premultiply(&mut rgba);
-    Ok(Image {
-        width: w,
-        height: h,
-        rgba,
-    })
-}
-
-fn decode_jpeg(bytes: &[u8]) -> Result<Image, ImageError> {
-    use zune_jpeg::zune_core::colorspace::ColorSpace;
-    use zune_jpeg::zune_core::options::DecoderOptions;
-    let options = DecoderOptions::default()
-        .jpeg_set_out_colorspace(ColorSpace::RGBA)
-        .set_max_width(1 << 14)
-        .set_max_height(1 << 14);
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(bytes, options);
-    let rgba = decoder
-        .decode()
-        .map_err(|e| ImageError::Decode(format!("{e:?}")))?;
-    let info = decoder
-        .info()
-        .ok_or_else(|| ImageError::Decode("sin cabecera".into()))?;
-    let (w, h) = (u32::from(info.width), u32::from(info.height));
-    check_size(w, h)?;
-    if rgba.len() != (w * h * 4) as usize {
-        return Err(ImageError::Decode("tamaño inesperado".into()));
-    }
-    Ok(Image {
-        width: w,
-        height: h,
-        rgba,
-    })
-}
-
-/// GIF: el primer cuadro compuesto sobre el lienzo lógico (transparente).
-fn decode_gif(bytes: &[u8]) -> Result<Image, ImageError> {
-    let err = |e: gif::DecodingError| ImageError::Decode(e.to_string());
-    let mut options = gif::DecodeOptions::new();
-    options.set_color_output(gif::ColorOutput::RGBA);
-    let mut decoder = options.read_info(Cursor::new(bytes)).map_err(err)?;
-    let (w, h) = (u32::from(decoder.width()), u32::from(decoder.height()));
-    check_size(w, h)?;
-    let mut rgba = vec![0u8; (w * h * 4) as usize];
-    if let Some(frame) = decoder.read_next_frame().map_err(err)? {
-        let (fx, fy) = (u32::from(frame.left), u32::from(frame.top));
-        let fw = u32::from(frame.width);
-        for (i, px) in frame.buffer.as_chunks::<4>().0.iter().enumerate() {
-            let (x, y) = (fx + i as u32 % fw.max(1), fy + i as u32 / fw.max(1));
-            if x < w && y < h && px[3] != 0 {
-                let o = ((y * w + x) * 4) as usize;
-                rgba[o..o + 4].copy_from_slice(px);
-            }
-        }
-    }
-    premultiply(&mut rgba);
-    Ok(Image {
-        width: w,
-        height: h,
-        rgba,
-    })
-}
-
-/// Decodifica `bytes`. La firma manda sobre `mime_hint` (como en los navegadores).
+/// Decodifica `bytes` (el primer fotograma, si es animada). La firma manda sobre `mime_hint`.
 pub fn decode(bytes: &[u8], mime_hint: Option<&str>) -> Result<Image, ImageError> {
-    let kind = sniff(bytes).or_else(|| {
-        mime_hint.map(|m| match m.split(';').next().unwrap_or("").trim() {
-            "image/png" => "image/png",
-            "image/jpeg" | "image/jpg" => "image/jpeg",
-            "image/gif" => "image/gif",
-            "image/svg+xml" => "image/svg+xml",
-            _ => "unknown",
-        })
-    });
-    match kind {
-        Some("image/png") => decode_png(bytes),
-        Some("image/jpeg") => decode_jpeg(bytes),
-        Some("image/gif") => decode_gif(bytes),
+    match kind(bytes, mime_hint) {
+        Some("image/png") => png::decode(bytes),
+        Some("image/jpeg") => jpeg::decode(bytes),
+        Some("image/gif") => gif::decode(bytes),
+        Some("image/bmp") => bmp::decode(bytes),
+        Some("image/x-icon") => ico::decode(bytes),
+        Some("image/webp") => webp::decode(bytes),
         Some(other) => Err(ImageError::Unsupported(other)),
         None => Err(ImageError::Unsupported("desconocido")),
+    }
+}
+
+/// Decodifica todos los fotogramas de `bytes`, compuestos sobre el lienzo. Los formatos sin
+/// animación (o un PNG sin `acTL`) dan un solo fotograma.
+pub fn decode_frames(bytes: &[u8], mime_hint: Option<&str>) -> Result<ImageFrames, ImageError> {
+    match kind(bytes, mime_hint) {
+        Some("image/png") => png::decode_frames(bytes),
+        Some("image/gif") => gif::decode_frames(bytes),
+        _ => decode(bytes, mime_hint).map(ImageFrames::still),
     }
 }

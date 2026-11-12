@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use bf_net::{FetchError, FetchOptions, Fetcher, Method};
+use bf_net::{CacheUse, FetchError, FetchOptions, Fetcher, HttpCache, Method, ReferrerPolicy};
 use bf_url::Url;
 
 struct Request {
@@ -124,6 +124,30 @@ fn respond(stream: &mut TcpStream, req: &Request) -> bool {
             true,
         ),
         "/echo-cookie" => (simple("200 OK", "", &header("cookie")), true),
+        "/echo-referer" => (simple("200 OK", "", &header("referer")), true),
+        "/gz-304" if header("if-none-match") == "\"v1\"" => (
+            b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nETag: \"v1\"\r\n\r\n".to_vec(),
+            true,
+        ),
+        "/gz-304" => {
+            let body = gzip(b"guardado");
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nETag: \"v1\"\r\nCache-Control: no-cache\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend(body);
+            (out, true)
+        }
+        "/to-referer" => (simple("302 Found", "Location: /echo-referer\r\n", ""), true),
+        "/to-referer-np" => (
+            simple(
+                "302 Found",
+                "Referrer-Policy: unsafe-url, no-referrer, bogus\r\nLocation: /echo-referer\r\n",
+                "",
+            ),
+            true,
+        ),
         "/accept" => {
             let body = format!("{}|{}", header("user-agent"), header("accept-encoding"));
             (simple("200 OK", "", &body), true)
@@ -156,6 +180,88 @@ fn server() -> (u16, thread::JoinHandle<()>) {
 
 fn url(port: u16, path: &str) -> Url {
     Url::parse(&format!("http://127.0.0.1:{port}{path}"), None).unwrap()
+}
+
+/// E6: Referrer Policy §8.3 en el `Fetcher`. El referente no cambia con las redirecciones
+/// (Fetch §2.2.5) y `Referrer-Policy` en una redirección cambia la política (Fetch §4.4 paso 14).
+#[test]
+fn referrer_policy_and_redirects() {
+    let (port, _server) = server();
+    let f = Fetcher::new();
+    let get = |path: &str, policy: ReferrerPolicy, from: &str| {
+        let opts = FetchOptions {
+            referrer: Some(Url::parse(from, None).unwrap()),
+            referrer_policy: policy,
+            ..FetchOptions::default()
+        };
+        let body = f.fetch(&url(port, path), &opts).unwrap().body;
+        String::from_utf8(body).unwrap()
+    };
+    let page = format!("http://u:p@127.0.0.1:{port}/pagina?q=1#f");
+    let full = format!("http://127.0.0.1:{port}/pagina?q=1");
+    let origin = format!("http://127.0.0.1:{port}/");
+    assert_eq!(get("/echo-referer", ReferrerPolicy::Default, &page), full);
+    assert_eq!(get("/echo-referer", ReferrerPolicy::Origin, &page), origin);
+    assert_eq!(get("/echo-referer", ReferrerPolicy::NoReferrer, &page), "");
+    // Entre orígenes, por defecto solo el origen.
+    assert_eq!(
+        get(
+            "/echo-referer",
+            ReferrerPolicy::Default,
+            "http://otro.example/a?b"
+        ),
+        "http://otro.example/"
+    );
+    assert_eq!(
+        get(
+            "/echo-referer",
+            ReferrerPolicy::UnsafeUrl,
+            "http://otro.example/a?b"
+        ),
+        "http://otro.example/a?b"
+    );
+    // Tras una redirección sigue siendo la página, no la URL que redirigió.
+    assert_eq!(get("/to-referer", ReferrerPolicy::Default, &page), full);
+    // El último token válido de la cabecera de la redirección: `no-referrer`.
+    assert_eq!(get("/to-referer-np", ReferrerPolicy::UnsafeUrl, &page), "");
+}
+
+/// E6: un 304 con `Content-Encoding: gzip` y sin cuerpo (como los de Wikipedia) valida la
+/// respuesta guardada en vez de fallar al descomprimir un cuerpo vacío.
+#[test]
+fn not_modified_with_content_encoding() {
+    let (port, _server) = server();
+    let mut f = Fetcher::new();
+    f.cache = Some(HttpCache::in_memory());
+    let first = f
+        .fetch(&url(port, "/gz-304"), &FetchOptions::default())
+        .unwrap();
+    assert_eq!(
+        (first.body.as_slice(), first.cache),
+        (&b"guardado"[..], CacheUse::Network)
+    );
+    let again = f
+        .fetch(&url(port, "/gz-304"), &FetchOptions::default())
+        .unwrap();
+    assert_eq!(again.status, 200);
+    assert_eq!(
+        (again.body.as_slice(), again.cache),
+        (&b"guardado"[..], CacheUse::Revalidated)
+    );
+}
+
+/// E6: Happy Eyeballs (RFC 8305). El servidor escucha solo en 127.0.0.1; si `localhost` da
+/// primero `::1`, el intento por IPv4 sale a los 250 ms en vez de esperar el rechazo de `::1`
+/// (en Windows, ~2 s).
+#[test]
+fn localhost_connects_fast_to_an_ipv4_only_server() {
+    let (port, _server) = server();
+    let f = Fetcher::new();
+    let start = std::time::Instant::now();
+    let u = Url::parse(&format!("http://localhost:{port}/echo-cookie"), None).unwrap();
+    assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().status, 200);
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_millis(1500), "{took:?}");
 }
 
 #[test]

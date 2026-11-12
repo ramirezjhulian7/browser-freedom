@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod idb;
+pub mod shared;
 
 use std::path::PathBuf;
 
