@@ -1449,12 +1449,33 @@ fn range_args(
     if s.is_undefined() || e.is_undefined() {
         return agent.type_error("startDate and endDate must not be undefined");
     }
-    let (f, x, k1) = formattable(agent, dtf, &s)?;
-    let (_, y, k2) = formattable(agent, dtf, &e)?;
+    // ToDateTimeFormattable de los dos extremos (ToNumber si no son de Temporal) y
+    // SameTemporalType (PartitionDateTimeRangePattern, paso 5) antes de HandleDateTimeValue:
+    // un TimeClip(NaN) no puede tapar el TypeError de tipos distintos.
+    let (s, k1) = to_date_time_formattable(agent, s)?;
+    let (e, k2) = to_date_time_formattable(agent, e)?;
     if k1 != k2 {
         return agent.type_error("startDate and endDate must be of the same type");
     }
+    let (f, x, _) = formattable(agent, dtf, &s)?;
+    let (_, y, _) = formattable(agent, dtf, &e)?;
     Ok((f, x, y))
+}
+
+/// ToDateTimeFormattable ( value ): el valor (un número si no es de Temporal) y el tipo de
+/// Temporal, si lo es.
+fn to_date_time_formattable(
+    agent: &mut Agent,
+    v: Value,
+) -> JsResult<(
+    Value,
+    Option<std::mem::Discriminant<crate::builtins::temporal::TemporalData>>,
+)> {
+    if let Some(d) = crate::builtins::temporal::data_of(agent, &v) {
+        return Ok((v, Some(std::mem::discriminant(&d))));
+    }
+    let n = agent.to_number(&v)?;
+    Ok((Value::Number(n), None))
 }
 
 /// Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ) (§11.3.5).
