@@ -107,7 +107,8 @@ fn real_sc(f: &Fragment) -> bool {
         && ((positioned(f) && f.z_index.is_some())
             || f.style.opacity.0 < 1.0
             || f.style.position == Position::Fixed
-            || masked(&f.style))
+            || masked(&f.style)
+            || crate::filters::creates_stacking_context(&f.style)) // E7
 }
 
 /// ¿Tiene `mask-image` (CSS Masking 1 §7.1)? Crea un stacking context (E7).
@@ -273,6 +274,10 @@ impl<'a> Builder<'a> {
     }
 
     fn stacking_context(&mut self, f: &'a Fragment, clip: &ClipChain) {
+        let effect = crate::filters::effect(f); // E7: filter, clip-path y mix-blend-mode
+        if effect.is_some() {
+            self.emit(clip, DisplayItem::PushEffect);
+        }
         let opacity = f.style.opacity.0;
         if opacity < 1.0 {
             self.set_clip(clip);
@@ -320,6 +325,9 @@ impl<'a> Builder<'a> {
         if opacity < 1.0 {
             self.set_clip(clip);
             self.list.push(DisplayItem::PopOpacity);
+        }
+        if let Some(fx) = effect {
+            self.emit(clip, DisplayItem::PopEffect(Box::new(fx))); // E7
         }
     }
 
@@ -507,7 +515,13 @@ impl<'a> Builder<'a> {
         // En el modelo colapsado los bordes de la tabla van con los de las celdas.
         let collapsed_table =
             matches!(&f.table, Some(TableRole::Table(t)) if t.collapsed.is_some());
-        if widths.top + widths.right + widths.bottom + widths.left > 0.0 && !collapsed_table {
+        let border_image = (!collapsed_table)
+            .then(|| crate::border_image::items(f, self.images, self.fonts))
+            .flatten(); // E7
+        if widths.top + widths.right + widths.bottom + widths.left > 0.0
+            && !collapsed_table
+            && border_image.is_none()
+        {
             let current = s.color.rgba();
             let border = DisplayItem::Border {
                 rect,
@@ -560,6 +574,9 @@ impl<'a> Builder<'a> {
                 }
                 None => self.emit(clip, border),
             }
+        }
+        for item in border_image.into_iter().flatten() {
+            self.emit(clip, item); // E7: `border-image` en lugar de los bordes
         }
         if matches!(f.table, Some(TableRole::Table(_))) {
             self.table_contents(f, clip);
