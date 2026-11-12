@@ -20,17 +20,17 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    ContentAlign, Direction, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
+    Aligned, ContentAlign, Direction, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
     LengthPercentageAuto, Overflow, Size,
 };
 
 use crate::block::{
-    Cb, Layout, border_edges, height_limits, margin_value, padding_edges, specified_height,
-    specified_width, width_limits,
+    Cb, Layout, PendingAbs, border_edges, height_limits, margin_value, padding_edges,
+    specified_height, specified_width, width_limits,
 };
 use crate::box_tree::{BoxKind, LayoutBox};
 use crate::float::FloatContext;
-use crate::fragment::{Edges, Fragment, FragmentKind};
+use crate::fragment::{Edges, Fragment, FragmentKind, Rect};
 
 pub(crate) fn is_flex_container(b: &LayoutBox) -> bool {
     matches!(b.style.display, Display::Flex | Display::InlineFlex)
@@ -60,6 +60,8 @@ struct Item<'a> {
     /// Distancia del borde cruzado-inicial del margin box a la baseline (filas).
     baseline: Option<f32>,
     align: ItemAlign,
+    /// E5: alineación propia `safe` (CSS Box Alignment 3 §4.4).
+    safe: bool,
 }
 
 impl Item<'_> {
@@ -98,16 +100,40 @@ fn resolved_align(item: &ComputedStyle, container: &ComputedStyle) -> ItemAlign 
         ItemAlign::Left | ItemAlign::Right => ItemAlign::Auto,
         a => a,
     };
-    let a = if fix(item.align_self) == ItemAlign::Auto {
-        fix(container.align_items)
+    let a = if fix(item.align_self.value) == ItemAlign::Auto {
+        fix(container.align_items.value)
     } else {
-        item.align_self
+        item.align_self.value
     };
     match a {
         ItemAlign::Auto | ItemAlign::Normal => ItemAlign::Stretch,
         ItemAlign::LastBaseline | ItemAlign::FlowEnd => ItemAlign::FlexEnd,
         ItemAlign::FlowStart => ItemAlign::FlexStart,
         a => a,
+    }
+}
+
+/// E5: ¿la alineación propia resuelta del ítem es `safe` (CSS Box Alignment 3 §4.4)?
+fn align_is_safe(item: &ComputedStyle, container: &ComputedStyle) -> bool {
+    let own = !matches!(
+        item.align_self.value,
+        ItemAlign::Auto | ItemAlign::Left | ItemAlign::Right
+    );
+    if own {
+        item.align_self.is_safe()
+    } else {
+        container.align_items.is_safe()
+    }
+}
+
+/// E5: `justify-content`/`align-content` de un contenedor flex: `flow-start`/`flow-end` son
+/// `flex-start`/`flex-end`, y con `safe` y desbordamiento, `start` (CSS Box Alignment 3 §4.4).
+fn flex_content_align(a: Aligned<ContentAlign>, free: f32) -> ContentAlign {
+    match a.value {
+        _ if a.is_safe() && free < 0.0 => ContentAlign::Start,
+        ContentAlign::FlowStart => ContentAlign::FlexStart,
+        ContentAlign::FlowEnd => ContentAlign::FlexEnd,
+        v => v,
     }
 }
 
@@ -145,6 +171,61 @@ pub(crate) fn container_baseline(f: &Fragment) -> Option<f32> {
         )
     })?;
     Some(first_baseline(item).unwrap_or(item.rect.bottom()))
+}
+
+/// E5: orientación de los ejes de un contenedor flex (§5.1), para alinear absolutos.
+struct AbsAxes {
+    row: bool,
+    reverse: bool,
+    main_rev: bool,
+    cross_flip: bool,
+    rtl: bool,
+}
+
+/// E5: fracción del espacio libre (física: 0 izquierda/arriba, 1 derecha/abajo) en cada eje
+/// `(x, y)` para la posición estática de un hijo absoluto de un contenedor flex (§4.1).
+/// `free_main` es el espacio libre en el eje principal: las distribuciones `space-around` y
+/// `space-evenly` caen a `safe center` (CSS Box Alignment 3 §5.3) y `space-between` y
+/// `stretch` a `flex-start`.
+fn abs_static_fractions(
+    b: &LayoutBox,
+    cs: &ComputedStyle,
+    ax: &AbsAxes,
+    (free_main, free_cross): (f32, f32),
+) -> (f32, f32) {
+    // Eje principal, medido desde el main-start.
+    let main = match flex_content_align(cs.justify_content, free_main) {
+        ContentAlign::FlexEnd => 1.0,
+        ContentAlign::Start => f32::from(u8::from(ax.reverse)),
+        ContentAlign::End => f32::from(u8::from(!ax.reverse)),
+        ContentAlign::Left if ax.row => f32::from(u8::from(ax.main_rev)),
+        ContentAlign::Right if ax.row => f32::from(u8::from(!ax.main_rev)),
+        ContentAlign::Left | ContentAlign::Right => f32::from(u8::from(ax.reverse)),
+        ContentAlign::Center => 0.5,
+        ContentAlign::SpaceAround | ContentAlign::SpaceEvenly if free_main >= 0.0 => 0.5,
+        _ => 0.0,
+    };
+    let main = if ax.main_rev { 1.0 - main } else { main };
+    // Eje cruzado (físico): como en la alineación de los ítems; `stretch`, `normal` y
+    // `baseline` cuentan como `flex-start`.
+    let item_rtl = !ax.row && b.style.direction == Direction::Rtl;
+    let container_rtl = !ax.row && ax.rtl;
+    let high = |h: bool| f32::from(u8::from(h));
+    let align = if align_is_safe(&b.style, cs) && free_cross < 0.0 {
+        ItemAlign::Start
+    } else {
+        resolved_align(&b.style, cs)
+    };
+    let cross = match align {
+        ItemAlign::FlexEnd => high(!ax.cross_flip),
+        ItemAlign::End => high(!container_rtl),
+        ItemAlign::SelfEnd => high(!item_rtl),
+        ItemAlign::Start => high(container_rtl),
+        ItemAlign::SelfStart => high(item_rtl),
+        ItemAlign::Center => 0.5,
+        _ => high(ax.cross_flip),
+    };
+    if ax.row { (main, cross) } else { (cross, main) }
 }
 
 impl<'a> Layout<'a> {
@@ -257,10 +338,14 @@ impl<'a> Layout<'a> {
         // --- Ítems en orden (`order`, estable) ---
         let mut children: Vec<&'a LayoutBox> = Vec::new();
         let mut out = Vec::new();
+        // E5: hueco de cada absoluto entre los pendientes (fijo, índice), en orden de árbol; la
+        // posición estática se alinea al final, con el tamaño del contenedor (§4.1).
+        let mut abs_slots: Vec<(&'a LayoutBox, bool, usize)> = Vec::new();
         for c in &container.children {
             if c.is_absolutely_positioned() {
-                // §4.1: posición estática como si fuera el único ítem (aproximada: el inicio
-                // del content box).
+                let (abs, fixed) = self.pending_abs_marks();
+                let is_fixed = c.style.position == bf_style::properties::types::Position::Fixed;
+                abs_slots.push((c, is_fixed, if is_fixed { fixed } else { abs }));
                 self.add_abs(c, cb.x, cb.y);
                 continue;
             }
@@ -466,6 +551,7 @@ impl<'a> Layout<'a> {
                 cross: column_cross,
                 baseline: None,
                 align,
+                safe: align_is_safe(s, cs),
             });
         }
 
@@ -722,14 +808,18 @@ impl<'a> Layout<'a> {
             let n = lines.len() as f32;
             let (mut start, mut between) = (0.0, 0.0);
             if wrap {
-                match cs.align_content {
+                // E5: `start`/`end` siguen el modo de escritura: coinciden con el cross-start
+                // salvo con `wrap-reverse`.
+                match flex_content_align(cs.align_content, free) {
                     ContentAlign::Normal | ContentAlign::Stretch if free > 0.0 => {
                         let extra = free / n;
                         for l in &mut lines {
                             l.cross += extra;
                         }
                     }
-                    ContentAlign::FlexEnd | ContentAlign::End => start = free,
+                    ContentAlign::Start if wrap_reverse => start = free,
+                    ContentAlign::End if !wrap_reverse => start = free,
+                    ContentAlign::FlexEnd => start = free,
                     ContentAlign::Center => start = free / 2.0,
                     ContentAlign::SpaceBetween if n > 1.0 && free > 0.0 => {
                         between = free / (n - 1.0)
@@ -830,7 +920,8 @@ impl<'a> Layout<'a> {
             // con el main-start salvo en `row-reverse`; en columnas, el block-start salvo en
             // `column-reverse`); `left`/`right` son físicos en filas y `start` en columnas
             // (CSS Box Alignment 3 §5.1).
-            let at_end = match cs.justify_content {
+            let jc = flex_content_align(cs.justify_content, free);
+            let at_end = match jc {
                 ContentAlign::FlexEnd => Some(true),
                 ContentAlign::Start => Some(reverse),
                 ContentAlign::End => Some(!reverse),
@@ -839,7 +930,7 @@ impl<'a> Layout<'a> {
                 ContentAlign::Left | ContentAlign::Right => Some(reverse),
                 _ => None,
             };
-            match cs.justify_content {
+            match jc {
                 _ if at_end.is_some() => {
                     if at_end == Some(true) {
                         start = free;
@@ -894,7 +985,13 @@ impl<'a> Layout<'a> {
                         // `self-start`/`self-end`, el del ítem (CSS Box Alignment 3 §6.1).
                         let item_rtl = !row && it.b.style.direction == Direction::Rtl;
                         let container_rtl = !row && rtl;
-                        let at_high = match it.align {
+                        // E5: `safe` con desbordamiento alinea como `start` (§4.4).
+                        let align = if it.safe && line_free < 0.0 {
+                            ItemAlign::Start
+                        } else {
+                            it.align
+                        };
+                        let at_high = match align {
                             ItemAlign::FlexEnd => Some(!cross_flip),
                             ItemAlign::End => Some(!container_rtl),
                             ItemAlign::SelfEnd => Some(!item_rtl),
@@ -903,7 +1000,7 @@ impl<'a> Layout<'a> {
                             ItemAlign::Center | ItemAlign::Baseline => None,
                             _ => Some(cross_flip),
                         };
-                        let start_offset = match (at_high, it.align) {
+                        let start_offset = match (at_high, align) {
                             (Some(true), _) => line_free,
                             (Some(false), _) => 0.0,
                             (None, ItemAlign::Baseline) if row => {
@@ -967,6 +1064,45 @@ impl<'a> Layout<'a> {
             }
         }
         let content_h = if row { container_cross } else { main_len };
+        // E5: posición estática de los hijos absolutos (CSS Flexbox 1 §4.1): la de un único
+        // ítem en un contenedor del tamaño usado, alineado con `justify-content` en el eje
+        // principal y `align-self` en el cruzado (CSS Box Alignment 3 §5.1 y §6.1). Se mide la
+        // caja con el content box como containing block, como en grid.
+        let content_box = Rect::new(cb.x, cb.y, cb.width, content_h);
+        let axes = AbsAxes {
+            row,
+            reverse,
+            main_rev,
+            cross_flip,
+            rtl,
+        };
+        for (c, is_fixed, idx) in abs_slots {
+            let f = self.measuring(|this| {
+                let p = PendingAbs {
+                    b: c,
+                    static_x: cb.x,
+                    static_y: cb.y,
+                };
+                this.absolute(p, content_box)
+            });
+            let m = f.margin_rect();
+            let (free_x, free_y) = (content_box.width - m.width, content_box.height - m.height);
+            let free = if row {
+                (free_x, free_y)
+            } else {
+                (free_y, free_x)
+            };
+            let (fx, fy) = abs_static_fractions(c, cs, &axes, free);
+            let slot = if is_fixed {
+                self.fixed.get_mut(idx)
+            } else {
+                self.abs_frames.last_mut().and_then(|f| f.get_mut(idx))
+            };
+            if let Some(p) = slot.filter(|p| std::ptr::eq(p.b, c)) {
+                p.static_x = cb.x + fx * free_x;
+                p.static_y = cb.y + fy * free_y;
+            }
+        }
         (out, content_h)
     }
 

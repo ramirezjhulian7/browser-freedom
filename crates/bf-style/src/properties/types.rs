@@ -671,6 +671,9 @@ keyword_enum!(
         SpaceEvenly = "space-evenly",
         Stretch = "stretch",
         Baseline = "baseline",
+        // E5: `flow-start`/`flow-end` (CSS Box Alignment 3 `<content-position>`).
+        FlowStart = "flow-start",
+        FlowEnd = "flow-end",
     }
 );
 
@@ -715,6 +718,121 @@ keyword_enum!(
         FlowEnd = "flow-end",
     }
 );
+
+/// E5: `<overflow-position>` (CSS Box Alignment 3 §4.4). `Default` es la ausencia de la
+/// palabra: se comporta como `unsafe` salvo donde el layout use un `safe` implícito.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OverflowPosition {
+    #[default]
+    Default,
+    Safe,
+    Unsafe,
+}
+
+/// E5: valor de alineación con su `<overflow-position>` (`align-*`/`justify-*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Aligned<T> {
+    pub value: T,
+    pub overflow: OverflowPosition,
+}
+
+impl<T> Aligned<T> {
+    pub fn is_safe(&self) -> bool {
+        self.overflow == OverflowPosition::Safe
+    }
+}
+
+// La comparación con el valor ignora el `<overflow-position>`.
+impl PartialEq<ItemAlign> for Aligned<ItemAlign> {
+    fn eq(&self, other: &ItemAlign) -> bool {
+        self.value == *other
+    }
+}
+
+impl PartialEq<ContentAlign> for Aligned<ContentAlign> {
+    fn eq(&self, other: &ContentAlign) -> bool {
+        self.value == *other
+    }
+}
+
+impl<T> From<T> for Aligned<T> {
+    fn from(value: T) -> Self {
+        Aligned {
+            value,
+            overflow: OverflowPosition::Default,
+        }
+    }
+}
+
+/// Separa el `safe`/`unsafe` inicial de un valor de alineación.
+fn overflow_prefix(input: &[ComponentValue]) -> (OverflowPosition, Vec<&ComponentValue>) {
+    let items = components(input);
+    match items.first() {
+        Some(m) if is_ident(m, "safe") => (OverflowPosition::Safe, items[1..].to_vec()),
+        Some(m) if is_ident(m, "unsafe") => (OverflowPosition::Unsafe, items[1..].to_vec()),
+        _ => (OverflowPosition::Default, items),
+    }
+}
+
+fn overflow_css(o: OverflowPosition, v: String) -> String {
+    match o {
+        OverflowPosition::Default => v,
+        OverflowPosition::Safe => format!("safe {v}"),
+        OverflowPosition::Unsafe => format!("unsafe {v}"),
+    }
+}
+
+impl PropValue for Aligned<ItemAlign> {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let (overflow, rest) = overflow_prefix(input);
+        if overflow == OverflowPosition::Default {
+            return ItemAlign::parse(input).map(Aligned::from);
+        }
+        // `<overflow-position>? <self-position>` (y `left | right` en `justify-*`).
+        let [v] = rest.as_slice() else { return None };
+        let value = ItemAlign::from_ident(ident(v)?)?;
+        let positional = !matches!(
+            value,
+            ItemAlign::Auto
+                | ItemAlign::Normal
+                | ItemAlign::Stretch
+                | ItemAlign::Baseline
+                | ItemAlign::LastBaseline
+        );
+        positional.then_some(Aligned { value, overflow })
+    }
+    fn to_css(&self) -> String {
+        overflow_css(self.overflow, self.value.to_css())
+    }
+}
+
+impl PropValue for Aligned<ContentAlign> {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let (overflow, rest) = overflow_prefix(input);
+        if overflow == OverflowPosition::Default {
+            return ContentAlign::parse(input).map(Aligned::from);
+        }
+        // `<overflow-position>? <content-position>` (y `left | right` en `justify-content`).
+        let [v] = rest.as_slice() else { return None };
+        let value = ContentAlign::from_ident(ident(v)?)?;
+        let positional = matches!(
+            value,
+            ContentAlign::Start
+                | ContentAlign::End
+                | ContentAlign::FlexStart
+                | ContentAlign::FlexEnd
+                | ContentAlign::Center
+                | ContentAlign::Left
+                | ContentAlign::Right
+                | ContentAlign::FlowStart
+                | ContentAlign::FlowEnd
+        );
+        positional.then_some(Aligned { value, overflow })
+    }
+    fn to_css(&self) -> String {
+        overflow_css(self.overflow, self.value.to_css())
+    }
+}
 
 impl PropValue for ItemAlign {
     fn parse(input: &[ComponentValue]) -> Option<Self> {
