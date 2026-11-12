@@ -139,6 +139,9 @@ struct Loading {
     nav: Navigation,
     url: Url,
     started: Instant,
+    /// E11: vuelve a abrir una entrada ya visitada (pestaña restaurada, vuelta tras una
+    /// descarga); no cuenta otra visita en el historial global.
+    reopen: bool,
 }
 
 /// Dónde está el puntero.
@@ -1595,6 +1598,7 @@ impl App {
             nav,
             url,
             started: Instant::now(),
+            reopen: false,
         });
         self.relayout = None;
         self.update_title();
@@ -2266,7 +2270,7 @@ impl App {
         if loading.id != id {
             return;
         }
-        let (nav, started) = (loading.nav, loading.started);
+        let (nav, started, reopen) = (loading.nav, loading.started, loading.reopen);
         self.loading = None;
         self.load_time = Some(started.elapsed());
         // Una respuesta guardada como descarga (E11): si había página, se vuelve a ella.
@@ -2277,13 +2281,18 @@ impl App {
         }
         let url = loaded.url.clone();
         let title = loaded.title().unwrap_or_else(|| url.href());
-        // El historial global (E11): las navegaciones, no las recargas ni las páginas de error.
-        if !matches!(nav, Navigation::Reload)
-            && loaded.meta.error.is_none()
-            && loaded.meta.download.is_none()
-        {
+        // El historial global (E11): las navegaciones, no las recargas, las pestañas restauradas
+        // ni las páginas de error.
+        if loaded.meta.error.is_none() && loaded.meta.download.is_none() {
+            let how = if reopen {
+                crate::history::Arrival::Reopen
+            } else if matches!(nav, Navigation::Reload) {
+                crate::history::Arrival::Reload
+            } else {
+                crate::history::Arrival::Navigation
+            };
             let shown = loaded.title().unwrap_or_default();
-            crate::history::global().record(&url.href(), &shown, crate::profile::now());
+            crate::history::global().arrived(&url.href(), &shown, crate::profile::now(), how);
         }
         self.current = Some(loaded);
         self.page = Some(page);
@@ -3767,6 +3776,14 @@ impl App {
         {
             let url = e.url.clone();
             self.start_load(url, Navigation::Traverse(self.index));
+            self.mark_reopen();
+        }
+    }
+
+    /// La carga recién empezada vuelve a abrir una entrada ya visitada: no cuenta otra visita.
+    fn mark_reopen(&mut self) {
+        if let Some(l) = &mut self.loading {
+            l.reopen = true;
         }
     }
 

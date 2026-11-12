@@ -66,6 +66,20 @@ impl Visit {
     }
 }
 
+/// Cómo llegó un documento a una pestaña, para decidir si cuenta como visita
+/// ([`History::arrived`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// Una navegación nueva o atrás/adelante: el usuario fue a la página.
+    Navigation,
+    /// Una recarga de la entrada que ya se mostraba.
+    Reload,
+    /// Se vuelve a abrir una entrada ya visitada sin que el usuario navegue: la entrada actual
+    /// de una pestaña restaurada de la sesión anterior, o la página a la que se vuelve después
+    /// de desviar una navegación a descarga. Esa visita ya se contó.
+    Reopen,
+}
+
 /// ¿Se guarda una visita a `url`? Solo páginas de la web y archivos: no las internas
 /// (`about:`, `freedom:`), ni `data:`, `blob:` o `javascript:`.
 pub fn recordable(url: &str) -> bool {
@@ -209,6 +223,15 @@ impl History {
             self.save();
         }
         true
+    }
+
+    /// Un documento llegó a una pestaña: solo una [`Arrival::Navigation`] cuenta como visita
+    /// ([`Self::record`]); una recarga o una pestaña restaurada no. Devuelve si se guardó.
+    pub fn arrived(&mut self, url: &str, title: &str, at: u64, how: Arrival) -> bool {
+        match how {
+            Arrival::Navigation => self.record(url, title, at),
+            Arrival::Reload | Arrival::Reopen => false,
+        }
     }
 
     pub fn len(&self) -> usize {

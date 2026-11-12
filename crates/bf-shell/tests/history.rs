@@ -223,3 +223,32 @@ fn top_sites_rank_by_frecency_one_per_site() {
     assert_eq!(h.top_sites(2, now).len(), 2);
     assert!(History::memory().top_sites(8, now).is_empty());
 }
+
+/// Una pestaña restaurada de la sesión anterior vuelve a cargar su entrada actual sin que el
+/// usuario navegue: no es otra visita (ni en memoria ni en el archivo del perfil). Una recarga
+/// tampoco; navegar sí.
+#[test]
+fn restored_tab_is_not_another_visit() {
+    use history::Arrival;
+    let path = temp_profile("restore").join("history");
+    let url = "https://es.wikipedia.org/wiki/Canción";
+    {
+        let mut h = History::open(path.clone());
+        assert!(h.arrived(url, "Canción - Wikipedia", 1_000, Arrival::Navigation));
+    }
+    // El navegador se cierra y, al abrir, restaura la pestaña con esa página.
+    {
+        let mut h = History::open(path.clone());
+        assert!(!h.arrived(url, "Canción - Wikipedia", 2_000, Arrival::Reopen));
+        assert!(!h.arrived(url, "Canción - Wikipedia", 2_100, Arrival::Reload));
+        let v = &h.recent(1)[0];
+        assert_eq!((v.count, v.last), (1, 1_000));
+    }
+    let mut h = History::open(path.clone());
+    let v = &h.recent(1)[0];
+    assert_eq!((v.count, v.last), (1, 1_000));
+    // Volver a la página navegando sí cuenta.
+    assert!(h.arrived(url, "Canción - Wikipedia", 3_000, Arrival::Navigation));
+    let v = &h.recent(1)[0];
+    assert_eq!((v.count, v.last), (2, 3_000));
+}

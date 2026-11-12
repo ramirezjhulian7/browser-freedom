@@ -216,6 +216,7 @@ impl App {
         };
         let url = entry.url.clone();
         self.start_load(url, Navigation::Traverse(self.index));
+        self.mark_reopen();
         true
     }
 
