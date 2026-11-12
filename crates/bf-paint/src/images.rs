@@ -393,6 +393,40 @@ fn is_image_element(el: &bf_dom::Element) -> bool {
                 .is_some_and(|t| t.eq_ignore_ascii_case("image")))
 }
 
+/// E12: la imagen que muestra un `<video>` (su `poster`, HTML §4.8.9) o un `<object>`/
+/// `<embed>` cuyo recurso es una imagen (por su `type` o la extensión de la URL; HTML
+/// §4.8.6 y §4.8.7). Su contenido se pinta como el de un `<img>` (con `object-fit`).
+fn embedded_image(el: &bf_dom::Element) -> Option<&str> {
+    let image_like = |src: &str| {
+        let ty = el.attr("type").unwrap_or("").trim().to_ascii_lowercase();
+        if !ty.is_empty() {
+            return ty.starts_with("image/");
+        }
+        let path = src
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        [
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif",
+        ]
+        .iter()
+        .any(|e| path.ends_with(e))
+    };
+    let (attr, check) = if el.is_html("video") {
+        ("poster", false)
+    } else if el.is_html("object") {
+        ("data", true)
+    } else if el.is_html("embed") {
+        ("src", true)
+    } else {
+        return None;
+    };
+    el.attr(attr)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && (!check || image_like(s)))
+}
+
 fn to_pixmap(img: bf_image::Image) -> Option<Pixmap> {
     let size = IntSize::from_wh(img.width, img.height)?;
     Pixmap::from_vec(img.rgba, size)
@@ -555,6 +589,10 @@ pub fn load_images(
                     images.sizes.insert(node, ImageState::Broken);
                 }
             }
+        } else if let Some(u) = embedded_image(el).and_then(|s| Url::parse(s, Some(base)).ok()) {
+            let href = u.href();
+            images.element_url.insert(node, href.clone());
+            want(href, &mut urls);
         }
     }
     inline_svgs(doc, styles, &mut images, base, loader);
