@@ -708,6 +708,11 @@ keyword_enum!(
         Left = "left",
         Right = "right",
         LastBaseline = "last-baseline",
+        // E5: `flow-start`/`flow-end` (CSS Box Alignment 3 `<self-position>`): en flex son
+        // `flex-start`/`flex-end`, en grid lanes el inicio/fin del flujo de apilado y en el
+        // resto `start`/`end`.
+        FlowStart = "flow-start",
+        FlowEnd = "flow-end",
     }
 );
 

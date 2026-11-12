@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- CSS Flexbox 1 §5.1 con direction: rtl: en filas el main-start es la derecha (row-reverse lo devuelve a la izquierda) y el margen main-start es el derecho; justify-content: left es físico; en columnas el cross-start es la derecha y self-start sigue el direction del ítem. -->
+<style>body{margin:0} .f{display:flex;direction:rtl;width:200px;height:20px} .f>div{width:20px;height:10px}</style>
+<div class=f id=a><div style="margin-right:5px"></div><div></div></div>
+<div class=f id=b style="flex-direction:row-reverse"><div style="margin-left:5px"></div><div></div></div>
+<div class=f id=c style="justify-content:left"><div></div></div>
+<div class=f id=d style="flex-direction:column;align-items:flex-start;height:auto"><div></div><div style="align-self:self-start;direction:ltr"></div></div>
+<div class=f id=e style="justify-content:start;flex-direction:row-reverse"><div></div></div>
+<!-- expect
+Block <html> 0,0 800×100
+  Block <body> 0,0 800×100
+    Block <div#a.f> 0,0 200×20
+      Block <div> 175,0 20×10
+      Block <div> 155,0 20×10
+    Block <div#b.f> 0,20 200×20
+      Block <div> 5,20 20×10
+      Block <div> 25,20 20×10
+    Block <div#c.f> 0,40 200×20
+      Block <div> 0,40 20×10
+    Block <div#d.f> 0,60 200×20
+      Block <div> 180,60 20×10
+      Block <div> 0,70 20×10
+    Block <div#e.f> 0,80 200×20
+      Block <div> 180,80 20×10
+-->
