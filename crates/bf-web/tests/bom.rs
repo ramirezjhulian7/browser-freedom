@@ -683,7 +683,7 @@ fn performance_now_and_timing() {
         "var a = performance.now(); var b = performance.now(); \
          a >= 0 && b >= a && Math.abs(performance.timeOrigin - Date.now()) < 60000 && \
          performance.timing.navigationStart > 0 && performance.navigation.type === 0 && \
-         performance.getEntriesByType('navigation').length === 0 && \
+         performance.getEntriesByType('navigation').length === 1 && \
          performance === window.performance && performance.timing === performance.timing"
     ));
 }
@@ -1214,4 +1214,104 @@ fn dom_inserted_external_scripts_run() {
     );
     p.idle();
     assert_eq!(p.show("log.join()"), "sync,dyn:true,load,error");
+}
+
+// --- E3: User Timing y Performance Timeline ---
+
+#[test]
+fn user_timing_marks_and_measures() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var a = performance.mark('a', {startTime: 2, detail: {x: 1}}); var b = performance.mark('b', {startTime: 1});              [a instanceof PerformanceMark, a instanceof PerformanceEntry, a.entryType, a.name, a.startTime,              a.duration, a.detail.x, String(b.detail), performance.getEntriesByType('mark').map(e => e.name).join('')].join()"
+        ),
+        "true,true,mark,a,2,0,1,null,ba"
+    );
+    assert_eq!(
+        p.show(
+            "var m1 = performance.measure('m1', {start: 1, duration: 3});              var m2 = performance.measure('m2', 'b', 'a');              var m3 = performance.measure('m3', {start: 'b', end: 10, detail: 'd'});              var m4 = performance.measure('m4', 'a');              [m1 instanceof PerformanceMeasure, m1.startTime, m1.duration, m2.startTime, m2.duration, m3.duration,              m3.detail, m4.startTime, m4.duration > 0, performance.getEntriesByName('m1')[0] === m1,              performance.getEntriesByName('a', 'measure').length].join()"
+        ),
+        "true,1,3,1,1,9,d,2,true,true,0"
+    );
+    // `getEntries` en orden cronológico, con la entrada de navegación al principio.
+    assert_eq!(
+        p.show("performance.getEntries().map(e => e.entryType[0] + e.name.slice(0, 2)).join(' ')"),
+        "nht mb mm1 mm2 mm3 ma mm4"
+    );
+    assert_eq!(
+        p.show(
+            "performance.clearMarks('b'); var r = performance.getEntriesByType('mark').map(e => e.name).join('');              performance.clearMeasures(); r + ' ' + performance.getEntriesByType('measure').length"
+        ),
+        "a 0"
+    );
+    // El constructor no guarda la entrada.
+    assert_eq!(
+        p.show(
+            "var c = new PerformanceMark('c', {detail: [1, 2]});              [c.entryType, c.detail.length, performance.getEntriesByName('c').length,              JSON.stringify(c.toJSON()).includes('\"entryType\":\"mark\"')].join()"
+        ),
+        "mark,2,0,true"
+    );
+    // Errores.
+    assert_eq!(
+        p.show(
+            "[() => performance.mark('navigationStart'), () => performance.measure('x', 'nope'),              () => performance.measure('x', {start: 1, end: 2, duration: 1}),              () => performance.measure('x', {start: 1}, 'a'), () => performance.mark('x', {startTime: -1}),              () => performance.measure('x', 'loadEventEnd')]              .map(f => { try { f(); return 'ok'; } catch (e) { return e.name; } }).join()"
+        ),
+        "SyntaxError,SyntaxError,TypeError,TypeError,TypeError,InvalidAccessError"
+    );
+}
+
+#[test]
+fn performance_observer_delivers_in_a_task() {
+    let mut p = Page::new(SIMPLE);
+    p.eval(
+        "var log = [];          var po = new PerformanceObserver(function (list, obs, opts) {            log.push(list.getEntries().map(e => e.entryType + ':' + e.name).join(',') + ' ' + (obs === po) + ' ' +              (this === po) + ' ' + JSON.stringify(opts) + ' ' + (list instanceof PerformanceObserverEntryList) + ' ' +              list.getEntriesByType('mark').length + list.getEntriesByName('y').length);          });          po.observe({entryTypes: ['mark', 'measure', 'longtask']});          performance.mark('x', {startTime: 3}); performance.measure('y', {start: 0, end: 1});          log.push('sync');",
+    );
+    p.idle();
+    assert_eq!(
+        p.show("log.join('|')"),
+        "sync|measure:y,mark:x true true {} true 11"
+    );
+    // `takeRecords` vacía el buffer: el callback no corre.
+    p.eval(
+        "var calls = 0; var po2 = new PerformanceObserver(() => calls++); po2.observe({type: 'mark'});          performance.mark('z'); var taken = po2.takeRecords().map(e => e.name).join();",
+    );
+    p.idle();
+    assert_eq!(p.show("taken + ' ' + calls"), "z 0");
+    // `buffered` entrega lo ya guardado (y la navegación), con `droppedEntriesCount`.
+    p.eval(
+        "var got = []; var po3 = new PerformanceObserver((l, o, opts) =>            got.push(l.getEntries().map(e => e.entryType + ':' + (e.entryType === 'navigation' ? e.name : e.name)).join(',') +            ' ' + opts.droppedEntriesCount));          po3.observe({type: 'mark', buffered: true}); po3.observe({type: 'navigation', buffered: true});",
+    );
+    p.idle();
+    assert_eq!(
+        p.show("got.join('|')"),
+        "navigation:https://example.test/dir/page.html?q=1#top,mark:x,mark:z 0"
+    );
+    // `disconnect` corta la entrega.
+    p.eval("po.disconnect(); log = []; performance.mark('w');");
+    p.idle();
+    assert_eq!(p.show("log.length"), "0");
+}
+
+#[test]
+fn performance_observer_api_and_errors() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var t = PerformanceObserver.supportedEntryTypes;              [t.join(), Object.isFrozen(t), t === PerformanceObserver.supportedEntryTypes].join()"
+        ),
+        "mark,measure,navigation,resource,true,true"
+    );
+    assert_eq!(
+        p.show(
+            "var po = new PerformanceObserver(() => {});              [() => po.observe({}), () => po.observe({entryTypes: ['mark'], type: 'mark'}),               () => { po.observe({entryTypes: ['mark']}); po.observe({type: 'mark'}); },               () => new PerformanceObserver(1), () => PerformanceObserver(() => {}),               () => po.observe({type: 'nada'})]              .map(f => { try { f(); return 'ok'; } catch (e) { return e.name; } }).join()"
+        ),
+        "TypeError,TypeError,InvalidModificationError,TypeError,TypeError,InvalidModificationError"
+    );
+    // La entrada de navegación.
+    assert_eq!(
+        p.show(
+            "var n = performance.getEntriesByType('navigation')[0];              [n instanceof PerformanceNavigationTiming, n instanceof PerformanceResourceTiming, n.entryType,              n.startTime, n.type, n.initiatorType, typeof n.domInteractive, typeof n.toJSON().loadEventEnd].join()"
+        ),
+        "true,true,navigation,0,navigate,navigation,number,number"
+    );
 }

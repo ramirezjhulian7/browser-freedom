@@ -14,7 +14,7 @@ use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, Throw};
 
 use crate::dom::state::state;
-use crate::dom::{arg_node, classes, from_opt_dom_string, throw_dom, to_dom_string, wrap_opt};
+use crate::dom::{arg_node, classes, from_opt_dom_string, throw_dom_in, to_dom_string, wrap_opt};
 use crate::{DocIndex, WebContextHandle, with_doc_mut};
 
 /// El payload de un `MutationObserver`: su id en cada documento observado.
@@ -103,13 +103,17 @@ fn observer_id(agent: &mut Agent, this: &Value, doc: DocIndex) -> ObserverId {
 /// `observe(target, options)` (§4.3.1).
 fn observe(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_observer(agent, a)?;
-    let target = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let target = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'observe' on 'MutationObserver': parameter 1",
+    )?;
     let opts = a.arg(1);
     let get = |agent: &mut Agent, name: &str| -> JsResult<Value> {
         match &opts {
             Value::Object(o) => agent.get(*o, &PropertyKey::from(name), opts.clone()),
             Value::Undefined | Value::Null => Ok(Value::Undefined),
-            _ => agent.type_error("The provided value is not of type 'MutationObserverInit'"),
+            _ => agent.type_error("Failed to execute 'observe' on 'MutationObserver': parameter 2 is not of type                  'MutationObserverInit'."),
         }
     };
     let opt_bool = |agent: &mut Agent, v: Value| -> Option<bool> {
@@ -151,7 +155,7 @@ fn observe(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let r = with_doc_mut(agent, target.doc, |d| d.observe(id, target.node, init));
     match r {
         Ok(()) => Ok(Value::Undefined),
-        Err(e) => throw_dom(agent, e),
+        Err(e) => throw_dom_in(agent, e, "MutationObserver", "observe"),
     }
 }
 

@@ -14,6 +14,7 @@ pub mod history;
 pub mod location;
 pub mod navigator;
 pub mod performance;
+pub mod performance_observer; // E3: Performance Timeline y User Timing
 pub mod screen;
 pub mod script;
 pub mod storage;
@@ -267,6 +268,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
             idle_deadline: agent.register_host_class(performance::idle_deadline_class()),
         };
         agent.set_embedder_data(classes);
+        performance_observer::register(agent, realm); // E3
     }
     let url = ctx.get(agent).url.clone();
     if agent.realm_data::<BomState>(realm).is_none() {

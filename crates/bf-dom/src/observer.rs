@@ -146,16 +146,24 @@ impl Document {
         let character_data = character_data.unwrap_or(false);
         // 3-6.
         if !init.child_list && !attributes && !character_data {
-            return Err(DomException::TypeError);
+            return Err(DomException::TypeErrorWith(
+                "The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.",
+            ));
         }
         if init.attribute_old_value == Some(true) && !attributes {
-            return Err(DomException::TypeError);
+            return Err(DomException::TypeErrorWith(
+                "The options object may only set 'attributeOldValue' to true when 'attributes' is true or not present.",
+            ));
         }
         if init.attribute_filter.is_some() && !attributes {
-            return Err(DomException::TypeError);
+            return Err(DomException::TypeErrorWith(
+                "The options object may only set 'attributeFilter' when 'attributes' is true or not present.",
+            ));
         }
         if init.character_data_old_value == Some(true) && !character_data {
-            return Err(DomException::TypeError);
+            return Err(DomException::TypeErrorWith(
+                "The options object may only set 'characterDataOldValue' to true when 'characterData' is true or not present.",
+            ));
         }
         let options = ObserverOptions {
             child_list: init.child_list,

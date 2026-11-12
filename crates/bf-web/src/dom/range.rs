@@ -396,7 +396,11 @@ fn set_boundary(
 
 fn set_start(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'setStart' on 'Range': parameter 1",
+    )?;
     let off = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
     set_boundary(agent, &a.this, n, off, true)?;
     Ok(Value::Undefined)
@@ -404,7 +408,11 @@ fn set_start(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn set_end(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'setEnd' on 'Range': parameter 1",
+    )?;
     let off = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
     set_boundary(agent, &a.this, n, off, false)?;
     Ok(Value::Undefined)
@@ -475,7 +483,11 @@ fn select(agent: &mut Agent, this: &Value, n: NodeRef) -> JsResult<()> {
 
 fn select_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'selectNode' on 'Range': parameter 1",
+    )?;
     select(agent, &a.this, n)?;
     Ok(Value::Undefined)
 }
@@ -501,7 +513,11 @@ fn select_contents(agent: &mut Agent, this: &Value, n: NodeRef) -> JsResult<()> 
 
 fn select_node_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'selectNodeContents' on 'Range': parameter 1",
+    )?;
     select_contents(agent, &a.this, n)?;
     Ok(Value::Undefined)
 }
@@ -893,7 +909,11 @@ fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) ->
 
 fn insert_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, _) = this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'insertNode' on 'Range': parameter 1",
+    )?;
     insert_into(agent, &a.this, doc, n)?;
     Ok(Value::Undefined)
 }
@@ -901,7 +921,11 @@ fn insert_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `surroundContents(newParent)` (§5.5).
 fn surround_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, id) = this_range(agent, a)?;
-    let new_parent = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let new_parent = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'surroundContents' on 'Range': parameter 1",
+    )?;
     let r = range_bounds(agent, doc, id);
     // 1.
     let bad = with_doc(agent, doc, |d| {
@@ -1014,7 +1038,11 @@ fn compare_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn intersects_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, id) = this_range(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'intersectsNode' on 'Range': parameter 1",
+    )?;
     let r = range_bounds(agent, doc, id);
     if n.doc != doc {
         return Ok(Value::Boolean(false));
@@ -1417,7 +1445,12 @@ fn sel_arg_point(
 
 fn sel_collapse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    let Some(n) = arg_opt_node(agent, &a.arg(0), "parameter 1")? else {
+    let Some(n) = arg_opt_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'collapse' on 'Selection': parameter 1",
+    )?
+    else {
         set_sel(agent, doc, None, Direction::None);
         return Ok(Value::Undefined);
     };
@@ -1451,7 +1484,11 @@ fn collapse_to_end(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `extend(node, offset)` (Selection API §2).
 fn extend(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'extend' on 'Selection': parameter 1",
+    )?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
     let Some((_, _, b)) = sel_range(agent, doc) else {
         return throw_dom(agent, DomException::InvalidStateError);
@@ -1504,9 +1541,17 @@ fn extend(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn set_base_and_extent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    let an = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let an = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'setBaseAndExtent' on 'Selection': parameter 1",
+    )?;
     let ao = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
-    let fnode = arg_node(agent, &a.arg(2), "parameter 3")?;
+    let fnode = arg_node(
+        agent,
+        &a.arg(2),
+        "Failed to execute 'setBaseAndExtent' on 'Selection': parameter 3",
+    )?;
     let fo = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(3))?;
     let anchor = sel_arg_point(agent, doc, an, ao)?;
     let focus = sel_arg_point(agent, doc, fnode, fo)?;
@@ -1537,7 +1582,11 @@ fn set_base_and_extent(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn select_all_children(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'selectAllChildren' on 'Selection': parameter 1",
+    )?;
     let len = with_doc(agent, n.doc, |d| d.child_nodes(n.node).len() as u32);
     let Some(start) = sel_arg_point(agent, doc, n, 0)? else {
         return Ok(Value::Undefined);
@@ -1564,7 +1613,11 @@ fn delete_from_document(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
 
 fn contains_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'containsNode' on 'Selection': parameter 1",
+    )?;
     let partial = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let Some((_, rdoc, b)) = sel_range(agent, doc) else {
         return Ok(Value::Boolean(false));

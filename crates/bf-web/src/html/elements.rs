@@ -371,6 +371,7 @@ pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> 
         Ok(()) => {
             mutated(agent);
             crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), false);
+            super::legacy_factories::img_attribute_changed(agent, n, name.as_lossy_str()); // E3
             Ok(())
         }
         Err(e) => throw_dom(agent, e),

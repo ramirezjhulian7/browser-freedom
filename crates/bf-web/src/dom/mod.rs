@@ -330,7 +330,7 @@ pub fn this_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
 pub fn arg_node(agent: &mut Agent, v: &Value, what: &str) -> JsResult<NodeRef> {
     match unwrap_node(agent, v) {
         Some(n) => Ok(n),
-        None => agent.type_error(&format!("{what} is not of type 'Node'")),
+        None => agent.type_error(&format!("{what} is not of type 'Node'.")),
     }
 }
 
@@ -369,6 +369,16 @@ pub fn from_opt_dom_string(s: Option<&DomString>) -> Value {
 /// Lanza un error del DOM (`DOMException`, o `TypeError` si es ese).
 pub fn throw_dom<T>(agent: &mut Agent, e: DomException) -> JsResult<T> {
     exception::throw(agent, e)
+}
+
+/// Como [`throw_dom`]; un `TypeError` dice la interfaz y el método que fallaron.
+pub fn throw_dom_in<T>(
+    agent: &mut Agent,
+    e: DomException,
+    interface: &str,
+    method: &str,
+) -> JsResult<T> {
+    exception::throw_in(agent, e, interface, method)
 }
 
 /// Registra una mutación hecha desde JavaScript (re-render) y agenda la entrega de los

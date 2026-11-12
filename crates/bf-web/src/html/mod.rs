@@ -5,6 +5,7 @@ pub mod activation;
 pub mod canvas;
 pub mod elements;
 pub mod forms;
+pub mod legacy_factories;
 pub mod misc;
 pub mod reflect;
 pub mod scripting;
@@ -22,4 +23,5 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     canvas::register(agent);
     submission::register(agent);
     elements::register(agent, realm, ctx);
+    legacy_factories::register(agent, realm); // E3: `Image`, `Audio`, `Option`
 }
