@@ -1026,50 +1026,10 @@ fn srcdoc_frame_has_its_own_window_and_document() {
     assert_eq!(p.show("loads"), "1");
 }
 
-/// E4: adoptar o insertar un nodo de otra ventana (DOM §4.5 "adopt" entre browsing contexts)
-/// lanza `NotSupportedError` sin tocar ninguno de los dos documentos (antes: pánico en
-/// `adopt_into`, `CustomElementRegistry-constructor-and-callbacks-are-held-strongly.html`).
-#[test]
-fn nodes_from_another_window_cannot_be_adopted() {
-    let mut p = framed(
-        "<div id=d>hola</div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
-        &[],
-    );
-    let try_ = |what: &str| {
-        format!(
-            "(function () {{ var fd = document.getElementById('f').contentDocument; \
-             try {{ {what}; return 'sin error'; }} catch (e) {{ return e.name; }} }})()"
-        )
-    };
-    assert_eq!(
-        p.show(&try_("fd.adoptNode(document.getElementById('d'))")),
-        "NotSupportedError"
-    );
-    assert_eq!(
-        p.show(&try_("fd.body.appendChild(document.createElement('b'))")),
-        "NotSupportedError"
-    );
-    assert_eq!(
-        p.show(&try_(
-            "document.body.appendChild(fd.getElementById('dentro'))"
-        )),
-        "NotSupportedError"
-    );
-    // Los dos documentos quedan como estaban; dentro de cada ventana, todo sigue igual.
-    assert!(p.truthy(
-        "var fd = document.getElementById('f').contentDocument; \
-         document.getElementById('d').textContent === 'hola' && \
-         fd.getElementById('dentro').textContent === 'x' && \
-         fd.body.childNodes.length === 1 && \
-         fd.body.appendChild(fd.createElement('i')).parentNode === fd.body && \
-         fd.adoptNode(fd.createElement('u')).ownerDocument === fd"
-    ));
-}
-
 /// E4: una operación de la interfaz de un `<iframe>` aplicada a un objeto de la ventana corre
 /// en el realm del objeto (WebIDL §3.9, DOM §4.4 "create a node"); antes leía el `NodeRef` en
-/// el documento del marco (pánico de índice en `node-creation-realm.html`). Un nodo de otra
-/// ventana pasado a `append` lanza `NotSupportedError`.
+/// el documento del marco (pánico de índice en `node-creation-realm.html`). Pasar un nodo de
+/// otra ventana a `append` lo adopta: ver `nodes_move_between_windows` (E1).
 #[test]
 fn interface_operations_run_in_the_realm_of_this() {
     let mut p = framed(
@@ -1084,14 +1044,6 @@ fn interface_operations_run_in_the_realm_of_this() {
         "t instanceof Text && !(t instanceof inner.Text) && t.ownerDocument === document &&",
         "c instanceof HTMLDivElement && c.id === 'd' && e.parentNode === document.body",
     )));
-    assert_eq!(
-        p.show(concat!(
-            "(function () { var fd = document.getElementById('f').contentDocument;",
-            "try { document.body.append(fd.getElementById('dentro')); return 'sin error'; }",
-            "catch (e) { return e.name; } })()",
-        )),
-        "NotSupportedError"
-    );
 }
 
 // E1: los atributos `on…` de un `<iframe>` (HTML §8.1.8.1) corren con el `load` del marco

@@ -12,7 +12,7 @@ use crate::dom::adopt::adopt_into;
 use crate::dom::collections::{HtmlCollectionData, static_node_list};
 use crate::dom::insertion::{inserted, roots_of};
 use crate::dom::{mutated, this_node, throw_dom, to_dom_string, unwrap_node, wrap_opt};
-use crate::{DocIndex, NodeRef, with_doc, with_doc_mut};
+use crate::{DocIndex, with_doc, with_doc_mut};
 
 /// `getElementById` (NonElementParentNode, para `DocumentFragment`; `Document` usa el suyo).
 pub fn non_element_parent_node(c: HostClass) -> HostClass {
@@ -126,10 +126,6 @@ pub fn nodes_arg(
 ) -> JsResult<Vec<NodeOrString>> {
     let mut out = Vec::with_capacity(a.args.len());
     for v in a.args {
-        // E4: un nodo de otra ventana no se puede adoptar entre `WebContext` (ver `arg_node`).
-        if agent.host_unwrap::<NodeRef>(v).is_some() && unwrap_node(agent, v).is_none() {
-            return throw_dom(agent, DomException::NotSupportedError);
-        }
         match unwrap_node(agent, v) {
             Some(n) => {
                 let is_document = with_doc(agent, n.doc, |d| {
