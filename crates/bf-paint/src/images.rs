@@ -683,10 +683,19 @@ pub fn load_images(
         .collect();
     for (node, href) in element_urls {
         let state = match (images.svgs.get(&href), images.by_url.get(&href)) {
-            (Some(svg), _) => {
-                let (width, height) = svg.default_size();
-                ImageState::Loaded(Size { width, height })
-            }
+            // Sin ancho ni alto naturales (solo `viewBox`), el layout recibe solo la proporción
+            // (CSS Images 3 §5.3.1; SVG 2 §8.2): el tamaño lo decide el contexto, no 300×150.
+            (Some(svg), _) => match svg.intrinsic() {
+                bf_svg::Intrinsic {
+                    width: None,
+                    height: None,
+                    ratio: Some(r),
+                } if r > 0.0 && r.is_finite() => ImageState::Ratio(r),
+                _ => {
+                    let (width, height) = svg.default_size();
+                    ImageState::Loaded(Size { width, height })
+                }
+            },
             (None, Some(p)) => ImageState::Loaded(Size {
                 width: p.width() as f32,
                 height: p.height() as f32,

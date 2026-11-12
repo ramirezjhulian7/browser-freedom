@@ -1565,7 +1565,18 @@ pub fn render_scrolled(
                     .pre_concat(Transform::from_row(*a, *b, *c, *d, *e, *f));
                 canvas.transforms.push(ts);
             }
-            DisplayItem::PopTransform | DisplayItem::PopFixed => {
+            DisplayItem::PushSticky {
+                constraints,
+                applied,
+                viewport,
+            } => {
+                // E4: el desplazamiento `sticky` con el scroll de este cuadro.
+                let view = Rect::new(scroll.0, scroll.1, viewport.width, viewport.height);
+                let (dx, dy) = constraints.offset(view);
+                let ts = canvas.ts().pre_translate(dx - applied.0, dy - applied.1);
+                canvas.transforms.push(ts);
+            }
+            DisplayItem::PopTransform | DisplayItem::PopFixed | DisplayItem::PopSticky => {
                 if canvas.transforms.len() > 1 {
                     canvas.transforms.pop();
                 }

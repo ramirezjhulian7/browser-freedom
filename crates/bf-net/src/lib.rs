@@ -1533,28 +1533,86 @@ impl Fetcher {
     }
 }
 
-/// Dónde guarda Freedom sus datos (HSTS, cookies): `%LOCALAPPDATA%\Freedom` en Windows,
-/// `~/Library/Application Support/Freedom` en macOS y `$XDG_DATA_HOME/freedom` (o
-/// `~/.local/share/freedom`) en el resto. Es la carpeta del perfil de `bf-shell`
-/// (`profile::dir`): si cambia una, cambia la otra.
+/// Dónde guarda Freedom sus datos (HSTS, cookies): la carpeta del perfil. `FREEDOM_PROFILE`
+/// la cambia, como en `bf-shell` (`profile::dir`), para que historial, cookies y HSTS vayan
+/// juntos; si no, `%LOCALAPPDATA%\Freedom` en Windows, `~/Library/Application Support/Freedom`
+/// en macOS y `$XDG_DATA_HOME/freedom` (o `~/.local/share/freedom`) en el resto. Si cambia
+/// una, cambia la otra.
 pub fn data_dir() -> Option<std::path::PathBuf> {
+    data_dir_with(|name| std::env::var_os(name), cfg!(target_os = "macos"))
+}
+
+/// [`data_dir`] con las variables de entorno de `var` y la plataforma `mac` (para los tests).
+fn data_dir_with(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    mac: bool,
+) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
-    if cfg!(target_os = "macos") {
-        return std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library/Application Support/Freedom"));
+    let var = |name: &str| var(name).filter(|v| !v.is_empty());
+    if let Some(profile) = var("FREEDOM_PROFILE") {
+        return Some(PathBuf::from(profile));
     }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+    if mac {
+        return var("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/Freedom"));
+    }
+    if let Some(local) = var("LOCALAPPDATA") {
         return Some(PathBuf::from(local).join("Freedom"));
     }
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+    if let Some(xdg) = var("XDG_DATA_HOME") {
         return Some(PathBuf::from(xdg).join("freedom"));
     }
-    std::env::var_os("HOME").map(|h| {
+    var("HOME").map(|h| {
         PathBuf::from(h)
             .join(".local")
             .join("share")
             .join("freedom")
     })
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn with(vars: &[(&str, &str)], mac: bool) -> Option<PathBuf> {
+        super::data_dir_with(
+            |name| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(v))
+            },
+            mac,
+        )
+    }
+
+    #[test]
+    fn profile_variable_wins() {
+        let vars = [
+            ("FREEDOM_PROFILE", "/tmp/perfil"),
+            ("HOME", "/Users/u"),
+            ("LOCALAPPDATA", "C:\\L"),
+        ];
+        for mac in [false, true] {
+            assert_eq!(with(&vars, mac), Some(PathBuf::from("/tmp/perfil")));
+        }
+        // Vacía no cuenta.
+        let vars = [("FREEDOM_PROFILE", ""), ("HOME", "/Users/u")];
+        assert_eq!(
+            with(&vars, true),
+            Some(PathBuf::from(
+                "/Users/u/Library/Application Support/Freedom"
+            ))
+        );
+        assert_eq!(
+            with(&vars, false),
+            Some(PathBuf::from("/Users/u/.local/share/freedom"))
+        );
+        assert_eq!(
+            with(&[("XDG_DATA_HOME", "/x")], false),
+            Some(PathBuf::from("/x/freedom"))
+        );
+        assert_eq!(with(&[], true), None);
+    }
 }
 
 /// `ResourceLoader` con red: `http(s)` por el [`Fetcher`], `data:` y `file:` locales.

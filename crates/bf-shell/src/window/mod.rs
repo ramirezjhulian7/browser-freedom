@@ -25,6 +25,7 @@ mod events;
 mod findbar;
 mod hit;
 mod icons;
+pub(crate) mod keys;
 mod menu;
 mod overlay;
 mod select;
@@ -326,6 +327,11 @@ fn url_from_input(input: &str) -> Option<Url> {
     }
     let query = bf_url::form::serialize(&[("q".to_owned(), s.to_owned())]);
     Url::parse(&format!("https://www.google.com/search?{query}"), None).ok()
+}
+
+/// El texto de una entrada de menú con su atajo: `Copiar (Ctrl+C)`, `Copiar (⌘C)` en macOS.
+fn shortcut_item(text: &str, spec: &str) -> String {
+    format!("{text} ({})", keys::label(spec, keys::MAC))
 }
 
 /// ¿`a` y `b` son el mismo documento salvo el fragmento?
@@ -1036,9 +1042,9 @@ impl App {
         let (Some(f), Some(current)) = (self.focus.clone(), self.current.clone()) else {
             return false;
         };
-        let ctrl = self.modifiers.control_key();
+        let edit = keys::edit_command(key, self.modifiers, keys::MAC);
+        let command = keys::primary(self.modifiers, keys::MAC) || self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
-        let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
         let mut value: Vec<char> = edit::value(&current.doc, f.node, f.kind).chars().collect();
         let len = value.len();
         let mut caret = f.caret.min(len);
@@ -1127,17 +1133,17 @@ impl App {
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
                 return kind == Editable::TextArea;
             }
-            Key::Character(c) if ctrl && is(c, "a") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::SelectAll) => {
                 anchor = Some(0);
                 caret = len;
             }
-            Key::Character(c) if ctrl && is(c, "c") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Copy) => {
                 if let Some((a, b)) = sel {
                     set_clipboard(&value[a..b].iter().collect::<String>());
                 }
                 return true;
             }
-            Key::Character(c) if ctrl && is(c, "x") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Cut) => {
                 if let Some((a, b)) = sel {
                     set_clipboard(&value[a..b].iter().collect::<String>());
                     delete_sel(&mut value, &mut caret);
@@ -1145,13 +1151,13 @@ impl App {
                     changed = true;
                 }
             }
-            Key::Character(c) if ctrl && is(c, "v") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Paste) => {
                 if let Some(t) = clipboard_text() {
                     insert(&mut value, &mut caret, &t, &mut changed);
                     anchor = None;
                 }
             }
-            Key::Character(_) if ctrl => return false,
+            Key::Character(_) if command => return false,
             Key::Named(NamedKey::Space) => {
                 insert(&mut value, &mut caret, " ", &mut changed);
                 anchor = None;
@@ -1234,7 +1240,10 @@ impl App {
         if field.is_none()
             && let Some(text) = self.selected_text()
         {
-            items.push(MenuItem::new("Copiar (Ctrl+C)", MenuAction::CopyText(text)));
+            items.push(MenuItem::new(
+                shortcut_item("Copiar", "Mod+C"),
+                MenuAction::CopyText(text),
+            ));
             items.push(MenuItem::separator());
         }
         if let Some(l) = &link {
@@ -1285,12 +1294,19 @@ impl App {
                 });
             }
             let has_sel = self.focus.as_ref().is_some_and(|f| f.selection().is_some());
-            items.push(MenuItem::new("Cortar (Ctrl+X)", MenuAction::Cut).disabled(!has_sel));
-            items.push(MenuItem::new("Copiar (Ctrl+C)", MenuAction::Copy).disabled(!has_sel));
+            items.push(
+                MenuItem::new(shortcut_item("Cortar", "Mod+X"), MenuAction::Cut).disabled(!has_sel),
+            );
+            items.push(
+                MenuItem::new(shortcut_item("Copiar", "Mod+C"), MenuAction::Copy)
+                    .disabled(!has_sel),
+            );
             let paste = clipboard_text().is_some_and(|t| !t.is_empty());
-            items.push(MenuItem::new("Pegar (Ctrl+V)", MenuAction::Paste).disabled(!paste));
+            items.push(
+                MenuItem::new(shortcut_item("Pegar", "Mod+V"), MenuAction::Paste).disabled(!paste),
+            );
             items.push(MenuItem::new(
-                "Seleccionar todo (Ctrl+A)",
+                shortcut_item("Seleccionar todo", "Mod+A"),
                 MenuAction::SelectAll,
             ));
             items.push(MenuItem::separator());
@@ -1301,7 +1317,10 @@ impl App {
             MenuItem::new("Adelante (Alt+→)", MenuAction::Forward)
                 .disabled(!self.chrome.can_forward),
         );
-        items.push(MenuItem::new("Recargar (Ctrl+R)", MenuAction::Reload));
+        items.push(MenuItem::new(
+            shortcut_item("Recargar", "Mod+R"),
+            MenuAction::Reload,
+        ));
         items.push(MenuItem::separator());
         let page_url = self.current.as_ref().map(|c| c.url.href());
         let no_page = page_url.is_none();
@@ -1328,7 +1347,7 @@ impl App {
     /// Ejecuta un atajo de edición (`x`, `c`, `v`, `a`) sobre el campo enfocado.
     fn edit_shortcut(&mut self, letter: &str) {
         let saved = self.modifiers;
-        self.modifiers = ModifiersState::CONTROL;
+        self.modifiers = keys::primary_state(keys::MAC);
         self.edit_key(&Key::Character(SmolStr::new(letter)), None);
         self.modifiers = saved;
     }
@@ -1540,7 +1559,11 @@ impl App {
             return;
         };
         let title = c.title().unwrap_or_else(|| short_name(&c.url));
-        let message = crate::bookmarks::toggle_page(&c.url.href(), &title);
+        let message = crate::bookmarks::toggle_page(
+            &c.url.href(),
+            &title,
+            &crate::internal::shortcut("Mod+D"),
+        );
         self.set_notice(message);
     }
 
@@ -3386,7 +3409,8 @@ impl App {
     /// Teclas con el foco en el campo de URL. Devuelve si la tecla se consumió.
     fn field_key(&mut self, key: &Key, text: Option<&str>) -> bool {
         let shift = self.modifiers.shift_key();
-        let ctrl = self.modifiers.control_key();
+        let edit = keys::edit_command(key, self.modifiers, keys::MAC);
+        let command = keys::blocks_text(self.modifiers, keys::MAC);
         let before = self.chrome.field.text.clone();
         // Las sugerencias del historial (E11): las flechas recorren la lista; Esc la cierra
         // antes de soltar el campo.
@@ -3426,25 +3450,25 @@ impl App {
             Key::Named(NamedKey::ArrowRight) => field.right(shift),
             Key::Named(NamedKey::Home) => field.home(shift),
             Key::Named(NamedKey::End) => field.end(shift),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => field.select_all(),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::SelectAll) => field.select_all(),
+            Key::Character(_) if edit == Some(keys::EditCommand::Copy) => {
                 if let Some(t) = field.selected_text() {
                     set_clipboard(&t);
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Cut) => {
                 if let Some(t) = field.selected_text() {
                     set_clipboard(&t);
                     field.insert("");
                 }
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
+            Key::Character(_) if edit == Some(keys::EditCommand::Paste) => {
                 if let Some(t) = clipboard_text() {
                     field.paste(&t);
                 }
             }
             Key::Named(NamedKey::Space) => field.insert(" "),
-            _ if ctrl || self.modifiers.alt_key() => return false,
+            _ if command => return false,
             _ => match text {
                 Some(t) if !t.chars().any(char::is_control) => field.insert(t),
                 _ => return false,
@@ -3504,78 +3528,64 @@ impl App {
     /// E4: un `keydown` cancelado por el documento: solo los atajos del navegador (que no son
     /// acciones por defecto del documento) siguen funcionando.
     fn key_press_prevented(&mut self, key: &Key) {
-        let ctrl = self.modifiers.control_key();
-        let browser_shortcut = match key {
-            Key::Character(c) => {
-                ctrl && ["t", "w", "l", "i", "r", "h"]
-                    .iter()
-                    .any(|k| c.eq_ignore_ascii_case(k))
-            }
-            Key::Named(n) => matches!(n, NamedKey::F5 | NamedKey::F6 | NamedKey::F12),
-            _ => false,
-        };
-        if browser_shortcut {
+        if keys::shortcut(key, self.modifiers, keys::MAC)
+            .is_some_and(keys::Action::survives_prevent_default)
+        {
             self.key_press(key, None);
+        }
+    }
+
+    /// Ejecuta un atajo del navegador.
+    fn run_shortcut(&mut self, action: keys::Action) {
+        use keys::Action as A;
+        match action {
+            A::NewTab => self.new_tab(None, false),
+            A::NewWindow => self.new_window(None),
+            A::CloseTab => self.close_tab(self.active),
+            A::NextTab => self.cycle_tab(1),
+            A::PrevTab => self.cycle_tab(-1),
+            A::Tab(d) => {
+                let last = self.tabs.len() - 1;
+                let d = usize::from(d);
+                self.activate_tab(if d == 9 { last } else { (d - 1).min(last) });
+            }
+            A::FocusBar => self.focus_bar(),
+            A::Panel => self.toggle_panel(),
+            A::Overlay => self.toggle_overlay(),
+            A::Reload => self.reload(),
+            A::DumpLayout => self.dump(true),
+            A::Bookmark => self.toggle_bookmark(),
+            A::Find => self.open_find(),
+            A::SavePng => self.save_png(),
+            A::History => self.open_internal("freedom://history"),
+            A::Downloads => self.open_internal("freedom://downloads"),
+            A::Bookmarks => self.open_internal("freedom://bookmarks"),
+            A::Home => self.home(),
+            A::Back => self.back(),
+            A::Forward => self.forward(),
+            A::ZoomIn => self.zoom_step(true),
+            A::ZoomOut => self.zoom_step(false),
+            A::ZoomReset => self.set_zoom(1.0),
         }
     }
 
     /// Una tecla pulsada (`text`: lo que escribe, si escribe algo).
     fn key_press(&mut self, key: &Key, text: Option<&str>) {
-        let ctrl = self.modifiers.control_key();
-        let alt = self.modifiers.alt_key();
+        let command = keys::blocks_text(self.modifiers, keys::MAC);
         let shift = self.modifiers.shift_key();
-        let is = |c: &str, k: &str| c.eq_ignore_ascii_case(k);
         if self.menu.take().is_some() {
             self.redraw_later();
             if matches!(key, Key::Named(NamedKey::Escape)) {
                 return;
             }
         }
-        // Atajos globales.
+        // Atajos globales (la tabla, por plataforma, está en `keys`).
+        if let Some(action) = keys::shortcut(key, self.modifiers, keys::MAC) {
+            return self.run_shortcut(action);
+        }
         match key {
-            Key::Character(c) if ctrl && is(c, "t") => return self.new_tab(None, false),
-            Key::Character(c) if ctrl && !shift && is(c, "n") => return self.new_window(None),
-            Key::Character(c) if ctrl && is(c, "w") => return self.close_tab(self.active),
-            Key::Named(NamedKey::Tab) if ctrl && shift => return self.cycle_tab(-1),
-            Key::Named(NamedKey::Tab) if ctrl => return self.cycle_tab(1),
-            Key::Named(NamedKey::PageDown) if ctrl => return self.cycle_tab(1),
-            Key::Named(NamedKey::PageUp) if ctrl => return self.cycle_tab(-1),
-            Key::Character(c)
-                if ctrl && c.len() == 1 && c.as_bytes()[0].is_ascii_digit() && c != "0" =>
-            {
-                let d = usize::from(c.as_bytes()[0] - b'0');
-                let last = self.tabs.len() - 1;
-                return self.activate_tab(if d == 9 { last } else { (d - 1).min(last) });
-            }
-            Key::Character(c) if ctrl && is(c, "l") => return self.focus_bar(),
-            Key::Named(NamedKey::F6) => return self.focus_bar(),
-            Key::Character(c) if ctrl && is(c, "i") => return self.toggle_panel(),
-            Key::Named(NamedKey::F12) => return self.toggle_overlay(),
-            Key::Character(c) if ctrl && is(c, "r") => return self.reload(),
-            Key::Named(NamedKey::F5) => return self.reload(),
-            Key::Character(c) if ctrl && shift && is(c, "d") => return self.dump(true),
-            Key::Character(c) if ctrl && is(c, "d") => return self.toggle_bookmark(),
-            Key::Character(c) if ctrl && is(c, "f") => return self.open_find(),
             Key::Named(NamedKey::F3) if self.find.is_none() => return self.open_find(),
-            Key::Character(c) if ctrl && is(c, "s") => return self.save_png(),
-            Key::Character(c) if ctrl && is(c, "h") => {
-                return self.open_internal("freedom://history");
-            }
-            Key::Character(c) if ctrl && is(c, "j") => {
-                return self.open_internal("freedom://downloads");
-            }
-            Key::Character(c) if ctrl && shift && is(c, "b") => {
-                return self.open_internal("freedom://bookmarks");
-            }
-            Key::Named(NamedKey::Home) if alt => return self.home(),
             Key::Named(NamedKey::Escape) if self.loading.is_some() => return self.stop(),
-            Key::Named(NamedKey::ArrowLeft) if alt => return self.back(),
-            Key::Named(NamedKey::ArrowRight) if alt => return self.forward(),
-            Key::Named(NamedKey::BrowserBack) => return self.back(),
-            Key::Named(NamedKey::BrowserForward) => return self.forward(),
-            Key::Character(c) if ctrl && (c == "+" || c == "=") => return self.zoom_step(true),
-            Key::Character(c) if ctrl && c == "-" => return self.zoom_step(false),
-            Key::Character(c) if ctrl && c == "0" => return self.set_zoom(1.0),
             _ => {}
         }
         if self.chrome.field.focused && self.field_key(key, text) {
@@ -3588,20 +3598,21 @@ impl App {
             return;
         }
         // Selección de texto de la página.
-        if ctrl && let Key::Character(c) = key {
-            if is(c, "c")
-                && let Some(t) = self.selected_text()
-            {
-                set_clipboard(&t);
-                return;
+        match keys::edit_command(key, self.modifiers, keys::MAC) {
+            Some(keys::EditCommand::Copy) => {
+                if let Some(t) = self.selected_text() {
+                    set_clipboard(&t);
+                    return;
+                }
             }
-            if is(c, "a")
-                && let Some(all) = self.text_index().and_then(|i| i.all())
-            {
-                self.selection = Some(all);
-                self.redraw_later();
-                return;
+            Some(keys::EditCommand::SelectAll) => {
+                if let Some(all) = self.text_index().and_then(|i| i.all()) {
+                    self.selection = Some(all);
+                    self.redraw_later();
+                    return;
+                }
             }
+            _ => {}
         }
         // En `about:home`, escribir va al campo de URL.
         let on_home = self
@@ -3609,8 +3620,7 @@ impl App {
             .as_ref()
             .is_some_and(|l| l.url.href() == "about:home");
         if on_home
-            && !ctrl
-            && !alt
+            && !command
             && let Some(t) =
                 text.filter(|t| !t.chars().any(char::is_control) && !t.trim().is_empty())
         {
@@ -3967,8 +3977,10 @@ impl App {
                 ..
             } => self.release(),
             WindowEvent::MouseWheel { delta, .. } => {
-                // `Ctrl+Shift` + rueda: zoom de texto (E11); `Ctrl` + rueda: zoom de página.
-                if self.modifiers.control_key() && self.modifiers.shift_key() {
+                // Modificador primario (`Ctrl`, `Cmd` en macOS) + `Mayús` + rueda: zoom de texto
+                // (E11); sin `Mayús`: zoom de página.
+                let primary = keys::primary(self.modifiers, keys::MAC);
+                if primary && self.modifiers.shift_key() {
                     let up = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y > 0.0,
                         MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
@@ -3976,7 +3988,7 @@ impl App {
                     self.text_zoom_step(up);
                     return;
                 }
-                if self.modifiers.control_key() {
+                if primary {
                     let up = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y > 0.0,
                         MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
@@ -4266,6 +4278,9 @@ impl App {
                 while let Some((m, rest)) = name.split_once('+').filter(|(_, r)| !r.is_empty()) {
                     modifiers |= match m {
                         "ctrl" => ModifiersState::CONTROL,
+                        "cmd" => ModifiersState::SUPER,
+                        // El primario de la plataforma: `Ctrl`, o `Cmd` en macOS.
+                        "mod" => keys::primary_state(keys::MAC),
                         "alt" => ModifiersState::ALT,
                         "shift" => ModifiersState::SHIFT,
                         _ => return Err(bad()),
@@ -4315,7 +4330,7 @@ impl App {
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
 /// `link:texto` (clic en el enlace con ese texto), `type:texto`,
-/// `key:[ctrl+|alt+|shift+]tecla`, `resize:W,H` y `wait`.
+/// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto), `resize:W,H` y `wait`.
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     // Sin `FREEDOM_PROFILE`, una sesión de prueba no toca el historial ni los marcadores.

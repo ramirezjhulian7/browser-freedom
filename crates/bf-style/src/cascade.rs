@@ -19,7 +19,9 @@ use bf_dom::{Document, NodeData, NodeId, QuirksMode};
 
 use crate::hints::presentational_hints;
 use crate::properties::shorthands::{ShorthandDef, shorthand_by_name};
-use crate::properties::types::{Content, Direction, Display, Float, Position, TextAlign};
+use crate::properties::types::{
+    Content, Direction, Display, Float, Position, TextAlign, WritingMode,
+};
 use crate::properties::{
     ComputeContext, ComputedStyle, CssWide, CustomProperties, LonghandId, PROPERTIES, Value,
     initial_values, longhand_by_name,
@@ -173,99 +175,179 @@ struct Entry {
     /// Capa sin invertir (para `revert-layer`).
     layer: usize,
     value: DeclValue,
-    /// E5: viene de una propiedad lógica del eje inline (`margin-inline-*`, ...), registrada
-    /// con su lado físico en `ltr`.
+    /// E5/E9: viene de una propiedad lógica (`margin-inline-*`, `inset-block-*`,
+    /// `inline-size`, ...), registrada con su longhand físico en `horizontal-tb` y `ltr`.
     logical: bool,
-    /// E5: la entrada se movió al lado físico opuesto (`direction: rtl`); un `Pending` toma
-    /// el valor del longhand opuesto de la expansión.
-    swapped: bool,
+    /// E5/E9: longhand bajo el que se registró la entrada si [`remap_logical`] la movió a
+    /// otro; un `Pending` toma el valor de ese longhand de la expansión.
+    from: Option<LonghandId>,
 }
 
-/// E5: CSS Logical 1 §4 con `writing-mode: horizontal-tb`: las propiedades lógicas del eje
-/// inline (`margin-inline-*`, `padding-inline-*`, `inset-inline-*`, `border-inline-*`) se
-/// registran con el lado físico de `direction: ltr` y se mueven al opuesto si el elemento es
-/// `rtl`.
-fn is_logical_inline(name: &str) -> bool {
-    [
+/// E5/E9: CSS Logical 1 §4: las propiedades lógicas se registran con el lado físico de
+/// `writing-mode: horizontal-tb` y `direction: ltr` y se mueven al que les corresponde según el
+/// modo de escritura y la dirección del elemento ([`remap_logical`]).
+fn is_logical(name: &str) -> bool {
+    let prefixed = [
         "margin-inline",
         "padding-inline",
         "inset-inline",
         "border-inline",
+        "margin-block",
+        "padding-block",
+        "inset-block",
+        "border-block",
     ]
     .iter()
     .any(|p| {
         name.get(..p.len())
             .is_some_and(|h| h.eq_ignore_ascii_case(p))
-    })
-}
-
-/// Longhands físicos izquierda/derecha que comparten una propiedad lógica del eje inline.
-const INLINE_PAIRS: [(LonghandId, LonghandId); 6] = [
-    (LonghandId::MarginLeft, LonghandId::MarginRight),
-    (LonghandId::PaddingLeft, LonghandId::PaddingRight),
-    (LonghandId::Left, LonghandId::Right),
-    (LonghandId::BorderLeftWidth, LonghandId::BorderRightWidth),
-    (LonghandId::BorderLeftStyle, LonghandId::BorderRightStyle),
-    (LonghandId::BorderLeftColor, LonghandId::BorderRightColor),
-];
-
-fn inline_counterpart(id: LonghandId) -> LonghandId {
-    INLINE_PAIRS
+    });
+    prefixed
+        || [
+            "inline-size",
+            "block-size",
+            "min-inline-size",
+            "min-block-size",
+            "max-inline-size",
+            "max-block-size",
+        ]
         .iter()
-        .find_map(|&(a, b)| {
-            if a == id {
-                Some(b)
-            } else if b == id {
-                Some(a)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(id)
+        .any(|p| name.eq_ignore_ascii_case(p))
 }
 
-/// El mismo valor para el longhand físico opuesto.
-fn swap_inline_value(v: Value) -> Value {
-    match v {
-        Value::MarginLeft(x) => Value::MarginRight(x),
-        Value::MarginRight(x) => Value::MarginLeft(x),
-        Value::PaddingLeft(x) => Value::PaddingRight(x),
-        Value::PaddingRight(x) => Value::PaddingLeft(x),
-        Value::Left(x) => Value::Right(x),
-        Value::Right(x) => Value::Left(x),
-        Value::BorderLeftWidth(x) => Value::BorderRightWidth(x),
-        Value::BorderRightWidth(x) => Value::BorderLeftWidth(x),
-        Value::BorderLeftStyle(x) => Value::BorderRightStyle(x),
-        Value::BorderRightStyle(x) => Value::BorderLeftStyle(x),
-        Value::BorderLeftColor(x) => Value::BorderRightColor(x),
-        Value::BorderRightColor(x) => Value::BorderLeftColor(x),
-        v => v,
+/// Longhands físicos por lado (arriba, derecha, abajo, izquierda) que comparten propiedades
+/// lógicas; en `horizontal-tb` `ltr`: block-start, inline-end, block-end, inline-start.
+const SIDE_GROUPS: [[LonghandId; 4]; 6] = {
+    use LonghandId as L;
+    [
+        [L::MarginTop, L::MarginRight, L::MarginBottom, L::MarginLeft],
+        [
+            L::PaddingTop,
+            L::PaddingRight,
+            L::PaddingBottom,
+            L::PaddingLeft,
+        ],
+        [L::Top, L::Right, L::Bottom, L::Left],
+        [
+            L::BorderTopWidth,
+            L::BorderRightWidth,
+            L::BorderBottomWidth,
+            L::BorderLeftWidth,
+        ],
+        [
+            L::BorderTopStyle,
+            L::BorderRightStyle,
+            L::BorderBottomStyle,
+            L::BorderLeftStyle,
+        ],
+        [
+            L::BorderTopColor,
+            L::BorderRightColor,
+            L::BorderBottomColor,
+            L::BorderLeftColor,
+        ],
+    ]
+};
+
+/// Pares de tamaños (ancho, alto): en `horizontal-tb`, inline-size y block-size.
+const SIZE_GROUPS: [[LonghandId; 2]; 3] = {
+    use LonghandId as L;
+    [
+        [L::Width, L::Height],
+        [L::MinWidth, L::MinHeight],
+        [L::MaxWidth, L::MaxHeight],
+    ]
+};
+
+/// El mismo valor para otro longhand de su grupo (mismo tipo).
+fn retarget(v: &Value, to: LonghandId) -> Value {
+    macro_rules! groups {
+        ($([$($id:ident),+])+) => {
+            match v {
+                $($(Value::$id(x))|+ => match to {
+                    $(LonghandId::$id => Value::$id(x.clone()),)+
+                    _ => v.clone(),
+                },)+
+                _ => v.clone(),
+            }
+        };
+    }
+    groups! {
+        [MarginTop, MarginRight, MarginBottom, MarginLeft]
+        [PaddingTop, PaddingRight, PaddingBottom, PaddingLeft]
+        [Top, Right, Bottom, Left]
+        [BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth]
+        [BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle]
+        [BorderTopColor, BorderRightColor, BorderBottomColor, BorderLeftColor]
+        [Width, Height]
+        [MinWidth, MinHeight]
+        [MaxWidth, MaxHeight]
     }
 }
 
-/// Mueve las entradas lógicas del eje inline al lado opuesto (`direction: rtl`), conservando
-/// el orden de precedencia de cada longhand.
-fn swap_logical_inline(per_property: &mut [Vec<Entry>]) {
-    for (a, b) in INLINE_PAIRS {
-        let la = std::mem::take(&mut per_property[a as usize]);
-        let lb = std::mem::take(&mut per_property[b as usize]);
-        let (mut to_a, mut to_b) = (Vec::new(), Vec::new());
-        for (from_a, list) in [(true, la), (false, lb)] {
+/// Lado físico (0 arriba, 1 derecha, 2 abajo, 3 izquierda) de cada lado lógico en el orden de
+/// [`SIDE_GROUPS`] (block-start, inline-end, block-end, inline-start), CSS Writing Modes 4
+/// §6.4.
+fn logical_sides(wm: WritingMode, rtl: bool) -> [usize; 4] {
+    let (block_start, inline_start) = match wm {
+        WritingMode::HorizontalTb => (0, 3),
+        WritingMode::VerticalRl | WritingMode::SidewaysRl => (1, 0),
+        WritingMode::VerticalLr => (3, 0),
+        WritingMode::SidewaysLr => (3, 2),
+    };
+    let inline_start = if rtl {
+        (inline_start + 2) % 4
+    } else {
+        inline_start
+    };
+    [
+        block_start,
+        (inline_start + 2) % 4,
+        (block_start + 2) % 4,
+        inline_start,
+    ]
+}
+
+/// Mueve las entradas lógicas de cada grupo al longhand físico que les toca con el modo de
+/// escritura y la dirección del elemento, conservando el orden de precedencia.
+fn remap_logical(per_property: &mut [Vec<Entry>], wm: WritingMode, rtl: bool) {
+    fn regroup<const N: usize>(
+        per_property: &mut [Vec<Entry>],
+        group: [LonghandId; N],
+        target: [usize; N],
+    ) {
+        let lists: Vec<Vec<Entry>> = group
+            .iter()
+            .map(|&id| std::mem::take(&mut per_property[id as usize]))
+            .collect();
+        let mut out: Vec<Vec<Entry>> = vec![Vec::new(); N];
+        for (i, list) in lists.into_iter().enumerate() {
             for mut e in list {
-                let target_a = from_a != e.logical;
-                if e.logical {
-                    e.swapped = !e.swapped;
-                    if let DeclValue::Value(v) = e.value {
-                        e.value = DeclValue::Value(swap_inline_value(v));
+                let t = if e.logical { target[i] } else { i };
+                if t != i {
+                    e.from = Some(group[i]);
+                    if let DeclValue::Value(v) = &e.value {
+                        e.value = DeclValue::Value(retarget(v, group[t]));
                     }
                 }
-                if target_a { to_a.push(e) } else { to_b.push(e) }
+                out[t].push(e);
             }
         }
-        to_a.sort_by_key(|e| e.prec);
-        to_b.sort_by_key(|e| e.prec);
-        per_property[a as usize] = to_a;
-        per_property[b as usize] = to_b;
+        for (id, mut list) in group.into_iter().zip(out) {
+            list.sort_by_key(|e| e.prec);
+            per_property[id as usize] = list;
+        }
+    }
+    let sides = logical_sides(wm, rtl);
+    if sides != [0, 1, 2, 3] {
+        for g in SIDE_GROUPS {
+            regroup(per_property, g, sides);
+        }
+    }
+    if wm != WritingMode::HorizontalTb {
+        for g in SIZE_GROUPS {
+            regroup(per_property, g, [1, 0]);
+        }
     }
 }
 
@@ -294,14 +376,14 @@ fn expand(
     let decl = source.decl;
     let value = trim(&decl.value);
     let prec = source.precedence();
-    let logical = is_logical_inline(&decl.name);
+    let logical = is_logical(&decl.name);
     let entry = |value: DeclValue| Entry {
         prec,
         origin: source.origin,
         layer: source.layer,
         value,
         logical,
-        swapped: false,
+        from: None,
     };
     if decl.name.starts_with("--") {
         let value = match CssWide::parse(value) {
@@ -1026,17 +1108,26 @@ impl<'a> Styler<'a> {
             ch_ratio,
         };
         let ctx = |len: LengthContext| ComputeContext { len, parent };
-        // E5: las propiedades lógicas del eje inline según el `direction` del elemento.
-        if any_logical
-            && self.cascaded_value(
+        // E5/E9: las propiedades lógicas según el `writing-mode` y el `direction` del elemento.
+        if any_logical {
+            let rtl = self.cascaded_value(
                 LonghandId::Direction,
                 &per_property,
                 parent,
                 &ctx(len),
                 &custom,
-            ) == Value::Direction(Direction::Rtl)
-        {
-            swap_logical_inline(&mut per_property);
+            ) == Value::Direction(Direction::Rtl);
+            let wm = match self.cascaded_value(
+                LonghandId::WritingMode,
+                &per_property,
+                parent,
+                &ctx(len),
+                &custom,
+            ) {
+                Value::WritingMode(wm) => wm,
+                _ => WritingMode::HorizontalTb,
+            };
+            remap_logical(&mut per_property, wm, rtl);
         }
         // font-size primero (sus `em` y `ex` son relativos a la fuente del padre), luego el
         // resto de la fuente (para `ex`/`ch` del elemento) y line-height (para `lh`).
@@ -1168,7 +1259,7 @@ impl<'a> Styler<'a> {
             CssWide::Inherit => inherit(),
             _ => unset(),
         };
-        let swapped = winner.is_some_and(|e| e.swapped);
+        let from = winner.and_then(|e| e.from);
         match winner.map(|e| &e.value) {
             None => unset(),
             Some(DeclValue::Wide(w)) => wide(*w),
@@ -1184,11 +1275,10 @@ impl<'a> Styler<'a> {
                     return wide(w);
                 }
                 let parsed = match shorthand {
-                    Some(sh) if swapped => (sh.expand)(substituted).and_then(|vals| {
-                        let want = inline_counterpart(id);
+                    Some(sh) if from.is_some() => (sh.expand)(substituted).and_then(|vals| {
                         vals.into_iter()
-                            .find(|v| v.id() == want)
-                            .map(swap_inline_value)
+                            .find(|v| Some(v.id()) == from)
+                            .map(|v| retarget(&v, id))
                     }),
                     Some(sh) => (sh.expand)(substituted)
                         .and_then(|vals| vals.into_iter().find(|v| v.id() == id)),

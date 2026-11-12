@@ -1407,6 +1407,17 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
     },
     alias!("grid-row-gap" => RowGap),
     alias!("grid-column-gap" => ColumnGap),
+    // E4: CSS Animations 1 §3.11 y CSS Transitions 1 §2.5.
+    ShorthandDef {
+        name: "animation",
+        longhands: super::animations::ANIMATION,
+        expand: super::animations::expand_animation,
+    },
+    ShorthandDef {
+        name: "transition",
+        longhands: super::animations::TRANSITION,
+        expand: super::animations::expand_transition,
+    },
 ];
 
 pub fn shorthand_by_name(name: &str) -> Option<&'static ShorthandDef> {
@@ -1558,5 +1569,27 @@ mod tests {
             ["grid-auto-flow: row dense", "grid-auto-rows: 40px"]
         );
         assert!(expand("grid-template", "\"a b\" \"c\"").is_none());
+    }
+
+    /// E4: `animation` y `transition` (CSS Animations 1 §3.11, CSS Transitions 1 §2.5).
+    #[test]
+    fn animation_and_transition() {
+        assert_eq!(
+            expand("transition", "opacity 1s linear 2s, transform 0.5s").unwrap(),
+            [
+                "transition-property: opacity, transform",
+                "transition-duration: 1s, 0.5s",
+                "transition-timing-function: linear, ease",
+                "transition-delay: 2s, 0s",
+                "transition-behavior: normal, normal",
+            ]
+        );
+        assert!(expand("transition", "none, opacity 1s").is_none());
+        let a = expand("animation", "spin 2s infinite alternate").unwrap();
+        assert_eq!(a[0], "animation-duration: 2s");
+        assert_eq!(a[3], "animation-iteration-count: infinite");
+        assert_eq!(a[4], "animation-direction: alternate");
+        assert_eq!(a[7], "animation-name: spin");
+        assert!(expand("animation", "1s 2s 3s").is_none());
     }
 }

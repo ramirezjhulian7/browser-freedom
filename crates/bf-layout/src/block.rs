@@ -10,8 +10,8 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BoxSizing, Clear, ContentAlign, Display, LengthPercentageAuto, MaxSize, Overflow, Position,
-    Size, ZIndex,
+    BoxSizing, Clear, ContentAlign, Direction, Display, LengthPercentageAuto, MaxSize, Overflow,
+    Position, Size, ZIndex,
 };
 
 use crate::box_tree::{BoxKind, LayoutBox};
@@ -68,6 +68,9 @@ pub(crate) struct PendingAbs<'a> {
     pub b: &'a LayoutBox,
     pub static_x: f32,
     pub static_y: f32,
+    /// E9: el elemento que establece el containing block de la posición estática es `rtl`:
+    /// `static_x` es el borde derecho de la caja hipotética (CSS 2.2 §10.3.7).
+    pub static_rtl: bool,
 }
 
 pub(crate) struct Layout<'a> {
@@ -94,6 +97,12 @@ pub(crate) struct Layout<'a> {
     pub pct_height_basis: Option<f32>,
     /// E5: datos que cada subgrid recibe de su contenedor padre (§9), por dirección de la caja.
     pub subgrids: std::collections::HashMap<usize, crate::grid::SubgridParent>,
+    /// E9: marco (modo de escritura) del flujo en curso; una caja de otro modo es la raíz de
+    /// un flujo ortogonal (`writing_mode.rs`).
+    pub frame: crate::writing_mode::Frame,
+    /// E9: `max-height` (content box) del containing block de los hijos en curso cuando su alto
+    /// no es definido: espacio inline de un flujo ortogonal (CSS Writing Modes 4 §7.3.1).
+    pub cb_max_height: Option<f32>,
     /// E5: `direction: rtl` en el containing block del bloque en flujo que se va a maquetar
     /// (CSS 2.2 §10.3.3: sobre-restringido, se ignora `margin-left`).
     pub cb_rtl: bool,
@@ -335,6 +344,8 @@ impl<'a> Layout<'a> {
             bfc_items: Vec::new(), // E4 grid
             subgrids: std::collections::HashMap::new(),
             pct_height_basis: None,
+            frame: crate::writing_mode::Frame::Horizontal,
+            cb_max_height: None,
             cb_rtl: false,
             content_probe: false,
             subgrid_mask: std::collections::HashMap::new(),
@@ -346,7 +357,16 @@ impl<'a> Layout<'a> {
     }
 
     pub fn metrics(&self, style: &ComputedStyle) -> FontMetrics {
-        self.fonts.metrics(&Self::font_request(style))
+        let mut m = self.fonts.metrics(&Self::font_request(style));
+        // E9: en un flujo vertical la baseline dominante es la central salvo con glifos de lado
+        // (CSS Inline 3 §4.1, `dominant-baseline: auto`): en el marco lógico, el ascent y el
+        // descent son la mitad del em box cada uno.
+        if self.frame.is_vertical() && crate::writing_mode::central_baseline(style) {
+            let half = (m.ascent + m.descent) / 2.0;
+            m.ascent = half;
+            m.descent = half;
+        }
+        m
     }
 
     /// Glifos con `letter-spacing` y `word-spacing` aplicados.
@@ -563,6 +583,12 @@ impl<'a> Layout<'a> {
         // Con `<ratio>` (sin `auto`) la relación se aplica a la caja de `box-sizing`; la
         // natural, al content box.
         let bb = s.box_sizing == BoxSizing::BorderBox;
+        // Sin dimensiones naturales y con proporción (un SVG con solo `viewBox`): con ancho y
+        // alto `auto`, el ancho es el del containing block, como un bloque en flujo (CSS 2.2
+        // §10.3.2, la sugerencia para este caso). Sin ese ancho (al medir tamaños intrínsecos,
+        // `cb.width` 0) se usa el tamaño de objeto por defecto, 300×150, con `contain` (CSS
+        // Images 3 §5.3.2, "default sizing algorithm").
+        let ratio_only = natural.width <= 0.0 && natural.height <= 0.0 && ratio.is_some();
         let (natural, ratio, ratio_bb) = match s.aspect_ratio.preferred() {
             Some(r) if !s.aspect_ratio.auto || ratio.is_none() => {
                 let bb = bb && !s.aspect_ratio.auto;
@@ -617,6 +643,20 @@ impl<'a> Layout<'a> {
         let (hmin, hmax) = height_limits(s, cb.height, ev);
         let (wmax, hmax) = (wmax.max(wmin), hmax.max(hmin));
         match (sw, sh, ratio) {
+            (None, None, Some(r)) if ratio_only && r > 0.0 => {
+                let w = if cb.width > 0.0 {
+                    let margins = margin_value(&s.margin_left, cb.width).unwrap_or(0.0)
+                        + margin_value(&s.margin_right, cb.width).unwrap_or(0.0);
+                    (cb.width - margins - eh).max(0.0)
+                } else {
+                    (150.0 * r).min(300.0)
+                };
+                let (w, h) = constrain_with_ratio(w, w_to_h(w, r), (wmin, wmax), (hmin, hmax));
+                LayoutSize {
+                    width: w,
+                    height: h,
+                }
+            }
             (None, None, Some(_)) => {
                 let (w, h) = (natural.width, natural.height);
                 let (w, h) = constrain_with_ratio(w, h, (wmin, wmax), (hmin, hmax));
@@ -725,7 +765,7 @@ impl<'a> Layout<'a> {
     }
 
     /// [`Self::block`] con el espacio horizontal disponible `avail` (dentro de `cb`).
-    fn block_in(
+    pub(crate) fn block_in(
         &mut self,
         b: &'a LayoutBox,
         cb: Cb,
@@ -734,6 +774,10 @@ impl<'a> Layout<'a> {
         floats: &mut FloatContext,
         is_root: bool,
     ) -> (Fragment, CollapsedMargin) {
+        // E9: raíz de un flujo de otro modo de escritura.
+        if self.is_orthogonal(b) {
+            return self.orthogonal_block(b, cb, avail, top);
+        }
         let style = &b.style;
         let border = border_edges(style);
         let padding = padding_edges(style, cb.width);
@@ -925,6 +969,13 @@ impl<'a> Layout<'a> {
         let fl: &mut FloatContext = if bfc { &mut own_floats } else { floats };
         let mut trailing = CollapsedMargin::default();
         let outer_legend = std::mem::replace(&mut self.legend, legend_box);
+        let max_basis = if child_cb.height.is_none() {
+            let (_, hi) = height_limits(style, cb.height, edges_v);
+            hi.is_finite().then_some(hi)
+        } else {
+            None
+        };
+        let saved_max_height = std::mem::replace(&mut self.cb_max_height, max_basis);
         let (mut children, auto_h) = match &b.kind {
             BoxKind::Replaced { natural, ratio } => {
                 let size = self.replaced_size(b, *natural, *ratio, cb);
@@ -964,6 +1015,7 @@ impl<'a> Layout<'a> {
                 (frags, h)
             }
         };
+        self.cb_max_height = saved_max_height;
         self.legend = outer_legend;
         // E5: con contención de tamaño (CSS Containment 2 §3.2) el alto automático es el de una
         // caja vacía o `contain-intrinsic-height` (CSS Sizing 4 §7.1).
@@ -1182,7 +1234,10 @@ impl<'a> Layout<'a> {
                     let f = self.float_box(child, cb, y, floats);
                     frags.push(f);
                 } else {
-                    self.add_abs(child, cb.x, y);
+                    // E9: en un contenedor `rtl`, la caja hipotética se alinea a la derecha.
+                    let rtl = b.style.direction == Direction::Rtl;
+                    let x = if rtl { cb.x + cb.width } else { cb.x };
+                    self.add_abs(child, x, y, rtl);
                 }
                 continue;
             }
@@ -1393,8 +1448,13 @@ impl<'a> Layout<'a> {
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
         let pending = self.pending_abs_marks(); // E4 grid
-        let (mut f, _) =
-            self.box_contents(b, cb, 0.0, 0.0, content_w, margins, &mut scratch, false);
+        // E9: un float de otro modo de escritura es la raíz de un flujo ortogonal.
+        let mut f = if self.is_orthogonal(b) {
+            self.orthogonal_fragment(b, cb)
+        } else {
+            self.box_contents(b, cb, 0.0, 0.0, content_w, margins, &mut scratch, false)
+                .0
+        };
         let outer = f.margin_rect();
         let left = b.style.float == bf_style::properties::types::Float::Left;
         // `clear` en un float (§9.5.2): su margin box queda debajo de los floats anteriores
@@ -1417,6 +1477,10 @@ impl<'a> Layout<'a> {
 
     /// Anchos intrínsecos (min-content, max-content) del contenido de `b`.
     pub(crate) fn intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        // E9: la contribución de un flujo ortogonal es su tamaño en el eje inline del padre.
+        if self.is_orthogonal(b) {
+            return self.orthogonal_intrinsic(b);
+        }
         // E5: los porcentajes de altura de los descendientes se resuelven contra el alto de
         // `b` si es definido respecto a `pct_height_basis` (CSS Sizing 3 §5.2.1).
         if matches!(b.kind, BoxKind::Replaced { .. }) {

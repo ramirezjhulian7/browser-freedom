@@ -79,6 +79,6 @@ button.quiet { background: var(--surface); color: var(--text); border: 1px solid
   <form class="find" action="freedom://bookmarks" method="get"><input name="q" value="{{query}}" placeholder="Buscar en los marcadores"><button type="submit">Buscar</button></form>
   <div class="tools"><a href="bf:bookmark-import">Importar HTML…</a><a href="bf:bookmark-export">Exportar HTML…</a><form action="bf:bookmark-folder" method="get"><input name="u" placeholder="Carpeta nueva"><button class="quiet" type="submit">Crear</button></form></div>
   {{folders}}
-  <p class="note muted">Ctrl+D guarda o quita la página actual · se guardan en {{path}} · <a href="freedom://history">Historial</a></p>
+  <p class="note muted">{{key:Mod+D}} guarda o quita la página actual · se guardan en {{path}} · <a href="freedom://history">Historial</a></p>
 </main>
 </html>

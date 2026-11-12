@@ -33,7 +33,8 @@ pub enum BoxKind {
     InlineBlock,
     /// Elemento reemplazado; `natural` es su tamaño natural (o el tamaño por defecto de 300×150).
     /// `natural`: dimensiones naturales (o las de por defecto); `ratio`: relación de aspecto
-    /// natural (ancho / alto) si la tiene.
+    /// natural (ancho / alto) si la tiene. `natural` de 0×0 con `ratio` es una imagen sin
+    /// dimensiones naturales, solo con proporción ([`ImageState::Ratio`]).
     Replaced { natural: Size, ratio: Option<f32> },
     /// `<br>`: salto de línea forzado.
     LineBreak,
@@ -180,6 +181,9 @@ impl LayoutReport {
 pub enum ImageState {
     /// Decodificada, con sus dimensiones naturales en px.
     Loaded(Size),
+    /// Decodificada sin ancho ni alto naturales pero con relación de aspecto natural (ancho /
+    /// alto): un SVG con solo `viewBox` (CSS Images 3 §5.3.1; SVG 2 §8.2, "intrinsic sizing").
+    Ratio(f32),
     /// No se pudo cargar o decodificar (o el formato no está soportado).
     Broken,
 }
@@ -227,10 +231,61 @@ pub fn build_box_tree_report(
     };
     let mut items = Vec::new();
     builder.element_items(root, &mut items);
-    let root = items.into_iter().next().map(|i| match i {
+    let mut root_box = items.into_iter().next().map(|i| match i {
         Item::Block(b) | Item::OutOfFlow(b) | Item::Inline(b) | Item::TablePart(b) => b,
     });
-    (root, builder.report)
+    if let Some(b) = root_box.as_mut() {
+        propagate_body_writing_mode(doc, styles, root, b);
+    }
+    (root_box, builder.report)
+}
+
+/// E9: los valores usados de `writing-mode` y `direction` de la raíz son los valores
+/// computados del elemento body (CSS Writing Modes 4 §8, "The Principal Writing Mode"), salvo
+/// si la raíz o el body tienen
+/// contención (CSS Containment 2 §3). Solo cambia la caja raíz: los valores computados (y lo
+/// que heredan sus hijos, incluidos `::before`/`::after`) quedan como estaban.
+fn propagate_body_writing_mode(
+    doc: &Document,
+    styles: &StyleMap,
+    root: NodeId,
+    root_box: &mut LayoutBox,
+) {
+    if !doc.element(root).is_some_and(|e| e.is_html("html")) {
+        return;
+    }
+    let Some(body) = doc.children(root).find(|&c| {
+        doc.element(c)
+            .is_some_and(|e| e.is_html("body") || e.is_html("frameset"))
+    }) else {
+        return;
+    };
+    let Some(body_style) = styles.get(&(body, None)) else {
+        return;
+    };
+    let contained = |s: &ComputedStyle| {
+        let c = s.contain;
+        c.size || c.inline_size || c.layout || c.paint
+    };
+    if contained(&root_box.style) || contained(body_style) {
+        return;
+    }
+    let set = |style: &mut Arc<ComputedStyle>| {
+        if style.direction != body_style.direction || style.writing_mode != body_style.writing_mode
+        {
+            let s = Arc::make_mut(style);
+            s.direction = body_style.direction;
+            s.writing_mode = body_style.writing_mode;
+        }
+    };
+    set(&mut root_box.style);
+    // Los bloques anónimos de la raíz (p. ej. el que envuelve un `::before` inline) heredan
+    // de la caja raíz, no del valor computado.
+    for c in &mut root_box.children {
+        if matches!(c.kind, BoxKind::AnonymousBlock) {
+            set(&mut c.style);
+        }
+    }
 }
 
 /// Tamaño natural (o por defecto) y relación de aspecto de un elemento reemplazado, si `node`
@@ -242,6 +297,13 @@ fn replaced_size(doc: &Document, node: NodeId, images: &ImageSizes) -> Option<(S
     {
         let ratio = (s.width > 0.0 && s.height > 0.0).then(|| s.width / s.height);
         return Some((*s, ratio));
+    }
+    if is_image_element(el)
+        && let Some(&ImageState::Ratio(r)) = images.get(&node)
+        && r > 0.0
+        && r.is_finite()
+    {
+        return Some((Size::default(), Some(r)));
     }
     // E1: las dimensiones naturales de un `canvas` son las de su bitmap (HTML §4.12.5), y sin
     // bitmap publicado, las de sus atributos `width`/`height` (300×150 por defecto).

@@ -22,6 +22,7 @@ mod table; // E4
 mod text_overflow; // E12
 pub mod unicode; // E9: Script y Vertical_Orientation
 mod unicode_tables; // E9: generado por tools/gen_unicode_text.py
+pub mod writing_mode; // E9: CSS Writing Modes 4 (flujos verticales)
 
 use bf_dom::Document;
 use bf_style::StyleMap;
@@ -53,6 +54,25 @@ pub fn layout_document_with_images(
 ) -> FragmentTree {
     let (root, report) = box_tree::build_box_tree_report(doc, styles, images);
     let fragment = root.as_ref().map(|root| {
+        // E9: con cajas verticales, cada caja se maqueta en el marco de su flujo; una raíz
+        // vertical, con el viewport traspuesto, y el resultado vuelve a coordenadas físicas.
+        if writing_mode::has_vertical(root) {
+            let frame = writing_mode::Frame::of(&root.style);
+            let tree = writing_mode::logical_tree(root);
+            let logical_viewport = if frame.is_vertical() {
+                Size {
+                    width: viewport.height,
+                    height: viewport.width,
+                }
+            } else {
+                viewport
+            };
+            let mut layout = block::Layout::new(fonts, logical_viewport);
+            layout.frame = frame;
+            let mut f = block::layout_root(&mut layout, &tree);
+            writing_mode::fragment_to_physical(&mut f, frame, (0.0, 0.0), viewport.width);
+            return f;
+        }
         let mut layout = block::Layout::new(fonts, viewport);
         block::layout_root(&mut layout, root)
     });

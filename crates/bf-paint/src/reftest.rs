@@ -383,6 +383,24 @@ impl Harness {
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
     }
 
+    /// E9: volcado del árbol de fragmentos de un archivo de WPT (ruta relativa a `tests/wpt`),
+    /// para depurar un fallo.
+    pub fn dump(&self, rel: &str) -> Option<String> {
+        let path = self.wpt.join(rel);
+        let (doc, _) = parse_file(&path)?;
+        let base = self.base(&path);
+        let ctx = crate::PageContext {
+            base: &base,
+            encoding: Encoding::Utf8,
+            loader: self.loader.clone(),
+            fonts: self.db.clone(),
+            extra: &[],
+            text_zoom: 1.0,
+        };
+        let page = crate::prepare_page(&doc, &ctx, VIEWPORT);
+        Some(bf_layout::dump(&doc, &page.tree))
+    }
+
     /// Un documento SVG suelto (E7): su raíz es el viewport, del tamaño de sus `width` y
     /// `height` absolutos o del viewport de la ventana, sobre fondo blanco.
     fn render_svg(&self, doc: &Document, path: &Path) -> Pixmap {
@@ -669,6 +687,8 @@ pub const GROUPS: &[&str] = &[
     "css/css-tables",
     "css/css-grid",
     "css/css-ui",
+    // E4: transformaciones.
+    "css/css-transforms",
     // E7: SVG (documentos `.svg` sueltos y SVG en línea en HTML).
     "svg",
     // E9: escritura vertical, bidi y texto.
@@ -809,7 +829,8 @@ const KNOWN_ISSUES: &str = "## Tests con expectativa dudosa
   no puede pasar.
 - `css/css-grid`: 939 de los 1567 tests ejecutables son de `grid-lanes` (masonry) o `subgrid`,
   que no están implementados (roadmap). Sin ellos pasan 434 de 628 (69.1%).
-- `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
+- `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`). `transform` se
+  pinta en 2D: las 3D se aplanan, sin `perspective`, `transform-style` ni `backface-visibility`.
 - El ajuste vertical de contornos (`FontProvider::vertical_fit`) es una aproximación propia al
   hinting, no comportamiento de spec; se desactiva con `Fonts::set_vertical_fit(false)`.
 ";

@@ -144,6 +144,12 @@ pub fn idle_deadline_class() -> HostClass {
         .method("timeRemaining", 0, time_remaining)
 }
 
+/// E4: la hora de la ventana en curso en ms desde su `timeOrigin`, sin redondear (la línea
+/// de tiempo del documento, Web Animations 1 §4.5).
+pub(crate) fn now_ms(agent: &mut Agent) -> f64 {
+    agent.host.hooks.now() - state(agent).now_origin
+}
+
 /// `performance.now()`: ms desde el `timeOrigin`, con resolución de 0.1 ms.
 fn now(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     let t = agent.host.hooks.now() - state(agent).now_origin;

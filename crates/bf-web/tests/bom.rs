@@ -1026,6 +1026,26 @@ fn srcdoc_frame_has_its_own_window_and_document() {
     assert_eq!(p.show("loads"), "1");
 }
 
+/// E4: una operación de la interfaz de un `<iframe>` aplicada a un objeto de la ventana corre
+/// en el realm del objeto (WebIDL §3.9, DOM §4.4 "create a node"); antes leía el `NodeRef` en
+/// el documento del marco (pánico de índice en `node-creation-realm.html`). Pasar un nodo de
+/// otra ventana a `append` lo adopta: ver `nodes_move_between_windows` (E1).
+#[test]
+fn interface_operations_run_in_the_realm_of_this() {
+    let mut p = framed(
+        "<div id=d></div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
+        &[],
+    );
+    assert!(p.truthy(concat!(
+        "var inner = document.getElementById('f').contentWindow;",
+        "var t = inner.Document.prototype.createTextNode.call(document, 'x');",
+        "var c = inner.Node.prototype.cloneNode.call(document.getElementById('d'));",
+        "var e = inner.Node.prototype.appendChild.call(document.body, document.createElement('i'));",
+        "t instanceof Text && !(t instanceof inner.Text) && t.ownerDocument === document &&",
+        "c instanceof HTMLDivElement && c.id === 'd' && e.parentNode === document.body",
+    )));
+}
+
 // E1: los atributos `on…` de un `<iframe>` (HTML §8.1.8.1) corren con el `load` del marco
 // (HTML §4.8.5 "iframe load event steps") y `document.activeElement` sigue al foco (§6.6.3).
 #[test]
@@ -1343,6 +1363,9 @@ fn performance_observer_api_and_errors() {
 // `nodes_move_between_windows` y `more_operations_take_nodes_of_another_window`.
 #[test]
 fn nodes_and_ranges_of_another_window_do_not_panic() {
+    // E4: una operación de la interfaz de esta ventana aplicada a un objeto del marco corre en
+    // el realm del objeto (WebIDL §3.9, "relevant realm"; el trampolín de bf-js), así que
+    // `Range.prototype.collapse.call(fr)` funciona y colapsa `fr`, como en los navegadores.
     let mut p = framed(
         "<p id=a>uno</p><iframe id=f srcdoc=\"<p id=b>dos</p><p>tres</p><p>cuatro</p>\"></iframe>",
         &[],
@@ -1373,8 +1396,7 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
              })()"
         ),
         "ok,false,false,false,false,true,WrongDocumentError,\
-         WrongDocumentError,false,false,NotSupportedError,0,NotSupportedError,\
-         dostrescuatro,uno"
+         WrongDocumentError,false,false,NotSupportedError,0,ok,,uno"
     );
 }
 

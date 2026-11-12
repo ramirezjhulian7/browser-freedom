@@ -76,6 +76,161 @@ fn html_test_with_scripts() {
     assert!(r[0].subtests[1].2.contains("mal formado"));
 }
 
+/// E4: el runner corre los callbacks de `requestAnimationFrame` ("update the rendering", HTML
+/// §8.1.7.3) avanzando el reloj virtual de cuadro en cuadro.
+#[test]
+fn animation_frames_run_on_the_virtual_clock() {
+    let root = fake_root("raf");
+    std::fs::write(
+        root.join("t/raf.html"),
+        "<!doctype html><script src=/resources/testharness.js></script>\
+         <script src=/resources/testharnessreport.js></script>\
+         <script>\
+           var times = [];\
+           function frame(t) {\
+             times.push(t);\
+             if (times.length < 3) { requestAnimationFrame(frame); return; }\
+             test(function () {\
+               if (!(times[0] > 0 && times[1] > times[0] && times[2] > times[1]))\
+                 throw new Error(times.join());\
+             }, 'raf');\
+             done();\
+           }\
+           requestAnimationFrame(frame);\
+         </script>",
+    )
+    .unwrap();
+    let r = run(&root, "t/raf.html");
+    assert_eq!(r[0].harness, Harness::Ok);
+    assert_eq!(r[0].subtests.len(), 1);
+    assert_eq!(
+        r[0].subtests[0].1,
+        SubStatus::Pass,
+        "{}",
+        r[0].subtests[0].2
+    );
+}
+
+/// E4: una transición CSS de punta a punta en el runner (CSS Transitions 1 §3 y §6): el
+/// "style change event" de `getComputedStyle` arranca la transición desde el "before-change
+/// style", los cuadros del reloj virtual muestran valores intermedios y se despachan
+/// `transitionrun`, `transitionstart` y `transitionend` de confianza, con `propertyName` y
+/// `elapsedTime`.
+#[test]
+fn css_transition_runs_with_events_on_the_virtual_clock() {
+    let root = fake_root("transition");
+    std::fs::write(
+        root.join("t/transition.html"),
+        "<!doctype html><style>\
+           #d { width: 100px; height: 10px; transition: width 1s linear; }\
+           #d.big { width: 200px; }\
+         </style><div id=d></div>\
+         <script src=/resources/testharness.js></script>\
+         <script src=/resources/testharnessreport.js></script>\
+         <script>\
+           var d = document.getElementById('d'), events = [], widths = [];\
+           ['transitionrun', 'transitionstart', 'transitionend'].forEach(function (k) {\
+             d.addEventListener(k, function (e) {\
+               events.push(e.type + ':' + e.propertyName + ':' + e.elapsedTime + ':' + e.isTrusted);\
+               if (e.type === 'transitionend') finish();\
+             });\
+           });\
+           getComputedStyle(d).width;\
+           d.className = 'big';\
+           function frame() {\
+             widths.push(parseFloat(getComputedStyle(d).width));\
+             if (events.length < 3) requestAnimationFrame(frame);\
+           }\
+           requestAnimationFrame(frame);\
+           function finish() {\
+             test(function () {\
+               var want = 'transitionrun:width:0:true,transitionstart:width:0:true,' +\
+                          'transitionend:width:1:true';\
+               if (events.join() !== want) throw new Error(events.join());\
+             }, 'eventos');\
+             test(function () {\
+               var mid = widths.filter(function (w) { return w > 100 && w < 200; });\
+               if (mid.length === 0) throw new Error(widths.join());\
+               if (getComputedStyle(d).width !== '200px') throw new Error(getComputedStyle(d).width);\
+             }, 'valores');\
+             done();\
+           }\
+         </script>",
+    )
+    .unwrap();
+    let r = run(&root, "t/transition.html");
+    assert_eq!(r[0].harness, Harness::Ok);
+    let st: Vec<(&str, SubStatus, &str)> = r[0]
+        .subtests
+        .iter()
+        .map(|(n, s, m)| (n.as_str(), *s, m.as_str()))
+        .collect();
+    assert_eq!(
+        st,
+        [
+            ("eventos", SubStatus::Pass, ""),
+            ("valores", SubStatus::Pass, "")
+        ]
+    );
+}
+
+/// E4: el runner crea los marcos de los `<iframe>` (HTML §4.8.5) como el hilo de la pestaña:
+/// `srcdoc`, `src` servido desde la raíz y `about:blank`, con su `load`.
+#[test]
+fn iframes_get_their_documents() {
+    let root = fake_root("frames");
+    std::fs::write(
+        root.join("t/sub.html"),
+        "<title>sub</title><script>var marca = 42;</script>",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("t/frames.html"),
+        concat!(
+            "<!doctype html><script src=/resources/testharness.js></script>",
+            "<script src=/resources/testharnessreport.js></script>",
+            "<iframe id=f srcdoc='<p id=x>hola</p>'></iframe>",
+            "<iframe id=g src=sub.html></iframe>",
+            "<script>",
+            "var b = document.createElement('iframe');",
+            "document.body.appendChild(b);",
+            "test(function () {",
+            "  if (b.contentDocument.URL !== 'about:blank') throw new Error(b.contentDocument.URL);",
+            "}, 'blank');",
+            "var n = 0;",
+            "function check() { n++; }",
+            "document.getElementById('f').addEventListener('load', check);",
+            "document.getElementById('g').addEventListener('load', check);",
+            // El `load` de la ventana espera al de los marcos (HTML §8.4, "the end").
+            "window.addEventListener('load', function () {",
+            "  test(function () {",
+            "    if (n !== 2) throw new Error('load de la ventana antes que el de los marcos');",
+            "    var d = document.getElementById('f').contentDocument;",
+            "    if (d.getElementById('x').textContent !== 'hola') throw new Error('srcdoc');",
+            "    var w = frames[1];",
+            "    if (w.marca !== 42 || w.document.title !== 'sub') throw new Error('src');",
+            "  }, 'load');",
+            "  done();",
+            "});",
+            "</script>",
+        ),
+    )
+    .unwrap();
+    let r = run(&root, "t/frames.html");
+    assert_eq!(r[0].harness, Harness::Ok, "{:?}", r[0].subtests);
+    let st: Vec<(&str, SubStatus)> = r[0]
+        .subtests
+        .iter()
+        .map(|(n, s, _)| (n.as_str(), *s))
+        .collect();
+    assert_eq!(
+        st,
+        [("blank", SubStatus::Pass), ("load", SubStatus::Pass)],
+        "{:?}",
+        r[0].subtests
+    );
+}
+
 #[test]
 fn any_js_wrapper_and_meta() {
     let root = fake_root("any");

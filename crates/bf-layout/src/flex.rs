@@ -346,7 +346,7 @@ impl<'a> Layout<'a> {
                 let (abs, fixed) = self.pending_abs_marks();
                 let is_fixed = c.style.position == bf_style::properties::types::Position::Fixed;
                 abs_slots.push((c, is_fixed, if is_fixed { fixed } else { abs }));
-                self.add_abs(c, cb.x, cb.y);
+                self.add_abs(c, cb.x, cb.y, false);
                 continue;
             }
             if matches!(c.kind, BoxKind::Marker { .. }) {
@@ -1082,6 +1082,7 @@ impl<'a> Layout<'a> {
                     b: c,
                     static_x: cb.x,
                     static_y: cb.y,
+                    static_rtl: false,
                 };
                 this.absolute(p, content_box)
             });

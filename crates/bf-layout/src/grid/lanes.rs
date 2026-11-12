@@ -1242,6 +1242,7 @@ impl<'a> Layout<'a> {
                         b: c,
                         static_x: content_box.x,
                         static_y: content_box.y,
+                        static_rtl: false,
                     };
                     this.absolute(p, content_box)
                 });
@@ -1252,7 +1253,7 @@ impl<'a> Layout<'a> {
                     dx
                 };
                 let (dx, dy) = fill_reverse_static(s, cs, rows, content_box, &f, (dx, dy));
-                self.add_abs(c, content_box.x + dx, content_box.y + dy);
+                self.add_abs(c, content_box.x + dx, content_box.y + dy, false);
                 continue;
             }
             let a = area(s);
@@ -1261,6 +1262,7 @@ impl<'a> Layout<'a> {
                     b: c,
                     static_x: a.x,
                     static_y: a.y,
+                    static_rtl: false,
                 },
                 a,
             );
