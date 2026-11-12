@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<style>html{writing-mode:vertical-rl} body{margin:0} div{width:20px;margin-right:10px;border-top:3px solid}</style>
+<div>ab cd</div><div style="height:100px">x</div>
+<!-- expect
+Block <html> 740,0 60×600
+  Block <body> 740,0 50×600
+    Block <div> 770,0 20×600
+      Line 774,3 16×597
+        Text "ab cd" 774,3 16×40
+    Block <div> 740,0 20×103
+      Line 744,3 16×100
+        Text "x" 744,3 16×8
+-->

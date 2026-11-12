@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<style>body{direction:rtl;margin:0;height:0} html::before{content:"ab"} html::after{content:"cd";display:block}</style>
+<body></body>
+<!-- expect
+Block <html> 0,0 800×32
+  Block <anonymous> 0,0 800×16
+    Line 0,0 800×16
+      Inline <html::before> 784,0 16×16
+        Text "ab" 784,0 16×16
+  Block <body> 0,16 800×0
+  Block <html::after> 0,16 800×16
+    Line 0,16 800×16
+      Text "cd" 0,16 16×16
+-->

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<style>body{margin:0} #cb{writing-mode:vertical-rl;width:100px;height:80px;position:relative;margin-left:5px} span{position:absolute} p{margin:0}</style>
+<div id=cb>ab<span>cd</span></div><p>x</p><div style="writing-mode:vertical-lr;display:inline-block">ef gh</div>
+<!-- expect
+Block <html> 0,0 800×139.2
+  Block <body> 0,0 800×139.2
+    Block <div#cb> 5,0 100×80
+      Line 89,0 16×80
+        Text "ab" 89,0 16×16
+      Block <span> 89,16 16×16
+        Line 89,16 16×16
+          Text "cd" 89,16 16×16
+    Block <p> 0,80 800×16
+      Line 0,80 800×16
+        Text "x" 0,80 8×16
+    Block <anonymous> 0,96 800×43.2
+      Line 0,96 800×43.2
+        InlineBlock <div> 0,96 16×40
+          Line 0,96 16×40
+            Text "ef gh" 0,96 16×40
+-->

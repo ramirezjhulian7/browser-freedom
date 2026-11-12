@@ -1017,6 +1017,18 @@ impl<'a> Builder<'a> {
         let shadowed = !f.style.text_shadow.0.is_empty();
         self.set_clip(clip);
         let start = self.list.items.len();
+        // E9: texto de un flujo vertical (sin decoraciones todavía).
+        if f.style.writing_mode.is_vertical() {
+            if color.a > 0.0 || shadowed {
+                let mut items = Vec::new();
+                self.vertical_glyph_items(f, &mut items);
+                for item in items {
+                    self.emit(clip, item);
+                }
+            }
+            self.text_shadows(f, start);
+            return;
+        }
         let metrics = self.fonts.metrics(&font_request(&f.style));
         let baseline = f.baseline.unwrap_or(f.rect.y + metrics.ascent);
         let lines: Vec<(&ComputedStyle, Edges)> = decorating
@@ -1445,6 +1457,10 @@ impl Builder<'_> {
         if f.kind != FragmentKind::Text || !visible(&f.style) || glyphs.is_empty() {
             return;
         }
+        if f.style.writing_mode.is_vertical() {
+            self.vertical_glyph_items(f, out);
+            return;
+        }
         let metrics = self.fonts.metrics(&font_request(&f.style));
         let baseline = f.baseline.unwrap_or(f.rect.y + metrics.ascent);
         let size = f.style.font_size_px();
@@ -1475,6 +1491,108 @@ impl Builder<'_> {
                 origin: (0.0, baseline),
                 y_fit: self.y_fit(font, size),
             });
+        }
+    }
+
+    /// E9: glifos de un texto de un flujo vertical (CSS Writing Modes 4 §5.1). El rectángulo
+    /// ya es físico: una columna de ancho ascent + descent que se recorre de arriba abajo. Los
+    /// glifos de lado se giran 90° en sentido horario (el ascent hacia la derecha, en
+    /// `vertical-rl` y en `vertical-lr`); los erguidos (`text-orientation: upright`, o `mixed`
+    /// con Vertical_Orientation U/Tu) se centran en la columna sin girar. Con `sideways-*`,
+    /// todo de lado.
+    fn vertical_glyph_items(&self, f: &Fragment, out: &mut Vec<DisplayItem>) {
+        use bf_layout::font::{Outline, PathCommand};
+        use bf_style::properties::types::{TextOrientation, WritingMode};
+        let Some((text, glyphs)) = &f.text else {
+            return;
+        };
+        let style = &f.style;
+        let metrics = self.fonts.metrics(&font_request(style));
+        let size = style.font_size_px();
+        let all_sideways = matches!(
+            style.writing_mode,
+            WritingMode::SidewaysRl | WritingMode::SidewaysLr
+        ) || style.text_orientation == TextOrientation::Sideways;
+        let upright = |cluster: usize| {
+            if all_sideways {
+                return false;
+            }
+            if style.text_orientation == TextOrientation::Upright {
+                return true;
+            }
+            text.get(cluster..)
+                .and_then(|t| t.chars().next())
+                .is_some_and(bf_layout::unicode::upright_in_mixed)
+        };
+        let rotate = |o: &Outline| {
+            let r = |x: f32, y: f32| (y, -x);
+            let commands = o
+                .commands
+                .iter()
+                .map(|c| match *c {
+                    PathCommand::MoveTo(x, y) => {
+                        let (x, y) = r(x, y);
+                        PathCommand::MoveTo(x, y)
+                    }
+                    PathCommand::LineTo(x, y) => {
+                        let (x, y) = r(x, y);
+                        PathCommand::LineTo(x, y)
+                    }
+                    PathCommand::QuadTo(x1, y1, x, y) => {
+                        let ((x1, y1), (x, y)) = (r(x1, y1), r(x, y));
+                        PathCommand::QuadTo(x1, y1, x, y)
+                    }
+                    PathCommand::CurveTo(x1, y1, x2, y2, x, y) => {
+                        let ((x1, y1), (x2, y2), (x, y)) = (r(x1, y1), r(x2, y2), r(x, y));
+                        PathCommand::CurveTo(x1, y1, x2, y2, x, y)
+                    }
+                    PathCommand::Close => PathCommand::Close,
+                })
+                .collect();
+            std::sync::Arc::new(Outline {
+                units_per_em: o.units_per_em,
+                commands,
+            })
+        };
+        let column = f.rect.width;
+        // Baseline alfabética de los glifos de lado: el ascent queda a la derecha.
+        let baseline_x = f.rect.x + column - metrics.ascent;
+        let color = style.color.rgba();
+        let mut pen = f.rect.y;
+        for g in glyphs {
+            let outline = self.fonts.outline(g.font, g.id);
+            let (glyph, y_fit) = if upright(g.cluster) {
+                let x = f.rect.x + (column - g.advance) / 2.0 + g.x_offset;
+                let y = pen + metrics.ascent - g.y_offset;
+                (
+                    GlyphInstance {
+                        id: g.id,
+                        x,
+                        y,
+                        outline,
+                    },
+                    self.y_fit(g.font, size),
+                )
+            } else {
+                (
+                    GlyphInstance {
+                        id: g.id,
+                        x: baseline_x + g.y_offset,
+                        y: pen + g.x_offset,
+                        outline: outline.map(|o| rotate(&o)),
+                    },
+                    (1.0, 1.0),
+                )
+            };
+            out.push(DisplayItem::Text {
+                glyphs: vec![glyph],
+                font: g.font,
+                size,
+                color,
+                origin: (0.0, 0.0),
+                y_fit,
+            });
+            pen += g.advance;
         }
     }
 
