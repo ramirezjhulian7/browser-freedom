@@ -1548,8 +1548,11 @@ pub fn parse_bg_position(layer: &[ComponentValue]) -> Option<(PositionAxis, Posi
         }
         _ => {
             // 3 o 4 valores: keyword [offset] keyword [offset].
+            // `center` toma el eje que dejan libre los demás keywords (E12: `center right
+            // 25%`, `top 3px center`).
             let mut x: Option<PositionAxis> = None;
             let mut y: Option<PositionAxis> = None;
+            let mut centers = 0;
             let mut i = 0;
             while i < items.len() {
                 let P::K(k) = items[i] else {
@@ -1573,16 +1576,17 @@ pub fn parse_bg_position(layer: &[ComponentValue]) -> Option<(PositionAxis, Posi
                 match k {
                     K::Left | K::Right if x.is_none() => x = Some(axis(k == K::Right)),
                     K::Top | K::Bottom if y.is_none() => y = Some(axis(k == K::Bottom)),
-                    K::Center if offset.is_none() => {
-                        if x.is_none() {
-                            x = Some(center());
-                        } else if y.is_none() {
-                            y = Some(center());
-                        } else {
-                            return None;
-                        }
-                    }
+                    K::Center if offset.is_none() => centers += 1,
                     _ => return None,
+                }
+            }
+            for _ in 0..centers {
+                if x.is_none() {
+                    x = Some(center());
+                } else if y.is_none() {
+                    y = Some(center());
+                } else {
+                    return None;
                 }
             }
             Some((x?, y?))
