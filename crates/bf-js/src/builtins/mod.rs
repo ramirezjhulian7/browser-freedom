@@ -38,6 +38,7 @@ pub mod weak;
 // E8
 pub mod array_from_async;
 pub mod disposable;
+pub mod shadow_realm;
 pub mod temporal;
 pub mod uint8_base64;
 
@@ -253,5 +254,7 @@ pub fn init_realm(agent: &mut Agent, realm: RealmId, object_prototype: Gc<Object
     disposable::init(agent, realm);
     // E8: Temporal (después de Date: agrega Date.prototype.toTemporalInstant).
     temporal::init(agent, realm);
+    // E8: ShadowRealm (propuesta stage 2.7).
+    shadow_realm::init(agent, realm);
     uint8_base64::init(agent, realm);
 }

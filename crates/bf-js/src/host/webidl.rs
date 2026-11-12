@@ -80,11 +80,17 @@ pub fn to_long_long(agent: &mut Agent, v: &Value) -> JsResult<i64> {
 pub fn to_long_enforce_range(agent: &mut Agent, v: &Value) -> JsResult<i32> {
     let x = agent.to_number(v)?;
     if !x.is_finite() {
-        return agent.type_error("Value is not a finite number");
+        return {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("Value {d} is not a finite number."))
+        };
     }
     let x = x.trunc();
     if !(-2147483648.0..=2147483647.0).contains(&x) {
-        return agent.type_error("Value is outside the 'long' value range");
+        return {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("Value {d} is outside the 'long' value range."))
+        };
     }
     Ok(x as i32)
 }
@@ -93,7 +99,10 @@ pub fn to_long_enforce_range(agent: &mut Agent, v: &Value) -> JsResult<i32> {
 pub fn to_double(agent: &mut Agent, v: &Value) -> JsResult<f64> {
     let x = agent.to_number(v)?;
     if !x.is_finite() {
-        return agent.type_error("The provided double value is non-finite");
+        return {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("The provided double value {d} is non-finite."))
+        };
     }
     Ok(x)
 }
@@ -107,7 +116,10 @@ pub fn to_unrestricted_double(agent: &mut Agent, v: &Value) -> JsResult<f64> {
 pub fn to_object(agent: &mut Agent, v: &Value) -> JsResult<Gc<Object>> {
     match v {
         Value::Object(o) => Ok(*o),
-        _ => agent.type_error("The provided value is not of type 'object'"),
+        _ => {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("The provided value {d} is not of type 'object'."))
+        }
     }
 }
 
@@ -116,7 +128,10 @@ pub fn to_nullable_object(agent: &mut Agent, v: &Value) -> JsResult<Option<Gc<Ob
     match v {
         Value::Undefined | Value::Null => Ok(None),
         Value::Object(o) => Ok(Some(*o)),
-        _ => agent.type_error("The provided value is not of type 'object'"),
+        _ => {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("The provided value {d} is not of type 'object'."))
+        }
     }
 }
 
@@ -127,11 +142,16 @@ pub fn to_sequence<T>(
     mut conv: impl FnMut(&mut Agent, &Value) -> JsResult<T>,
 ) -> JsResult<Vec<T>> {
     if !v.is_object() {
-        return agent.type_error("The provided value cannot be converted to a sequence");
+        return {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!(
+                "The provided value {d} cannot be converted to a sequence."
+            ))
+        };
     }
     let key = PropertyKey::Symbol(agent.well_known.iterator);
     let Some(method) = agent.get_method_of(v, &key)? else {
-        return agent.type_error("The object must have a callable @@iterator property");
+        return agent.webidl_type_error("The object must have a callable @@iterator property.");
     };
     let (it, next) = agent.get_iterator_from_method(v, &method)?;
     let mut out = Vec::new();
@@ -150,7 +170,12 @@ impl Dictionary {
         match v {
             Value::Undefined | Value::Null => Ok(Dictionary(None)),
             Value::Object(o) => Ok(Dictionary(Some(*o))),
-            _ => agent.type_error("The provided value is not of type 'dictionary'"),
+            _ => {
+                let d = agent.describe(v);
+                agent.webidl_type_error(&format!(
+                    "The provided value {d} is not of type 'dictionary'."
+                ))
+            }
         }
     }
 
@@ -176,7 +201,10 @@ impl Dictionary {
 /// Una callback function (§3.2.21): TypeError si no es invocable.
 pub fn to_callback(agent: &mut Agent, v: &Value) -> JsResult<Value> {
     if !agent.is_callable(v) {
-        return agent.type_error("The provided callback is not a function");
+        return {
+            let d = agent.describe(v);
+            agent.webidl_type_error(&format!("The provided callback {d} is not a function."))
+        };
     }
     Ok(v.clone())
 }

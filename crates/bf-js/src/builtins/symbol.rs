@@ -81,9 +81,15 @@ fn this_symbol(agent: &mut Agent, v: &Value) -> JsResult<Gc<Symbol>> {
         Value::Symbol(s) => Ok(*s),
         Value::Object(o) => match agent.heap[*o].kind {
             ObjectKind::Symbol(s) => Ok(s),
-            _ => agent.type_error("not a Symbol"),
+            _ => {
+                let d = agent.describe(v);
+                agent.type_error(&format!("{d} is not a Symbol"))
+            }
         },
-        _ => agent.type_error("not a Symbol"),
+        _ => {
+            let d = agent.describe(v);
+            agent.type_error(&format!("{d} is not a Symbol"))
+        }
     }
 }
 

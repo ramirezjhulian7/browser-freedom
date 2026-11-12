@@ -883,8 +883,13 @@ impl<'t> Codegen<'t> {
             let ds = self.sti().dispose_slot.expect("scope con using");
             for dec in &d.declarations {
                 self.pos(dec.span.start);
+                // `using` con un patrón: early error que ya rechaza el parser.
                 let Pat::Ident(id) = &dec.id else {
-                    unreachable!("using con un patrón (lo rechaza el parser)")
+                    self.throw_error(
+                        ErrorKind::SyntaxError,
+                        "Invalid destructuring declaration in 'using'",
+                    );
+                    continue;
                 };
                 match &dec.init {
                     Some(init) => {

@@ -554,7 +554,14 @@ impl<'t> Codegen<'t> {
                         self.expr(k);
                         self.emit(Op::DeleteElem(strict));
                     }
-                    MemberProp::Private(_) => unreachable!("delete de privado (early error)"),
+                    // Early error (§13.5.1.1) que ya rechaza el parser; si llegara, SyntaxError.
+                    MemberProp::Private(_) => {
+                        self.throw_error(
+                            ErrorKind::SyntaxError,
+                            "Private fields can not be deleted",
+                        );
+                        self.emit(Op::True);
+                    }
                 }
             }
             Expr::Chain { expression, .. } => {
@@ -581,7 +588,13 @@ impl<'t> Codegen<'t> {
                                 self.expr(k);
                                 self.emit(Op::DeleteElem(strict));
                             }
-                            MemberProp::Private(_) => unreachable!("delete de privado"),
+                            MemberProp::Private(_) => {
+                                self.throw_error(
+                                    ErrorKind::SyntaxError,
+                                    "Private fields can not be deleted",
+                                );
+                                self.emit(Op::True);
+                            }
                         }
                     }
                     other => {
@@ -630,7 +643,12 @@ impl<'t> Codegen<'t> {
                     match property {
                         MemberProp::Ident(id) => self.push_str(&id.name),
                         MemberProp::Computed(k) => self.expr(k),
-                        MemberProp::Private(_) => unreachable!("super.#x (early error)"),
+                        // `super.#x` es un early error que ya rechaza el parser.
+                        MemberProp::Private(_) => {
+                            self.emit(Op::Pop);
+                            self.throw_error(ErrorKind::SyntaxError, "Unexpected private field");
+                            return RefKind::Binding(Target::Callee);
+                        }
                     }
                     self.emit_ctx(CtxWhat::Function);
                     self.emit(Op::HomeObject);
@@ -830,7 +848,11 @@ impl<'t> Codegen<'t> {
             match property {
                 MemberProp::Ident(id) => self.push_str(&id.name),
                 MemberProp::Computed(k) => self.expr(k),
-                MemberProp::Private(_) => unreachable!("super.#x"),
+                // `super.#x` es un early error que ya rechaza el parser.
+                MemberProp::Private(_) => {
+                    self.throw_error(ErrorKind::SyntaxError, "Unexpected private field");
+                    self.emit(Op::Undefined);
+                }
             }
             self.emit_ctx(CtxWhat::Function);
             self.emit(Op::HomeObject);
@@ -1059,7 +1081,11 @@ impl<'t> Codegen<'t> {
                                         PropValue::Method(f) => {
                                             self.method_closure(f, name, 1);
                                         }
-                                        PropValue::CoverInit(..) => unreachable!("CoverInit"),
+                                        // `{a = 1}` fuera de un patrón: early error del
+                                        // parser (§13.2.5.1); si llegara, SyntaxError.
+                                        PropValue::CoverInit(..) => {
+                                            self.cover_init_error();
+                                        }
                                     }
                                     self.emit(Op::InitProp(n));
                                 }
@@ -1101,6 +1127,16 @@ impl<'t> Codegen<'t> {
         }
     }
 
+    /// `{a = 1}` fuera de un patrón (early error que ya rechaza el parser): SyntaxError al
+    /// ejecutar, con un valor de relleno para que la pila quede como espera lo que sigue.
+    fn cover_init_error(&mut self) {
+        self.throw_error(
+            ErrorKind::SyntaxError,
+            "Invalid shorthand property initializer",
+        );
+        self.emit(Op::Undefined);
+    }
+
     /// [obj key] → obj: el valor de una propiedad con clave en la pila.
     fn object_value(&mut self, value: &PropValue, kind: PropKind, _n: Option<u32>) {
         match kind {
@@ -1112,7 +1148,7 @@ impl<'t> Codegen<'t> {
                     PropValue::Method(f) => {
                         self.method_closure(f, Some(NameSource::Stack(NamePrefix::None)), 2)
                     }
-                    PropValue::CoverInit(..) => unreachable!("CoverInit"),
+                    PropValue::CoverInit(..) => self.cover_init_error(),
                 }
                 self.emit(Op::InitElem);
             }
