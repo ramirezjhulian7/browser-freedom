@@ -27,6 +27,10 @@ pub struct MediaContext {
     pub monochrome_bits: u32,
     /// Tamaño de fuente inicial, para `em`/`rem` (16px por ahora).
     pub font_size: f64,
+    /// Zoom de texto del navegador (1 = sin zoom): multiplica los tamaños de fuente que no
+    /// son relativos a la fuente del padre (ver `bf_style::cascade`). No afecta a las media
+    /// queries.
+    pub text_zoom: f64,
 }
 
 impl Default for MediaContext {
@@ -45,6 +49,7 @@ impl Default for MediaContext {
             color_bits: 8,
             monochrome_bits: 0,
             font_size: 16.0,
+            text_zoom: 1.0,
         }
     }
 }

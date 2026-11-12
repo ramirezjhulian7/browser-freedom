@@ -8,6 +8,8 @@ license.workspace = true
 bf-css = { path = "../bf-css" }
 bf-dom = { path = "../bf-dom" }
 bf-html = { path = "../bf-html" }
+# E3: el tamaño natural de las imágenes que precarga `new Image()`
+bf-image = { path = "../bf-image" }
 bf-infra = { path = "../bf-infra" }
 bf-js = { path = "../bf-js" }
 # E2: el CSSOM necesita la cascada y la maqueta

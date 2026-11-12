@@ -25,6 +25,29 @@ pub const BAR: f32 = 72.0;
 pub const STATUS: f32 = 24.0;
 pub const PANEL: f32 = 320.0;
 
+/// Sugerencias que muestra la barra de dirección al escribir.
+const SUGGESTIONS: usize = 6;
+/// Margen transparente alrededor de la lista de sugerencias, para la sombra.
+const SUGGEST_PAD: f32 = 20.0;
+
+/// Una sugerencia de la barra de dirección (de los marcadores o del historial).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suggestion {
+    pub title: String,
+    pub url: String,
+    pub bookmark: bool,
+}
+
+/// Marcadores como mucho entre las sugerencias (van primero).
+const BOOKMARK_SUGGESTIONS: usize = 2;
+
+/// La lista de sugerencias maquetada, con su esquina (px lógicos de la ventana) y sus iconos.
+struct SuggestLayer {
+    doc: UiDoc,
+    origin: (f32, f32),
+    icons: Vec<(Icon, Rect, Rgba)>,
+}
+
 /// Zonas activas de la barra.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
@@ -32,6 +55,8 @@ pub enum Region {
     Forward,
     Reload,
     Field,
+    /// La estrella de marcadores, a la derecha del campo (E11).
+    Star,
     Engine,
     /// La pestaña `i`, su botón de cerrar, y el botón de pestaña nueva.
     Tab(usize),
@@ -62,11 +87,12 @@ enum FieldIcon {
     None,
 }
 
-const REGIONS: [(&str, Region); 5] = [
+const REGIONS: [(&str, Region); 6] = [
     ("back", Region::Back),
     ("forward", Region::Forward),
     ("reload", Region::Reload),
     ("field", Region::Field),
+    ("star", Region::Star),
     ("engine", Region::Engine),
 ];
 
@@ -87,6 +113,7 @@ impl UiDoc {
             loader: Arc::new(FileLoader::new()),
             fonts,
             extra: &[],
+            text_zoom: 1.0,
         };
         let page = prepare_page(&doc, &ctx, size);
         UiDoc { doc, page, size }
@@ -191,6 +218,9 @@ impl UrlField {
 
     fn delete_selection(&mut self) -> bool {
         let Some((start, end)) = self.selection() else {
+            // Un ancla sobre el cursor (seleccionar todo en un campo vacío) no es selección,
+            // pero quedaría y volvería selección al escribir: la primera letra se perdería.
+            self.anchor = None;
             return false;
         };
         let (bs, be) = (self.byte(start), self.byte(end));
@@ -267,7 +297,7 @@ fn formatted_url(url: &str) -> (FieldIcon, String) {
     let kind = match u.scheme.as_str() {
         "https" => FieldIcon::Secure,
         "http" => FieldIcon::Insecure,
-        "about" => FieldIcon::Internal,
+        "about" | "freedom" => FieldIcon::Internal,
         _ => FieldIcon::None,
     };
     if host.is_empty() {
@@ -297,6 +327,8 @@ pub struct Chrome {
     pub can_back: bool,
     pub can_forward: bool,
     pub loading: bool,
+    /// La página actual está en los marcadores (la estrella va rellena).
+    pub bookmarked: bool,
     pub hover: Option<Region>,
     /// La página usó algo que el motor aún no soporta (punto ámbar en el botón del panel).
     pub engine_alert: bool,
@@ -318,6 +350,14 @@ pub struct Chrome {
     status: Option<UiDoc>,
     panel: Option<UiDoc>,
     pub panel_scroll: f32,
+    /// Sugerencias para lo escrito en el campo, la elegida con las flechas (su URL queda en el
+    /// campo), la que está bajo el puntero y lo que se había escrito (vuelve al salir de la
+    /// lista con las flechas).
+    suggestions: Vec<Suggestion>,
+    suggest_sel: Option<usize>,
+    suggest_hover: Option<usize>,
+    typed: String,
+    suggest: Option<SuggestLayer>,
 }
 
 impl Chrome {
@@ -330,6 +370,7 @@ impl Chrome {
             can_back: false,
             can_forward: false,
             loading: false,
+            bookmarked: false,
             hover: None,
             engine_alert: false,
             panel_open: false,
@@ -346,7 +387,188 @@ impl Chrome {
             status: None,
             panel: None,
             panel_scroll: 0.0,
+            suggestions: Vec::new(),
+            suggest_sel: None,
+            suggest_hover: None,
+            typed: String::new(),
+            suggest: None,
         }
+    }
+
+    // --- Sugerencias de la barra de dirección ---
+
+    /// Vuelve a buscar sugerencias para lo escrito en el campo: primero los marcadores que
+    /// coinciden, luego el historial global.
+    pub fn update_suggestions(&mut self) {
+        self.typed = self.field.text.clone();
+        self.suggest_sel = None;
+        self.suggest_hover = None;
+        self.suggestions.clear();
+        if !self.field.focused || self.typed.trim().is_empty() {
+            return;
+        }
+        for b in crate::bookmarks::global()
+            .search(&self.typed)
+            .into_iter()
+            .take(BOOKMARK_SUGGESTIONS)
+        {
+            self.suggestions.push(Suggestion {
+                title: b.label().to_owned(),
+                url: b.url.clone(),
+                bookmark: true,
+            });
+        }
+        let history = crate::history::global();
+        for v in history.suggest(&self.typed, SUGGESTIONS, crate::profile::now()) {
+            if self.suggestions.len() >= SUGGESTIONS {
+                break;
+            }
+            if !self.suggestions.iter().any(|s| s.url == v.url) {
+                self.suggestions.push(Suggestion {
+                    title: v.label().to_owned(),
+                    url: v.url.clone(),
+                    bookmark: false,
+                });
+            }
+        }
+    }
+
+    pub fn clear_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.suggest_sel = None;
+        self.suggest_hover = None;
+        self.suggest = None;
+    }
+
+    /// ¿Se ve la lista de sugerencias?
+    pub fn suggestions_open(&self) -> bool {
+        self.field.focused && !self.suggestions.is_empty()
+    }
+
+    /// Flecha abajo (`down`) o arriba con la lista abierta: elige la sugerencia siguiente o la
+    /// anterior y pone su URL en el campo; pasar del borde vuelve a lo escrito. Devuelve si la
+    /// tecla se usó.
+    pub fn move_suggestion(&mut self, down: bool) -> bool {
+        if !self.suggestions_open() {
+            return false;
+        }
+        let n = self.suggestions.len();
+        self.suggest_sel = match (self.suggest_sel, down) {
+            (None, true) => Some(0),
+            (None, false) => Some(n - 1),
+            (Some(i), true) => (i + 1 < n).then_some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+        };
+        let text = match self.suggest_sel {
+            Some(i) => self.suggestions[i].url.clone(),
+            None => self.typed.clone(),
+        };
+        self.field.set_text(text);
+        true
+    }
+
+    /// La sugerencia bajo `(x, y)` (px lógicos de la ventana).
+    pub fn suggestion_at(&self, x: f32, y: f32) -> Option<usize> {
+        let layer = self.suggest.as_ref().filter(|_| self.suggestions_open())?;
+        let (lx, ly) = (x - layer.origin.0, y - layer.origin.1);
+        (0..self.suggestions.len()).find(|i| {
+            layer
+                .doc
+                .rect(&format!("sr-{i}"))
+                .is_some_and(|r| lx >= r.x && lx < r.right() && ly >= r.y && ly < r.bottom())
+        })
+    }
+
+    /// Cambia la sugerencia bajo el puntero; devuelve si cambió (y hay que volver a maquetar).
+    pub fn set_suggest_hover(&mut self, hover: Option<usize>) -> bool {
+        if hover == self.suggest_hover {
+            return false;
+        }
+        self.suggest_hover = hover;
+        true
+    }
+
+    pub fn suggestion_url(&self, i: usize) -> Option<&str> {
+        self.suggestions.get(i).map(|s| s.url.as_str())
+    }
+
+    /// Maqueta la lista bajo el campo `field` (su rect en la barra).
+    fn layout_suggestions(&mut self, field: Rect) {
+        if !self.suggestions_open() {
+            self.suggest = None;
+            return;
+        }
+        let mut rows = String::new();
+        for (i, s) in self.suggestions.iter().enumerate() {
+            let mut class = String::from("row");
+            let mut edge = "";
+            if self.suggest_sel == Some(i) {
+                class.push_str(" sel");
+                edge = "<span class=\"edge\"></span>";
+            } else if self.suggest_hover == Some(i) {
+                class.push_str(" hover");
+            }
+            let url = s.url.strip_prefix("https://").unwrap_or(&s.url);
+            rows.push_str(&format!(
+                "<span id=\"sr-{i}\" class=\"{class}\">{edge}<span id=\"si-{i}\" class=\"icon\"></span>\
+                 <span class=\"t\">{}</span><span class=\"u\">{}</span></span>",
+                escape(&s.title),
+                escape(url)
+            ));
+        }
+        let vars = [
+            ("theme", self.theme.css_vars()),
+            ("pad", SUGGEST_PAD.to_string()),
+            ("rows", rows),
+        ];
+        let doc = UiDoc::build(
+            &fill(internal::SUGGEST, &vars),
+            Size {
+                width: field.width + 2.0 * SUGGEST_PAD,
+                height: 600.0,
+            },
+            self.fonts.clone(),
+        );
+        let t = &self.theme;
+        let icons = (0..self.suggestions.len())
+            .filter_map(|i| {
+                let color = if self.suggest_sel == Some(i) {
+                    t.accent
+                } else {
+                    t.text_secondary
+                };
+                let kind = if self.suggestions[i].bookmark {
+                    Icon::StarFilled
+                } else {
+                    Icon::Clock
+                };
+                doc.rect(&format!("si-{i}")).map(|r| (kind, r, color))
+            })
+            .collect();
+        self.suggest = Some(SuggestLayer {
+            doc,
+            origin: (field.x - SUGGEST_PAD, field.bottom() + 6.0 - SUGGEST_PAD),
+            icons,
+        });
+    }
+
+    /// La capa de las sugerencias: su lista con los iconos, su esquina (px lógicos de la
+    /// ventana) y su tamaño.
+    pub fn suggestions_layer(&self) -> Option<(DisplayList, (f32, f32), Size)> {
+        let layer = self.suggest.as_ref().filter(|_| self.suggestions_open())?;
+        let mut list = layer.doc.display_list().clone();
+        for &(i, rect, color) in &layer.icons {
+            list.items.extend(icon(i, rect, color));
+        }
+        let height = layer.doc.rect("list").map_or(0.0, |r| r.bottom()) + SUGGEST_PAD;
+        Some((
+            list,
+            layer.origin,
+            Size {
+                width: layer.doc.size.width,
+                height,
+            },
+        ))
     }
 
     fn bar_html(&self) -> String {
@@ -454,6 +676,7 @@ impl Chrome {
                 button("forward", self.can_forward, Region::Forward, false),
             ),
             ("reload", button("reload", true, Region::Reload, false)),
+            ("star", button("star", true, Region::Star, false)),
             (
                 "engine",
                 button("engine", true, Region::Engine, self.panel_open),
@@ -558,6 +781,15 @@ impl Chrome {
             ("icon-forward", Icon::Forward, enabled(self.can_forward)),
             ("icon-reload", reload, t.text),
             ("icon-engine", Icon::Engine, engine),
+            (
+                "icon-star",
+                if self.bookmarked {
+                    Icon::StarFilled
+                } else {
+                    Icon::Star
+                },
+                if self.bookmarked { t.accent } else { t.text },
+            ),
             ("icon-newtab", Icon::Plus, t.text_secondary),
         ];
         if let Some((i, color)) = field {
@@ -588,7 +820,11 @@ impl Chrome {
         }
         self.icons = found;
         self.spinners = spinners;
+        let field = bar.rect("field");
         self.bar = Some(bar);
+        if let Some(field) = field {
+            self.layout_suggestions(field);
+        }
         self.layout_status();
     }
 
@@ -713,6 +949,26 @@ impl Chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_after_select_all_on_empty_field() {
+        let mut f = UrlField::default();
+        f.select_all();
+        for c in ["c", "a", "n"] {
+            f.insert(c);
+        }
+        assert_eq!(f.text, "can");
+        // Con texto, seleccionar todo y escribir lo reemplaza.
+        f.select_all();
+        f.insert("á");
+        f.insert("r");
+        assert_eq!(f.text, "ár");
+        f.select_all();
+        f.backspace();
+        f.insert("x");
+        f.insert("y");
+        assert_eq!(f.text, "xy");
+    }
 
     #[test]
     fn url_field_selection_and_paste() {

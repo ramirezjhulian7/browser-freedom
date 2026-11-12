@@ -136,9 +136,30 @@ pub fn create(agent: &mut Agent, name: &str, message: &str) -> Value {
 
 /// Lanza `e` (`TypeError` es un error de ECMAScript; el resto, `DOMException`).
 pub fn throw<T>(agent: &mut Agent, e: DomException) -> JsResult<T> {
-    if e == DomException::TypeError {
+    if e.is_type_error() {
         return agent.type_error(e.message());
     }
     let v = create(agent, e.name(), e.message());
     Err(Throw::Value(v))
+}
+
+/// Como [`throw`], pero un `TypeError` lleva delante la interfaz y el método, al estilo de los
+/// bindings de los navegadores: "Failed to execute 'observe' on 'MutationObserver': …". Los
+/// `DOMException` conservan el mensaje de la tabla de WebIDL.
+pub fn throw_in<T>(
+    agent: &mut Agent,
+    e: DomException,
+    interface: &str,
+    method: &str,
+) -> JsResult<T> {
+    if e.is_type_error() {
+        return agent.type_error(&failed_to_execute(method, interface, e.message()));
+    }
+    throw(agent, e)
+}
+
+/// "Failed to execute '`method`' on '`interface`': `detail`" (el formato de los mensajes de
+/// error de los bindings de Chromium, que los sitios y sus registros de errores conocen).
+pub fn failed_to_execute(method: &str, interface: &str, detail: &str) -> String {
+    format!("Failed to execute '{method}' on '{interface}': {detail}")
 }

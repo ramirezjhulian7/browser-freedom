@@ -256,3 +256,153 @@ fn body_window_event_handlers() {
         "true,true,true,false"
     );
 }
+
+// --- E3: `Image`, `Audio` y `Option` (HTML §4.8.3, §4.8.9, §4.10.10) ---
+
+/// Un PNG de 3×2 píxeles.
+const PNG_3X2: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEUlEQVR4nGP4z8DwH4YZkDkAm34L9XKwuTwAAAAASUVORK5CYII=";
+
+#[test]
+fn legacy_factory_functions() {
+    let mut p = Page::new(DOC);
+    assert_eq!(
+        p.show(
+            "[Image, Audio, Option].map(f => [typeof f, f.name, f.length].join(':')).join() + ' ' + \
+             (Image.prototype === HTMLImageElement.prototype) + (Audio.prototype === HTMLAudioElement.prototype) + \
+             (Option.prototype === HTMLOptionElement.prototype) + ' ' + \
+             JSON.stringify(Object.getOwnPropertyDescriptor(Image, 'prototype').writable) + \
+             Object.getOwnPropertyDescriptor(window, 'Image').enumerable"
+        ),
+        "function:Image:0,function:Audio:0,function:Option:0 truetruetrue falsefalse"
+    );
+    assert_eq!(
+        p.show(
+            "var im = new Image(10, 20); [im.tagName, im instanceof HTMLImageElement, im.getAttribute('width'), \
+             im.height, im.isConnected, new Image().hasAttribute('width')].join()"
+        ),
+        "IMG,true,10,20,false,false"
+    );
+    assert_eq!(
+        p.show("try { Image(); 'sin error' } catch (e) { e instanceof TypeError && e.message }"),
+        "Failed to construct 'Image': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
+    );
+    assert_eq!(
+        p.show(
+            "var au = new Audio('a.mp3'); [au.tagName, au instanceof HTMLAudioElement, au.getAttribute('preload'), \
+             au.getAttribute('src'), new Audio().hasAttribute('src')].join()"
+        ),
+        "AUDIO,true,auto,a.mp3,false"
+    );
+    assert_eq!(
+        p.show(
+            "var o = new Option('texto', 'v', true, false); [o.text, o.value, o.defaultSelected, o.selected, \
+             o.childNodes.length].join() + ' ' + [new Option('x', undefined, false, true).selected, \
+             new Option('y').value, new Option().childNodes.length, new Option().hasAttribute('value')].join()"
+        ),
+        "texto,v,true,false,1 true,y,0,false"
+    );
+    // Se puede agregar a un `select`.
+    assert_eq!(
+        p.show(
+            "var s = document.getElementById('s'); s.appendChild(new Option('tres', '3', false, true)); \
+             [s.options.length, s.value].join()"
+        ),
+        "3,3"
+    );
+}
+
+/// Un WebP sin pérdida (VP8L) de 1×1 píxel.
+const WEBP_1X1: &str = "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+
+/// Solo la cabecera `ftyp` de un AVIF: el motor no decodifica AVIF (da `error`).
+const AVIF_HEADER: &str =
+    "data:image/avif;base64,AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADybWV0YQ==";
+
+#[test]
+fn new_image_preloads_and_fires_load_or_error() {
+    let mut p = Page::new(DOC);
+    p.show(&format!(
+        "var log = []; var ok = new Image(); \
+         ok.onload = () => log.push('load ' + ok.naturalWidth + 'x' + ok.naturalHeight + ' ' + ok.complete); \
+         ok.onerror = () => log.push('error ok'); ok.src = '{PNG_3X2}'; \
+         var bad = new Image(); bad.addEventListener('error', () => log.push('error bad')); \
+         bad.onload = () => log.push('load bad'); bad.src = 'data:text/plain,hola'; \
+         var empty = document.createElement('img'); empty.onerror = () => log.push('error empty'); \
+         empty.setAttribute('src', ''); \
+         var twice = new Image(); twice.onload = () => log.push('load twice'); \
+         twice.onerror = () => log.push('error twice'); twice.src = 'data:text/plain,x'; \
+         twice.src = '{PNG_3X2}'; \
+         var webp = new Image(); webp.onload = () => log.push('load webp ' + webp.naturalWidth + 'x' + webp.naturalHeight); \
+         webp.onerror = () => log.push('error webp'); webp.src = '{WEBP_1X1}'; \
+         var avif = new Image(); avif.onload = () => log.push('load avif'); \
+         avif.onerror = () => log.push('error avif'); avif.src = '{AVIF_HEADER}'; \
+         log.push('sync');"
+    ));
+    // Nada se dispara de forma síncrona.
+    assert_eq!(p.show("log.join('|')"), "sync");
+    let _ = p.rt.run_until_idle();
+    let log = p.show("log.slice().sort().join('|')");
+    assert_eq!(
+        log,
+        "error avif|error bad|error empty|load 3x2 true|load twice|load webp 1x1|sync"
+    );
+    // La carga queda como recurso en la línea de tiempo.
+    assert_eq!(
+        p.show(
+            "var r = performance.getEntriesByType('resource'); \
+             [r.length > 0, r[0].initiatorType, r[0] instanceof PerformanceResourceTiming].join()"
+        ),
+        "true,img,true"
+    );
+}
+
+// --- E3: mensajes de `TypeError` y `DOMTokenList.supports()` ---
+
+#[test]
+fn type_errors_name_interface_and_method() {
+    let mut p = Page::new(DOC);
+    assert_eq!(
+        p.show(
+            "try { new MutationObserver(() => {}).observe(document.body, {}); '' } catch (e) { e.name + ': ' + e.message }"
+        ),
+        "TypeError: Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true."
+    );
+    assert_eq!(
+        p.show(
+            "try { new MutationObserver(() => {}).observe(document.body, {childList: true, attributes: false, attributeOldValue: true}); '' } \
+             catch (e) { e.message }"
+        ),
+        "Failed to execute 'observe' on 'MutationObserver': The options object may only set 'attributeOldValue' to true when 'attributes' is true or not present."
+    );
+    assert_eq!(
+        p.show(
+            "try { document.body.appendChild(null); '' } catch (e) { e.name + ': ' + e.message }"
+        ),
+        "TypeError: Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'."
+    );
+    assert_eq!(
+        p.show("try { document.body.classList.supports('x'); '' } catch (e) { e.name + ': ' + e.message }"),
+        "TypeError: Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens ('class')."
+    );
+}
+
+#[test]
+fn rel_list_and_sandbox_supported_tokens() {
+    let mut p = Page::new(DOC);
+    // El polyfill de `modulepreload` de Vite pregunta esto al empezar cada bundle.
+    assert_eq!(
+        p.show(
+            "var l = document.createElement('link').relList; \
+             [l.supports('stylesheet'), l.supports('ICON'), l.supports('modulepreload'), l.supports('preload'), \
+             l.supports('noopener')].join()"
+        ),
+        "true,true,false,false,false"
+    );
+    assert_eq!(
+        p.show(
+            "var a = document.createElement('a').relList; var f = document.createElement('iframe').sandbox; \
+             [a.supports('noopener'), a.supports('stylesheet'), f.supports('allow-scripts'), f.supports('x')].join()"
+        ),
+        "true,false,true,false"
+    );
+}

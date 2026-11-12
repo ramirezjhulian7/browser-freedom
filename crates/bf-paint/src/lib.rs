@@ -2,13 +2,15 @@
 
 #![forbid(unsafe_code)]
 
+mod border_image; // E7
 pub mod builder;
 pub mod display_list;
 mod effects; // E4
+pub mod filters;
 pub mod images;
 pub mod raster;
 pub mod reftest;
-pub mod scrollbars; // E12
+pub mod scrollbars; // E12 // E7
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -168,6 +170,9 @@ pub struct PageContext<'a> {
     pub fonts: Arc<FontDb>,
     /// Hojas adicionales del llamador (user o UA).
     pub extra: &'a [&'a Stylesheet],
+    /// Zoom de texto del navegador (1 = sin zoom; ver `MediaContext::text_zoom`). Los marcos
+    /// anidados heredan el del documento.
+    pub text_zoom: f32,
 }
 
 /// Estilo → layout → lista de visualización.
@@ -201,6 +206,7 @@ pub fn prepare_page_with_frames(
     let media = MediaContext {
         width: f64::from(viewport.width),
         height: f64::from(viewport.height),
+        text_zoom: f64::from(ctx.text_zoom),
         ..MediaContext::default()
     };
     let sheets = document_stylesheets(
@@ -298,6 +304,7 @@ fn prepare_frames(
                 loader: ctx.loader.clone(),
                 fonts: ctx.fonts.clone(),
                 extra: &[],
+                text_zoom: ctx.text_zoom,
             };
             let size = Size {
                 width: rect.width,

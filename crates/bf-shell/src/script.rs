@@ -74,6 +74,8 @@ pub enum PageRequest {
     Traverse(i32),
     /// `window.open`: una pestaña nueva.
     Open(String),
+    /// Mayús+clic en un enlace: una ventana nueva (E11).
+    OpenWindow(String),
     /// `window.close()`.
     Close,
     /// `window.scrollTo` y compañía: desplazar la página a (x, y) px CSS.
@@ -1176,6 +1178,7 @@ mod tests {
             loader: loader(&env),
             fonts,
             extra: &[],
+            text_zoom: 1.0,
         };
         let viewport = bf_layout::Size {
             width: 640.0,

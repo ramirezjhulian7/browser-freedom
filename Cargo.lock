@@ -429,6 +429,7 @@ dependencies = [
  "bf-web",
  "rfd",
  "softbuffer",
+ "unicode-normalization",
  "winit",
 ]
 
@@ -470,6 +471,7 @@ dependencies = [
  "bf-dom",
  "bf-font",
  "bf-html",
+ "bf-image",
  "bf-infra",
  "bf-js",
  "bf-layout",

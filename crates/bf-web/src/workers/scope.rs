@@ -45,6 +45,8 @@ pub enum ScopeKind {
     Dedicated,
     /// Un `SharedWorker` con su registro.
     Shared(Arc<super::shared::SharedEntry>),
+    /// Un service worker (`workers::service`): su script ya está traído.
+    Service(Arc<super::service::ServiceInfo>),
 }
 
 /// Todo lo que el hilo de un worker necesita (se manda al hilo).
@@ -103,6 +105,8 @@ struct WorkerHooks {
     parent: Option<Arc<AgentInbox>>,
     worker_id: u64,
     url: String,
+    /// `SharedWorker` o `ServiceWorker` (los que no tienen dueño escriben en stderr).
+    label: &'static str,
 }
 
 impl HostHooks for WorkerHooks {
@@ -112,7 +116,7 @@ impl HostHooks for WorkerHooks {
                 worker: self.worker_id,
                 event: WorkerEvent::Console(level, message.to_owned()),
             }),
-            None => eprintln!("[SharedWorker] {message}"),
+            None => eprintln!("[{}] {message}", self.label),
         }
     }
 
@@ -129,7 +133,7 @@ impl HostHooks for WorkerHooks {
                     colno,
                 },
             }),
-            None => eprintln!("[SharedWorker] Uncaught {message}"),
+            None => eprintln!("[{}] Uncaught {message}", self.label),
         }
     }
 }
@@ -160,6 +164,7 @@ fn run(spec: WorkerSpec) {
     let parent = spec.parent.clone();
     let worker_id = spec.worker_id;
     let control = spec.control.clone();
+    let service = matches!(spec.kind, ScopeKind::Service(_)).then(|| spec.inbox.clone());
     let send = |event: WorkerEvent| {
         if let Some(p) = &parent {
             p.push(Envelope::FromWorker {
@@ -176,6 +181,9 @@ fn run(spec: WorkerSpec) {
         ));
     }
     control.closed.store(true, Ordering::SeqCst);
+    if let Some(inbox) = service {
+        super::service::worker_exited(&inbox);
+    }
     send(WorkerEvent::Closed);
 }
 
@@ -185,6 +193,10 @@ fn create_agent(spec: &WorkerSpec) -> Runtime {
         parent: spec.parent.clone(),
         worker_id: spec.worker_id,
         url: spec.url.serialize(false),
+        label: match spec.kind {
+            ScopeKind::Service(_) => "ServiceWorker",
+            _ => "SharedWorker",
+        },
     };
     let mut rt = Runtime::with_options(
         Box::new(hooks),
@@ -228,6 +240,16 @@ fn create_agent(spec: &WorkerSpec) -> Runtime {
 fn run_inner(spec: WorkerSpec) {
     let mut rt = create_agent(&spec);
     let agent = &mut rt.agent;
+    if let ScopeKind::Service(info) = &spec.kind {
+        // "Run Service Worker" (SW §8.13): el script ya se trajo (y se comparó) en el
+        // trabajo de registro; una excepción al evaluarlo es un fallo.
+        let ok = run_service_script(agent, &spec, info);
+        info.started(ok);
+        if ok {
+            event_loop(agent, &spec.inbox, &spec.control);
+        }
+        return;
+    }
     // "Fetch a classic/module worker script" (§10.2.4 paso 12), las políticas de la
     // respuesta (COEP y `crossOriginIsolated`) y la ejecución.
     let fetched = fetch_script_response(spec.backend.as_ref(), &spec.url, MimeCheck::WorkerScript)
@@ -291,6 +313,33 @@ fn run_inner(spec: WorkerSpec) {
         return;
     }
     event_loop(agent, &spec.inbox, &spec.control);
+}
+
+/// Evalúa el script de un service worker; `false` si lanzó (o no compiló).
+fn run_service_script(
+    agent: &mut Agent,
+    spec: &WorkerSpec,
+    info: &super::service::ServiceInfo,
+) -> bool {
+    let src = spec.url.serialize(false);
+    let r = match spec.script_type {
+        ScriptType::Classic => agent.eval_script(&info.script, &src).map(|_| ()),
+        ScriptType::Module => {
+            let loader = std::rc::Rc::new(ModuleFetcher {
+                backend: spec.backend.clone(),
+            });
+            agent.set_module_loader(loader);
+            agent.run_module(&src).map(|_| ())
+        }
+    };
+    match r {
+        Ok(_) => agent.perform_microtask_checkpoint().is_ok(),
+        Err(Throw::Value(e)) => {
+            crate::dom::events::report_exception(agent, &e);
+            false
+        }
+        Err(Throw::Terminate(_)) => false,
+    }
 }
 
 /// HTML §10.2.4 "run a worker", *processResponseConsumeBody* pasos 4–10: la política de
@@ -497,6 +546,7 @@ pub struct ScopeClasses {
     pub worker_global_scope: HostClassId,
     pub dedicated: HostClassId,
     pub shared: HostClassId,
+    pub service: HostClassId,
     pub location: HostClassId,
     pub navigator: HostClassId,
     pub file_reader_sync: HostClassId,
@@ -575,6 +625,7 @@ fn install(
     let class = match kind {
         ScopeKind::Dedicated => classes.dedicated,
         ScopeKind::Shared(_) => classes.shared,
+        ScopeKind::Service(_) => classes.service,
     };
     let g = agent.host_make_global(
         realm,
@@ -584,6 +635,8 @@ fn install(
     crate::dom::window::track_rejections(agent, realm);
     // IndexedDB (E2) también está expuesto en los workers.
     crate::storage::register(agent, realm, &h);
+    // `caches` (SW §5.5, `[SecureContext]`).
+    super::cache::install(agent, realm);
     // `ImageData` (y lo demás del canvas expuesto en Worker), también para deserializarlo.
     crate::html::canvas::register(agent);
     let saved = agent.current_realm;
@@ -591,7 +644,22 @@ fn install(
     for name in WINDOW_ONLY {
         let _ = agent.delete(g, &PropertyKey::from(*name));
     }
+    // `[Exposed=(Window,DedicatedWorker,SharedWorker)]`: no están en un service worker.
+    if matches!(kind, ScopeKind::Service(_)) {
+        for name in [
+            "Worker",
+            "XMLHttpRequest",
+            "XMLHttpRequestUpload",
+            "XMLHttpRequestEventTarget",
+            "FileReaderSync",
+        ] {
+            let _ = agent.delete(g, &PropertyKey::from(name));
+        }
+    }
     agent.current_realm = saved;
+    if let ScopeKind::Service(info) = kind {
+        super::service::install_scope(agent, realm, info);
+    }
 }
 
 /// Registra (una vez) las clases del lado worker.
@@ -605,8 +673,10 @@ fn register_scope_classes(agent: &mut Agent) -> ScopeClasses {
     let fetch = crate::net::fetch::window_partial();
     let dedicated = agent.register_host_class(dedicated_scope_class(wgs));
     let shared = agent.register_host_class(shared_scope_class(wgs));
+    let service = agent.register_host_class(service_scope_class(wgs));
     agent.host_extend_class(dedicated, fetch);
     agent.host_extend_class(shared, crate::net::fetch::window_partial());
+    agent.host_extend_class(service, crate::net::fetch::window_partial());
     let location = agent.register_host_class(location_class());
     let navigator = agent.register_host_class(navigator_class());
     let file_reader_sync = agent.register_host_class(file_reader_sync_class());
@@ -614,6 +684,7 @@ fn register_scope_classes(agent: &mut Agent) -> ScopeClasses {
         worker_global_scope: wgs,
         dedicated,
         shared,
+        service,
         location,
         navigator,
         file_reader_sync,
@@ -651,6 +722,16 @@ fn shared_scope_class(wgs: HostClassId) -> HostClass {
         .attribute("name", Some(scope_name), Some(replaceable_name))
         .method("close", 0, scope_close);
     with_event_handlers(worker_scope_members(c), &["connect"])
+}
+
+/// `ServiceWorkerGlobalScope` (SW §4.1): `clients`, `registration`, `serviceWorker` y
+/// `skipWaiting()` los pone `service.js` en el prototipo.
+fn service_scope_class(wgs: HostClassId) -> HostClass {
+    let c = HostClass::new("ServiceWorkerGlobalScope").parent(wgs);
+    with_event_handlers(
+        worker_scope_members(c),
+        &["install", "activate", "fetch", "message", "messageerror"],
+    )
 }
 
 fn scope_state(agent: &Agent) -> Option<&ScopeState> {
@@ -798,7 +879,10 @@ fn import_scripts(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let backend = crate::net::current_backend(agent);
     let mut scripts = Vec::with_capacity(urls.len());
     for u in &urls {
-        match fetch_script(backend.as_ref(), u, MimeCheck::Imported) {
+        // Un service worker usa su *script resource map* (SW §6.3.2).
+        let r = super::service::import_script(agent, u)
+            .unwrap_or_else(|| fetch_script(backend.as_ref(), u, MimeCheck::Imported));
+        match r {
             Ok(t) => scripts.push(t),
             Err(_) => {
                 return crate::net::dom_error(

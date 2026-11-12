@@ -999,15 +999,12 @@ impl<'a> Styler<'a> {
         style.custom = compute_custom_properties(&mut customs, parent, &self.registry);
         let mut custom = style.custom.clone();
 
-        let root_font_size = if is_root {
-            crate::properties::types::MEDIUM_FONT_SIZE
-        } else {
-            self.root_font_size
-        };
-        let parent_font = parent.map_or(
-            crate::properties::types::MEDIUM_FONT_SIZE,
-            ComputedStyle::font_size_px,
-        );
+        // El zoom de texto del navegador (E11): el tamaño inicial ya va escalado, así los
+        // `em`/`rem`/`%` del root parten de él.
+        let zoom = self.media.text_zoom as f32;
+        let medium = crate::properties::types::MEDIUM_FONT_SIZE * zoom;
+        let root_font_size = if is_root { medium } else { self.root_font_size };
+        let parent_font = parent.map_or(medium, ComputedStyle::font_size_px);
         let ratios = |s: &ComputedStyle| {
             let fs = s.font_size_px();
             match self.fonts {
@@ -1051,6 +1048,10 @@ impl<'a> Styler<'a> {
             &custom,
         );
         style.set(fs);
+        if zoom != 1.0 && self.font_size_zooms(&per_property, is_root) {
+            let px = style.font_size_px() * zoom;
+            style.set(Value::FontSize(crate::properties::types::FontSize::Px(px)));
+        }
         len.font_size = style.font_size_px();
         for id in [
             LonghandId::FontFamily,
@@ -1117,6 +1118,28 @@ impl<'a> Styler<'a> {
             };
         }
         style
+    }
+
+    /// ¿El zoom de texto escala el `font-size` de este elemento? Sí cuando el valor que gana
+    /// no depende de la fuente del padre: una palabra clave o longitud absoluta, `initial`, o
+    /// nada/`inherit` en el root (que toma el inicial). Lo heredado y lo relativo (`em`, `%`,
+    /// `rem`, `smaller`, `calc()`, `var()`) ya parte de un tamaño escalado.
+    fn font_size_zooms(&self, per_property: &[Vec<Entry>], is_root: bool) -> bool {
+        let winner = cascaded(
+            &per_property[LonghandId::FontSize as usize],
+            |e| (&e.prec, e.origin, e.layer),
+            |e| match e.value {
+                DeclValue::Wide(w) => Some(w),
+                _ => None,
+            },
+        );
+        match winner.map(|e| &e.value) {
+            None => is_root,
+            Some(DeclValue::Wide(CssWide::Initial)) => true,
+            Some(DeclValue::Wide(_)) => is_root,
+            Some(DeclValue::Value(Value::FontSize(fs))) => fs.is_absolute(),
+            Some(_) => false,
+        }
     }
 
     /// Valor computado de un longhand según su valor en cascada.

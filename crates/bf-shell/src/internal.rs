@@ -1,6 +1,8 @@
-//! Páginas internas (`about:`), generadas como HTML y maquetadas por el mismo motor que las
-//! páginas de la web: `about:home`, `about:error`, `about:engine`, `about:wpt` y `about:` (el
-//! índice). También genera el reporte del motor que muestra el panel lateral de la ventana.
+//! Páginas internas (`about:` y `freedom://`), generadas como HTML y maquetadas por el mismo
+//! motor que las páginas de la web: `about:home`, `about:error`, `about:engine`, `about:wpt`,
+//! `about:` (el índice) y las del uso diario, `freedom://history`. Cada una responde con los
+//! dos esquemas (`about:history` es `freedom://history`). También genera el reporte del motor
+//! que muestra el panel lateral de la ventana.
 //!
 //! Las plantillas viven en `crates/bf-shell/pages/` y se embeben con `include_str!`; los
 //! `{{nombre}}` se reemplazan con [`fill`]. Los colores llegan del [`Theme`] como custom
@@ -46,8 +48,16 @@ const ENGINE: &str = include_str!("../pages/engine.html");
 pub const PANEL: &str = include_str!("../pages/panel.html");
 const WPT: &str = include_str!("../pages/wpt.html");
 const ABOUT: &str = include_str!("../pages/about.html");
+const HISTORY: &str = include_str!("../pages/history.html");
+const BOOKMARKS: &str = include_str!("../pages/bookmarks.html");
+const DOWNLOADS: &str = include_str!("../pages/downloads.html");
+const DOWNLOADED: &str = include_str!("../pages/downloaded.html");
+const SETTINGS: &str = include_str!("../pages/settings.html");
+pub const DLBAR: &str = include_str!("../pages/dlbar.html");
 pub const BAR: &str = include_str!("../pages/bar.html");
 pub const MENU: &str = include_str!("../pages/menu.html");
+pub const SUGGEST: &str = include_str!("../pages/suggest.html");
+pub const FIND: &str = include_str!("../pages/find.html");
 pub const DIALOG: &str = include_str!("../pages/dialog.html");
 pub const SOURCE: &str = include_str!("../pages/source.html");
 pub const STATUS: &str = include_str!("../pages/status.html");
@@ -58,6 +68,7 @@ const WPT_STATUS: &str = include_str!("../../../docs/wpt-status.md");
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Ir a la barra de dirección"),
     ("Ctrl+T · Ctrl+W", "Pestaña nueva y cerrar pestaña"),
+    ("Ctrl+N", "Ventana nueva"),
     ("Ctrl+Tab · Ctrl+1…9", "Cambiar de pestaña"),
     (
         "Clic central · Ctrl+clic",
@@ -66,7 +77,13 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Alt+← · Alt+→", "Atrás y adelante"),
     ("Ctrl+R · F5", "Recargar"),
     ("Esc", "Detener la carga"),
-    ("Ctrl+H", "Inicio"),
+    ("Alt+Inicio", "Página de inicio"),
+    ("Ctrl+H · Ctrl+J", "Historial y descargas"),
+    (
+        "Ctrl+D · Ctrl+Shift+B",
+        "Guardar marcador y ver los marcadores",
+    ),
+    ("Ctrl+F", "Buscar en la página"),
     (
         "Ctrl++ · Ctrl+− · Ctrl+0",
         "Acercar, alejar y tamaño normal",
@@ -83,7 +100,10 @@ pub const DEV_SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+D", "Volcar el layout"),
 ];
 
-/// Accesos de `about:home`.
+/// Cuántos sitios más visitados muestra la página de pestaña nueva (dos filas de cuatro).
+const TOP_SITES: usize = 8;
+
+/// Accesos de `about:home` cuando el historial está vacío.
 const TILES: &[(&str, &str, &str)] = &[
     ("Google", "https://www.google.com/", "www.google.com"),
     (
@@ -122,13 +142,47 @@ fn themed(template: &str, theme: &Theme, vars: &[(&str, String)]) -> String {
     fill(template, &all)
 }
 
-/// La página interna para `url` (`about:...`).
+/// ¿`url` es una página interna (`about:` o `freedom:`)?
+pub fn is_internal(url: &Url) -> bool {
+    matches!(url.scheme.as_str(), "about" | "freedom")
+}
+
+/// El nombre de la página interna: el camino de `about:<nombre>` o el host de
+/// `freedom://<nombre>`.
+fn internal_name(url: &Url) -> String {
+    let name = if url.scheme == "freedom" {
+        let host = url.host_string();
+        if host.is_empty() {
+            url.path_string()
+        } else {
+            host
+        }
+    } else {
+        url.path_string()
+    };
+    name.trim_matches('/').to_ascii_lowercase()
+}
+
+/// El valor del parámetro `name` de la query (`application/x-www-form-urlencoded`).
+fn query_param(url: &Url, name: &str) -> Option<String> {
+    let q = url.query.as_deref()?;
+    bf_url::form::parse(q.as_bytes())
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+}
+
+/// La página interna para `url` (`about:...` o `freedom://...`).
 pub fn page(url: &Url, ctx: &LoadContext) -> Loaded {
-    let name = url.path_string().to_ascii_lowercase();
+    let name = internal_name(url);
     let html = match name.as_str() {
         "blank" => String::new(),
         "" => themed(ABOUT, &ctx.theme, &[]),
         "home" | "newtab" => home(ctx),
+        "history" => history(url, ctx),
+        "bookmarks" => bookmarks(url, ctx),
+        "downloads" => downloads_page(ctx),
+        "settings" => settings_page(ctx),
         "wpt" => wpt(&ctx.theme),
         "engine" => engine(url, ctx),
         "source" => source(url, ctx),
@@ -146,6 +200,605 @@ pub fn page(url: &Url, ctx: &LoadContext) -> Loaded {
         }
     };
     Loaded::generated(url, &html, ctx.net.clone(), Meta::default())
+}
+
+/// Lo que la ventana hace después de una acción del perfil.
+#[derive(Debug, Default, PartialEq)]
+pub struct Outcome {
+    /// Volver a generar la página actual.
+    pub reload: bool,
+    /// Ir a otra página (en lugar de recargar).
+    pub go: Option<Url>,
+    /// Un aviso para la línea de estado.
+    pub notice: Option<String>,
+    /// Cambiaron las opciones ([`crate::settings`]): la ventana las aplica.
+    pub settings: bool,
+}
+
+impl Outcome {
+    fn reload() -> Outcome {
+        Outcome {
+            reload: true,
+            ..Outcome::default()
+        }
+    }
+
+    fn go(href: &str) -> Outcome {
+        Outcome {
+            go: Url::parse(href, None).ok(),
+            ..Outcome::default()
+        }
+    }
+}
+
+/// Las acciones `bf:` de las páginas del perfil (historial, marcadores, descargas). Devuelve
+/// `Some` si `url` es una de ellas; la ventana solo las acepta desde una página interna.
+pub fn profile_action(url: &Url) -> Option<Outcome> {
+    let now = crate::profile::now();
+    let id = || query_param(url, "u").and_then(|v| v.parse::<u64>().ok());
+    match url.path_string().as_str() {
+        "history-remove" => {
+            let target = query_param(url, "u")?;
+            crate::history::global().remove(&target);
+            Some(Outcome::reload())
+        }
+        "history-clear" => {
+            let since = match url.query.as_deref().unwrap_or("") {
+                "hour" => now.saturating_sub(3600),
+                "day" => now - now % 86_400,
+                "all" => 0,
+                _ => return Some(Outcome::default()),
+            };
+            crate::history::global().clear_since(since);
+            Some(Outcome::reload())
+        }
+        "bookmark-remove" => {
+            crate::bookmarks::global().remove(id()?);
+            Some(Outcome::reload())
+        }
+        "bookmark-save" => {
+            let id = query_param(url, "id")?.parse().ok()?;
+            let field = |n: &str| query_param(url, n).unwrap_or_default();
+            crate::bookmarks::global().update(id, &field("title"), &field("url"), &field("folder"));
+            Some(Outcome::go("freedom://bookmarks"))
+        }
+        "bookmark-folder" => {
+            crate::bookmarks::global().add_folder(&query_param(url, "u")?);
+            Some(Outcome::reload())
+        }
+        "bookmark-folder-remove" => {
+            crate::bookmarks::global().remove_folder(&query_param(url, "u")?);
+            Some(Outcome::reload())
+        }
+        "bookmark-import" => {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Importar marcadores (HTML de Netscape)")
+                .add_filter("Marcadores HTML", &["html", "htm"])
+                .pick_file()
+            else {
+                return Some(Outcome::default());
+            };
+            let notice = match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let text = bf_infra::decode_text(&bytes);
+                    let n = crate::bookmarks::global().import_netscape(&text, "Importados", now);
+                    format!("Importados {n} marcadores de {}", path.display())
+                }
+                Err(e) => format!("No se pudo leer {}: {e}", path.display()),
+            };
+            Some(Outcome {
+                reload: true,
+                notice: Some(notice),
+                ..Outcome::default()
+            })
+        }
+        "bookmark-export" => {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Exportar marcadores")
+                .set_file_name("marcadores-freedom.html")
+                .save_file()
+            else {
+                return Some(Outcome::default());
+            };
+            let html = crate::bookmarks::global().export_netscape();
+            let notice = match std::fs::write(&path, html) {
+                Ok(()) => format!("Marcadores exportados a {}", path.display()),
+                Err(e) => format!("No se pudo guardar {}: {e}", path.display()),
+            };
+            Some(Outcome {
+                notice: Some(notice),
+                ..Outcome::default()
+            })
+        }
+        "download-show" => {
+            let path = crate::downloads::global()
+                .get(id()?)
+                .map(|d| d.path.clone());
+            if let Some(p) = path {
+                crate::downloads::reveal(&p);
+            }
+            Some(Outcome::default())
+        }
+        "download-cancel" => {
+            crate::downloads::global().cancel(id()?);
+            Some(Outcome::reload())
+        }
+        "download-forget" => {
+            crate::downloads::global().forget(id()?);
+            Some(Outcome::reload())
+        }
+        "setting-third-party-cookies" => {
+            let mut s = crate::settings::global();
+            s.block_third_party_cookies = !s.block_third_party_cookies;
+            s.save();
+            Some(Outcome {
+                reload: true,
+                settings: true,
+                ..Outcome::default()
+            })
+        }
+        "setting-restore-session" => {
+            let mut s = crate::settings::global();
+            s.restore_session = !s.restore_session;
+            s.save();
+            Some(Outcome::reload())
+        }
+        "setting-text-zoom" => {
+            let mut s = crate::settings::global();
+            s.text_zoom = match url.query.as_deref().unwrap_or("") {
+                "in" => s.text_zoom_step(true),
+                "out" => s.text_zoom_step(false),
+                "reset" => 1.0,
+                _ => return Some(Outcome::default()),
+            };
+            s.save();
+            Some(Outcome {
+                reload: true,
+                settings: true,
+                ..Outcome::default()
+            })
+        }
+        "download-clear" => {
+            crate::downloads::global().clear_finished();
+            Some(Outcome::reload())
+        }
+        _ => None,
+    }
+}
+
+/// El desvío de `load.rs` (E6) para las descargas: si `response` no es para mostrar
+/// ([`crate::downloads::should_download`]), su cuerpo se guarda en la carpeta de descargas y
+/// el documento es una página interna que lo dice (con `Meta::download`); la ventana vuelve a
+/// la página anterior si la había.
+pub fn download_response(
+    response: &bf_net::Response,
+    net: &std::sync::Arc<bf_net::NetLoader>,
+) -> Option<Loaded> {
+    let content_type = response.headers.get("content-type");
+    let disposition = response.headers.get("content-disposition");
+    if !response.ok() || !crate::downloads::should_download(content_type, disposition) {
+        return None;
+    }
+    let name = crate::downloads::filename_for(&response.url, disposition, content_type);
+    let theme = Theme::for_system(None);
+    let (title, detail, saved) =
+        match crate::downloads::save_bytes(&response.url.href(), &name, &response.body) {
+            Ok(path) => (
+                "Descarga terminada".to_owned(),
+                format!(
+                    "Se guardó {} ({}).",
+                    path.display(),
+                    crate::downloads::human_size(response.body.len() as u64)
+                ),
+                path.display().to_string(),
+            ),
+            Err(e) => (
+                "La descarga falló".to_owned(),
+                format!("No se pudo guardar {name}: {e}"),
+                name.clone(),
+            ),
+        };
+    let html = themed(
+        DOWNLOADED,
+        &theme,
+        &[("title", escape(&title)), ("detail", escape(&detail))],
+    );
+    let meta = Meta {
+        download: Some(saved),
+        content_type: content_type.map(str::to_owned),
+        ..Meta::default()
+    };
+    Some(Loaded::generated(&response.url, &html, net.clone(), meta))
+}
+
+/// Una imagen abierta como documento (HTML §7.4.6, "Page load processing model for media"):
+/// un documento HTML con un `<img>` cuyo `src` es la URL. SVG se trata como XML en `load.rs`.
+pub fn image_document(
+    response: &bf_net::Response,
+    net: &std::sync::Arc<bf_net::NetLoader>,
+) -> Option<Loaded> {
+    let essence = response
+        .headers
+        .get("content-type")?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    if !response.ok() || !essence.starts_with("image/") || essence == "image/svg+xml" {
+        return None;
+    }
+    let href = response.url.href();
+    let name = response
+        .url
+        .path_string()
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| response.url.host_string(), str::to_owned);
+    let html = format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title></head>         <body style=\"margin:0\"><img src=\"{}\" alt=\"\"></body></html>",
+        escape(&name),
+        escape(&href)
+    );
+    let meta = Meta {
+        status: Some((response.status, response.status_text.clone())),
+        content_type: Some(essence),
+        ..Meta::default()
+    };
+    let mut loaded = Loaded::generated(&response.url, &html, net.clone(), meta);
+    // No es una página del navegador: no puede disparar acciones `bf:`.
+    loaded.meta.internal = false;
+    loaded.meta.bytes = response.body.len();
+    Some(loaded)
+}
+
+/// `freedom://settings`: las opciones del navegador ([`crate::settings`]).
+fn settings_page(ctx: &LoadContext) -> String {
+    let s = crate::settings::global().clone();
+    let profile = crate::profile::dir().map_or_else(
+        || "en memoria (no se guarda)".to_owned(),
+        |d| d.display().to_string(),
+    );
+    themed(
+        SETTINGS,
+        &ctx.theme,
+        &[
+            (
+                "cookies_on",
+                if s.block_third_party_cookies {
+                    " on"
+                } else {
+                    ""
+                }
+                .to_owned(),
+            ),
+            (
+                "cookies_state",
+                if s.block_third_party_cookies {
+                    "Activado"
+                } else {
+                    "Desactivado"
+                }
+                .to_owned(),
+            ),
+            (
+                "restore_on",
+                if s.restore_session { " on" } else { "" }.to_owned(),
+            ),
+            (
+                "restore_state",
+                if s.restore_session {
+                    "Activado"
+                } else {
+                    "Desactivado"
+                }
+                .to_owned(),
+            ),
+            ("text_zoom", format!("{} %", (s.text_zoom * 100.0).round())),
+            (
+                "downloads_dir",
+                escape(&crate::downloads::downloads_dir().display().to_string()),
+            ),
+            ("profile", escape(&profile)),
+        ],
+    )
+}
+
+/// `freedom://downloads`: las descargas con su estado, abrir la carpeta, cancelar y quitar.
+fn downloads_page(ctx: &LoadContext) -> String {
+    let g = crate::downloads::global();
+    let list = g.list();
+    let mut rows = String::new();
+    for d in &list {
+        let state = d.status();
+        let bad = if matches!(d.state, crate::downloads::State::Failed(_)) {
+            " bad"
+        } else {
+            ""
+        };
+        let track = match (&d.state, d.fraction()) {
+            (crate::downloads::State::Running, Some(f)) => format!(
+                "<span class=\"track\"><span class=\"fill\" style=\"width:{:.1}%\"></span></span>",
+                f * 100.0
+            ),
+            _ => String::new(),
+        };
+        let id = d.id.to_string();
+        let acts = match d.state {
+            crate::downloads::State::Running => format!(
+                "<a href=\"{}\">Cancelar</a>",
+                action_href("download-cancel", &id)
+            ),
+            crate::downloads::State::Done => format!(
+                "<a href=\"{}\">Mostrar en la carpeta</a><a href=\"{}\">Quitar</a>",
+                action_href("download-show", &id),
+                action_href("download-forget", &id)
+            ),
+            _ => format!(
+                "<a href=\"{}\">Reintentar</a><a href=\"{}\">Quitar</a>",
+                escape(&d.url),
+                action_href("download-forget", &id)
+            ),
+        };
+        let _ = write!(
+            rows,
+            "<div class=\"row\"><span class=\"main\"><span class=\"n\">{name}</span>\
+             <span class=\"u\">{url}</span><span class=\"s{bad}\">{day} {clock} · {state}</span>{track}</span>\
+             <span class=\"acts\">{acts}</span></div>",
+            name = escape(&d.name()),
+            url = escape(&d.url),
+            day = crate::profile::format_day(d.started),
+            clock = crate::profile::format_clock(d.started),
+            state = escape(&state),
+        );
+    }
+    if rows.is_empty() {
+        rows = "<p class=\"empty\">Todavía no descargaste nada.</p>".to_owned();
+    }
+    let running = g.running();
+    let summary = match (list.len(), running) {
+        (0, _) => "Los archivos que descargues aparecen aquí.".to_owned(),
+        (n, 0) => format!("{n} descargas."),
+        (n, r) => format!("{n} descargas, {r} en curso."),
+    };
+    drop(g);
+    themed(
+        DOWNLOADS,
+        &ctx.theme,
+        &[
+            ("summary", escape(&summary)),
+            ("rows", rows),
+            (
+                "dir",
+                escape(&crate::downloads::downloads_dir().display().to_string()),
+            ),
+        ],
+    )
+}
+
+/// `freedom://bookmarks[?q=…|?edit=<id>]`: los marcadores por carpeta (o lo que coincide con
+/// la búsqueda), con editar, borrar, carpetas e importar/exportar.
+fn bookmarks(url: &Url, ctx: &LoadContext) -> String {
+    let query = query_param(url, "q").unwrap_or_default();
+    let searching = !query.trim().is_empty();
+    let b = crate::bookmarks::global();
+    let row = |out: &mut String, m: &crate::bookmarks::Bookmark| {
+        let _ = write!(
+            out,
+            "<div class=\"row\"><a class=\"t\" href=\"{href}\">{title}</a><span class=\"h\">{host}</span>\
+             <a class=\"e\" href=\"freedom://bookmarks?edit={id}\">Editar</a>\
+             <a class=\"x\" href=\"{remove}\" title=\"Borrar el marcador\">×</a></div>",
+            href = escape(&m.url),
+            title = escape(m.label()),
+            host = escape(&host_of(&m.url)),
+            id = m.id,
+            remove = action_href("bookmark-remove", &m.id.to_string()),
+        );
+    };
+    let mut folders = String::new();
+    if searching {
+        let found = b.search(&query);
+        let _ = write!(folders, "<h2>Resultados</h2><div class=\"card day\">");
+        if found.is_empty() {
+            let _ = write!(
+                folders,
+                "<p class=\"empty\">Nada coincide con «{}».</p>",
+                escape(query.trim())
+            );
+        }
+        for m in found {
+            row(&mut folders, m);
+        }
+        folders.push_str("</div>");
+    } else {
+        let names = std::iter::once(String::new()).chain(b.folders().iter().cloned());
+        for name in names {
+            let items: Vec<_> = b.in_folder(&name).collect();
+            if name.is_empty() && items.is_empty() && !b.is_empty() {
+                continue;
+            }
+            let remove = if name.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<a href=\"{}\">Borrar carpeta</a>",
+                    action_href("bookmark-folder-remove", &name)
+                )
+            };
+            let label = if name.is_empty() { "Marcadores" } else { &name };
+            let _ = write!(
+                folders,
+                "<div class=\"folder\"><h2>{}</h2>{remove}</div><div class=\"card day\">",
+                escape(label)
+            );
+            if items.is_empty() {
+                let empty = if name.is_empty() {
+                    "Todavía no hay marcadores. Pulsa Ctrl+D en una página para guardarla."
+                } else {
+                    "Carpeta vacía."
+                };
+                let _ = write!(folders, "<p class=\"empty\">{empty}</p>");
+            }
+            for m in items {
+                row(&mut folders, m);
+            }
+            folders.push_str("</div>");
+        }
+    }
+    let edit = query_param(url, "edit")
+        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|id| b.get(id))
+        .map(|m| {
+            let chips: String = b
+                .folders()
+                .iter()
+                .map(|f| format!("<span>{}</span>", escape(f)))
+                .collect();
+            format!(
+                "<form class=\"card edit\" action=\"bf:bookmark-save\" method=\"get\">\
+                 <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                 <label class=\"field\"><span>Nombre</span><input name=\"title\" value=\"{title}\"></label>\
+                 <label class=\"field\"><span>Dirección</span><input name=\"url\" value=\"{href}\"></label>\
+                 <label class=\"field\"><span>Carpeta</span><input name=\"folder\" value=\"{folder}\" placeholder=\"(Marcadores)\"></label>\
+                 <div class=\"chips\">{chips}</div>\
+                 <div class=\"actions\"><a href=\"freedom://bookmarks\">Cancelar</a><button type=\"submit\">Guardar</button></div></form>",
+                id = m.id,
+                title = escape(&m.title),
+                href = escape(&m.url),
+                folder = escape(&m.folder),
+            )
+        })
+        .unwrap_or_default();
+    let summary = match b.len() {
+        0 => "Las páginas que guardes aparecen aquí.".to_owned(),
+        1 => "1 marcador.".to_owned(),
+        n => format!("{n} marcadores en {} carpetas.", b.folders().len() + 1),
+    };
+    drop(b);
+    let path = crate::profile::file("bookmarks").map_or_else(
+        || "memoria (sin perfil)".to_owned(),
+        |p| p.display().to_string(),
+    );
+    themed(
+        BOOKMARKS,
+        &ctx.theme,
+        &[
+            ("summary", escape(&summary)),
+            ("query", escape(&query)),
+            ("edit", edit),
+            ("folders", folders),
+            ("path", escape(&path)),
+        ],
+    )
+}
+
+/// Un enlace `bf:<accion>?u=<valor>`, ya escapado para un atributo.
+fn action_href(action: &str, value: &str) -> String {
+    let q = bf_url::form::serialize(&[("u".to_owned(), value.to_owned())]);
+    escape(&format!("bf:{action}?{q}"))
+}
+
+/// El host de una URL para mostrar junto al título (o el esquema, si no tiene).
+fn host_of(href: &str) -> String {
+    Url::parse(href, None).map_or_else(
+        |_| String::new(),
+        |u| {
+            let h = u.host_string();
+            if h.is_empty() { u.scheme.clone() } else { h }
+        },
+    )
+}
+
+/// Visitas que muestra `freedom://history`.
+const HISTORY_SHOWN: usize = 400;
+
+/// `freedom://history[?q=…]`: el historial por día (o lo que coincide con la búsqueda), con
+/// borrar por entrada y por periodo, y las páginas de esta pestaña.
+fn history(url: &Url, ctx: &LoadContext) -> String {
+    let query = query_param(url, "q").unwrap_or_default();
+    let searching = !query.trim().is_empty();
+    let h = crate::history::global();
+    let list = if searching {
+        let mut l = h.search(&query);
+        l.truncate(HISTORY_SHOWN);
+        l
+    } else {
+        h.recent(HISTORY_SHOWN)
+    };
+    let summary = match (searching, list.len()) {
+        (false, _) if h.is_empty() => "Todavía no hay nada en el historial.".to_owned(),
+        (false, n) => format!(
+            "{} páginas visitadas; se muestran las {n} más recientes.",
+            h.len()
+        ),
+        (true, 0) => format!("Nada coincide con «{}».", query.trim()),
+        (true, n) => format!("{n} páginas coinciden con «{}».", query.trim()),
+    };
+    let mut days = String::new();
+    let mut current_day = String::new();
+    for v in &list {
+        let day = crate::profile::format_day(v.last);
+        if day != current_day {
+            if !current_day.is_empty() {
+                days.push_str("</div>");
+            }
+            let _ = write!(days, "<h2>{day}</h2><div class=\"card day\">");
+            current_day = day;
+        }
+        let _ = write!(
+            days,
+            "<div class=\"row\"><span class=\"time\">{time}</span><a class=\"t\" href=\"{href}\">{title}</a>\
+             <span class=\"h\">{host}</span><span class=\"n\">{count}</span>\
+             <a class=\"x\" href=\"{remove}\" title=\"Borrar del historial\">×</a></div>",
+            time = crate::profile::format_clock(v.last),
+            href = escape(&v.url),
+            title = escape(v.label()),
+            host = escape(&host_of(&v.url)),
+            count = if v.count > 1 {
+                format!("×{}", v.count)
+            } else {
+                String::new()
+            },
+            remove = action_href("history-remove", &v.url),
+        );
+    }
+    if !current_day.is_empty() {
+        days.push_str("</div>");
+    }
+    drop(h);
+    let mut tab = String::new();
+    if !searching && !ctx.recent.is_empty() {
+        tab.push_str("<h2>En esta pestaña</h2><div class=\"card day\">");
+        for (title, href) in ctx.recent.iter().take(12) {
+            let _ = write!(
+                tab,
+                "<div class=\"row\"><a class=\"t\" href=\"{h}\">{t}</a><span class=\"h\">{host}</span></div>",
+                h = escape(href),
+                t = escape(if title.is_empty() { href } else { title }),
+                host = escape(&host_of(href)),
+            );
+        }
+        tab.push_str("</div>");
+    }
+    let path = crate::profile::file("history").map_or_else(
+        || "memoria (sin perfil)".to_owned(),
+        |p| p.display().to_string(),
+    );
+    themed(
+        HISTORY,
+        &ctx.theme,
+        &[
+            ("summary", escape(&summary)),
+            ("query", escape(&query)),
+            ("tab", tab),
+            ("days", days),
+            ("path", escape(&path)),
+            (
+                "links",
+                " · <a href=\"freedom://bookmarks\">Marcadores</a>".to_owned(),
+            ),
+        ],
+    )
 }
 
 /// `about:source?<url>`: el código fuente de esa URL, con números de línea.
@@ -180,13 +833,38 @@ fn source(url: &Url, ctx: &LoadContext) -> String {
 }
 
 fn home(ctx: &LoadContext) -> String {
+    // Los sitios más visitados del historial (E11); sin historial, unos accesos de ejemplo.
+    let top: Vec<(String, String, String)> = crate::history::global()
+        .top_sites(TOP_SITES, crate::profile::now())
+        .into_iter()
+        .map(|v| (v.label().to_owned(), v.url.clone(), host_of(&v.url)))
+        .collect();
+    let top = if top.is_empty() {
+        TILES
+            .iter()
+            .map(|(n, h, o)| ((*n).to_owned(), (*h).to_owned(), (*o).to_owned()))
+            .collect()
+    } else {
+        top
+    };
     let mut tiles = String::new();
-    for (name, href, host) in TILES {
-        let letter = name.chars().next().unwrap_or('?').to_uppercase();
+    for (name, href, host) in &top {
+        let letter = host
+            .strip_prefix("www.")
+            .unwrap_or(host)
+            .chars()
+            .chain(name.chars())
+            .find(|c| c.is_alphanumeric())
+            .unwrap_or('?')
+            .to_uppercase();
         let _ = write!(
             tiles,
-            "<a class=\"tile\" href=\"{href}\"><span class=\"frame\">{letter}<span class=\"gap\">\
-             </span></span><span class=\"name\">{name}</span><span class=\"host\">{host}</span></a>"
+            "<a class=\"tile\" href=\"{href}\" title=\"{name}\"><span class=\"frame\">{letter}\
+             <span class=\"gap\"></span></span><span class=\"name\">{name}</span>\
+             <span class=\"host\">{host}</span></a>",
+            href = escape(href),
+            name = escape(name),
+            host = escape(host),
         );
     }
     let mut recent = String::new();
@@ -354,7 +1032,7 @@ fn engine(url: &Url, ctx: &LoadContext) -> String {
             &[("subject", "ninguna página".into()), ("body", body)],
         );
     };
-    let fetched = if target.scheme == "about" {
+    let fetched = if is_internal(&target) {
         Ok(page(&target, ctx))
     } else {
         fetch_document(&target, ctx.net.clone())
@@ -379,6 +1057,7 @@ fn engine(url: &Url, ctx: &LoadContext) -> String {
         loader: loaded.loader.clone(),
         fonts: ctx.fonts.clone(),
         extra: &[],
+        text_zoom: 1.0,
     };
     let page = prepare_page(&loaded.doc, &pctx, ctx.viewport);
     themed(
@@ -788,7 +1467,17 @@ mod tests {
     #[test]
     fn templates_fill_every_placeholder() {
         let ctx = LoadContext::cli();
-        for name in ["", "home", "wpt", "error?dns", "engine", "nope"] {
+        for name in [
+            "",
+            "home",
+            "wpt",
+            "error?dns",
+            "engine",
+            "nope",
+            "history",
+            "bookmarks",
+            "bookmarks?edit=1",
+        ] {
             let url = Url::parse(&format!("about:{name}"), None).unwrap();
             let loaded = page(&url, &ctx);
             let html = bf_dom::test_serialize(&loaded.doc, loaded.doc.root());
@@ -805,14 +1494,23 @@ mod tests {
     fn internal_pages_use_only_supported_css() {
         let ctx = LoadContext::cli();
         let media = bf_css::media::MediaContext::default();
-        for name in ["", "home", "wpt", "error?tls", "engine"] {
+        for name in [
+            "",
+            "home",
+            "wpt",
+            "error?tls",
+            "engine",
+            "history",
+            "bookmarks",
+            "settings",
+        ] {
             let url = Url::parse(&format!("about:{name}"), None).unwrap();
             let loaded = page(&url, &ctx);
             let sheets = bf_style::document_stylesheets(&loaded.doc, &media, None);
             let report = bf_style::style_report(&loaded.doc, &sheets);
             assert_eq!(report.ignored(), 0, "about:{name}: {report:?}");
         }
-        for template in [BAR, STATUS, PANEL] {
+        for template in [BAR, STATUS, PANEL, SUGGEST, FIND] {
             let html = fill(
                 template,
                 &[

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Historial</title>
+<style>
+{{theme}}
+{{style}}
+.top { display: flex; align-items: center; margin-bottom: 4px; }
+.top h1 { flex: 1; margin: 0; }
+.find { display: flex; align-items: center; margin: 18px 0 8px; }
+.find input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.find button {
+  height: 40px;
+  margin-left: 8px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-weight: 600;
+}
+.clear { display: flex; flex-wrap: wrap; align-items: center; font-size: 13px; color: var(--text2); }
+.clear a {
+  display: block;
+  margin: 0 0 0 6px;
+  padding: 2px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.day { padding: 4px 0; }
+.row { display: flex; align-items: center; padding: 7px 10px 7px 16px; border-top: 1px solid var(--border); }
+.row:first-child { border-top: 0; }
+.row .time { flex: none; width: 52px; color: var(--text2); font-size: 13px; }
+.row .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--text); }
+.row .h { flex: none; max-width: 34%; overflow: hidden; white-space: nowrap; margin-left: 12px; color: var(--text2); font-size: 13px; }
+.row .n { flex: none; width: 44px; text-align: right; color: var(--text2); font-size: 12px; }
+.row .x {
+  flex: none;
+  display: block;
+  width: 24px;
+  height: 24px;
+  margin-left: 8px;
+  border-radius: 6px;
+  text-align: center;
+  line-height: 24px;
+  color: var(--text2);
+}
+.empty { padding: 9px 16px; margin: 0; color: var(--text2); }
+.note { margin-top: 28px; font-size: 13px; }
+</style>
+<main>
+  <div class="top"><h1>Historial</h1></div>
+  <p class="muted">{{summary}}</p>
+  <form class="find" action="freedom://history" method="get"><input name="q" value="{{query}}" placeholder="Buscar en el historial (título o dirección)"><button type="submit">Buscar</button></form>
+  <div class="clear">Borrar:<a href="bf:history-clear?hour">la última hora</a><a href="bf:history-clear?day">hoy</a><a href="bf:history-clear?all">todo</a></div>
+  {{tab}}
+  {{days}}
+  <p class="note muted">Se guarda en {{path}} · las horas son UTC{{links}}</p>
+</main>
+</html>

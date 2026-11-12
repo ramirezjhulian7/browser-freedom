@@ -79,6 +79,8 @@ pub struct View {
     pub viewport: Size,
     pub scroll: (f32, f32),
     pub device_pixel_ratio: f32,
+    /// Zoom de texto del navegador (E11; 1 = sin zoom).
+    pub text_zoom: f32,
 }
 
 impl Default for View {
@@ -90,6 +92,7 @@ impl Default for View {
             },
             scroll: (0.0, 0.0),
             device_pixel_ratio: 1.0,
+            text_zoom: 1.0,
         }
     }
 }
@@ -150,6 +153,24 @@ impl Documents {
             .viewport = size;
     }
 
+    /// El zoom de texto de la pestaña `tab` (E11); el próximo layout lo usa.
+    pub fn set_text_zoom(&mut self, tab: u64, zoom: f32) {
+        self.thread(tab)
+            .view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .text_zoom = zoom;
+    }
+
+    /// El zoom de texto con el que se maqueta la pestaña `tab`.
+    pub fn text_zoom(&mut self, tab: u64) -> f32 {
+        self.thread(tab)
+            .view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .text_zoom
+    }
+
     /// El desplazamiento y la escala de la página cambiaron: el hilo actualiza el snapshot
     /// del layout (y dispara `scroll`).
     pub fn set_scroll(&mut self, tab: u64, scroll: (f32, f32), device_pixel_ratio: f32) {
@@ -170,6 +191,21 @@ impl Documents {
     pub fn close(&mut self, tab: u64) {
         if let Some(t) = self.threads.remove(&tab) {
             let _ = t.jobs.send(Msg::Stop);
+        }
+    }
+
+    /// Cierra los hilos de todas las pestañas (E11: se cierra la ventana).
+    pub fn close_all(&mut self) {
+        for (_, t) in self.threads.drain() {
+            let _ = t.jobs.send(Msg::Stop);
+        }
+    }
+
+    /// Manda un trabajo solo si la pestaña `tab` ya tiene hilo (E11: una pestaña restaurada
+    /// que todavía no se mostró no arranca uno para un aviso).
+    pub fn send_existing(&mut self, tab: u64, job: Job) {
+        if let Some(t) = self.threads.get(&tab) {
+            let _ = t.jobs.send(Msg::Job(job));
         }
     }
 }
@@ -621,6 +657,7 @@ impl State {
             return;
         };
         let viewport = self.viewport();
+        let view_zoom = self.view().text_zoom;
         let fonts = self.fonts.clone();
         let canvases = current.canvases.clone();
         // E4: los documentos de los `<iframe>`, que se pintan dentro de su caja.
@@ -636,6 +673,7 @@ impl State {
                 loader: loaded.loader.clone(),
                 fonts: fonts.clone(),
                 extra: &[],
+                text_zoom: view_zoom,
             };
             catch_unwind(AssertUnwindSafe(|| {
                 prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames)
