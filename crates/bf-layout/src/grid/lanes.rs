@@ -622,7 +622,11 @@ impl<'a> Layout<'a> {
                 self.subgrids
                     .insert(it.b as *const LayoutBox as usize, entry);
             }
+            let from = out.len();
             self.push_axis_item(it.clone(), true, None, basis, &mut out, 0);
+            if matches!(setup.items[i].1, Placement::Auto(_)) {
+                spread_empty_edges(&mut out, from, grid.cols.len(), true);
+            }
         }
         out
     }
@@ -909,6 +913,9 @@ impl<'a> Layout<'a> {
                     };
                     let mut expanded = Vec::new();
                     self.push_axis_item(it, false, None, cb.width, &mut expanded, 0);
+                    if matches!(setup.items[i].1, Placement::Auto(_)) {
+                        spread_empty_edges(&mut expanded, 0, tracks.len(), false);
+                    }
                     for e in &expanded {
                         let aw = e.area_w.unwrap_or(outer_w);
                         let (c, _) = self.row_contrib(e, cs, &tracks, row_gap, aw);
@@ -1244,6 +1251,7 @@ impl<'a> Layout<'a> {
                 } else {
                     dx
                 };
+                let (dx, dy) = fill_reverse_static(s, cs, rows, content_box, &f, (dx, dy));
                 self.add_abs(c, content_box.x + dx, content_box.y + dy);
                 continue;
             }
@@ -1262,6 +1270,7 @@ impl<'a> Layout<'a> {
             } else {
                 dx
             };
+            let (dx, dy) = fill_reverse_static(s, cs, rows, a, &f, (dx, dy));
             f.translate(dx, dy);
             out.push(f);
         }
@@ -1327,6 +1336,58 @@ impl<'a> Layout<'a> {
             *size = run.range_end();
         }
         (sizes[0], sizes[1].max(sizes[0]))
+    }
+}
+
+/// E5: con `fill-reverse` la posición estática de un absoluto en el eje de apilado se refleja
+/// como el contenido (CSS Grid 3, `grid-lanes-direction`; WPT `grid-lanes/abspos/
+/// *-oof-fill-reverse-*`). `(dx, dy)` es su desplazamiento en `area`, con `f` medido al inicio.
+fn fill_reverse_static(
+    s: &ComputedStyle,
+    cs: &ComputedStyle,
+    rows: bool,
+    area: Rect,
+    f: &Fragment,
+    (dx, dy): (f32, f32),
+) -> (f32, f32) {
+    if !cs.grid_lanes_direction.fill_reverse {
+        return (dx, dy);
+    }
+    use bf_style::properties::types::LengthPercentageAuto as L;
+    let auto = |v: &L| matches!(v, L::Auto);
+    let m = f.margin_rect();
+    if rows && auto(&s.left) && auto(&s.right) {
+        (area.width - m.width - dx, dy)
+    } else if !rows && auto(&s.top) && auto(&s.bottom) {
+        (dx, area.height - m.height - dy)
+    } else {
+        (dx, dy)
+    }
+}
+
+/// E5: los ítems de un subgrid auto-colocado (sus ítems, con el margen, borde, padding y medio
+/// gap de los subgrids que los contienen, y los ítems vacíos de sus bordes, Grid 2 §9) cuentan
+/// en todas las posiciones del eje de rejilla en que podría caer el subgrid, como cualquier
+/// auto-colocado (§3.4 y csswg-drafts#10926; WPT `grid-subgridded-to-grid-lanes/track-sizing/
+/// *-subgrid-extra-margin-*`). `items[from..]` son los del subgrid.
+fn spread_empty_edges(items: &mut Vec<GridItem<'_>>, from: usize, n: usize, columns: bool) {
+    let span = |e: &GridItem<'_>| if columns { e.col } else { e.row };
+    let placed: Vec<GridItem<'_>> = items[from..].to_vec();
+    for e in placed {
+        let (s0, s1) = span(&e);
+        let len = s1.saturating_sub(s0);
+        if len == 0 || len > n {
+            continue;
+        }
+        for t in (0..=n - len).filter(|&t| t != s0) {
+            let mut c = e.clone();
+            if columns {
+                c.col = (t, t + len);
+            } else {
+                c.row = (t, t + len);
+            }
+            items.push(c);
+        }
     }
 }
 

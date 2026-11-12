@@ -85,6 +85,20 @@ arriba). La columna `master` es la medición de la rama sin los cambios de la ro
 Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte con
 `writing-mode` vertical pasaba por casualidad.
 
+## E5: abspos en flex, `safe` y lanes (2026-11-12, ronda 4)
+
+Mismo comando sobre `army/e5` con `master` `d6540e8`; "antes" es el FINAL `4762047`.
+
+| Directorio | 4762047 | army/e5 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/css-flexbox | 699/949 (73.7 %) | 724/949 (76.3 %) | 478 | 0 |
+| css/css-grid | 1054/1567 (67.3 %) | 1102/1567 (70.3 %) | 913 | 2 |
+| css/css-grid/grid-lanes | 518/851 (60.9 %) | 565/851 (66.4 %) | – | – |
+
+Pasan de "pass" a "fail" `css-flexbox/align-items-007` (los SVG de E7 se pintan y uno sin
+`width`/`height` llega con 300×150 de tamaño natural), `flex-abspos-align-self-safe-outer-cb-003`
+(tentative) y `grid-lanes-grid-item-self-baseline-002b` (escritura vertical).
+
 ## Tests con expectativa dudosa
 
 - `css/CSS2/text/letter-spacing-080.xht`: el test pide `letter-spacing: 6em` con `font: 20px`

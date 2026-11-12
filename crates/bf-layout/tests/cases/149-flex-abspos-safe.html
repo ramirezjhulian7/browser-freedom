@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<!-- CSS Flexbox 1 §4.1: el hijo absoluto se coloca como único ítem (justify-content: center y align-items: flex-end: 40,40). CSS Box Alignment 3 §4.4: `safe center` con desbordamiento alinea como `start` (el ítem de 60px en un contenedor de 40px queda en x=0). -->
+<style>body{margin:0} .f{display:flex;position:relative;width:100px;height:50px;justify-content:center;align-items:flex-end} .a{position:absolute;width:20px;height:10px} .g{display:flex;width:40px;height:20px;justify-content:safe center} .w{flex-shrink:0;width:60px;height:20px}</style>
+<div class=f><div class=a></div></div>
+<div class=g><div class=w></div></div>
+<!-- expect
+Block <html> 0,0 800×70
+  Block <body> 0,0 800×70
+    Block <div.f> 0,0 100×50
+      Block <div.a> 40,40 20×10
+    Block <div.g> 0,50 40×20
+      Block <div.w> 0,50 60×20
+-->
