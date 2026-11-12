@@ -660,8 +660,32 @@ pub struct FunctionCode {
     pub decls: Option<Box<Declarations>>,
     /// ¿La función tiene `eval` directo o `with`? (Solo informativo.)
     pub dynamic: bool,
+    /// E8: `Some(k)` si los argumentos solo se leen en las `k` primeras instrucciones, todas
+    /// `ArgToLocal`: la llamada rápida los copia directo a los locales, salta esas `k` y no
+    /// guarda el vector de argumentos en el frame. `None` si algo más los lee (`GetArg`,
+    /// `RestArgs`, `arguments`, `super(...args)` implícito).
+    pub direct_args: Option<u32>,
     /// Las inline caches de los accesos por nombre (E3).
     pub ics: crate::vm::ic::IcTable,
+}
+
+/// E8: el valor de [`FunctionCode::direct_args`] para estas instrucciones.
+pub fn direct_args(ops: &[Op]) -> Option<u32> {
+    let reads_args = |op: &Op| {
+        matches!(
+            op,
+            Op::GetArg(_)
+                | Op::ArgToLocal(..)
+                | Op::RestArgs(_)
+                | Op::CreateArguments(_)
+                | Op::SuperConstructForward
+        )
+    };
+    let k = ops
+        .iter()
+        .take_while(|op| matches!(op, Op::ArgToLocal(..)))
+        .count();
+    (!ops[k..].iter().any(reads_args)).then_some(k as u32)
 }
 
 impl FunctionCode {
