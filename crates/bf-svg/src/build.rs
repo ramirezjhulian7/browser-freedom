@@ -8,8 +8,9 @@ use bf_style::values::color::{Color, parse_color};
 use crate::geom::{self, Seg, Transform};
 use crate::style::Node as DocNode;
 use crate::{
-    ClipPath, Fill, FillRule, Gradient, GradientKind, Group, Intrinsic, LineCap, LineJoin, Mask,
-    Node, Paint, Path, Pattern, Rgba, Spread, Stroke, Svg, TextAnchor, Tree,
+    ClipPath, ContextPaint, ContextPaints, Fill, FillRule, Gradient, GradientKind, Group,
+    Intrinsic, LineCap, LineJoin, Mask, Node, Paint, Path, Pattern, Rgba, Spread, Stroke, Svg,
+    TextAnchor, Tree,
 };
 
 mod filter;
@@ -27,6 +28,11 @@ enum Len {
     Ex(f32),
     /// `calc()`: px + % + em.
     Calc(f32, f32, f32),
+    /// Unidades del viewport inicial (CSS Values 4 §6.1.2): `vw`, `vh`, `vmin`, `vmax`.
+    Vw(f32),
+    Vh(f32),
+    Vmin(f32),
+    Vmax(f32),
 }
 
 /// Valor de un `calc()` (CSS Values 4 §10): número puro o combinación lineal px/%/em.
@@ -60,6 +66,8 @@ fn calc(values: &[ComponentValue]) -> Option<CalcVal> {
                     Len::Em(v) => Some(CalcVal::Len(0.0, 0.0, v)),
                     Len::Ex(v) => Some(CalcVal::Len(0.0, 0.0, v / 2.0)),
                     Len::Calc(a, b, c) => Some(CalcVal::Len(a, b, c)),
+                    // Sin unidades del viewport dentro de `calc()`.
+                    Len::Vw(_) | Len::Vh(_) | Len::Vmin(_) | Len::Vmax(_) => None,
                 },
             },
         }
@@ -172,6 +180,10 @@ fn len_from(v: f32, unit: &str) -> Option<Len> {
         // Sin métricas de la fuente aquí: `ch` vale 0,5em (CSS Values 4 §6.1.1, el valor por
         // defecto cuando no se puede medir).
         "ch" => Some(Len::Em(v * 0.5)),
+        "vw" | "svw" | "lvw" | "dvw" | "vi" | "svi" | "lvi" | "dvi" => Some(Len::Vw(v)),
+        "vh" | "svh" | "lvh" | "dvh" | "vb" | "svb" | "lvb" | "dvb" => Some(Len::Vh(v)),
+        "vmin" | "svmin" | "lvmin" | "dvmin" => Some(Len::Vmin(v)),
+        "vmax" | "svmax" | "lvmax" | "dvmax" => Some(Len::Vmax(v)),
         u => Some(Len::Px(v * unit_px(u)?)),
     }
 }
@@ -236,6 +248,8 @@ enum PaintSpec {
     Color(Rgba),
     CurrentColor,
     Url(String, Option<Box<PaintSpec>>),
+    /// `context-fill`/`context-stroke` (SVG 2 §13.3).
+    Context(ContextPaint),
 }
 
 fn url_of(c: &ComponentValue) -> Option<String> {
@@ -262,11 +276,14 @@ fn parse_paint(v: &[ComponentValue]) -> Option<PaintSpec> {
         {
             return Some(PaintSpec::None);
         }
-        // `context-fill`/`context-stroke` solo tienen sentido en marcadores y `use`.
-        if let Some(TokenKind::Ident(s)) = c.token()
-            && (s.eq_ignore_ascii_case("context-fill") || s.eq_ignore_ascii_case("context-stroke"))
-        {
-            return Some(PaintSpec::None);
+        // `context-fill`/`context-stroke`: la pintura del `use` o de la forma del marcador.
+        if let Some(TokenKind::Ident(s)) = c.token() {
+            if s.eq_ignore_ascii_case("context-fill") {
+                return Some(PaintSpec::Context(ContextPaint::Fill));
+            }
+            if s.eq_ignore_ascii_case("context-stroke") {
+                return Some(PaintSpec::Context(ContextPaint::Stroke));
+            }
         }
         match parse_color(c)? {
             Color::Rgba(c) => Some(PaintSpec::Color(c)),
@@ -312,6 +329,18 @@ struct St {
     markers: [Option<String>; 3],
     /// `paint-order` (SVG 2 §13.7.3): 0 relleno, 1 trazo, 2 marcadores.
     paint_order: [u8; 3],
+    /// `line-height` computado (CSS Inline 3 §5.1; heredado).
+    line_height: LineHeight,
+}
+
+/// Valor computado de `line-height`: un número se hereda como número y una longitud, ya
+/// absoluta.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum LineHeight {
+    #[default]
+    Normal,
+    Factor(f32),
+    Px(f32),
 }
 
 impl Default for St {
@@ -341,6 +370,7 @@ impl Default for St {
             dominant_baseline: crate::Baseline::Alphabetic,
             markers: [None, None, None],
             paint_order: [0, 1, 2],
+            line_height: LineHeight::Normal,
         }
     }
 }
@@ -350,6 +380,9 @@ impl Default for St {
 struct Viewport {
     w: f32,
     h: f32,
+    /// Tamaño del viewport inicial, para `vw`/`vh`: el del documento SVG (el tamaño con el que
+    /// se pinta; en un SVG usado como imagen, el de la imagen).
+    icb: (f32, f32),
 }
 
 impl Viewport {
@@ -358,6 +391,10 @@ impl Viewport {
             Len::Px(v) => v,
             Len::Em(v) => v * font,
             Len::Ex(v) => v * font * 0.5,
+            Len::Vw(v) => v * self.icb.0 / 100.0,
+            Len::Vh(v) => v * self.icb.1 / 100.0,
+            Len::Vmin(v) => v * self.icb.0.min(self.icb.1) / 100.0,
+            Len::Vmax(v) => v * self.icb.0.max(self.icb.1) / 100.0,
             Len::Calc(px, pct, em) => px + em * font + self.resolve(Len::Pct(pct), axis, font),
             Len::Pct(p) => {
                 let base = match axis {
@@ -375,6 +412,9 @@ struct Builder<'a> {
     svg: &'a Svg,
     /// Elementos en curso (para cortar ciclos de `use`).
     stack: Vec<usize>,
+    /// Relleno y trazo especificados de los elementos de contexto en curso (SVG 2 §13.3), del
+    /// exterior al interior; ya sin `context-*` (se resuelven al apilarlos).
+    context: Vec<[PaintSpec; 2]>,
 }
 
 fn is_inherited_reset(name: &str) -> bool {
@@ -636,6 +676,25 @@ impl<'a> Builder<'a> {
                         st.word_spacing = space;
                     }
                 }
+                "line-height" => {
+                    st.line_height = match id.as_deref() {
+                        Some("normal") => LineHeight::Normal,
+                        _ => match one(v).and_then(|c| c.token().cloned()) {
+                            Some(TokenKind::Number(n)) if n.value >= 0.0 => {
+                                LineHeight::Factor(n.value as f32)
+                            }
+                            Some(TokenKind::Percentage(p)) if p.value >= 0.0 => {
+                                LineHeight::Px(st.size * p.value as f32 / 100.0)
+                            }
+                            _ => match one(v).and_then(cv_len) {
+                                Some(l @ (Len::Px(_) | Len::Em(_) | Len::Ex(_))) => {
+                                    LineHeight::Px(vp.resolve(l, Axis::Other, st.size).max(0.0))
+                                }
+                                _ => continue,
+                            },
+                        },
+                    };
+                }
                 "dominant-baseline" => {
                     if let Some(b) = id.as_deref().and_then(text::baseline_keyword) {
                         st.dominant_baseline = b;
@@ -735,7 +794,12 @@ impl<'a> Builder<'a> {
                     let l = cv_len(c);
                     let v = l.map(|l| {
                         let size = if k == 0 { rw } else { rh };
-                        Viewport { w: size, h: size }.resolve(l, Axis::X, st.size)
+                        Viewport {
+                            w: size,
+                            h: size,
+                            icb: vp.icb,
+                        }
+                        .resolve(l, Axis::X, st.size)
                     });
                     if k == 0 {
                         ox = v;
@@ -828,6 +892,7 @@ impl<'a> Builder<'a> {
         };
         Some(Node::Group(Group {
             host_units: false,
+            context: None,
             transform,
             opacity,
             clip,
@@ -923,6 +988,7 @@ impl<'a> Builder<'a> {
             rect,
             content: Group {
                 host_units: false,
+                context: None,
                 transform: content_t,
                 opacity: 1.0,
                 clip: None,
@@ -1000,8 +1066,9 @@ impl<'a> Builder<'a> {
             "ellipse" => {
                 let cx = self.len(n, "cx", Axis::X, vp, st).unwrap_or(0.0);
                 let cy = self.len(n, "cy", Axis::Y, vp, st).unwrap_or(0.0);
-                let rx = self.len(n, "rx", Axis::X, vp, st);
-                let ry = self.len(n, "ry", Axis::Y, vp, st);
+                // Un radio negativo es inválido y vale `auto` (SVG 2 §10.4): toma el otro.
+                let rx = self.len(n, "rx", Axis::X, vp, st).filter(|v| *v >= 0.0);
+                let ry = self.len(n, "ry", Axis::Y, vp, st).filter(|v| *v >= 0.0);
                 let (rx, ry) = match (rx, ry) {
                     (Some(a), Some(b)) => (a, b),
                     (Some(a), None) | (None, Some(a)) => (a, a),
@@ -1105,16 +1172,21 @@ impl<'a> Builder<'a> {
             .get("vector-effect")
             .and_then(|v| ident(v))
             .is_some_and(|v| v == "non-scaling-stroke");
-        let markers = if st.markers.iter().any(Option::is_some)
-            && matches!(n.name.as_str(), "path" | "line" | "polyline" | "polygon")
-        {
-            self.markers(&segs, st, vp, non_scaling)
+        let has_markers = st.markers.iter().any(Option::is_some)
+            && matches!(n.name.as_str(), "path" | "line" | "polyline" | "polygon");
+        let fill = self.fill(st, bbox, vp);
+        let mut stroke = self.stroke(st, bbox, vp);
+        let markers = if has_markers {
+            // La forma es el elemento de contexto de sus marcadores (SVG 2 §13.3).
+            let context = ContextPaints {
+                fill: fill.as_ref().map(|f| f.paint.clone()),
+                stroke: stroke.as_ref().map(|s| s.paint.clone()),
+            };
+            self.markers(&segs, st, vp, non_scaling, context)
         } else {
             Vec::new()
         };
         let n = self.node(i);
-        let fill = self.fill(st, bbox, vp);
-        let mut stroke = self.stroke(st, bbox, vp);
         if let Some(s) = &mut stroke {
             // `pathLength` (§9.5.1): las distancias del trazo se escalan por longitud real /
             // `pathLength`; un valor negativo es un error (se ignora) y cero escala a infinito.
@@ -1188,7 +1260,14 @@ impl<'a> Builder<'a> {
     }
 
     /// Los marcadores de un trazado (§13.7): uno por vértice, orientados según `orient`.
-    fn markers(&mut self, segs: &[Seg], st: &St, vp: Viewport, non_scaling: bool) -> Vec<Node> {
+    fn markers(
+        &mut self,
+        segs: &[Seg],
+        st: &St,
+        vp: Viewport,
+        non_scaling: bool,
+        context: ContextPaints,
+    ) -> Vec<Node> {
         let verts = vertices(segs);
         let mut out = Vec::new();
         let last = verts.len().saturating_sub(1);
@@ -1206,8 +1285,16 @@ impl<'a> Builder<'a> {
             let Some(m) = self.by_id(url).filter(|&m| self.node(m).name == "marker") else {
                 continue;
             };
-            if let Some(node) = self.marker(m, v, kind == 0, st, vp, non_scaling) {
-                out.push(node);
+            self.push_context(st);
+            let node = self.marker(m, v, kind == 0, st, vp, non_scaling);
+            self.context.pop();
+            if let Some(node) = node {
+                out.push(Node::Group(Group {
+                    context: Some(Box::new(context.clone())),
+                    opacity: 1.0,
+                    children: vec![node],
+                    ..Group::default()
+                }));
             }
         }
         out
@@ -1239,9 +1326,19 @@ impl<'a> Builder<'a> {
         let angle = match mn.attr("orient").map(str::trim) {
             Some("auto") => v.angle(),
             Some("auto-start-reverse") => v.angle() + if start { 180.0 } else { 0.0 },
+            // `<angle>` o número en grados (SVG 2 §13.7.2; CSS Values 4 §7.1).
             Some(a) => {
-                let a = a.trim_end_matches("deg");
-                a.parse::<f32>().unwrap_or(0.0)
+                let a = a.to_ascii_lowercase();
+                let (num, k) = [
+                    ("deg", 1.0),
+                    ("grad", 0.9),
+                    ("rad", 180.0 / std::f32::consts::PI),
+                    ("turn", 360.0),
+                ]
+                .iter()
+                .find_map(|&(u, k)| Some((a.strip_suffix(u)?, k)))
+                .unwrap_or((a.as_str(), 1.0));
+                num.trim().parse::<f32>().map_or(0.0, |v| v * k)
             }
             None => 0.0,
         };
@@ -1259,8 +1356,12 @@ impl<'a> Builder<'a> {
         let ry = self.len(mn, "refY", Axis::Y, vp, &mst).unwrap_or(0.0);
         let (rx, ry) = vb_t.apply(rx, ry);
         let inner_vp = match vb {
-            Some((_, _, w, h)) => Viewport { w, h },
-            None => Viewport { w: mw, h: mh },
+            Some((_, _, w, h)) => Viewport { w, h, icb: vp.icb },
+            None => Viewport {
+                w: mw,
+                h: mh,
+                icb: vp.icb,
+            },
         };
         self.stack.push(m);
         let children = self.children(m, &mst, inner_vp);
@@ -1278,6 +1379,7 @@ impl<'a> Builder<'a> {
                 Transform::IDENTITY,
             )],
             texts: Vec::new(),
+            clip: None,
         });
         // Con `non-scaling-stroke` el ancho del trazo está en px del host: el marcador se
         // escala en el host, desde su vértice.
@@ -1292,6 +1394,7 @@ impl<'a> Builder<'a> {
         };
         let node = Node::Group(Group {
             host_units: false,
+            context: None,
             transform,
             opacity: Self::opacity(mn),
             clip,
@@ -1299,6 +1402,7 @@ impl<'a> Builder<'a> {
             filter: None,
             children: vec![Node::Group(Group {
                 host_units: false,
+                context: None,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
@@ -1317,6 +1421,7 @@ impl<'a> Builder<'a> {
             mask: None,
             filter: None,
             host_units: true,
+            context: None,
             children: vec![node],
         }))
     }
@@ -1357,8 +1462,12 @@ impl<'a> Builder<'a> {
             Ok(vb) => vb,
         };
         let inner_vp = match view_box {
-            Some((_, _, vw, vh)) => Viewport { w: vw, h: vh },
-            None => Viewport { w, h },
+            Some((_, _, vw, vh)) => Viewport {
+                w: vw,
+                h: vh,
+                icb: vp.icb,
+            },
+            None => Viewport { w, h, icb: vp.icb },
         };
         let par = c.attr("preserveAspectRatio").unwrap_or("");
         let vb_t = view_box.map_or(Transform::IDENTITY, |vb| {
@@ -1378,9 +1487,11 @@ impl<'a> Builder<'a> {
                 Transform::IDENTITY,
             )],
             texts: Vec::new(),
+            clip: None,
         });
         Some(Node::Group(Group {
             host_units: false,
+            context: None,
             transform: Transform::translate(x, y),
             opacity: 1.0,
             clip,
@@ -1388,6 +1499,7 @@ impl<'a> Builder<'a> {
             filter: None,
             children: vec![Node::Group(Group {
                 host_units: false,
+                context: None,
                 transform: vb_t,
                 opacity: 1.0,
                 clip: None,
@@ -1418,7 +1530,9 @@ impl<'a> Builder<'a> {
                 }
                 let tst = self.computed(tn, st, vp);
                 self.stack.push(target);
+                self.push_context(st);
                 let node = self.nested_svg(target, target, &tst, vp, Some((w, h)));
+                self.context.pop();
                 self.stack.pop();
                 let tn = self.node(target);
                 // Los atributos de presentación propios del `symbol` (opacidad, transformación).
@@ -1435,20 +1549,56 @@ impl<'a> Builder<'a> {
             }
             _ => {
                 self.stack.push(original);
+                self.push_context(st);
                 let node = self.element(target, st, vp);
+                self.context.pop();
                 self.stack.pop();
                 node?
             }
         };
-        Some(Node::Group(Group {
+        let placed = Node::Group(Group {
             host_units: false,
+            context: None,
             transform: Transform::translate(x, y),
             opacity: 1.0,
             clip: None,
             mask: None,
             filter: None,
             children: vec![inner],
+        });
+        // El `use` es el elemento de contexto de su contenido (SVG 2 §13.3): sus pinturas,
+        // con su caja, en su sistema (sin el `x`/`y`, que solo mueve el contenido).
+        let bbox = node_bbox(&placed, &Transform::IDENTITY);
+        let context = self.context_paints(st, bbox, vp);
+        Some(Node::Group(Group {
+            context: Some(Box::new(context)),
+            opacity: 1.0,
+            children: vec![placed],
+            ..Group::default()
         }))
+    }
+
+    /// Apila el relleno y el trazo especificados de un elemento de contexto, con sus
+    /// `context-*` resueltos con el contexto exterior.
+    fn push_context(&mut self, st: &St) {
+        let outer = self.context.last().cloned();
+        let own = |p: &PaintSpec| match p {
+            PaintSpec::Context(k) => outer
+                .as_ref()
+                .map_or(PaintSpec::None, |o| o[*k as usize].clone()),
+            p => p.clone(),
+        };
+        let entry = [own(&st.fill), own(&st.stroke)];
+        self.context.push(entry);
+    }
+
+    /// Las pinturas de un elemento de contexto ya pintado, con la caja `bbox` (en el sistema
+    /// del grupo que las llevará).
+    fn context_paints(&mut self, st: &St, bbox: Option<Bbox>, vp: Viewport) -> ContextPaints {
+        ContextPaints {
+            fill: self.resolve_paint(&st.fill, st, bbox, vp),
+            stroke: self.resolve_paint(&st.stroke, st, bbox, vp),
+        }
     }
 
     fn resolve_paint(
@@ -1462,6 +1612,16 @@ impl<'a> Builder<'a> {
             PaintSpec::None => None,
             PaintSpec::Color(c) => Some(Paint::Color(*c)),
             PaintSpec::CurrentColor => Some(Paint::Color(st.color)),
+            // SVG 2 §13.3: sin elemento de contexto no hay pintura. `currentColor` se resuelve
+            // con el `color` del elemento que la usa (WPT `paint-context-003.svg`); los
+            // servidores de pintura, en el sistema del contexto (ver `Paint::Context`).
+            PaintSpec::Context(k) => match &self.context.last()?[*k as usize] {
+                PaintSpec::None => None,
+                PaintSpec::Color(c) => Some(Paint::Color(*c)),
+                PaintSpec::CurrentColor => Some(Paint::Color(st.color)),
+                PaintSpec::Url(..) => Some(Paint::Context(*k)),
+                PaintSpec::Context(_) => None,
+            },
             PaintSpec::Url(url, fallback) => {
                 let server = self.by_id(url).filter(|&s| {
                     matches!(
@@ -1607,7 +1767,11 @@ impl<'a> Builder<'a> {
             (None, false, _) => Transform::IDENTITY,
         };
         let inner_vp = match view_box {
-            Some((_, _, vw, vh)) => Viewport { w: vw, h: vh },
+            Some((_, _, vw, vh)) => Viewport {
+                w: vw,
+                h: vh,
+                icb: vp.icb,
+            },
             None => vp,
         };
         // El contenido es el del primero de la cadena que tenga hijos elemento.
@@ -1630,6 +1794,7 @@ impl<'a> Builder<'a> {
             transform: pt.then(&Transform::translate(x, y)),
             content: Group {
                 host_units: false,
+                context: None,
                 transform: content_t,
                 opacity: 1.0,
                 clip: None,
@@ -1831,11 +1996,27 @@ impl<'a> Builder<'a> {
             transform,
             shapes: Vec::new(),
             texts: Vec::new(),
+            clip: None,
         };
         if self.stack.contains(&c) {
             return Some(clip);
         }
         self.stack.push(c);
+        // `clip-path` en el propio `clipPath` (CSS Masking 1 §6.3): con la misma caja y en el
+        // sistema del elemento recortado, como este.
+        if let Some(inner) = cn
+            .props
+            .get("clip-path")
+            .and_then(|v| one(v).and_then(url_of))
+            .and_then(|u| self.by_id(&u))
+            .filter(|&k| self.node(k).name == "clipPath" && !self.stack.contains(&k))
+        {
+            let Some(nested) = self.clip_path(inner, st, vp, bbox) else {
+                self.stack.pop();
+                return None;
+            };
+            clip.clip = Some(Box::new(nested));
+        }
         let kids = self.node(c).children.clone();
         for k in kids {
             let kn = self.node(k);
@@ -2212,7 +2393,8 @@ fn absolute(n: &DocNode, name: &str) -> Option<f32> {
         Len::Em(v) => Some(v * 16.0),
         Len::Ex(v) => Some(v * 8.0),
         Len::Calc(px, 0.0, em) => Some(px + em * 16.0),
-        Len::Pct(_) | Len::Calc(..) => None,
+        // Los porcentajes y las unidades del viewport dependen del contenedor.
+        Len::Pct(_) | Len::Calc(..) | Len::Vw(_) | Len::Vh(_) | Len::Vmin(_) | Len::Vmax(_) => None,
     }
     .filter(|v| *v >= 0.0)
 }
@@ -2285,6 +2467,7 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         let full = tree(&inner, dw, dh);
         let root = Group {
             host_units: false,
+            context: None,
             transform: Transform::scale(width / rw, height / rh)
                 .then(&Transform::translate(-rx, -ry)),
             opacity: 1.0,
@@ -2302,9 +2485,11 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
     let mut b = Builder {
         svg,
         stack: Vec::new(),
+        context: Vec::new(),
     };
     let mut root = Group {
         host_units: false,
+        context: None,
         transform: Transform::IDENTITY,
         opacity: 1.0,
         clip: None,
@@ -2320,10 +2505,15 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
         let disabled = view_box_state(r).is_err() && view.and_then(|v| v.view_box).is_none();
         let vb = view.and_then(|v| v.view_box).or_else(|| view_box(r));
         let vp = match vb {
-            Some((_, _, w, h)) => Viewport { w, h },
+            Some((_, _, w, h)) => Viewport {
+                w,
+                h,
+                icb: (width, height),
+            },
             None => Viewport {
                 w: width,
                 h: height,
+                icb: (width, height),
             },
         };
         let base = St {
@@ -2360,4 +2550,141 @@ pub(crate) fn tree(svg: &Svg, width: f32, height: f32) -> Tree {
 #[allow(dead_code)]
 pub(crate) fn values(s: &str) -> Vec<ComponentValue> {
     parse_component_value_list(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ContextPaint, Group, Node, Paint, Path, Rgba, Svg};
+
+    fn tree(body: &str, w: f32, h: f32) -> Group {
+        let src = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>\
+             {body}</svg>"
+        );
+        Svg::parse(&src).unwrap().tree(w, h).root
+    }
+
+    fn paths(g: &Group, out: &mut Vec<Path>) {
+        for c in &g.children {
+            match c {
+                Node::Path(p) => out.push(p.clone()),
+                Node::Group(g) => paths(g, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn groups<'a>(g: &'a Group, out: &mut Vec<&'a Group>) {
+        out.push(g);
+        for c in &g.children {
+            if let Node::Group(k) = c {
+                groups(k, out);
+            }
+        }
+    }
+
+    fn color(p: &Option<crate::Fill>) -> Option<Rgba> {
+        match p.as_ref()?.paint {
+            Paint::Color(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn context_paint_in_use() {
+        // SVG 2 §13.3: el relleno y el trazo del `use`; `currentColor`, con el `color` del
+        // elemento que la usa.
+        let g = tree(
+            "<defs><rect id='r' width='10' height='10' color='lime' \
+             fill='context-stroke' stroke='context-fill'/></defs>\
+             <use href='#r' fill='blue' stroke='currentColor' color='red'/>",
+            100.0,
+            100.0,
+        );
+        let mut ps = Vec::new();
+        paths(&g, &mut ps);
+        assert_eq!(color(&ps[0].fill), Some(Rgba::rgb(0, 255, 0)));
+        let stroke = ps[0].stroke.as_ref().map(|s| s.paint.clone());
+        assert_eq!(stroke, Some(Paint::Color(Rgba::rgb(0, 0, 255))));
+        // Sin elemento de contexto no hay pintura.
+        let g = tree(
+            "<rect width='10' height='10' fill='context-fill'/>",
+            100.0,
+            100.0,
+        );
+        let mut ps = Vec::new();
+        paths(&g, &mut ps);
+        assert!(ps.is_empty() || ps[0].fill.is_none());
+    }
+
+    #[test]
+    fn context_paint_server_resolved_by_group() {
+        // Con un gradiente, la forma deja `Paint::Context` y el grupo del `use` lleva la
+        // pintura en su sistema.
+        let g = tree(
+            "<defs><linearGradient id='lg'><stop offset='0' stop-color='red'/>\
+             <stop offset='1' stop-color='blue'/></linearGradient>\
+             <rect id='r' width='10' height='10' fill='context-fill'/></defs>\
+             <use href='#r' x='5' fill='url(#lg)'/>",
+            100.0,
+            100.0,
+        );
+        let mut ps = Vec::new();
+        paths(&g, &mut ps);
+        assert_eq!(
+            ps[0].fill.as_ref().map(|f| f.paint.clone()),
+            Some(Paint::Context(ContextPaint::Fill))
+        );
+        let mut gs = Vec::new();
+        groups(&g, &mut gs);
+        let ctx = gs
+            .iter()
+            .find_map(|g| g.context.as_ref())
+            .expect("contexto");
+        assert!(matches!(ctx.fill, Some(Paint::Gradient(_))));
+    }
+
+    #[test]
+    fn viewport_units_and_auto_radii() {
+        // `vw`/`vh` (CSS Values 4 §6.1.2) del viewport inicial; un radio negativo es `auto`
+        // (SVG 2 §10.4).
+        let g = tree(
+            "<rect style='width:10vw;height:50vh' fill='green'/>\
+             <ellipse cx='50' cy='50' rx='-5' ry='20'/>",
+            200.0,
+            100.0,
+        );
+        let mut ps = Vec::new();
+        paths(&g, &mut ps);
+        let b = crate::geom::bbox(&ps[0].segs).unwrap();
+        assert_eq!((b.2, b.3), (20.0, 50.0));
+        let b = crate::geom::bbox(&ps[1].segs).unwrap();
+        assert!((b.2 - 40.0).abs() < 1e-3 && (b.3 - 40.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn overflow_attribute_and_nested_clip() {
+        // `overflow` es atributo de presentación (§6.6): un `svg` anidado visible no recorta.
+        let g = tree(
+            "<svg width='1' height='1' overflow='visible'><rect width='50' height='50'/></svg>",
+            100.0,
+            100.0,
+        );
+        let mut gs = Vec::new();
+        groups(&g, &mut gs);
+        assert!(gs.iter().all(|g| g.clip.is_none()));
+        // `clip-path` en un `clipPath`: el recorte lleva el anidado (CSS Masking 1 §6.3).
+        let g = tree(
+            "<clipPath id='a'><circle r='5'/></clipPath>\
+             <clipPath id='b' clip-path='url(#a)'><rect width='10' height='10'/></clipPath>\
+             <rect width='20' height='20' clip-path='url(#b)'/>",
+            100.0,
+            100.0,
+        );
+        let mut gs = Vec::new();
+        groups(&g, &mut gs);
+        let clip = gs.iter().find_map(|g| g.clip.as_ref()).expect("recorte");
+        assert_eq!(clip.shapes.len(), 1);
+        assert_eq!(clip.clip.as_ref().map(|c| c.shapes.len()), Some(1));
+    }
 }

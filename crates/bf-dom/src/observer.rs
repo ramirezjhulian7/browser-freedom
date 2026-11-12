@@ -225,6 +225,11 @@ impl Document {
         std::mem::take(&mut self.observers.observers[observer.0 as usize].records)
     }
 
+    /// E1: "queue a mutation observer microtask" (lo usa "signal a slot change").
+    pub(crate) fn queue_mutation_observer_microtask(&mut self) {
+        self.observers.microtask_queued = true;
+    }
+
     /// ¿Hay un "mutation observer microtask" pendiente?
     pub fn mutation_observer_microtask_queued(&self) -> bool {
         self.observers.microtask_queued

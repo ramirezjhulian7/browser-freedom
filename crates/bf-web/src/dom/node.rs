@@ -260,7 +260,9 @@ fn set_text_content(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn get_root_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let r = with_doc(agent, n.doc, |d| d.get_root_node(n.node));
+    // E1: `GetRootNodeOptions.composed`.
+    let composed = crate::dom::events::dict_bool(agent, &a.arg(0), "composed")?;
+    let r = with_doc(agent, n.doc, |d| d.get_root_node_composed(n.node, composed));
     Ok(wrap_node(agent, NodeRef::new(n.doc, r)))
 }
 
@@ -289,13 +291,21 @@ fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     let r = with_doc_mut(agent, n.doc, |d| d.clone_node_checked(n.node, deep));
     match r {
-        Ok(c) => Ok(wrap_node(agent, NodeRef::new(n.doc, c))),
+        Ok(c) => {
+            // E1: los custom elements de la copia.
+            crate::html::custom_elements::cloned(agent, NodeRef::new(n.doc, c));
+            Ok(wrap_node(agent, NodeRef::new(n.doc, c)))
+        }
         Err(e) => throw_dom(agent, e),
     }
 }
 
 fn is_equal_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: un nodo de otra ventana cuenta como distinto (comparar entre arenas no está hecho).
+    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+        return Ok(Value::Boolean(false));
+    }
     let Some(o) = arg_opt_node(agent, &a.arg(0), "parameter 1")? else {
         return Ok(Value::Boolean(false));
     };
@@ -309,12 +319,30 @@ fn is_equal_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn is_same_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: un nodo de otra ventana nunca es este (aunque su `NodeRef` coincida).
+    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+        return Ok(Value::Boolean(false));
+    }
     let o = arg_opt_node(agent, &a.arg(0), "parameter 1")?;
     Ok(Value::Boolean(o == Some(n)))
 }
 
 fn compare_document_position(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: un nodo de otra ventana tiene otra raíz (§4.4 paso 6): desconectado, con el orden
+    // de los wrappers en el heap (consistente mientras los dos vivan).
+    if let (Value::Object(this), Value::Object(other)) = (&a.this, &a.arg(0))
+        && crate::dom::is_foreign_node(agent, &a.arg(0))
+    {
+        let order = if other.index() < this.index() {
+            document_position::PRECEDING
+        } else {
+            document_position::FOLLOWING
+        };
+        let r =
+            document_position::DISCONNECTED | document_position::IMPLEMENTATION_SPECIFIC | order;
+        return Ok(Value::Number(f64::from(r)));
+    }
     let o = arg_node(agent, &a.arg(0), "parameter 1")?;
     let r = if o.doc == n.doc {
         with_doc(agent, n.doc, |d| {
@@ -335,6 +363,10 @@ fn compare_document_position(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Va
 
 fn contains(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: un nodo de otra ventana no es descendiente de este.
+    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+        return Ok(Value::Boolean(false));
+    }
     let o = arg_opt_node(agent, &a.arg(0), "parameter 1")?;
     let r = match o {
         Some(o) if o.doc == n.doc => with_doc(agent, n.doc, |d| d.contains(n.node, Some(o.node))),

@@ -40,6 +40,8 @@ fn parse_options() -> ParseOptions {
     ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        // E1: los documentos de navegación permiten declarative shadow roots.
+        allow_declarative_shadow_roots: true,
     }
 }
 
@@ -238,6 +240,7 @@ pub fn begin_parse_with(agent: &mut Agent, realm: RealmId, url: &Url, scripting:
     let mut parser = Parser::new(&ParseOptions {
         scripting,
         iframe_srcdoc: url.href() == "about:srcdoc",
+        allow_declarative_shadow_roots: true,
     });
     parser.delay_load_event();
     parser.document_mut().url = url.clone();
@@ -628,6 +631,8 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         let placeholder = Parser::new(&parse_options());
         let parser = std::mem::replace(doc, placeholder);
         put_parser(self.agent, self.realm, parser);
+        // E1: los custom elements que el parser insertó se actualizan antes del script.
+        crate::html::custom_elements::process_reactions(self.agent);
         match info.type_ {
             ScriptType::Classic => match fetched {
                 Some(f) => self.run_classic(&f.source, &f.url),

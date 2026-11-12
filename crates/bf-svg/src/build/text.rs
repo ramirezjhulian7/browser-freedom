@@ -9,7 +9,9 @@
 //! chunk*), igual que el principio de cada `textPath`. El avance, `text-anchor` y la
 //! colocación sobre el camino (§11.8.3) son de quien pinta, que tiene las fuentes.
 
-use super::{Axis, Builder, Len, PaintSpec, St, Viewport, conditions_pass, ident, parse_len};
+use super::{
+    Axis, Builder, Len, LineHeight, PaintSpec, St, Viewport, conditions_pass, ident, parse_len,
+};
 use bf_css::syntax::TokenKind;
 
 use crate::geom;
@@ -137,6 +139,15 @@ pub(super) fn build(b: &mut Builder, i: usize, st: &St, vp: Viewport) -> Option<
         }
     }
 
+    // `inline-size` (§11.4.1): texto ajustado en un área; solo cuentan la primera `x` e `y`
+    // (las demás posiciones absolutas se ignoran) y no hay `textPath`.
+    let inline_size = inline_size(b, i, st, vp).filter(|_| w.paths.is_empty());
+    if inline_size.is_some() {
+        for v in rx.iter_mut().skip(1).chain(ry.iter_mut().skip(1)) {
+            *v = None;
+        }
+    }
+
     // Los *chunks*: uno nuevo en cada posición absoluta y al entrar o salir de un `textPath`.
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut g = 0;
@@ -193,7 +204,19 @@ pub(super) fn build(b: &mut Builder, i: usize, st: &St, vp: Viewport) -> Option<
         transform: geom::Transform::IDENTITY,
         chunks,
         paths: w.paths,
+        inline_size,
     }))
+}
+
+/// `inline-size` del elemento `text` (SVG 2 §11.4.1): `None` si es `0` o `auto`; los
+/// porcentajes, del ancho del viewport (texto horizontal).
+fn inline_size(b: &Builder, i: usize, st: &St, vp: Viewport) -> Option<f32> {
+    let v = b.node(i).props.get("inline-size")?;
+    let px = match super::one(v).and_then(super::cv_len)? {
+        Len::Pct(p) => vp.w * p / 100.0,
+        l => vp.resolve(l, Axis::X, st.size),
+    };
+    (px > 0.0 && px.is_finite()).then_some(px)
 }
 
 /// Lista de `<length-percentage>` de un atributo (separados por espacios y/o comas); vacía si
@@ -327,6 +350,11 @@ fn walk(
                         baseline_shift: shift,
                         stroke_first: st.paint_order.iter().position(|&k| k == 1)
                             < st.paint_order.iter().position(|&k| k == 0),
+                        line_height: match st.line_height {
+                            LineHeight::Normal => None,
+                            LineHeight::Factor(f) => Some(f * st.size),
+                            LineHeight::Px(px) => Some(px),
+                        },
                     };
                     template = Some(s.clone());
                     s
@@ -569,5 +597,22 @@ mod tests {
         assert_eq!(s[0].family, vec!["monospace".to_owned()]);
         assert_eq!(s[1].baseline, Baseline::Central);
         assert!((s[1].baseline_shift - 20.0 / 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn inline_size_keeps_one_chunk() {
+        // §11.4.1: con `inline-size` solo cuentan la primera `x` e `y`; los porcentajes son
+        // del ancho del viewport.
+        let t = text(
+            "<text x='10' y='20' style='inline-size:50%;line-height:1.5;font-size:10px'>a \
+             <tspan x='70' y='5'>b</tspan></text>",
+        );
+        assert_eq!(t.inline_size, Some(50.0));
+        assert_eq!(t.chunks.len(), 1);
+        assert_eq!((t.chunks[0].x, t.chunks[0].y), (Some(10.0), Some(20.0)));
+        assert_eq!(t.chunks[0].spans[0].line_height, Some(15.0));
+        let t = text("<text style='inline-size:0'>a</text>");
+        assert_eq!(t.inline_size, None);
+        assert_eq!(t.chunks[0].spans[0].line_height, None);
     }
 }

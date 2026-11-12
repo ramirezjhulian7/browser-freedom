@@ -262,6 +262,8 @@ impl ScriptHost for PageHost<'_> {
             &mut ctx(self.agent, self.realm).documents[0],
             DocumentOwner::Parser(Box::new(real)),
         );
+        // E1: los custom elements que el parser insertó se actualizan antes del script.
+        crate::html::custom_elements::process_reactions(self.agent);
         self.run_classic_script(&text, &url);
         let back = std::mem::replace(&mut ctx(self.agent, self.realm).documents[0], saved);
         if let DocumentOwner::Parser(p) = back {
