@@ -32,6 +32,7 @@ bf-web = { path = "../bf-web" }
 bf-image = { path = "../bf-image" }
 arboard = "3"
 rfd = "0.15"
+unicode-normalization = "0.1"
 
 [lints]
 workspace = true

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<style>
+{{theme}}
+/* La barra de descargas, abajo en el marco sobre la línea de estado: una tarjeta por descarga
+   (icono, nombre, estado y una línea de progreso ámbar) y, a la derecha, "Ver descargas" y
+   cerrar. Los iconos los dibuja downloadbar.rs en los huecos .icon. */
+html, body { margin: 0; height: 48px; overflow: hidden; background: var(--frame); }
+body { font-family: var(--font); font-size: var(--chrome-size); color: var(--text); }
+#bar { position: relative; display: flex; align-items: center; height: 48px; padding: 0 6px 0 8px; box-sizing: border-box; border-top: 1px solid var(--border); }
+.edge { position: absolute; top: -1px; left: 10px; width: 60px; height: 2px; border-radius: 0 0 2px 2px; background: var(--accent); }
+.item {
+  flex: none;
+  display: flex;
+  align-items: center;
+  width: 236px;
+  height: 36px;
+  margin-right: 6px;
+  padding: 0 4px 0 10px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--chrome);
+  border: 1px solid var(--border);
+}
+.item.hover { border-color: var(--accent); }
+.icon { flex: none; display: block; width: 16px; height: 16px; }
+.txt { flex: 1; min-width: 0; margin-left: 10px; }
+.n { display: block; overflow: hidden; white-space: nowrap; font-size: 12px; line-height: 15px; }
+.s { display: block; overflow: hidden; white-space: nowrap; font-size: 11px; line-height: 13px; color: var(--text2); }
+.s.bad { color: var(--danger); }
+.track { display: block; height: 2px; margin-top: 2px; border-radius: 1px; background: var(--border); }
+.fill { display: block; height: 2px; border-radius: 1px; background: var(--accent); }
+.btn { flex: none; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; box-sizing: border-box; }
+.btn.hover { background: var(--hover); }
+.grow { flex: 1; }
+.all { flex: none; padding: 5px 12px; margin-right: 4px; border-radius: 8px; color: var(--accent-text); white-space: nowrap; }
+.all.hover { background: var(--hover); }
+</style>
+<div id="bar"><span class="edge"></span>{{items}}<span class="grow"></span><span id="all" class="all{{all_hover}}">Ver descargas</span><span id="hide" class="btn{{hide_hover}}"><span id="icon-hide" class="icon"></span></span></div>
+</html>

@@ -209,6 +209,7 @@ fn set_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let v = done(agent, r)?;
     crate::dom::events::content_attribute_changed(agent, n, &name);
     crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), false);
+    crate::html::legacy_factories::img_attribute_changed(agent, n, name.as_lossy_str()); // E3
     Ok(v)
 }
 
@@ -221,7 +222,10 @@ fn set_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.set_attribute_ns(n.node, ns.as_deref(), &qn, value)
     });
     let v = done(agent, r)?;
-    crate::dom::events::content_attribute_changed(agent, n, &qn);
+    // Los handlers `on…` solo miran atributos sin namespace (HTML §8.1.8.1).
+    if ns.is_none() {
+        crate::dom::events::content_attribute_changed(agent, n, &qn);
+    }
     Ok(v)
 }
 
@@ -246,6 +250,9 @@ fn remove_attribute_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.remove_attribute_ns(n.node, ns.as_deref(), &local)
     });
     mutated(agent);
+    if ns.is_none() {
+        crate::dom::events::content_attribute_changed(agent, n, &local);
+    }
     Ok(Value::Undefined)
 }
 
@@ -385,7 +392,11 @@ fn insert_adjacent_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     if !agent.host_is_instance(&a.arg(1), element) {
         return agent.type_error("parameter 2 is not of type 'Element'.");
     }
-    let el = arg_node(agent, &a.arg(1), "parameter 2")?;
+    let el = arg_node(
+        agent,
+        &a.arg(1),
+        "Failed to execute 'insertAdjacentElement' on 'Element': parameter 2",
+    )?;
     let el = adopt_into(agent, el, n.doc)?;
     let r = with_doc_mut(agent, n.doc, |d| {
         d.insert_adjacent_element(n.node, &where_, el.node)

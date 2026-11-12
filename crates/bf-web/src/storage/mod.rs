@@ -53,6 +53,20 @@ fn refresh_dir(agent: &mut Agent, realm: RealmId) {
     }
 }
 
+/// E3: el directorio raíz del almacenamiento de `realm` (el de [`set_storage_dir`] o el de
+/// `WebHooks::storage_dir`); `None`: en memoria. Lo usan los Service Workers y la Cache API
+/// para guardar en el perfil.
+pub fn root_dir(agent: &Agent, realm: RealmId) -> Option<PathBuf> {
+    if let Some(s) = agent.realm_data::<StorageState>(realm)
+        && s.root.is_some()
+    {
+        return s.root.clone();
+    }
+    agent
+        .realm_data::<crate::WebContext>(realm)
+        .and_then(|c| c.hooks.storage_dir())
+}
+
 /// El almacén del realm en curso.
 fn backend_mut(agent: &mut Agent) -> &mut Backend {
     let realm = WebContextHandle::current(agent).realm;

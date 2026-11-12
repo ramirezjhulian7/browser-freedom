@@ -448,15 +448,64 @@ fn tl_replace(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
 }
 
+/// `supports(token)` (DOM §7.1): los *supported tokens* del atributo, comparados en
+/// minúsculas ASCII; si el atributo no los define (`class`, `htmlFor`, `sizes`), `TypeError`.
 fn tl_supports(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let d: TokenListData = payload(agent, &a.this)?;
     let t = to_dom_string(agent, &a.arg(0))?;
-    match d.list.supports(&t) {
-        Ok(_) => agent.type_error(
-            "Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported \
-             tokens.",
-        ),
-        Err(e) => throw_dom(agent, e),
+    let attr = d.list.local_name.to_string();
+    let element = with_doc(agent, d.doc, |doc| {
+        doc.element(d.list.element)
+            .filter(|e| e.ns == Namespace::Html)
+            .map(|e| e.name.to_string())
+    });
+    let Some(supported) = element.and_then(|el| supported_tokens(&el, &attr)) else {
+        return agent.type_error(&crate::dom::exception::failed_to_execute(
+            "supports",
+            "DOMTokenList",
+            &format!("DOMTokenList has no supported tokens ('{attr}')."),
+        ));
+    };
+    let token = t.to_string().to_ascii_lowercase();
+    Ok(Value::Boolean(supported.contains(&token.as_str())))
+}
+
+/// Los *supported tokens* de un atributo `DOMTokenList` de HTML (`None` si no define).
+///
+/// - `rel` de `<link>` (HTML §4.6.7): los tipos de enlace que el motor procesa. Ni `preload`
+///   ni `modulepreload` están: no se cargan por adelantado, y decir que sí haría que los
+///   polyfills (el de `modulepreload` de Vite, `loadCSS`) se saltaran su respaldo.
+/// - `rel` de `<a>`, `<area>` y `<form>` (§4.6.6.4): `noreferrer`, `noopener`, `opener`.
+/// - `sandbox` de `<iframe>` (§4.8.5).
+fn supported_tokens(element: &str, attr: &str) -> Option<&'static [&'static str]> {
+    match (element, attr) {
+        ("link", "rel") => Some(&[
+            "alternate",
+            "dns-prefetch",
+            "icon",
+            "next",
+            "preconnect",
+            "prefetch",
+            "search",
+            "stylesheet",
+        ]),
+        ("a" | "area" | "form", "rel") => Some(&["noreferrer", "noopener", "opener"]),
+        ("iframe", "sandbox") => Some(&[
+            "allow-downloads",
+            "allow-forms",
+            "allow-modals",
+            "allow-orientation-lock",
+            "allow-pointer-lock",
+            "allow-popups",
+            "allow-popups-to-escape-sandbox",
+            "allow-presentation",
+            "allow-same-origin",
+            "allow-scripts",
+            "allow-top-navigation",
+            "allow-top-navigation-by-user-activation",
+            "allow-top-navigation-to-custom-protocols",
+        ]),
+        _ => None,
     }
 }
 

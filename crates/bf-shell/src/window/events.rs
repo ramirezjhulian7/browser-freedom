@@ -580,7 +580,10 @@ fn activations(t: &mut Target<'_>, mods: Mods, out: &mut Vec<PageRequest>) {
                     .and_then(|e| e.attr("target"))
                     .map(str::to_ascii_lowercase)
                     .unwrap_or_default();
-                if mods.ctrl || target == "_blank" {
+                if mods.shift && !mods.ctrl {
+                    // E11: Mayús+clic abre el enlace en una ventana nueva.
+                    out.push(PageRequest::OpenWindow(url.href()));
+                } else if mods.ctrl || target == "_blank" {
                     out.push(PageRequest::Open(url.href()));
                 } else if let Some(r) = t.realm.filter(|_| target != "_top" && target != "_parent")
                     && let Some(e) = &mut t.engine

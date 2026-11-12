@@ -7,9 +7,16 @@
 
 use std::process::ExitCode;
 
+mod bookmarks;
+mod downloads;
+mod find;
+mod history;
 mod internal;
 mod load;
+mod profile;
+mod restore;
 mod script;
+mod settings;
 mod theme;
 mod window;
 
@@ -330,6 +337,7 @@ fn render(arg: &str, args: &[String]) -> Result<(), String> {
         loader: loaded.loader.clone(),
         fonts,
         extra: &[],
+        text_zoom: 1.0,
     };
     let page = bf_paint::prepare_page_with_frames(&loaded.doc, &ctx, viewport, &[], &frames);
     let start = std::time::Instant::now();

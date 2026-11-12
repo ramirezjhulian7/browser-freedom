@@ -19,10 +19,14 @@ pub enum MenuAction {
     Reload,
     /// Abrir `url` en una pestaña nueva en segundo plano.
     OpenInTab(String),
+    /// Abrir `url` en una ventana nueva (E11).
+    OpenInWindow(String),
     /// Copiar un texto al portapapeles (direcciones, selección).
     CopyText(String),
     /// Guardar el recurso `url` (una imagen) con un diálogo de archivo.
     SaveResource(String),
+    /// Descargar `url` a la carpeta de descargas, con progreso en la barra (E11).
+    Download(String),
     SavePage,
     ViewSource,
     Inspect,

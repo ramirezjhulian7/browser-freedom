@@ -24,6 +24,7 @@ use crate::properties::{
     ComputeContext, ComputedStyle, CssWide, CustomProperties, LonghandId, PROPERTIES, Value,
     initial_values, longhand_by_name,
 };
+use crate::values::registered::{Registration, Registry};
 use crate::values::{LengthContext, NORMAL_LINE_HEIGHT, trim};
 
 /// Estilos computados por (elemento, pseudo-elemento).
@@ -49,10 +50,15 @@ pub fn user_agent_stylesheet() -> &'static Stylesheet {
     &ua_sheets().html
 }
 
-/// ¿Contiene `var()` (en cualquier nivel)?
+/// ¿Contiene `var()` o `env()` (en cualquier nivel)? Las dos se sustituyen en computed-value
+/// time (CSS Variables 1 §3, CSS Environment Variables 1 §3).
 pub fn contains_var(values: &[ComponentValue]) -> bool {
     values.iter().any(|v| match v {
-        ComponentValue::Function(f) => f.name.eq_ignore_ascii_case("var") || contains_var(&f.value),
+        ComponentValue::Function(f) => {
+            f.name.eq_ignore_ascii_case("var")
+                || f.name.eq_ignore_ascii_case("env")
+                || contains_var(&f.value)
+        }
         ComponentValue::Block(b) => contains_var(&b.value),
         ComponentValue::Token(_) => false,
     })
@@ -406,10 +412,33 @@ fn cascaded<T>(
     None
 }
 
-// --- var() ---
+// --- var() y env() ---
 
-/// Sustituye las referencias `var()` de `values`. `None` si alguna referencia es inválida y
-/// no tiene fallback válido.
+/// El valor de una variable de entorno (CSS Environment Variables 1 §2): las áreas seguras y
+/// el teclado virtual valen 0 (pantalla rectangular, sin teclado en pantalla). Las demás
+/// (`titlebar-area-*`, `viewport-segment-*`) no existen aquí y usan el fallback.
+fn env_value(name_part: &[ComponentValue]) -> Option<Vec<ComponentValue>> {
+    let [name] = trim(name_part) else {
+        return None;
+    };
+    let Some(bf_css::syntax::TokenKind::Ident(name)) = name.token() else {
+        return None;
+    };
+    let name = name.to_ascii_lowercase();
+    let side = |prefix: &str, sides: &[&str]| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| sides.contains(&rest))
+    };
+    let sides = ["top", "right", "bottom", "left"];
+    let keyboard = ["top", "right", "bottom", "left", "width", "height"];
+    (side("safe-area-inset-", &sides)
+        || side("safe-area-max-inset-", &sides)
+        || side("keyboard-inset-", &keyboard))
+    .then(|| bf_css::syntax::parse_component_value_list("0px"))
+}
+
+/// Sustituye las referencias `var()` y `env()` de `values`. `None` si alguna referencia es
+/// inválida y no tiene fallback válido.
 fn substitute(
     values: &[ComponentValue],
     lookup: &mut dyn FnMut(&str) -> Option<Arc<Vec<ComponentValue>>>,
@@ -417,6 +446,21 @@ fn substitute(
     let mut out = Vec::with_capacity(values.len());
     for v in values {
         match v {
+            // `env( <custom-ident> <integer [0,∞]>*, <declaration-value>? )`.
+            ComponentValue::Function(f) if f.name.eq_ignore_ascii_case("env") => {
+                let comma = f
+                    .value
+                    .iter()
+                    .position(|v| v.token() == Some(&bf_css::syntax::TokenKind::Comma));
+                let (name_part, fallback) = match comma {
+                    Some(i) => (&f.value[..i], Some(&f.value[i + 1..])),
+                    None => (&f.value[..], None),
+                };
+                match env_value(name_part) {
+                    Some(value) => out.extend(value),
+                    None => out.extend(substitute(fallback?, lookup)?),
+                }
+            }
             ComponentValue::Function(f) if f.name.eq_ignore_ascii_case("var") => {
                 let comma = f
                     .value
@@ -456,21 +500,43 @@ fn substitute(
 
 /// Resuelve las custom properties del elemento: aplica la cascada sobre las heredadas y
 /// sustituye `var()` con detección de ciclos (las propiedades de un ciclo quedan inválidas).
+/// Las registradas (`@property`) que no heredan empiezan en su valor inicial, y las que no
+/// cumplen su sintaxis tras la sustitución se comportan como `unset` (CSS Properties and
+/// Values API 1 §2.4).
 fn compute_custom_properties(
     entries: &mut [CustomEntry],
     parent: Option<&ComputedStyle>,
+    registry: &Registry,
 ) -> Arc<CustomProperties> {
     let inherited = parent.map(|p| p.custom.clone()).unwrap_or_default();
-    if entries.is_empty() {
+    if entries.is_empty() && registry.is_empty() {
         return inherited;
     }
+    // Lo que vale una registrada sin valor en cascada (o con `unset`).
+    let unset_registered = |r: &Registration| -> Option<Arc<Vec<ComponentValue>>> {
+        if r.inherits {
+            inherited
+                .get(&r.name)
+                .cloned()
+                .or_else(|| r.initial.clone())
+        } else {
+            r.initial.clone()
+        }
+    };
     entries.sort_by_key(|e| e.prec);
     let mut by_name: HashMap<&str, Vec<&CustomEntry>> = HashMap::new();
     for e in entries.iter() {
         by_name.entry(&e.name).or_default().push(e);
     }
     let mut raw: HashMap<String, Arc<Vec<ComponentValue>>> = (*inherited).clone();
+    for r in registry.iter() {
+        match unset_registered(r) {
+            Some(v) => raw.insert(r.name.clone(), v),
+            None => raw.remove(&r.name),
+        };
+    }
     for (name, list) in by_name {
+        let reg = registry.get(name);
         let winner = cascaded(
             &list,
             |e| (&e.prec, e.origin, e.layer),
@@ -484,8 +550,15 @@ fn compute_custom_properties(
                 raw.insert(name.to_owned(), v.clone());
             }
             Some(CustomValue::Wide(CssWide::Initial)) => {
-                raw.remove(name);
+                match reg.and_then(|r| r.initial.clone()) {
+                    Some(v) => raw.insert(name.to_owned(), v),
+                    None => raw.remove(name),
+                };
             }
+            // Registrada sin valor en cascada o con `unset`: ya tiene su valor (heredado o
+            // inicial, según `inherits`).
+            Some(CustomValue::Wide(w)) if reg.is_some() && *w != CssWide::Inherit => {}
+            None if reg.is_some() => {}
             // `inherit`, `unset` y sin valor en cascada: el heredado (las custom properties
             // se heredan).
             _ => match inherited.get(name) {
@@ -543,6 +616,34 @@ fn compute_custom_properties(
     for name in names {
         if let Some(v) = resolve(&name, &raw, &mut state, &mut Vec::new(), &mut cyclic) {
             out.insert(name, v);
+        }
+    }
+    // Las registradas: inválidas en computed-value time si no cumplen la sintaxis.
+    for r in registry.iter() {
+        let valid = out.get(&r.name).is_some_and(|v| r.accepts(trim(v)));
+        if !valid {
+            match unset_registered(r) {
+                Some(v) => out.insert(r.name.clone(), v),
+                None => out.remove(&r.name),
+            };
+        }
+    }
+    Arc::new(out)
+}
+
+/// El valor computado de las custom properties registradas (§2.4): longitudes en px,
+/// colores y números resueltos. Va después de `font-size` y `line-height` (para `em`, `lh`).
+fn compute_registered(
+    custom: &Arc<CustomProperties>,
+    registry: &Registry,
+    len: &LengthContext,
+) -> Arc<CustomProperties> {
+    let mut out = (**custom).clone();
+    for r in registry.iter() {
+        if let Some(v) = out.get(&r.name)
+            && let Some(computed) = r.compute(trim(v), len)
+        {
+            out.insert(r.name.clone(), Arc::new(computed));
         }
     }
     Arc::new(out)
@@ -630,6 +731,8 @@ fn quirks_margin_declarations(doc: &Document, node: NodeId) -> Vec<Declaration> 
 
 struct Styler<'a> {
     doc: &'a Document,
+    /// Las custom properties registradas con `@property`.
+    registry: Registry,
     ua: Vec<&'a Stylesheet>,
     author: Vec<&'a Stylesheet>,
     /// E1: las hojas de autor de cada shadow root.
@@ -893,18 +996,15 @@ impl<'a> Styler<'a> {
         let mut style = parent
             .cloned()
             .unwrap_or_else(|| ComputedStyle::initial().clone());
-        style.custom = compute_custom_properties(&mut customs, parent);
-        let custom = style.custom.clone();
+        style.custom = compute_custom_properties(&mut customs, parent, &self.registry);
+        let mut custom = style.custom.clone();
 
-        let root_font_size = if is_root {
-            crate::properties::types::MEDIUM_FONT_SIZE
-        } else {
-            self.root_font_size
-        };
-        let parent_font = parent.map_or(
-            crate::properties::types::MEDIUM_FONT_SIZE,
-            ComputedStyle::font_size_px,
-        );
+        // El zoom de texto del navegador (E11): el tamaño inicial ya va escalado, así los
+        // `em`/`rem`/`%` del root parten de él.
+        let zoom = self.media.text_zoom as f32;
+        let medium = crate::properties::types::MEDIUM_FONT_SIZE * zoom;
+        let root_font_size = if is_root { medium } else { self.root_font_size };
+        let parent_font = parent.map_or(medium, ComputedStyle::font_size_px);
         let ratios = |s: &ComputedStyle| {
             let fs = s.font_size_px();
             match self.fonts {
@@ -948,6 +1048,10 @@ impl<'a> Styler<'a> {
             &custom,
         );
         style.set(fs);
+        if zoom != 1.0 && self.font_size_zooms(&per_property, is_root) {
+            let px = style.font_size_px() * zoom;
+            style.set(Value::FontSize(crate::properties::types::FontSize::Px(px)));
+        }
         len.font_size = style.font_size_px();
         for id in [
             LonghandId::FontFamily,
@@ -967,6 +1071,10 @@ impl<'a> Styler<'a> {
         );
         style.set(lh);
         len.line_height = style.line_height.resolve(len.font_size, NORMAL_LINE_HEIGHT);
+        if !self.registry.is_empty() {
+            custom = compute_registered(&custom, &self.registry, &len);
+            style.custom = custom.clone();
+        }
         let full = ctx(len);
         for def in PROPERTIES {
             if matches!(
@@ -1010,6 +1118,28 @@ impl<'a> Styler<'a> {
             };
         }
         style
+    }
+
+    /// ¿El zoom de texto escala el `font-size` de este elemento? Sí cuando el valor que gana
+    /// no depende de la fuente del padre: una palabra clave o longitud absoluta, `initial`, o
+    /// nada/`inherit` en el root (que toma el inicial). Lo heredado y lo relativo (`em`, `%`,
+    /// `rem`, `smaller`, `calc()`, `var()`) ya parte de un tamaño escalado.
+    fn font_size_zooms(&self, per_property: &[Vec<Entry>], is_root: bool) -> bool {
+        let winner = cascaded(
+            &per_property[LonghandId::FontSize as usize],
+            |e| (&e.prec, e.origin, e.layer),
+            |e| match e.value {
+                DeclValue::Wide(w) => Some(w),
+                _ => None,
+            },
+        );
+        match winner.map(|e| &e.value) {
+            None => is_root,
+            Some(DeclValue::Wide(CssWide::Initial)) => true,
+            Some(DeclValue::Wide(_)) => is_root,
+            Some(DeclValue::Value(Value::FontSize(fs))) => fs.is_absolute(),
+            Some(_) => false,
+        }
     }
 
     /// Valor computado de un longhand según su valor en cascada.
@@ -1122,7 +1252,10 @@ pub fn style_document_with_sheets(
             Origin::UserAgent => ua_list.push(s),
         }
     }
+    // CSS Properties and Values API 1 §3: las `@property` de las hojas de autor.
+    let registry = Registry::from_sheets(&author, media);
     let mut styler = Styler {
+        registry,
         doc,
         ua: ua_list,
         author,

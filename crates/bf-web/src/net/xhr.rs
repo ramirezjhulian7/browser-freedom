@@ -698,19 +698,31 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Undefined);
     }
     let with_credentials = s.with_credentials;
-    let net = super::start_fetch(
-        agent,
-        params,
-        Box::new(move |agent: &mut Agent, result| {
-            if st(agent, t).generation != generation {
-                return;
+    // E3: si la página está controlada por un service worker, la petición pasa primero por su
+    // evento `fetch` (XHR §3.5.6 paso 11 hace un fetch; SW §4.6 "Handle Fetch"). Sin
+    // `respondWith`, sale a la red como siempre.
+    let request = sw_request(&params);
+    let sw_headers = params.headers.clone();
+    let done: crate::workers::service::FetchDone =
+        Box::new(move |agent: &mut Agent, outcome| match outcome {
+            None => start_network(agent, t, o, generation, params, with_credentials),
+            Some(r) => {
+                if st(agent, t).generation != generation {
+                    return;
+                }
+                let r = r.map(|(d, headers)| XhrResponse {
+                    url: d.url,
+                    status: d.status,
+                    status_text: d.status_text,
+                    headers,
+                    body: d.body.source.map(|b| (*b).clone()).unwrap_or_default(),
+                });
+                process_response(agent, t, o, generation, r);
             }
-            with_st(agent, t, |x| x.net = None);
-            let r = filter(&url, with_credentials, result);
-            process_response(agent, t, o, generation, r);
-        }),
-    );
-    with_st(agent, t, |x| x.net = Some(net));
+        });
+    if let Err(done) = crate::workers::service::handle_fetch(agent, &request, &sw_headers, done) {
+        done(agent, None);
+    }
     if cur.timeout > 0 {
         let cb = agent.create_builtin_with_slots(
             on_timeout,
@@ -733,6 +745,52 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         with_st(agent, t, |x| x.timer = Some(timer));
     }
     Ok(Value::Undefined)
+}
+
+/// Manda la petición a la red (main fetch con CORS) y procesa la respuesta.
+fn start_network(
+    agent: &mut Agent,
+    t: TargetRef,
+    o: Obj,
+    generation: u64,
+    params: super::cors::FetchParams,
+    with_credentials: bool,
+) {
+    if st(agent, t).generation != generation {
+        return;
+    }
+    let url = params.url.clone();
+    let net = super::start_fetch(
+        agent,
+        params,
+        Box::new(move |agent: &mut Agent, result| {
+            if st(agent, t).generation != generation {
+                return;
+            }
+            with_st(agent, t, |x| x.net = None);
+            let r = filter(&url, with_credentials, result);
+            process_response(agent, t, o, generation, r);
+        }),
+    );
+    with_st(agent, t, |x| x.net = Some(net));
+}
+
+/// La petición de un XHR como la ve el service worker (`mode` `cors`, `destination` vacío).
+fn sw_request(p: &super::cors::FetchParams) -> super::fetch::RequestData {
+    super::fetch::RequestData {
+        method: p.method.clone(),
+        url: p.url.clone(),
+        body: super::body::Body::new(p.body.clone()),
+        mode: p.mode.clone(),
+        credentials: p.credentials.clone(),
+        cache: "default".into(),
+        redirect: "follow".into(),
+        referrer: "about:client".into(),
+        referrer_policy: String::new(),
+        integrity: String::new(),
+        keepalive: false,
+        priority: "auto".into(),
+    }
 }
 
 /// La respuesta filtrada según su tainting (basic o CORS; el CORS check ya lo hizo main

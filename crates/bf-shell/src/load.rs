@@ -179,6 +179,8 @@ pub struct Meta {
     pub internal: bool,
     /// Si es una página de error, el error.
     pub error: Option<LoadError>,
+    /// La respuesta no era para mostrar y se guardó como descarga (E11): la ruta del archivo.
+    pub download: Option<String>,
 }
 
 #[derive(Clone)]
@@ -284,7 +286,7 @@ impl LoadContext {
 /// error del comando. Los scripts se ejecutan (la consola va a stderr).
 pub fn load(arg: &str) -> Result<Loaded, String> {
     let url = url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
-    if url.scheme == "about" {
+    if internal::is_internal(&url) {
         return Ok(internal::page(&url, &LoadContext::cli()));
     }
     let mut engine = Engine::stderr();
@@ -302,7 +304,7 @@ pub fn load(arg: &str) -> Result<Loaded, String> {
 /// Carga para la ventana: nunca falla; los errores se muestran como `about:error`. Con
 /// `engine`, los scripts del documento se ejecutan con él.
 pub fn load_with(url: &Url, ctx: &LoadContext, engine: Option<(&mut Engine, &PageEnv)>) -> Loaded {
-    if url.scheme == "about" {
+    if internal::is_internal(url) {
         return internal::page(url, ctx);
     }
     match fetch_document_with(url, ctx.net.clone(), ctx.post.clone(), engine) {
@@ -362,6 +364,14 @@ pub fn fetch_document_with(
             response.url, response.status, response.status_text
         );
     }
+    // Lo que no se muestra (`Content-Disposition: attachment`, tipos que el motor no
+    // renderiza) se guarda como descarga (E11).
+    if let Some(saved) = crate::internal::download_response(&response, &net) {
+        return Ok(saved);
+    }
+    if let Some(image) = crate::internal::image_document(&response, &net) {
+        return Ok(image);
+    }
     let fetch = start.elapsed();
     let start = Instant::now();
     let loader = Arc::new(CachedLoader::new(net));
@@ -390,7 +400,17 @@ pub fn fetch_document_with(
         } else {
             EncodingSource::Default
         };
-        (bf_html::parse_xml_document(&text), enc, source)
+        // E10, cambio mínimo: al navegar, un error de buena formación se informa en línea
+        // con un `parsererror` (HTML, "page load processing model for XML files").
+        let mut doc = bf_html::parse_xml_document_with_error_report(&text);
+        // El content type del documento (DOM §4.5): el de la respuesta o, sin él, el de la
+        // extensión (E10, cambio mínimo).
+        doc.content_type = match &content_type {
+            Some(ct) => ct.essence.as_str().into(),
+            None if path.ends_with(".svg") => "image/svg+xml".into(),
+            None => "application/xhtml+xml".into(),
+        };
+        (doc, enc, source)
     } else {
         let ct = content_type
             .as_ref()
@@ -431,6 +451,7 @@ pub fn fetch_document_with(
         content_type: response.headers.get("content-type").map(str::to_owned),
         internal: false,
         error: None,
+        download: None,
     };
     Ok(Loaded {
         doc,

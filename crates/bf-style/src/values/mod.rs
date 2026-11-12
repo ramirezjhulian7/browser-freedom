@@ -2,7 +2,9 @@
 //! URLs e imágenes. Los colores están en [`color`].
 
 pub mod color;
+pub mod color_space;
 mod named_colors;
+pub mod registered;
 
 use std::fmt;
 
@@ -29,6 +31,75 @@ pub enum LengthUnit {
     Vh,
     Vmin,
     Vmax,
+    /// `vi`/`vb` y las variantes small/large/dynamic (CSS Values 4 §6.1.2): sin barras de
+    /// interfaz que aparezcan o se oculten, los tres tamaños de viewport coinciden, y con
+    /// escritura horizontal `vi` = `vw` y `vb` = `vh`.
+    Vi,
+    Vb,
+    Svw,
+    Svh,
+    Svi,
+    Svb,
+    Svmin,
+    Svmax,
+    Lvw,
+    Lvh,
+    Lvi,
+    Lvb,
+    Lvmin,
+    Lvmax,
+    Dvw,
+    Dvh,
+    Dvi,
+    Dvb,
+    Dvmin,
+    Dvmax,
+    /// Unidades de container query (CSS Contain 3 §7): sin contenedor de consulta elegible
+    /// (todavía no hay `@container`) valen como las small viewport units.
+    Cqw,
+    Cqh,
+    Cqi,
+    Cqb,
+    Cqmin,
+    Cqmax,
+}
+
+/// Las unidades de viewport con su eje: (nombre, unidad, eje).
+const VIEWPORT_UNITS: &[(&str, LengthUnit, ViewportAxis)] = &[
+    ("vi", LengthUnit::Vi, ViewportAxis::Width),
+    ("vb", LengthUnit::Vb, ViewportAxis::Height),
+    ("svw", LengthUnit::Svw, ViewportAxis::Width),
+    ("svh", LengthUnit::Svh, ViewportAxis::Height),
+    ("svi", LengthUnit::Svi, ViewportAxis::Width),
+    ("svb", LengthUnit::Svb, ViewportAxis::Height),
+    ("svmin", LengthUnit::Svmin, ViewportAxis::Min),
+    ("svmax", LengthUnit::Svmax, ViewportAxis::Max),
+    ("lvw", LengthUnit::Lvw, ViewportAxis::Width),
+    ("lvh", LengthUnit::Lvh, ViewportAxis::Height),
+    ("lvi", LengthUnit::Lvi, ViewportAxis::Width),
+    ("lvb", LengthUnit::Lvb, ViewportAxis::Height),
+    ("lvmin", LengthUnit::Lvmin, ViewportAxis::Min),
+    ("lvmax", LengthUnit::Lvmax, ViewportAxis::Max),
+    ("dvw", LengthUnit::Dvw, ViewportAxis::Width),
+    ("dvh", LengthUnit::Dvh, ViewportAxis::Height),
+    ("dvi", LengthUnit::Dvi, ViewportAxis::Width),
+    ("dvb", LengthUnit::Dvb, ViewportAxis::Height),
+    ("dvmin", LengthUnit::Dvmin, ViewportAxis::Min),
+    ("dvmax", LengthUnit::Dvmax, ViewportAxis::Max),
+    ("cqw", LengthUnit::Cqw, ViewportAxis::Width),
+    ("cqh", LengthUnit::Cqh, ViewportAxis::Height),
+    ("cqi", LengthUnit::Cqi, ViewportAxis::Width),
+    ("cqb", LengthUnit::Cqb, ViewportAxis::Height),
+    ("cqmin", LengthUnit::Cqmin, ViewportAxis::Min),
+    ("cqmax", LengthUnit::Cqmax, ViewportAxis::Max),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewportAxis {
+    Width,
+    Height,
+    Min,
+    Max,
 }
 
 impl LengthUnit {
@@ -50,7 +121,12 @@ impl LengthUnit {
             "vh" => LengthUnit::Vh,
             "vmin" => LengthUnit::Vmin,
             "vmax" => LengthUnit::Vmax,
-            _ => return None,
+            other => {
+                return VIEWPORT_UNITS
+                    .iter()
+                    .find(|(n, ..)| *n == other)
+                    .map(|&(_, u, _)| u);
+            }
         })
     }
 
@@ -72,6 +148,10 @@ impl LengthUnit {
             LengthUnit::Vh => "vh",
             LengthUnit::Vmin => "vmin",
             LengthUnit::Vmax => "vmax",
+            other => VIEWPORT_UNITS
+                .iter()
+                .find(|&&(_, u, _)| u == other)
+                .map_or("px", |&(n, ..)| n),
         }
     }
 }
@@ -144,6 +224,19 @@ impl Length {
             LengthUnit::Vh => v * ctx.viewport_height / 100.0,
             LengthUnit::Vmin => v * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
             LengthUnit::Vmax => v * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
+            other => {
+                let axis = VIEWPORT_UNITS
+                    .iter()
+                    .find(|&&(_, u, _)| u == other)
+                    .map_or(ViewportAxis::Width, |&(.., a)| a);
+                let (w, h) = (ctx.viewport_width, ctx.viewport_height);
+                v * match axis {
+                    ViewportAxis::Width => w,
+                    ViewportAxis::Height => h,
+                    ViewportAxis::Min => w.min(h),
+                    ViewportAxis::Max => w.max(h),
+                } / 100.0
+            }
         }
     }
 }
@@ -177,16 +270,152 @@ pub enum CalcNode {
     Invert(Box<CalcNode>),
     Min(Vec<CalcNode>),
     Max(Vec<CalcNode>),
+    /// `clamp()`; `none` en los extremos (CSS Values 4 §10.4) es un extremo infinito.
     Clamp(Box<CalcNode>, Box<CalcNode>, Box<CalcNode>),
+    /// El resto de las math functions de CSS Values 4 §10.5–§10.8.
+    Func(MathFn, Vec<CalcNode>),
 }
 
-/// Tipo de un nodo de `calc()`.
+/// Math functions de CSS Values 4 §10.5 (stepped value), §10.6 (trigonométricas), §10.7
+/// (exponenciales) y §10.8 (signo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFn {
+    Round(Rounding),
+    Mod,
+    Rem,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Pow,
+    Sqrt,
+    Hypot,
+    Log,
+    Exp,
+    Abs,
+    Sign,
+}
+
+/// `<rounding-strategy>` de `round()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rounding {
+    Nearest,
+    Up,
+    Down,
+    ToZero,
+}
+
+impl MathFn {
+    fn name(self) -> &'static str {
+        match self {
+            MathFn::Round(_) => "round",
+            MathFn::Mod => "mod",
+            MathFn::Rem => "rem",
+            MathFn::Sin => "sin",
+            MathFn::Cos => "cos",
+            MathFn::Tan => "tan",
+            MathFn::Asin => "asin",
+            MathFn::Acos => "acos",
+            MathFn::Atan => "atan",
+            MathFn::Atan2 => "atan2",
+            MathFn::Pow => "pow",
+            MathFn::Sqrt => "sqrt",
+            MathFn::Hypot => "hypot",
+            MathFn::Log => "log",
+            MathFn::Exp => "exp",
+            MathFn::Abs => "abs",
+            MathFn::Sign => "sign",
+        }
+    }
+
+    /// ¿El resultado tiene el tipo de sus argumentos (y no es un número o un ángulo)?
+    fn keeps_type(self) -> bool {
+        matches!(
+            self,
+            MathFn::Round(_) | MathFn::Mod | MathFn::Rem | MathFn::Hypot | MathFn::Abs
+        )
+    }
+
+    fn apply(self, a: &[f32]) -> f32 {
+        let x = a.first().copied().unwrap_or(f32::NAN);
+        let y = a.get(1).copied();
+        match self {
+            MathFn::Round(r) => {
+                let step = y.unwrap_or(1.0);
+                if step == 0.0 {
+                    return f32::NAN;
+                }
+                let q = x / step;
+                let n = match r {
+                    // El empate va hacia +∞ (§10.5.1).
+                    Rounding::Nearest => (q + 0.5).floor(),
+                    Rounding::Up => q.ceil(),
+                    Rounding::Down => q.floor(),
+                    Rounding::ToZero => q.trunc(),
+                };
+                n * step
+            }
+            MathFn::Mod => {
+                let b = y.unwrap_or(f32::NAN);
+                if b == 0.0 {
+                    f32::NAN
+                } else {
+                    x - b * (x / b).floor()
+                }
+            }
+            MathFn::Rem => {
+                let b = y.unwrap_or(f32::NAN);
+                if b == 0.0 {
+                    f32::NAN
+                } else {
+                    x - b * (x / b).trunc()
+                }
+            }
+            MathFn::Sin => x.sin(),
+            MathFn::Cos => x.cos(),
+            MathFn::Tan => x.tan(),
+            MathFn::Asin => x.asin(),
+            MathFn::Acos => x.acos(),
+            MathFn::Atan => x.atan(),
+            MathFn::Atan2 => x.atan2(y.unwrap_or(f32::NAN)),
+            MathFn::Pow => x.powf(y.unwrap_or(f32::NAN)),
+            MathFn::Sqrt => x.sqrt(),
+            MathFn::Hypot => a.iter().map(|v| v * v).sum::<f32>().sqrt(),
+            MathFn::Log => match y {
+                Some(base) => x.ln() / base.ln(),
+                None => x.ln(),
+            },
+            MathFn::Exp => x.exp(),
+            MathFn::Abs => x.abs(),
+            MathFn::Sign => {
+                if x == 0.0 || x.is_nan() {
+                    x
+                } else {
+                    x.signum()
+                }
+            }
+        }
+    }
+}
+
+/// Valor de nivel superior de una math function (CSS Values 4 §10.9): NaN es 0 y los
+/// infinitos se recortan a un valor finito grande.
+fn finite(v: f32) -> f32 {
+    const BIG: f32 = 33_554_428.0;
+    if v.is_nan() { 0.0 } else { v.clamp(-BIG, BIG) }
+}
+
+/// Tipo de un nodo de `calc()`. Los ángulos van en radianes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CalcType {
     Number,
     Length,
     Percentage,
     LengthPercentage,
+    Angle,
 }
 
 impl CalcType {
@@ -194,7 +423,8 @@ impl CalcType {
         use CalcType::*;
         match (self, other) {
             (Number, Number) => Some(Number),
-            (Number, _) | (_, Number) => None,
+            (Angle, Angle) => Some(Angle),
+            (Number | Angle, _) | (_, Number | Angle) => None,
             (Length, Length) => Some(Length),
             (Percentage, Percentage) => Some(Percentage),
             _ => Some(LengthPercentage),
@@ -219,13 +449,14 @@ impl CalcNode {
                 Box::new(b.compute(ctx)),
                 Box::new(c.compute(ctx)),
             ),
+            CalcNode::Func(f, v) => CalcNode::Func(*f, v.iter().map(|n| n.compute(ctx)).collect()),
         };
         if node.has_percentage() {
             node
         } else {
             match node.eval(0.0) {
-                (v, true) => CalcNode::Length(Length::px(v)),
-                (v, false) => CalcNode::Number(v),
+                (v, true) => CalcNode::Length(Length::px(finite(v))),
+                (v, false) => CalcNode::Number(finite(v)),
             }
         }
     }
@@ -234,9 +465,11 @@ impl CalcNode {
         match self {
             CalcNode::Percentage(_) => true,
             CalcNode::Number(_) | CalcNode::Length(_) => false,
-            CalcNode::Sum(v) | CalcNode::Product(v) | CalcNode::Min(v) | CalcNode::Max(v) => {
-                v.iter().any(CalcNode::has_percentage)
-            }
+            CalcNode::Sum(v)
+            | CalcNode::Product(v)
+            | CalcNode::Min(v)
+            | CalcNode::Max(v)
+            | CalcNode::Func(_, v) => v.iter().any(CalcNode::has_percentage),
             CalcNode::Negate(n) | CalcNode::Invert(n) => n.has_percentage(),
             CalcNode::Clamp(a, b, c) => {
                 a.has_percentage() || b.has_percentage() || c.has_percentage()
@@ -255,10 +488,21 @@ impl CalcNode {
                 let (x, l) = n.eval(basis);
                 (acc + x, len || l)
             }),
-            CalcNode::Product(v) => v.iter().fold((1.0, false), |(acc, len), n| {
-                let (x, l) = n.eval(basis);
-                (acc * x, len || l)
-            }),
+            // La dimensión de longitud del producto: +1 por factor longitud, −1 por divisor
+            // longitud (`100vw / 1px` es un número).
+            CalcNode::Product(v) => {
+                let (value, power) = v.iter().fold((1.0, 0i32), |(acc, pow), n| match n {
+                    CalcNode::Invert(d) => {
+                        let (x, l) = d.eval(basis);
+                        (acc / x, pow - i32::from(l))
+                    }
+                    _ => {
+                        let (x, l) = n.eval(basis);
+                        (acc * x, pow + i32::from(l))
+                    }
+                });
+                (value, power != 0)
+            }
             CalcNode::Negate(n) => {
                 let (x, l) = n.eval(basis);
                 (-x, l)
@@ -280,6 +524,12 @@ impl CalcNode {
                 let (v, l2) = val.eval(basis);
                 let (hi, l3) = max.eval(basis);
                 (v.min(hi).max(lo), l1 || l2 || l3)
+            }
+            CalcNode::Func(f, v) => {
+                let args: Vec<(f32, bool)> = v.iter().map(|n| n.eval(basis)).collect();
+                let values: Vec<f32> = args.iter().map(|a| a.0).collect();
+                let len = f.keeps_type() && args.iter().any(|a| a.1);
+                (f.apply(&values), len)
             }
         }
     }
@@ -308,6 +558,16 @@ impl fmt::Display for CalcNode {
             CalcNode::Min(v) => list(f, "min", v),
             CalcNode::Max(v) => list(f, "max", v),
             CalcNode::Clamp(a, b, c) => write!(f, "clamp({a}, {b}, {c})"),
+            CalcNode::Func(MathFn::Round(r), v) if *r != Rounding::Nearest => {
+                let r = match r {
+                    Rounding::Up => "up",
+                    Rounding::Down => "down",
+                    _ => "to-zero",
+                };
+                let items: Vec<String> = v.iter().map(ToString::to_string).collect();
+                write!(f, "round({r}, {})", items.join(", "))
+            }
+            CalcNode::Func(m, v) => list(f, m.name(), v),
         }
     }
 }
@@ -347,7 +607,7 @@ impl LengthPercentage {
         match self {
             LengthPercentage::Length(l) => l.value,
             LengthPercentage::Percentage(p) => p / 100.0 * basis,
-            LengthPercentage::Calc(c) => c.eval(basis).0,
+            LengthPercentage::Calc(c) => finite(c.eval(basis).0),
         }
     }
 
@@ -374,7 +634,15 @@ impl fmt::Display for LengthPercentage {
         match self {
             LengthPercentage::Length(l) => write!(f, "{l}"),
             LengthPercentage::Percentage(p) => write!(f, "{}%", fmt_number(*p)),
-            LengthPercentage::Calc(c) => write!(f, "calc{c}"),
+            // Las sumas y productos ya se escriben entre paréntesis; las demás math
+            // functions se escriben con su nombre.
+            LengthPercentage::Calc(c) => match **c {
+                CalcNode::Sum(_) | CalcNode::Product(_) => write!(f, "calc{c}"),
+                CalcNode::Min(_) | CalcNode::Max(_) | CalcNode::Clamp(..) | CalcNode::Func(..) => {
+                    write!(f, "{c}")
+                }
+                _ => write!(f, "calc({c})"),
+            },
         }
     }
 }
@@ -453,7 +721,7 @@ pub fn parse_length_percentage(v: &ComponentValue) -> Option<LengthPercentage> {
     if let ComponentValue::Function(f) = v {
         let (node, ty) = parse_math_function(&f.name, &f.value)?;
         return match ty {
-            CalcType::Number => None,
+            CalcType::Number | CalcType::Angle => None,
             _ => Some(LengthPercentage::Calc(Box::new(node))),
         };
     }
@@ -472,13 +740,18 @@ pub fn parse_non_negative_lp(v: &ComponentValue) -> Option<LengthPercentage> {
 pub fn parse_number(v: &ComponentValue) -> Option<f32> {
     if let ComponentValue::Function(f) = v {
         let (node, ty) = parse_math_function(&f.name, &f.value)?;
-        return (ty == CalcType::Number).then(|| node.eval(0.0).0);
+        return (ty == CalcType::Number).then(|| finite(node.eval(0.0).0));
     }
     number(v)
 }
 
-/// `<angle>` en grados (`0` sin unidad se acepta, como en `<angle-percentage>` legacy).
+/// `<angle>` en grados (`0` sin unidad se acepta, como en `<angle-percentage>` legacy),
+/// incluidas las math functions de ángulos.
 pub fn parse_angle(v: &ComponentValue) -> Option<f32> {
+    if let ComponentValue::Function(f) = v {
+        let (node, ty) = parse_math_function(&f.name, &f.value)?;
+        return (ty == CalcType::Angle).then(|| finite(node.eval(0.0).0.to_degrees()));
+    }
     match v.token()? {
         TokenKind::Dimension(n, unit) => {
             let n = n.value as f32;
@@ -529,7 +802,7 @@ pub fn parse_url(v: &ComponentValue) -> Option<String> {
     }
 }
 
-/// Math functions: `calc()`, `min()`, `max()`, `clamp()`.
+/// Math functions: `calc()`, `min()`, `max()`, `clamp()` y las de [`parse_math_fn`].
 fn parse_math_function(name: &str, args: &[ComponentValue]) -> Option<(CalcNode, CalcType)> {
     match name.to_ascii_lowercase().as_str() {
         "calc" => parse_calc_sum(trim(args)),
@@ -559,14 +832,101 @@ fn parse_math_function(name: &str, args: &[ComponentValue]) -> Option<(CalcNode,
             let [a, b, c] = groups.as_slice() else {
                 return None;
             };
-            let (a, ta) = parse_calc_sum(trim(a))?;
             let (b, tb) = parse_calc_sum(trim(b))?;
-            let (c, tc) = parse_calc_sum(trim(c))?;
-            let ty = ta.add(tb)?.add(tc)?;
+            // `none` en un extremo: sin límite por ese lado.
+            let bound = |g: &[ComponentValue], inf: f32| -> Option<(CalcNode, Option<CalcType>)> {
+                if single_ident(g).is_some_and(|s| s.eq_ignore_ascii_case("none")) {
+                    return Some((CalcNode::Number(inf), None));
+                }
+                let (n, t) = parse_calc_sum(trim(g))?;
+                Some((n, Some(t)))
+            };
+            let (a, ta) = bound(a, f32::NEG_INFINITY)?;
+            let (c, tc) = bound(c, f32::INFINITY)?;
+            let mut ty = tb;
+            for t in [ta, tc].into_iter().flatten() {
+                ty = ty.add(t)?;
+            }
             Some((CalcNode::Clamp(Box::new(a), Box::new(b), Box::new(c)), ty))
         }
-        _ => None,
+        other => parse_math_fn(other, args),
     }
+}
+
+/// Las math functions de CSS Values 4 §10.5–§10.8 (sus argumentos son `<calc-sum>`).
+fn parse_math_fn(name: &str, args: &[ComponentValue]) -> Option<(CalcNode, CalcType)> {
+    let groups = bf_css::syntax::split_comma_separated(args);
+    let mut groups: &[Vec<ComponentValue>] = &groups;
+    let mut f = match name {
+        "round" => MathFn::Round(Rounding::Nearest),
+        "mod" => MathFn::Mod,
+        "rem" => MathFn::Rem,
+        "sin" => MathFn::Sin,
+        "cos" => MathFn::Cos,
+        "tan" => MathFn::Tan,
+        "asin" => MathFn::Asin,
+        "acos" => MathFn::Acos,
+        "atan" => MathFn::Atan,
+        "atan2" => MathFn::Atan2,
+        "pow" => MathFn::Pow,
+        "sqrt" => MathFn::Sqrt,
+        "hypot" => MathFn::Hypot,
+        "log" => MathFn::Log,
+        "exp" => MathFn::Exp,
+        "abs" => MathFn::Abs,
+        "sign" => MathFn::Sign,
+        _ => return None,
+    };
+    if let MathFn::Round(_) = f
+        && let Some(first) = groups.first()
+        && let Some(s) = single_ident(first)
+    {
+        let r = match s.to_ascii_lowercase().as_str() {
+            "nearest" => Some(Rounding::Nearest),
+            "up" => Some(Rounding::Up),
+            "down" => Some(Rounding::Down),
+            "to-zero" => Some(Rounding::ToZero),
+            // Puede ser una constante (`round(pi)`) en vez de una estrategia.
+            _ => None,
+        };
+        if let Some(r) = r {
+            f = MathFn::Round(r);
+            groups = &groups[1..];
+        }
+    }
+    let mut nodes = Vec::with_capacity(groups.len());
+    let mut types = Vec::with_capacity(groups.len());
+    for g in groups {
+        let (n, t) = parse_calc_sum(trim(g))?;
+        nodes.push(n);
+        types.push(t);
+    }
+    // El tipo común de los argumentos (deben poder sumarse).
+    let common = |types: &[CalcType]| -> Option<CalcType> {
+        let (first, rest) = types.split_first()?;
+        rest.iter().try_fold(*first, |acc, t| acc.add(*t))
+    };
+    use CalcType::{Angle, Number};
+    let ty = match (f, types.as_slice()) {
+        (MathFn::Round(_), [Number]) => {
+            nodes.push(CalcNode::Number(1.0));
+            Number
+        }
+        (MathFn::Round(_) | MathFn::Mod | MathFn::Rem, [_, _]) => common(&types)?,
+        (MathFn::Sin | MathFn::Cos | MathFn::Tan, [Number | Angle]) => Number,
+        (MathFn::Asin | MathFn::Acos | MathFn::Atan, [Number]) => Angle,
+        (MathFn::Atan2, [_, _]) => {
+            common(&types)?;
+            Angle
+        }
+        (MathFn::Pow, [Number, Number]) | (MathFn::Log, [Number] | [Number, Number]) => Number,
+        (MathFn::Sqrt | MathFn::Exp, [Number]) => Number,
+        (MathFn::Hypot, [_, ..]) => common(&types)?,
+        (MathFn::Abs, [t]) => *t,
+        (MathFn::Sign, [_]) => Number,
+        _ => return None,
+    };
+    Some((CalcNode::Func(f, nodes), ty))
 }
 
 /// `<calc-sum> = <calc-product> [ [ '+' | '-' ] <calc-product> ]*` (los operadores aditivos
@@ -636,9 +996,15 @@ fn parse_calc_product(values: &[ComponentValue]) -> Option<(CalcNode, CalcType)>
                 };
                 factors.push(n);
             }
+            // CSS Values 4 §10.9: el divisor puede tener tipo; con el mismo tipo que el
+            // dividendo (longitudes o ángulos) el cociente es un número.
             TokenKind::Delim('/') => {
-                if t != CalcType::Number {
-                    return None;
+                match (ty, t) {
+                    (_, CalcType::Number) => {}
+                    (CalcType::Length, CalcType::Length) | (CalcType::Angle, CalcType::Angle) => {
+                        ty = CalcType::Number;
+                    }
+                    _ => return None,
                 }
                 factors.push(CalcNode::Invert(Box::new(n)));
             }
@@ -665,14 +1031,24 @@ fn parse_calc_value(v: &ComponentValue) -> Option<(CalcNode, CalcType)> {
             TokenKind::Percentage(p) => {
                 Some((CalcNode::Percentage(p.value as f32), CalcType::Percentage))
             }
-            TokenKind::Dimension(n, unit) => {
-                Some((CalcNode::Length(numeric_len(n, unit)?), CalcType::Length))
-            }
-            TokenKind::Ident(i) if i.eq_ignore_ascii_case("pi") => {
-                Some((CalcNode::Number(std::f32::consts::PI), CalcType::Number))
-            }
-            TokenKind::Ident(i) if i.eq_ignore_ascii_case("e") => {
-                Some((CalcNode::Number(std::f32::consts::E), CalcType::Number))
+            TokenKind::Dimension(n, unit) => match numeric_len(n, unit) {
+                Some(l) => Some((CalcNode::Length(l), CalcType::Length)),
+                None => {
+                    let deg = parse_angle(v)?;
+                    Some((CalcNode::Number(deg.to_radians()), CalcType::Angle))
+                }
+            },
+            // `<calc-keyword>` (CSS Values 4 §10.7.1).
+            TokenKind::Ident(i) => {
+                let n = match i.to_ascii_lowercase().as_str() {
+                    "pi" => std::f32::consts::PI,
+                    "e" => std::f32::consts::E,
+                    "infinity" => f32::INFINITY,
+                    "-infinity" => f32::NEG_INFINITY,
+                    "nan" => f32::NAN,
+                    _ => return None,
+                };
+                Some((CalcNode::Number(n), CalcType::Number))
             }
             _ => None,
         },
@@ -687,6 +1063,41 @@ mod tests {
 
     fn lp(s: &str) -> LengthPercentage {
         parse_length_percentage(&parse_component_value(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn math_angles_and_numbers() {
+        let angle = |s: &str| parse_angle(&parse_component_value(s).unwrap());
+        let number = |s: &str| parse_number(&parse_component_value(s).unwrap());
+        let close = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-3);
+        assert!(close(angle("calc(90deg + atan(1))"), 135.0));
+        assert!(close(angle("calc(0.5turn)"), 180.0));
+        assert!(close(angle("acos(0)"), 90.0));
+        assert_eq!(angle("calc(1)"), None);
+        assert!(close(number("sin(90deg)"), 1.0));
+        assert!(close(number("round(2.5)"), 3.0));
+        assert!(close(number("round(-2.5)"), -2.0));
+        assert!(close(number("sign(-0.1)"), -1.0));
+        assert!(close(number("calc(pi)"), std::f32::consts::PI));
+        assert!(close(number("calc(round(pi))"), 3.0));
+        assert_eq!(number("sin(1px)"), None);
+        // Percentages en math functions: se resuelven al usarse.
+        assert_eq!(
+            lp("round(55%, 10px)")
+                .compute(&LengthContext::default())
+                .resolve(100.0),
+            60.0
+        );
+        assert_eq!(
+            lp("abs(-50%)")
+                .compute(&LengthContext::default())
+                .resolve(10.0),
+            5.0
+        );
+        // Serialización de las nuevas funciones (el CSSOM las usa en el valor especificado).
+        assert_eq!(lp("round(up, 50%, 3px)").to_string(), "round(up, 50%, 3px)");
+        assert_eq!(lp("min(10px, 5%)").to_string(), "min(10px, 5%)");
+        assert_eq!(lp("calc(10px + 5%)").to_string(), "calc(10px + 5%)");
     }
 
     #[test]

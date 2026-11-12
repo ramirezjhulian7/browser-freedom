@@ -8,6 +8,7 @@
 //! un instante. Nada de esto programa trabajo: quien anima (el bucle de cuadros) pregunta.
 
 mod svg;
+pub(crate) use svg::apply_filter; // E7
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -571,6 +572,9 @@ pub fn load_images(
         if let Image::Url(u) = &style.list_style_image {
             want(u.clone(), &mut urls);
         }
+        if let Image::Url(u) = &style.border_image_source {
+            want(u.clone(), &mut urls);
+        }
     }
     // Carga en paralelo: la red domina el tiempo.
     let results: Mutex<Vec<(String, Result<Loaded, String>)>> = Mutex::default();
@@ -740,6 +744,7 @@ pub(crate) fn foreign_objects(
             loader: ctx.loader.clone(),
             fonts: ctx.fonts.clone(),
             extra: &extra,
+            text_zoom: ctx.text_zoom,
         };
         let page = crate::prepare_page(&child, &child_ctx, size);
         // Se pinta todo lo maquetado (con `overflow: visible` se ve lo que desborda); el

@@ -181,7 +181,10 @@ pub fn parse_text(path: &Path, text: &str) -> Document {
         e.eq_ignore_ascii_case("xht") || e.eq_ignore_ascii_case("xhtml") || is_svg_ext(e)
     });
     if xml {
-        bf_html::parse_xml_document(text)
+        // E10, cambio mínimo: el content type de un `.xht` (sus `createElement` son XHTML).
+        let mut doc = bf_html::parse_xml_document(text);
+        doc.content_type = "application/xhtml+xml".into();
+        doc
     } else {
         bf_html::parse_document(text, &bf_html::ParseOptions::default()).0
     }
@@ -375,6 +378,7 @@ impl Harness {
             loader: self.loader.clone(),
             fonts: self.db.clone(),
             extra: &[],
+            text_zoom: 1.0,
         };
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
     }
@@ -675,6 +679,12 @@ pub const GROUPS: &[&str] = &[
     "css/css-overflow",
     "css/css-position",
     "css/css-images",
+    // E2: colores (CSS Color 4/5), valores y unidades, `env()`, `@property` y variables.
+    "css/css-color",
+    "css/css-values",
+    "css/css-env",
+    "css/css-properties-values-api",
+    "css/css-variables",
 ];
 
 /// ¿Puede haber tests del grupo `g` (`css/css-position`) cuya ruta contenga `flt`? Un filtro
