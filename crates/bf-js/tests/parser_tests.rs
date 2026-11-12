@@ -6,6 +6,9 @@
 //!
 //! El corpus es de ES2017: los casos que el spec actual cambió están en [`STALE`] con su
 //! motivo.
+//!
+//! Sin `BF_FULL`, cada carpeta se recorre con una muestra determinista (1 de cada
+//! [`SAMPLE_STEP`] archivos en orden de nombre); con `BF_FULL=1`, entera.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -209,6 +212,9 @@ const STALE: &[(&str, &str)] = &[
     ),
 ];
 
+/// Sin `BF_FULL`, se prueba 1 de cada `SAMPLE_STEP` archivos de cada carpeta.
+const SAMPLE_STEP: usize = 50;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/test262-parser-tests")
 }
@@ -330,6 +336,9 @@ fn files(dir: &str) -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|e| e == "js"))
         .collect();
     v.sort();
+    if std::env::var_os("BF_FULL").is_none() {
+        v = v.into_iter().step_by(SAMPLE_STEP).collect();
+    }
     v
 }
 

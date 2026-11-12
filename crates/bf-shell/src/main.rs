@@ -274,7 +274,8 @@ fn load_live(
     }
     set_cookie_site(&url);
     let mut engine = script::Engine::stderr();
-    let net = std::sync::Arc::new(bf_net::NetLoader::new());
+    // E6: la caché HTTP, HSTS y las cookies persistentes en disco, como `load::load`.
+    let net = std::sync::Arc::new(bf_net::NetLoader::with_disk_cache());
     let env = script::PageEnv::cli(net.clone());
     let mut loaded = load::fetch_document_with(&url, net, None, Some((&mut engine, &env)))
         .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;

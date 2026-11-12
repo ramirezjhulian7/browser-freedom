@@ -28,6 +28,7 @@ pub mod formdata;
 pub mod headers;
 pub mod streams;
 pub mod websocket;
+pub mod wpt_http_cache;
 pub mod wptserve;
 pub mod xhr;
 
@@ -545,14 +546,37 @@ fn backend(agent: &mut Agent) -> Arc<dyn NetBackend> {
             origin.host = Url::parse("http://web-platform.test/", None)
                 .ok()
                 .and_then(|u| u.host);
+            // E6: los tests de `fetch/http-cache/` pasan por la caché HTTP (una por documento).
+            let session = url
+                .path_string()
+                .starts_with("/fetch/http-cache/")
+                .then(|| http_cache_session(agent, realm));
             return Arc::new(wptserve::WptServe {
                 files: LoaderBackend(loader),
                 origin,
+                session,
             });
         }
         return Arc::new(LoaderBackend(loader));
     }
     default_fetcher()
+}
+
+/// E6: la sesión de caché HTTP del documento de WPT de `realm`, con el reloj del agente.
+fn http_cache_session(agent: &mut Agent, realm: RealmId) -> Arc<wpt_http_cache::Session> {
+    let now = agent.host.hooks.now();
+    if agent
+        .realm_data::<Arc<wpt_http_cache::Session>>(realm)
+        .is_none()
+    {
+        agent.set_realm_data(realm, Arc::new(wpt_http_cache::Session::default()));
+    }
+    let s = agent
+        .realm_data::<Arc<wpt_http_cache::Session>>(realm)
+        .cloned()
+        .expect("Session");
+    s.set_virtual_ms(now);
+    s
 }
 
 /// "Bad port" (Fetch §2.9): los puertos a los que nunca se conecta por HTTP(S).
