@@ -670,10 +670,50 @@ fn tls_bad_certificate_is_a_tls_error() {
     let f = Fetcher::new();
     let u = Url::parse(&format!("https://127.0.0.1:{port}/"), None).unwrap();
     match f.fetch(&u, &FetchOptions::default()) {
-        Err(bf_net::FetchError::Tls(_)) => {}
+        Err(e @ bf_net::FetchError::Tls(_)) => {
+            // E6: con el motivo, para la página de error.
+            assert_eq!(
+                e.kind(),
+                bf_net::NetErrorKind::Tls(bf_net::TlsReason::UnknownIssuer)
+            );
+        }
         other => panic!("se esperaba un error de TLS: {other:?}"),
     }
     server.join().unwrap();
+}
+
+/// E6: RFC 9113 §9.1.1 (*connection reuse*): `https://localhost:<p>` y `https://127.0.0.1:<p>`
+/// resuelven a la misma IP y el certificado vale para los dos nombres: la segunda petición va
+/// por la conexión h2 de la primera.
+#[test]
+fn h2_connection_is_coalesced_across_origins() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let stream = tls_accept(&listener, tls_server_config(&[b"h2", b"http/1.1"]));
+        let mut s = Server::handshake(stream, &[]);
+        let mut authorities = Vec::new();
+        for _ in 0..2 {
+            let r = s.request(false);
+            authorities.push(r.get(":authority").unwrap().to_owned());
+            s.respond(r.id, "200", &[], b"ok");
+        }
+        authorities
+    });
+    let f = test_fetcher();
+    for host in ["localhost", "127.0.0.1"] {
+        let u = Url::parse(&format!("https://{host}:{port}/"), None).unwrap();
+        let res = f.fetch(&u, &FetchOptions::default()).unwrap();
+        assert_eq!(
+            (res.protocol, res.body.as_slice()),
+            (Protocol::H2, &b"ok"[..])
+        );
+    }
+    assert_eq!(
+        server.join().unwrap(),
+        [format!("localhost:{port}"), format!("127.0.0.1:{port}")]
+    );
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
 }
 
 /// E6: HSTS (RFC 6797) de punta a punta. Una respuesta por TLS con `Strict-Transport-Security`
@@ -734,6 +774,52 @@ fn hsts_upgrades_http_to_https() {
         "{:?}",
         start.elapsed()
     );
+}
+
+/// E6: el caso negativo de RFC 9113 §9.1.1: `otro.test` resuelve (resolvedor inyectado) a la
+/// misma IP que la conexión h2 con `localhost`, pero el certificado no vale para ese nombre: no
+/// se reutiliza; la conexión nueva falla con `NameMismatch`.
+#[test]
+fn h2_is_not_coalesced_when_the_certificate_does_not_cover_the_name() {
+    struct Ipv4Only;
+    impl bf_net::dns::Resolver for Ipv4Only {
+        fn lookup(
+            &self,
+            _: &str,
+            family: bf_net::dns::Family,
+        ) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(match family {
+                bf_net::dns::Family::V4 => vec![std::net::Ipv4Addr::LOCALHOST.into()],
+                bf_net::dns::Family::V6 => Vec::new(),
+            })
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let config = tls_server_config(&[b"h2", b"http/1.1"]);
+        let stream = tls_accept(&listener, config.clone());
+        let mut s = Server::handshake(stream, &[]);
+        let r = s.request(false);
+        s.respond(r.id, "200", &[], b"ok");
+        // La segunda conexión: el cliente corta el handshake al ver el certificado.
+        let mut second = tls_accept(&listener, config);
+        let _ = second.read(&mut [0u8; 16]);
+        s
+    });
+    let mut f = test_fetcher();
+    f.dns = Arc::new(bf_net::Dns::new(Arc::new(Ipv4Only)));
+    let first = Url::parse(&format!("https://localhost:{port}/"), None).unwrap();
+    let res = f.fetch(&first, &FetchOptions::default()).unwrap();
+    assert_eq!(res.protocol, Protocol::H2);
+    let other = Url::parse(&format!("https://otro.test:{port}/"), None).unwrap();
+    let err = f.fetch(&other, &FetchOptions::default()).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        bf_net::NetErrorKind::Tls(bf_net::TlsReason::NameMismatch)
+    );
+    assert_eq!(*f.connections_opened.lock().unwrap(), 2);
+    server.join().unwrap();
 }
 
 /// La red de verdad: Wikipedia habla h2. `cargo test -p bf-net --test h2 -- --ignored`.

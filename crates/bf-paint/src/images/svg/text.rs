@@ -1,7 +1,8 @@
 //! Layout y contornos del texto SVG (SVG 2 §11.8): el avance con las fuentes de `bf-font`,
 //! `letter-spacing` y `word-spacing` (CSS Text 3 §8), `dx`/`dy`/`rotate` por carácter,
 //! `text-anchor` por *chunk* (§11.8.2), líneas base (§11.10.2) y texto sobre un camino
-//! (`textPath`, *text on a path layout rules*, §11.8.3).
+//! (`textPath`, *text on a path layout rules*, §11.8.3) y texto ajustado en líneas con
+//! `inline-size` (§11.4.1).
 
 use bf_layout::{FontProvider, FontRequest, Glyph, PathCommand};
 use bf_style::properties::types::{FamilyName, FontFamily};
@@ -22,6 +23,8 @@ struct Placed {
     dy: f32,
     /// `rotate` en grados.
     rotate: f32,
+    /// El clúster es un espacio (oportunidad de corte de línea).
+    space: bool,
 }
 
 /// Un fragmento ya medido.
@@ -131,6 +134,7 @@ fn lay_chunk<'a>(fonts: &dyn FontProvider, chunk: &'a Chunk) -> (Vec<Laid<'a>>, 
                 s,
                 dy,
                 rotate,
+                space: range(c).all(|k| matches!(chars.get(k), Some(' ' | '\u{a0}'))),
             });
             s += g.advance;
             if last {
@@ -232,6 +236,12 @@ pub(super) fn paths(
             .path
             .and_then(|i| Some((measures.get(i)?, t.paths.get(i)?.start_offset)));
         match on_path {
+            None if t.inline_size.is_some() => {
+                let x = chunk.x.unwrap_or(pen_x);
+                let y = chunk.y.unwrap_or(pen_y);
+                let size = t.inline_size.unwrap_or(f32::INFINITY);
+                wrapped(fonts, &laid, chunk.anchor, (x, y), size, &mut out);
+            }
             None => {
                 let x0 = chunk.x.unwrap_or(pen_x) - shift;
                 let y0 = chunk.y.unwrap_or(pen_y);
@@ -281,6 +291,125 @@ pub(super) fn paths(
         }
     }
     out
+}
+
+/// Una línea del texto ajustado.
+struct Line {
+    /// Primer glifo (índices de fragmento y de glifo).
+    start: (usize, usize),
+    /// Distancia desde el principio del chunk a la que empieza.
+    s0: f32,
+    /// Ancho sin los espacios del final (lo que alinea `text-anchor`).
+    width: f32,
+}
+
+/// Texto con `inline-size` (SVG 2 §11.4.1): los glifos del chunk cortados en líneas de
+/// `size` de ancho como máximo, por los espacios (sin oportunidad de corte, la palabra
+/// desborda); cada línea se alinea con `text-anchor` en `x` y la primera línea base va en `y`.
+/// Las líneas se apilan como en CSS Inline 3 §5: el `line-height` de cada fragmento se
+/// reparte (*half-leading*) alrededor de su ascent y su descent.
+fn wrapped(
+    fonts: &dyn FontProvider,
+    laid: &[Laid<'_>],
+    anchor: TextAnchor,
+    (x, y): (f32, f32),
+    size: f32,
+    out: &mut Vec<(Path, Option<Fill>, Option<Stroke>, bool)>,
+) {
+    // Por encima y por debajo de la línea base, de cada fragmento.
+    let extents: Vec<(f32, f32)> = laid
+        .iter()
+        .map(|l| {
+            let fam = family(&l.span.family);
+            let req = FontRequest {
+                family: &fam,
+                size: METRICS_SIZE,
+                weight: l.span.weight,
+                italic: l.span.italic,
+            };
+            let m = fonts.metrics(&req);
+            let k = l.span.size / METRICS_SIZE;
+            let (a, d) = (m.ascent * k, m.descent * k);
+            let lh = l
+                .span
+                .line_height
+                .unwrap_or_else(|| m.normal_line_height() * k);
+            let half = (lh - (a + d)) / 2.0;
+            (a + half, d + half)
+        })
+        .collect();
+    let new_line = |start: (usize, usize), s0: f32| Line {
+        start,
+        s0,
+        width: 0.0,
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    let mut line = new_line((0, 0), 0.0);
+    // Inicio de la última palabra de la línea (detrás de un espacio), si la hay, y el ancho
+    // de la línea sin ella.
+    let mut word: Option<((usize, usize), f32, f32)> = None;
+    let (mut after_space, mut ink) = (false, false);
+    for (li, l) in laid.iter().enumerate() {
+        for (gi, p) in l.glyphs.iter().enumerate() {
+            if p.space {
+                after_space = true;
+                continue;
+            }
+            if after_space && ink {
+                word = Some(((li, gi), p.s, line.width));
+            }
+            after_space = false;
+            if p.s + p.glyph.advance - line.s0 > size
+                && let Some((start, s0, width)) = word.take()
+            {
+                line.width = width;
+                lines.push(std::mem::replace(&mut line, new_line(start, s0)));
+            }
+            ink = true;
+            line.width = line.width.max(p.s + p.glyph.advance - line.s0);
+        }
+    }
+    lines.push(line);
+    let line_of = |li: usize, gi: usize| {
+        lines
+            .partition_point(|ln| ln.start <= (li, gi))
+            .saturating_sub(1)
+    };
+    // Alto de cada línea: el de los fragmentos que tienen glifos en ella.
+    let mut heights = vec![(0.0f32, 0.0f32); lines.len()];
+    for (li, l) in laid.iter().enumerate() {
+        for gi in 0..l.glyphs.len() {
+            let h = &mut heights[line_of(li, gi)];
+            h.0 = h.0.max(extents[li].0);
+            h.1 = h.1.max(extents[li].1);
+        }
+    }
+    let mut baselines = Vec::with_capacity(lines.len());
+    let mut base = y;
+    for k in 0..lines.len() {
+        if k > 0 {
+            base += heights[k - 1].1 + heights[k].0;
+        }
+        baselines.push(base);
+    }
+    for (li, l) in laid.iter().enumerate() {
+        let mut pb = PathBuilder::new();
+        for (gi, p) in l.glyphs.iter().enumerate() {
+            let k = line_of(li, gi);
+            let ln = &lines[k];
+            let shift = match anchor {
+                TextAnchor::Start => 0.0,
+                TextAnchor::Middle => ln.width / 2.0,
+                TextAnchor::End => ln.width,
+            };
+            let origin = (x - shift + p.s - ln.s0, baselines[k] + p.dy);
+            let dir = turn((1.0, 0.0), p.rotate);
+            outline(fonts, &mut pb, &p.glyph, l.span.size, origin, dir, l.base);
+        }
+        if let Some(path) = pb.finish() {
+            out.push(paint(l.span, path));
+        }
+    }
 }
 
 fn paint(span: &Span, path: Path) -> (Path, Option<Fill>, Option<Stroke>, bool) {

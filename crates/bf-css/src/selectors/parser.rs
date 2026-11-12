@@ -128,16 +128,20 @@ fn parse_complex(items: &[ComponentValue], ns: &NamespaceMap, ctx: Ctx) -> Resul
         compounds: Vec::new(),
         combinators: Vec::new(),
         pseudo_element: None,
+        slotted: None,
+        part: None,
     };
     loop {
-        let (compound, pseudo_element) = p.compound()?;
+        let (compound, ending) = p.compound()?;
         selector.compounds.push(compound);
         let had_whitespace = p.skip_whitespace();
-        if let Some(pe) = pseudo_element {
+        if let Some(ending) = ending {
             if !p.at_end() {
                 return Err(SelectorError);
             }
-            selector.pseudo_element = Some(pe);
+            selector.pseudo_element = ending.pseudo;
+            selector.slotted = ending.slotted.map(Box::new);
+            selector.part = ending.part;
             break;
         }
         if p.at_end() {
@@ -208,11 +212,20 @@ impl<'a> Parser<'a> {
         Some(c)
     }
 
-    /// `[ <type-selector>? <subclass-selector>* ]!`, más un pseudo-elemento final opcional.
-    fn compound(&mut self) -> Result<(Compound, Option<PseudoElement>)> {
+    /// `[ <type-selector>? <subclass-selector>* ]!`, más un pseudo-elemento final opcional
+    /// (E1: o `::slotted()`/`::part()`, seguidos opcionalmente de otro pseudo-elemento).
+    fn compound(&mut self) -> Result<(Compound, Option<Ending>)> {
         let mut compound = Vec::new();
         if let Some(t) = self.type_selector()? {
             compound.push(t);
+        }
+        // E1: `::slotted()`/`::part()` sin compound delante se refieren a `*`.
+        let starts_with_tree_pseudo = matches!(self.peek_token(0), Some(TokenKind::Colon))
+            && matches!(self.peek_token(1), Some(TokenKind::Colon))
+            && matches!(self.peek(2), Some(ComponentValue::Function(f))
+                if matches!(f.name.to_ascii_lowercase().as_str(), "slotted" | "part"));
+        if compound.is_empty() && starts_with_tree_pseudo {
+            compound.push(Simple::Universal(NsConstraint::Any));
         }
         while let Some(item) = self.peek(0) {
             match item {
@@ -247,7 +260,33 @@ impl<'a> Parser<'a> {
                                 if !self.ctx.pseudo_elements {
                                     return Err(SelectorError);
                                 }
-                                return Ok((compound, Some(pe)));
+                                return Ok((
+                                    compound,
+                                    Some(Ending {
+                                        pseudo: Some(pe),
+                                        ..Ending::default()
+                                    }),
+                                ));
+                            }
+                            // E1: `::slotted()`/`::part()` y un pseudo-elemento opcional.
+                            tree @ (Pseudo::Slotted(_) | Pseudo::Part(_)) => {
+                                if !self.ctx.pseudo_elements || compound.is_empty() {
+                                    return Err(SelectorError);
+                                }
+                                let mut ending = Ending::default();
+                                match tree {
+                                    Pseudo::Slotted(l) => ending.slotted = Some(l),
+                                    Pseudo::Part(p) => ending.part = Some(p),
+                                    _ => unreachable!(),
+                                }
+                                if matches!(self.peek_token(0), Some(TokenKind::Colon)) {
+                                    self.pos += 1;
+                                    match self.pseudo()? {
+                                        Pseudo::Element(pe) => ending.pseudo = Some(pe),
+                                        _ => return Err(SelectorError),
+                                    }
+                                }
+                                return Ok((compound, Some(ending)));
                             }
                         }
                     }
@@ -266,14 +305,18 @@ impl<'a> Parser<'a> {
     fn element_ns(&self, prefix: Option<&TokenKind>) -> Result<NsConstraint> {
         Ok(match prefix {
             None => match &self.ns.default {
-                Some(url) => NsConstraint::Url(url.clone()),
+                Some(url) => NsConstraint::Url {
+                    url: url.clone(),
+                    prefix: None,
+                },
                 None => NsConstraint::Any,
             },
-            Some(TokenKind::Delim('*')) => NsConstraint::Any,
+            Some(TokenKind::Delim('*')) => NsConstraint::ExplicitAny,
             Some(TokenKind::Delim('|')) => NsConstraint::None,
-            Some(TokenKind::Ident(p)) => {
-                NsConstraint::Url(self.ns.prefixes.get(p).ok_or(SelectorError)?.clone())
-            }
+            Some(TokenKind::Ident(p)) => NsConstraint::Url {
+                url: self.ns.prefixes.get(p).ok_or(SelectorError)?.clone(),
+                prefix: Some(p.clone()),
+            },
             Some(_) => unreachable!(),
         })
     }
@@ -334,7 +377,13 @@ impl<'a> Parser<'a> {
             ) => {
                 p.pos += 3;
                 let url = self.ns.prefixes.get(prefix).ok_or(SelectorError)?;
-                (AttrNs::Url(url.clone()), n.clone())
+                (
+                    AttrNs::Url {
+                        url: url.clone(),
+                        prefix: prefix.clone(),
+                    },
+                    n.clone(),
+                )
             }
             (
                 Some(TokenKind::Delim('*')),
@@ -417,6 +466,27 @@ impl<'a> Parser<'a> {
         match item {
             ComponentValue::Token(t) => match &t.kind {
                 TokenKind::Colon => {
+                    // E1: `::slotted(<compound>)` y `::part(<ident>+)`.
+                    if let Some(ComponentValue::Function(f)) = self.peek(0) {
+                        self.pos += 1;
+                        return match f.name.to_ascii_lowercase().as_str() {
+                            "slotted" => Ok(Pseudo::Slotted(self.compound_argument(&f.value)?)),
+                            "part" => {
+                                let mut names = Vec::new();
+                                for v in f.value.iter().filter(|v| !v.is_whitespace()) {
+                                    match v.token() {
+                                        Some(TokenKind::Ident(n)) => names.push(n.clone()),
+                                        _ => return Err(SelectorError),
+                                    }
+                                }
+                                if names.is_empty() {
+                                    return Err(SelectorError);
+                                }
+                                Ok(Pseudo::Part(names))
+                            }
+                            _ => Err(SelectorError),
+                        };
+                    }
                     let Some(TokenKind::Ident(name)) = self.peek_token(0) else {
                         return Err(SelectorError);
                     };
@@ -452,6 +522,9 @@ impl<'a> Parser<'a> {
             relative: Relative::No,
         };
         Ok(match name {
+            // E1.
+            "host" => PseudoClass::Host(Some(self.compound_argument(args)?)),
+            "host-context" => PseudoClass::HostContext(self.compound_argument(args)?),
             "not" => PseudoClass::Not(parse_list(args, self.ns, inner)?),
             "is" => PseudoClass::Is(parse_forgiving(args, self.ns, inner)),
             "where" => PseudoClass::Where(parse_forgiving(args, self.ns, inner)),
@@ -533,6 +606,14 @@ impl<'a> Parser<'a> {
                 }
                 PseudoClass::Heading(levels)
             }
+            // HTML §4.13.7.4: `:state(<ident>)`; el identificador distingue mayúsculas.
+            "state" => {
+                let mut values = args.iter().filter(|v| !v.is_whitespace());
+                match (values.next().and_then(ComponentValue::token), values.next()) {
+                    (Some(TokenKind::Ident(v)), None) => PseudoClass::State(v.clone()),
+                    _ => return Err(SelectorError),
+                }
+            }
             "dir" => {
                 let mut values = args.iter().filter(|v| !v.is_whitespace());
                 match (values.next().and_then(ComponentValue::token), values.next()) {
@@ -553,6 +634,34 @@ impl<'a> Parser<'a> {
 enum Pseudo {
     Class(PseudoClass),
     Element(PseudoElement),
+    /// E1.
+    Slotted(SelectorList),
+    Part(Vec<String>),
+}
+
+/// E1: lo que cierra un compound: un pseudo-elemento, `::slotted()` o `::part()`.
+#[derive(Debug, Default)]
+struct Ending {
+    pseudo: Option<PseudoElement>,
+    slotted: Option<SelectorList>,
+    part: Option<Vec<String>>,
+}
+
+impl Parser<'_> {
+    /// E1: el argumento `<compound-selector>` de `:host()`, `:host-context()` y
+    /// `::slotted()`: un solo compound, sin combinators ni pseudo-elementos.
+    fn compound_argument(&self, args: &[ComponentValue]) -> Result<SelectorList> {
+        let inner = Ctx {
+            pseudo_elements: false,
+            in_has: self.ctx.in_has,
+            relative: Relative::No,
+        };
+        let list = parse_list(args, self.ns, inner)?;
+        if list.0.len() != 1 || !list.0[0].combinators.is_empty() {
+            return Err(SelectorError);
+        }
+        Ok(list)
+    }
 }
 
 fn pseudo_element(name: &str) -> Option<PseudoElement> {
@@ -597,6 +706,9 @@ fn pseudo_class(lower: &str) -> Option<PseudoClass> {
         "placeholder-shown" => PseudoClass::PlaceholderShown,
         "scope" => PseudoClass::Scope,
         "defined" => PseudoClass::Defined,
+        "valid" => PseudoClass::Valid,
+        "invalid" => PseudoClass::Invalid,
+        "host" => PseudoClass::Host(None),
         "heading" => PseudoClass::Heading(Vec::new()),
         _ => return None,
     })

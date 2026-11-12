@@ -6,9 +6,8 @@
 //! [`modes`] e [`in_body`]; las de contenido foráneo en [`foreign`].
 //!
 //! Partes del spec que no aplican todavía y se omiten a propósito: el *parser sanitizer
-//! configuration* (siempre null), declarative shadow roots y content patching (`allow
-//! declarative shadow roots` es false, así que `<template shadowrootmode>` y `<template for>`
-//! se insertan como templates normales), custom elements, form owners, el parser
+//! configuration* (siempre null), content patching (`<template for>` se inserta como un
+//! template normal), custom elements, form owners, el parser
 //! especulativo y los scripts SVG. El procesamiento de los `script` HTML (pausa en
 //! `</script>`, `document.write()`, "the end") está en [`script`].
 
@@ -32,6 +31,9 @@ pub struct ParseOptions {
     pub scripting: bool,
     /// El documento es un iframe srcdoc document (nunca entra en quirks mode).
     pub iframe_srcdoc: bool,
+    /// E1: *allow declarative shadow roots* del documento: `<template shadowrootmode>` crea un
+    /// shadow root (los documentos de navegación y `setHTMLUnsafe`; no `innerHTML`).
+    pub allow_declarative_shadow_roots: bool,
 }
 
 /// Elemento de contexto para [`parse_fragment`].
@@ -192,6 +194,7 @@ struct TreeBuilder {
     foster_parenting: bool,
     scripting: bool,
     iframe_srcdoc: bool,
+    allow_declarative_shadow_roots: bool,
     context: Option<NodeId>,
     pending_table_chars: String,
     /// "If the next token is a U+000A LINE FEED (LF) character token, then ignore that token".
@@ -203,6 +206,9 @@ struct TreeBuilder {
     /// El `script` cuyo end tag se acaba de procesar en el modo text: el parser corre los
     /// pasos que siguen a sacarlo de la stack (13.2.6.4.8) apenas vuelve del dispatcher.
     script_end: Option<NodeId>,
+    /// E10: los `link` HTML que el parser insertó conectados al documento y de los que el host
+    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]).
+    inserted_links: Vec<NodeId>,
     /// *Script nesting level* (13.2.4.4 "parser pause flag" y 13.2.6.4.8).
     nesting: u32,
     /// *Parser pause flag*.
@@ -230,6 +236,7 @@ impl TreeBuilder {
             foster_parenting: false,
             scripting: opts.scripting,
             iframe_srcdoc: opts.iframe_srcdoc,
+            allow_declarative_shadow_roots: opts.allow_declarative_shadow_roots,
             context: None,
             pending_table_chars: String::new(),
             skip_next_lf: false,
@@ -238,6 +245,7 @@ impl TreeBuilder {
             stopped: false,
             errors: Vec::new(),
             script_end: None,
+            inserted_links: Vec::new(),
             nesting: 0,
             paused: false,
             insertion_point: None,
@@ -304,6 +312,7 @@ impl TreeBuilder {
             };
             self.process_token(tok);
             self.script_end = None;
+            self.inserted_links.clear();
         }
         // 13.2.7 The end: "Pop all the nodes off the stack of open elements." Después el event
         // loop corre los microtasks pendientes.
@@ -689,16 +698,43 @@ impl TreeBuilder {
         id
     }
 
-    /// Create an element for a token. `intended_parent` solo importa para custom elements y
-    /// form owners, que aún no existen.
+    /// Create an element for a token. El intended parent (para el form owner) se aproxima con
+    /// el *appropriate place* actual.
     fn create_element_for_token(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
-        self.create_element(Element {
+        let id = self.create_element(Element {
             ns,
             prefix: None,
             name: tag.name.clone(),
             attrs: tag.attrs.clone(),
             template_contents: None,
-        })
+        });
+        // E1: el *is value* (paso 4 de "create an element for a token").
+        if ns == Namespace::Html
+            && let Some(is) = tag.attr("is")
+        {
+            self.doc.set_is_value(id, Some(is.into()));
+        }
+        // E1: paso 13: un form-associated element (no custom) se asocia con el *form element
+        // pointer* si no hay `template` en la pila, no es listed con atributo `form` y el
+        // intended parent está en el mismo árbol que el form.
+        if ns == Namespace::Html
+            && let Some(form) = self.form
+            && !self.stack_has_template()
+        {
+            let name = tag.name.to_string();
+            let listed = matches!(
+                name.as_str(),
+                "button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea"
+            );
+            if (listed || name == "img")
+                && !(listed && tag.attr("form").is_some())
+                && self.doc.tree_root(self.appropriate_place(None).parent)
+                    == self.doc.tree_root(form)
+            {
+                self.doc.set_parser_form_owner(id, form);
+            }
+        }
+        id
     }
 
     /// Appropriate place for inserting a node.
@@ -779,6 +815,14 @@ impl TreeBuilder {
             return;
         }
         self.doc.insert_before(loc.parent, element, loc.before);
+        // E10: un `link` que queda conectado (no en el contenido de un `template`) empieza a
+        // procesar su recurso (HTML §4.6.7 "becomes browsing-context connected"): se avisa al
+        // host al volver del dispatcher.
+        if self.doc.element(element).is_some_and(|e| e.is_html("link"))
+            && self.doc.is_connected(element)
+        {
+            self.inserted_links.push(element);
+        }
     }
 
     /// Insert a foreign element.
@@ -792,6 +836,60 @@ impl TreeBuilder {
     /// Insert an HTML element.
     fn insert_html(&mut self, tag: &TagToken) -> NodeId {
         self.insert_foreign(tag, Namespace::Html)
+    }
+
+    /// E1: pasos 8-9 del start tag `template` en "in head" (13.2.6.4.4): con
+    /// `shadowrootmode` y *allow declarative shadow roots*, el template (ya en la stack, sin
+    /// insertar) recibe como template contents el shadow root del *adjusted current node*.
+    /// Devuelve `false` si el template se inserta como uno normal.
+    fn attach_declarative_shadow(&mut self, tag: &TagToken, template: NodeId) -> bool {
+        use bf_dom::shadow::{ShadowRootInit, ShadowRootMode, SlotAssignmentMode};
+        let mode = match tag
+            .attr("shadowrootmode")
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("open") => ShadowRootMode::Open,
+            Some("closed") => ShadowRootMode::Closed,
+            _ => return false,
+        };
+        if !self.allow_declarative_shadow_roots {
+            return false;
+        }
+        // El nodo actual antes de apilar el template; como los navegadores, el elemento de
+        // contexto de un fragmento y el elemento raíz no reciben shadow roots declarativos.
+        let n = self.open.len();
+        if n < 2 {
+            return false;
+        }
+        let host = self.open[n - 2];
+        if host == self.open[0] {
+            return false;
+        }
+        // 9.7.
+        if self.doc.shadow_root(host).is_some() {
+            return false;
+        }
+        let init = ShadowRootInit {
+            mode,
+            delegates_focus: tag.attr("shadowrootdelegatesfocus").is_some(),
+            slot_assignment: SlotAssignmentMode::Named,
+            clonable: tag.attr("shadowrootclonable").is_some(),
+            serializable: tag.attr("shadowrootserializable").is_some(),
+        };
+        // 9.8.2: si falla, el template se inserta normal.
+        let Ok(shadow) = self.doc.attach_shadow(host, init) else {
+            return false;
+        };
+        if let Some(d) = self.doc.shadow_root_data_mut(shadow) {
+            d.declarative = true;
+            d.available_to_element_internals = true;
+        }
+        if let Some(e) = self.doc.element_mut(template) {
+            e.template_contents = Some(shadow);
+        }
+        self.template_hosts.insert(shadow, template);
+        true
     }
 
     /// Insert a character (acepta varios caracteres a la vez).

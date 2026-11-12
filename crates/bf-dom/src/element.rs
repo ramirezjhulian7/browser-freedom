@@ -102,7 +102,11 @@ impl Document {
             if *local == "open" {
                 self.details_open_changed(el, old_value.is_some());
             }
+            // E1: `slot` y el `name` de los `slot` (DOM §4.2.2.3).
+            self.shadow_attribute_changed(el, local, old_value);
         }
+        // E1: la reacción `attributeChangedCallback`.
+        self.custom_attribute_changed(el, local, ns, old_value);
     }
 
     /// "Change an attribute" (por namespace y local name) a `value`.

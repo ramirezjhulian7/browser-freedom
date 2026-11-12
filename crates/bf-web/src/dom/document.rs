@@ -36,6 +36,9 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .attribute("contentType", Some(content_type), None)
         .attribute("doctype", Some(doctype), None)
         .attribute("documentElement", Some(document_element), None)
+        // E10: SVG 2 `partial interface Document { readonly attribute SVGSVGElement?
+        // rootElement; }`.
+        .attribute("rootElement", Some(root_element), None)
         .attribute("title", Some(get_title), Some(set_title))
         .attribute("head", Some(head), None)
         .attribute("body", Some(body), None)
@@ -157,6 +160,13 @@ fn document_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(wrap_opt(agent, doc, e))
 }
 
+/// E10: `Document.rootElement` (SVG 2): el document element si es un `svg` SVG, o `null`.
+fn root_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let doc = this_doc(agent, a)?;
+    let e = with_doc(agent, doc, |d| d.svg_root_element());
+    Ok(wrap_opt(agent, doc, e))
+}
+
 fn get_title(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     let s = with_doc(agent, doc, |d| d.title());
@@ -197,8 +207,10 @@ fn default_view(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// raíz).
 fn active_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let e = with_doc(agent, doc, |d| d.body().or_else(|| d.document_element()));
-    Ok(wrap_opt(agent, doc, e))
+    // E1: el elemento enfocado, retargeteado (DocumentOrShadowRoot).
+    let root = with_doc(agent, doc, |d| d.root());
+    let e = crate::dom::shadow::active_element_for(agent, crate::NodeRef::new(doc, root));
+    Ok(wrap_opt(agent, doc, e.map(|e| e.node)))
 }
 
 /// `dir` refleja el atributo `dir` del elemento raíz (`ltr`/`rtl`/`auto` o vacío).
@@ -271,16 +283,43 @@ fn created(
 fn create_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     let name = to_dom_string(agent, &a.arg(0))?;
+    let is = element_creation_is(agent, &a.arg(1))?;
     let r = with_doc_mut(agent, doc, |d| d.create_element(&name));
-    created(agent, doc, r)
+    custom_created(agent, doc, r, is)
 }
 
 fn create_element_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     let ns = namespace_arg(agent, &a.arg(0))?;
     let qn = to_dom_string(agent, &a.arg(1))?;
+    let is = element_creation_is(agent, &a.arg(2))?;
     let r = with_doc_mut(agent, doc, |d| d.create_element_ns(ns.as_deref(), &qn));
-    created(agent, doc, r)
+    custom_created(agent, doc, r, is)
+}
+
+/// E1: el `is` de `ElementCreationOptions` (un string como opciones no cuenta).
+fn element_creation_is(agent: &mut Agent, options: &Value) -> JsResult<Option<String>> {
+    let Value::Object(o) = options else {
+        return Ok(None);
+    };
+    let v = agent.get_str(*o, "is")?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    Ok(Some(to_dom_string(agent, &v)?.to_string()))
+}
+
+/// E1: "create an element" con los custom elements (definición, *is value*, constructor).
+fn custom_created(
+    agent: &mut Agent,
+    doc: DocIndex,
+    r: Result<bf_dom::NodeId, bf_dom::DomException>,
+    is: Option<String>,
+) -> JsResult<Value> {
+    match r {
+        Ok(n) => crate::html::custom_elements::create_element(agent, NodeRef::new(doc, n), is),
+        Err(e) => throw_dom(agent, e),
+    }
 }
 
 fn create_text_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -362,6 +401,10 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
     if n.doc == doc {
         let r = with_doc_mut(agent, doc, |d| d.import_node(n.node, deep));
+        // E1: los custom elements de la copia.
+        if let Ok(c) = r {
+            crate::html::custom_elements::cloned(agent, NodeRef::new(doc, c));
+        }
         return created(agent, doc, r);
     }
     let ctx = WebContextHandle::current(agent);
@@ -378,6 +421,8 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let old = with_doc(agent, n.doc, |d| d.inclusive_descendants(n.node));
     let new = with_doc(agent, doc, |d| d.inclusive_descendants(copy));
     crate::dom::insertion::copy_script_state(agent, (n.doc, &old), (doc, &new));
+    // E1: los custom elements de la copia.
+    crate::html::custom_elements::cloned(agent, NodeRef::new(doc, copy));
     Ok(wrap_node(agent, NodeRef::new(doc, copy)))
 }
 

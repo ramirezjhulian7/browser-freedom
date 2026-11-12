@@ -24,6 +24,9 @@
 pub mod abort;
 mod character_data;
 pub mod collections;
+mod constraint_validity; // E10
+pub mod custom; // E1
+mod custom_states; // E10
 mod document;
 mod element;
 pub mod events;
@@ -36,12 +39,13 @@ pub mod observer;
 pub mod range; // E3
 pub mod script;
 mod serialize;
+pub mod shadow; // E1
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub use bf_infra::{Atom, DomString, Namespace, Url};
-pub use document::{HtmlElementKind, html_element_kind};
+pub use document::{HtmlElementKind, html_element_kind, is_valid_custom_element_name};
 pub use element::{DomTokenList, NodeOrString, TokenListError};
 pub use exception::DomException;
 pub use node::{NodeType, document_position};
@@ -250,6 +254,14 @@ pub struct Document {
     pub(crate) aborts: abort::AbortState,
     pub(crate) scripts: script::ScriptLists,
     pub(crate) live_ranges: range::LiveRanges, // E3
+    /// E10: el *states set* de cada custom element (`:state()`, ver `custom_states`).
+    custom_states: HashMap<NodeId, Vec<DomString>>,
+    /// E10: la validez que anota el host (`:valid`/`:invalid`, ver `constraint_validity`).
+    constraint_validity: HashMap<NodeId, bool>,
+    pub(crate) shadow: shadow::ShadowState, // E1
+    pub(crate) custom: custom::CustomState, // E1
+    /// E1: los form owners que asoció el parser (HTML §13.2.6.1, *parser inserted flag*).
+    pub(crate) parser_form_owners: HashMap<NodeId, NodeId>,
 }
 
 impl Default for Document {
@@ -277,6 +289,11 @@ impl Document {
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
+            custom_states: HashMap::new(),
+            constraint_validity: HashMap::new(),    // E10
+            shadow: shadow::ShadowState::default(), // E1
+            custom: custom::CustomState::default(), // E1
+            parser_form_owners: HashMap::new(),     // E1
         };
         doc.push(NodeData::Document);
         doc
@@ -447,9 +464,9 @@ impl Document {
         true
     }
 
-    /// ¿El nodo está conectado (su raíz es el nodo `Document`)?
+    /// ¿El nodo está conectado (su *shadow-including root* es el nodo `Document`)?
     pub fn is_connected(&self, id: NodeId) -> bool {
-        self.tree_root(id) == self.root()
+        self.shadow_including_root(id) == self.root()
     }
 
     /// Descendientes inclusivos de `id` en tree order (sin entrar a template contents).

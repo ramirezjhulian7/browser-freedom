@@ -43,6 +43,35 @@ fn text_content(doc: &Document, node: NodeId) -> String {
         .collect()
 }
 
+/// E1: las hojas de un shadow tree (CSS Scoping §3.1): sus `<style>` y, después, sus
+/// `adoptedStyleSheets`. Los `<link rel=stylesheet>` dentro de un shadow tree todavía no se
+/// cargan.
+pub fn shadow_tree_stylesheets(
+    doc: &Document,
+    root: NodeId,
+    media: &MediaContext,
+) -> Vec<Stylesheet> {
+    let mut sheets = Vec::new();
+    for node in doc.descendants(root) {
+        let Some(el) = doc.element(node) else {
+            continue;
+        };
+        if !el.is_html("style") || !is_css_type(el.attr("type")) {
+            continue;
+        }
+        if let Some(m) = el.attr("media")
+            && !parse_media_query_list(m).evaluate(media)
+        {
+            continue;
+        }
+        sheets.push(Stylesheet::parse(&text_content(doc, node), Origin::Author));
+    }
+    for text in doc.adopted_style_texts(root) {
+        sheets.push(Stylesheet::parse(text, Origin::Author));
+    }
+    sheets
+}
+
 /// Hojas de autor del documento en orden de árbol: `<style>` y `<link rel="stylesheet">`
 /// (este último solo con `resources`), con su atributo `media` evaluado.
 pub fn document_stylesheets(

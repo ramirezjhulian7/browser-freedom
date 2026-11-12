@@ -28,6 +28,31 @@ pub struct MatchContext {
     pub visited_links: HashSet<NodeId>,
     /// Scoping root de `:scope`; si es `None`, `:scope` equivale a `:root`.
     pub scope: Option<NodeId>,
+    /// E1: el árbol de la hoja que se aplica y cómo (CSS Scoping §3).
+    pub shadow: ShadowMatch,
+}
+
+/// E1: el contexto de árbol de las reglas que se comparan (CSS Scoping §3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShadowMatch {
+    /// El shadow root del árbol de la hoja (`None`: el documento). Dentro de él, su host es
+    /// *featureless*: solo `:host`, `:host()` y `:host-context()` lo eligen.
+    pub scope: Option<NodeId>,
+    pub mode: ShadowMode,
+}
+
+/// E1: a qué elementos se aplican las reglas de la hoja.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShadowMode {
+    /// A los elementos del mismo árbol (los selectores sin `::slotted()` ni `::part()`).
+    #[default]
+    Tree,
+    /// Al host del shadow root `scope` (los selectores de un solo compound `:host…`).
+    Host,
+    /// A un elemento asignado a ese `slot` del árbol (`::slotted()`).
+    Slotted(NodeId),
+    /// A un elemento con `part` dentro del shadow tree de ese host del árbol (`::part()`).
+    Part(NodeId),
 }
 
 impl MatchContext {
@@ -48,7 +73,15 @@ pub fn matches(
     node: NodeId,
     ctx: &MatchContext,
 ) -> bool {
-    selector.pseudo_element.is_none() && Matcher { doc, ctx }.complex(selector, node, None)
+    selector.pseudo_element.is_none()
+        && selector.slotted.is_none()
+        && selector.part.is_none()
+        && Matcher {
+            doc,
+            ctx,
+            scope: None,
+        }
+        .complex(selector, node, None)
 }
 
 /// ¿Algún selector de la lista coincide con `node`?
@@ -65,10 +98,27 @@ pub fn matching_specificity(
     pseudo: Option<PseudoElement>,
     ctx: &MatchContext,
 ) -> Option<Specificity> {
-    let matcher = Matcher { doc, ctx };
+    matching_specificity_in(list, doc, node, pseudo, ctx, ctx.shadow)
+}
+
+/// E1: como [`matching_specificity`], con el contexto de árbol `shadow` en lugar del de
+/// `ctx`.
+pub fn matching_specificity_in(
+    list: &SelectorList,
+    doc: &Document,
+    node: NodeId,
+    pseudo: Option<PseudoElement>,
+    ctx: &MatchContext,
+    shadow: ShadowMatch,
+) -> Option<Specificity> {
+    let matcher = Matcher {
+        doc,
+        ctx,
+        scope: shadow.scope,
+    };
     list.0
         .iter()
-        .filter(|s| s.pseudo_element == pseudo && matcher.complex(s, node, None))
+        .filter(|s| s.pseudo_element == pseudo && matcher.complex_in_mode(s, node, shadow.mode))
         .map(ComplexSelector::specificity)
         .max()
 }
@@ -76,6 +126,8 @@ pub fn matching_specificity(
 struct Matcher<'a> {
     doc: &'a Document,
     ctx: &'a MatchContext,
+    /// E1: el shadow root cuyo host es featureless (ver [`ShadowMatch::scope`]).
+    scope: Option<NodeId>,
 }
 
 /// Atributos HTML cuyos valores se comparan sin distinguir mayúsculas ASCII
@@ -139,10 +191,84 @@ impl Matcher<'_> {
     }
 
     fn parent_element(&self, node: NodeId) -> Option<NodeId> {
-        self.doc.parent(node).filter(|&p| self.element(p).is_some())
+        // E1: el host featureless no tiene padre; es el padre de los hijos de su shadow root.
+        if self.is_scope_host(node) {
+            return None;
+        }
+        let p = self.doc.parent(node)?;
+        if self.element(p).is_some() {
+            return Some(p);
+        }
+        if Some(p) == self.scope {
+            return self.doc.shadow_host(p);
+        }
+        None
+    }
+
+    /// E1: ¿Es `node` el host (featureless) del shadow root de la hoja?
+    fn is_scope_host(&self, node: NodeId) -> bool {
+        self.scope
+            .is_some_and(|s| self.doc.shadow_host(s) == Some(node))
+    }
+
+    /// E1: un matcher sin árbol de shadow (para los argumentos de `:host()`, `::slotted()`).
+    fn unscoped(&self) -> Matcher<'_> {
+        Matcher {
+            doc: self.doc,
+            ctx: self.ctx,
+            scope: None,
+        }
+    }
+
+    /// E1: ¿Algún compound de `list` (un argumento `<compound-selector>`) elige `node`?
+    fn compound_arg(&self, list: &SelectorList, node: NodeId) -> bool {
+        let m = self.unscoped();
+        list.0
+            .iter()
+            .any(|c| c.compounds.len() == 1 && m.compound(&c.compounds[0], node))
+    }
+
+    /// E1: el matching según el modo del contexto de árbol.
+    fn complex_in_mode(&self, sel: &ComplexSelector, node: NodeId, mode: ShadowMode) -> bool {
+        match mode {
+            ShadowMode::Tree => {
+                sel.slotted.is_none() && sel.part.is_none() && self.complex(sel, node, None)
+            }
+            ShadowMode::Host => {
+                sel.slotted.is_none()
+                    && sel.part.is_none()
+                    && sel.compounds.len() == 1
+                    && self.is_scope_host(node)
+                    && self.compound(&sel.compounds[0], node)
+            }
+            ShadowMode::Slotted(slot) => {
+                sel.part.is_none()
+                    && sel
+                        .slotted
+                        .as_ref()
+                        .is_some_and(|arg| self.compound_arg(arg, node))
+                    && self.complex(sel, slot, None)
+            }
+            ShadowMode::Part(host) => {
+                sel.slotted.is_none()
+                    && sel.part.as_ref().is_some_and(|names| {
+                        let parts = self
+                            .element(node)
+                            .and_then(|e| e.attr("part"))
+                            .unwrap_or("");
+                        names
+                            .iter()
+                            .all(|n| parts.split(is_document_whitespace).any(|p| p == n))
+                    })
+                    && self.complex(sel, host, None)
+            }
+        }
     }
 
     fn prev_element(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_scope_host(node) {
+            return None;
+        }
         let mut current = self.doc.get(node).prev_sibling();
         while let Some(n) = current {
             if self.element(n).is_some() {
@@ -154,6 +280,9 @@ impl Matcher<'_> {
     }
 
     fn next_element(&self, node: NodeId) -> Option<NodeId> {
+        if self.is_scope_host(node) {
+            return None;
+        }
         let mut current = self.doc.get(node).next_sibling();
         while let Some(n) = current {
             if self.element(n).is_some() {
@@ -272,15 +401,25 @@ impl Matcher<'_> {
     }
 
     fn compound(&self, compound: &Compound, node: NodeId) -> bool {
+        // E1: el host featureless solo coincide con `:host`, `:host()` y `:host-context()`.
+        if self.is_scope_host(node) {
+            return !compound.is_empty()
+                && compound.iter().all(|simple| {
+                    matches!(
+                        simple,
+                        Simple::PseudoClass(PseudoClass::Host(_) | PseudoClass::HostContext(_))
+                    ) && self.simple(simple, node)
+                });
+        }
         compound.iter().all(|simple| self.simple(simple, node))
     }
 
     fn ns_matches(ns: &NsConstraint, el: &Element) -> bool {
         match ns {
-            NsConstraint::Any => true,
+            NsConstraint::Any | NsConstraint::ExplicitAny => true,
             // `|E`: elementos sin namespace.
             NsConstraint::None => el.ns == Namespace::Null,
-            NsConstraint::Url(url) => el.ns.uri() == url,
+            NsConstraint::Url { url, .. } => el.ns.uri() == url,
         }
     }
 
@@ -292,7 +431,7 @@ impl Matcher<'_> {
         match simple {
             Simple::Type { ns, name, lower } => {
                 Self::ns_matches(ns, el)
-                    && if el.ns == Namespace::Html {
+                    && if self.html_in_html_document(el) {
                         el.name == *lower
                     } else {
                         el.name == *name
@@ -321,8 +460,15 @@ impl Matcher<'_> {
         }
     }
 
+    /// ¿Elemento HTML en un documento HTML? Solo ahí los nombres de tipo y de atributo (y los
+    /// valores de algunos atributos) se comparan sin distinguir mayúsculas (HTML §4.16.2); en
+    /// XHTML y XML la comparación es exacta.
+    fn html_in_html_document(&self, el: &Element) -> bool {
+        el.ns == Namespace::Html && self.doc.is_html
+    }
+
     fn attribute(&self, sel: &AttrSelector, el: &Element) -> bool {
-        let html = el.ns == Namespace::Html;
+        let html = self.html_in_html_document(el);
         let name = if html {
             sel.name.to_ascii_lowercase()
         } else {
@@ -332,7 +478,7 @@ impl Matcher<'_> {
             let ns_ok = match &sel.ns {
                 AttrNs::None => attr.ns.is_none(),
                 AttrNs::Any => true,
-                AttrNs::Url(url) => attr.ns.is_some_and(|ns| ns.uri() == url),
+                AttrNs::Url { url, .. } => attr.ns.is_some_and(|ns| ns.uri() == url),
             };
             if !ns_ok || attr.name != name {
                 return false;
@@ -484,10 +630,11 @@ impl Matcher<'_> {
             }
             PseudoClass::Disabled => self.is_disabled(node, el),
             PseudoClass::Enabled => {
-                html && matches!(
+                html && (matches!(
                     el.name.as_lossy_str(),
                     "button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset"
-                ) && !self.is_disabled(node, el)
+                ) || self.doc.is_form_associated_custom_element(node))
+                    && !self.is_disabled(node, el)
             }
             PseudoClass::Required => {
                 (is("input") || is("select") || is("textarea")) && el.attr("required").is_some()
@@ -507,10 +654,35 @@ impl Matcher<'_> {
                 ranges.iter().any(|r| lang_matches(r, lang.as_deref()))
             }
             PseudoClass::Dir(dir) => self.directionality(node) == *dir,
+            // HTML §4.13.7.4: "must match all custom elements whose states set's set entries
+            // contains identifier". Solo los custom elements tienen states set (lo rellena
+            // `CustomStateSet`, ver `bf_dom::Document::custom_states`).
+            PseudoClass::State(state) => self.doc.has_custom_state(node, state),
             PseudoClass::Scope => self.scope(node),
-            // Sin custom element registry: los custom elements (nombre con '-') no están
-            // definidos; el resto de los elementos sí.
-            PseudoClass::Defined => !(html && el.name.contains('-')),
+            PseudoClass::Valid => self.validity_matches(node, el, true),
+            PseudoClass::Invalid => self.validity_matches(node, el, false),
+            // E1: solo el host featureless, en el contexto de su shadow tree.
+            PseudoClass::Host(arg) => {
+                self.is_scope_host(node) && arg.as_ref().is_none_or(|l| self.compound_arg(l, node))
+            }
+            PseudoClass::HostContext(arg) => {
+                if !self.is_scope_host(node) {
+                    return false;
+                }
+                let mut current = Some(node);
+                while let Some(n) = current {
+                    if self.element(n).is_some() && self.compound_arg(arg, n) {
+                        return true;
+                    }
+                    current = match self.doc.parent(n) {
+                        Some(p) => Some(p),
+                        None => self.doc.shadow_host(n),
+                    };
+                }
+                false
+            }
+            // E1: el *custom element state* "uncustomized" o "custom".
+            PseudoClass::Defined => self.doc.is_defined_element(node),
             PseudoClass::Heading(levels) => {
                 let level = match el.name.as_lossy_str() {
                     "h1" => 1,
@@ -526,10 +698,171 @@ impl Matcher<'_> {
         }
     }
 
+    /// E10: `:valid` (`valid = true`) o `:invalid` (HTML §4.16.3). Un candidato para la
+    /// validación de restricciones casa según satisfaga o no sus restricciones; un `form`, si
+    /// no es (o es) el form owner de algún candidato que no las satisface; un `fieldset`, si
+    /// no tiene (o tiene) un descendiente así.
+    fn validity_matches(&self, node: NodeId, el: &Element, valid: bool) -> bool {
+        if el.is_html("form") {
+            let root = self.doc.tree_root(node);
+            let invalid = self.doc.descendants(root).into_iter().any(|n| {
+                self.element(n).is_some_and(|e| {
+                    self.constraint_validity(n, e) == Some(false)
+                        && self.form_owner(n, e) == Some(node)
+                })
+            });
+            return invalid != valid;
+        }
+        if el.is_html("fieldset") {
+            let invalid = self.doc.descendants(node).into_iter().any(|n| {
+                self.element(n)
+                    .is_some_and(|e| self.constraint_validity(n, e) == Some(false))
+            });
+            return invalid != valid;
+        }
+        self.constraint_validity(node, el) == Some(valid)
+    }
+
+    /// E10: `Some(satisface sus restricciones)` si `node` es candidato para la validación de
+    /// restricciones (HTML §4.10.20.1), `None` si no. Manda lo que anotó el host
+    /// ([`Document::constraint_validity`]: `ElementInternals.setValidity()`, *dirty values*);
+    /// si no anotó nada, se mira solo *suffering from being missing* con los atributos y la
+    /// checkedness/selectedness del DOM.
+    fn constraint_validity(&self, node: NodeId, el: &Element) -> Option<bool> {
+        if !self.is_validation_candidate(node, el) {
+            return None;
+        }
+        if let Some(v) = self.doc.constraint_validity(node) {
+            return Some(v);
+        }
+        Some(!self.value_missing(node, el))
+    }
+
+    /// Elemento *submittable* (HTML §4.10.2) que no está *barred from constraint validation*:
+    /// deshabilitado, dentro de un `datalist`, con `readonly` (donde aplica), `input`
+    /// `hidden`/`reset`/`button` o `button` que no es de envío.
+    fn is_validation_candidate(&self, node: NodeId, el: &Element) -> bool {
+        if el.ns != Namespace::Html {
+            return false;
+        }
+        let submittable = if self.doc.is_form_associated_custom_element(node) {
+            // HTML §4.13.7.4: `readonly` en un form-associated custom element lo excluye.
+            el.attr("readonly").is_none()
+        } else {
+            match el.name.as_lossy_str() {
+                "input" => {
+                    let ty = input_type(el);
+                    !matches!(ty.as_str(), "hidden" | "reset" | "button")
+                        && !(el.attr("readonly").is_some() && readonly_applies(&ty))
+                }
+                "button" => {
+                    let ty = el.attr("type").unwrap_or("submit").to_ascii_lowercase();
+                    !matches!(ty.as_str(), "reset" | "button")
+                }
+                "select" => true,
+                "textarea" => el.attr("readonly").is_none(),
+                _ => false,
+            }
+        };
+        if !submittable || self.is_disabled(node, el) {
+            return false;
+        }
+        let mut current = self.parent_element(node);
+        while let Some(p) = current {
+            if self.element(p).is_some_and(|e| e.is_html("datalist")) {
+                return false;
+            }
+            current = self.parent_element(p);
+        }
+        true
+    }
+
+    /// *Suffering from being missing* con lo que hay en el DOM (HTML §4.10.5.3.4 `required`,
+    /// §4.10.5.1.15/16 checkbox y radio, §4.10.7 `select`, §4.10.11 `textarea`). El valor de
+    /// un `input` es su atributo `value` (el *dirty value* lo anota el host).
+    fn value_missing(&self, node: NodeId, el: &Element) -> bool {
+        let required = |e: &Element| e.attr("required").is_some();
+        match el.name.as_lossy_str() {
+            "input" => match input_type(el).as_str() {
+                "checkbox" => required(el) && !self.doc.checkedness(node),
+                "radio" => {
+                    let group = self.doc.radio_group(node);
+                    let required_in_group =
+                        group.iter().any(|&n| self.element(n).is_some_and(required));
+                    required_in_group && group.iter().all(|&n| !self.doc.checkedness(n))
+                }
+                // Sin archivos elegidos (los elige el host).
+                "file" => required(el),
+                ty if required_applies(ty) => {
+                    required(el) && el.attr("value").is_none_or(str::is_empty)
+                }
+                _ => false,
+            },
+            "textarea" => required(el) && self.doc.text_content(node).is_empty(),
+            "select" => {
+                if !required(el) {
+                    return false;
+                }
+                let options = self.doc.list_of_options(node);
+                let selected: Vec<NodeId> = options
+                    .iter()
+                    .copied()
+                    .filter(|&o| self.doc.option_selectedness(o))
+                    .collect();
+                // "Placeholder label option": sin `multiple`, display size 1, el primer
+                // option de la lista, hijo del `select` y con valor vacío.
+                let placeholder = (el.attr("multiple").is_none()
+                    && self.doc.display_size(node) == 1)
+                    .then(|| options.first().copied())
+                    .flatten()
+                    .filter(|&o| {
+                        self.doc.parent(o) == Some(node)
+                            && self
+                                .element(o)
+                                .and_then(|e| e.attr("value").map(str::is_empty))
+                                // El valor de un `option` sin `value` es su texto sin
+                                // espacios ASCII (HTML §4.10.10).
+                                .unwrap_or_else(|| self.doc.text_content(o).trim_ascii().is_empty())
+                    });
+                selected.is_empty() || (selected.len() == 1 && Some(selected[0]) == placeholder)
+            }
+            _ => false,
+        }
+    }
+
+    /// El form owner de un elemento *listed* (HTML §4.10.17.3, "reset the form owner"): el
+    /// `form` del atributo `form` si está conectado, el que asoció el parser, o el `form`
+    /// ancestro más cercano.
+    fn form_owner(&self, node: NodeId, el: &Element) -> Option<NodeId> {
+        if let Some(id) = el.attr("form")
+            && self.doc.is_connected(node)
+        {
+            return self
+                .doc
+                .get_element_by_id(&id.into())
+                .filter(|&f| self.element(f).is_some_and(|e| e.is_html("form")));
+        }
+        if let Some(f) = self.doc.parser_form_owner(node) {
+            return Some(f);
+        }
+        let mut current = self.parent_element(node);
+        while let Some(p) = current {
+            if self.element(p).is_some_and(|e| e.is_html("form")) {
+                return Some(p);
+            }
+            current = self.parent_element(p);
+        }
+        None
+    }
+
     /// "Actually disabled" (HTML §4.16.3) para controles de formulario.
     fn is_disabled(&self, node: NodeId, el: &Element) -> bool {
         if el.ns != Namespace::Html {
             return false;
+        }
+        // E1: los *form-associated custom elements* también (HTML §4.16.3).
+        if self.doc.is_form_associated_custom_element(node) {
+            return el.attr("disabled").is_some() || self.in_disabled_fieldset(node);
         }
         match el.name.as_lossy_str() {
             "button" | "input" | "select" | "textarea" | "fieldset" => {
@@ -647,6 +980,65 @@ impl Matcher<'_> {
         }
         Dir::Ltr
     }
+}
+
+/// E10: el estado del atributo `type` de un `input` (HTML §4.10.5): en minúsculas ASCII, y
+/// `text` si falta o no es un tipo conocido.
+fn input_type(el: &Element) -> String {
+    const TYPES: [&str; 22] = [
+        "hidden",
+        "text",
+        "search",
+        "tel",
+        "url",
+        "email",
+        "password",
+        "date",
+        "month",
+        "week",
+        "time",
+        "datetime-local",
+        "number",
+        "range",
+        "color",
+        "checkbox",
+        "radio",
+        "file",
+        "submit",
+        "image",
+        "reset",
+        "button",
+    ];
+    let ty = el.attr("type").unwrap_or("text").to_ascii_lowercase();
+    if TYPES.contains(&ty.as_str()) {
+        ty
+    } else {
+        "text".to_owned()
+    }
+}
+
+/// E10: ¿Aplican `readonly` y `required` (con valor de texto) a este tipo de `input`? (HTML
+/// §4.10.5, tabla de atributos; checkbox, radio y file se tratan aparte para `required`.)
+fn readonly_applies(ty: &str) -> bool {
+    matches!(
+        ty,
+        "text"
+            | "search"
+            | "tel"
+            | "url"
+            | "email"
+            | "password"
+            | "date"
+            | "month"
+            | "week"
+            | "time"
+            | "datetime-local"
+            | "number"
+    )
+}
+
+fn required_applies(ty: &str) -> bool {
+    readonly_applies(ty)
 }
 
 fn is_link(el: &Element) -> bool {

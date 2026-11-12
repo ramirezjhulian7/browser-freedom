@@ -5,13 +5,15 @@
 //! `Vary`, §4.1), la sirve si está fresca (§4.2), la valida con `If-None-Match` /
 //! `If-Modified-Since` si caducó (§4.3), y si no va a la red con la función que le pasa quien
 //! llama. Después guarda lo que se pueda guardar (§3), actualiza lo validado con un 304
-//! (§4.3.4) e invalida tras métodos inseguros (§4.4). También sirve rangos (§3.4) desde una
-//! respuesta completa o parcial guardada.
+//! (§4.3.4) e invalida tras métodos inseguros (§4.4). También sirve rangos desde una respuesta
+//! completa o parcial guardada, combina las parciales y completa una parcial pidiendo lo que
+//! falta (§3.3–3.4). Entiende `immutable` (RFC 8246) y `stale-while-revalidate` (RFC 5861): lo
+//! segundo deja [`Revalidation`]s pendientes que quien llama hace en segundo plano.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bf_url::Url;
@@ -384,12 +386,32 @@ struct Memory {
 
 type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 
-/// La caché HTTP de un [`crate::Fetcher`].
+/// La caché HTTP de un [`crate::Fetcher`]. Clonarla da otra referencia a la misma caché (para
+/// revalidar en segundo plano).
+#[derive(Clone)]
 pub struct HttpCache {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     memory: Mutex<Memory>,
     /// Carpeta de la caché en disco (`None`: solo memoria).
     dir: Option<PathBuf>,
     clock: Clock,
+    /// RFC 5861 §3: revalidaciones por hacer en segundo plano, y las claves en curso.
+    revalidations: Mutex<Vec<Revalidation>>,
+    in_flight: Mutex<HashSet<String>>,
+}
+
+/// Una revalidación en segundo plano (RFC 5861 §3): se sirvió una respuesta caducada dentro de
+/// su `stale-while-revalidate` y hay que validarla con [`HttpCache::revalidate`].
+#[derive(Debug, Clone)]
+pub struct Revalidation {
+    pub url: Url,
+    /// Las cabeceras de la petición que la sirvió (las de `Vary`, las cookies).
+    pub headers: Headers,
+    pub credentials: bool,
+    key: String,
 }
 
 impl Default for HttpCache {
@@ -400,7 +422,9 @@ impl Default for HttpCache {
 
 impl std::fmt::Debug for HttpCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpCache").field("dir", &self.dir).finish()
+        f.debug_struct("HttpCache")
+            .field("dir", &self.inner.dir)
+            .finish()
     }
 }
 
@@ -418,33 +442,40 @@ pub fn default_dir() -> Option<PathBuf> {
 
 impl HttpCache {
     pub fn in_memory() -> HttpCache {
-        HttpCache {
-            memory: Mutex::default(),
-            dir: None,
-            clock: Box::new(SystemTime::now),
-        }
+        HttpCache::new(None)
     }
 
     /// Una caché en memoria respaldada por `dir` en disco.
     pub fn on_disk(dir: impl Into<PathBuf>) -> HttpCache {
+        HttpCache::new(Some(dir.into()))
+    }
+
+    fn new(dir: Option<PathBuf>) -> HttpCache {
         HttpCache {
-            dir: Some(dir.into()),
-            ..HttpCache::in_memory()
+            inner: Arc::new(Inner {
+                memory: Mutex::default(),
+                dir,
+                clock: Box::new(SystemTime::now),
+                revalidations: Mutex::default(),
+                in_flight: Mutex::default(),
+            }),
         }
     }
 
-    /// Con otro reloj (para tests).
+    /// Con otro reloj (para tests). Antes de clonarla: si ya está compartida, no cambia.
     pub fn with_clock(mut self, clock: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
-        self.clock = Box::new(clock);
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.clock = Box::new(clock);
+        }
         self
     }
 
     pub fn dir(&self) -> Option<&Path> {
-        self.dir.as_deref()
+        self.inner.dir.as_deref()
     }
 
     fn now(&self) -> f64 {
-        secs((self.clock)())
+        secs((self.inner.clock)())
     }
 
     /// La clave de una URL: sin fragmento, y separada por credenciales.
@@ -456,8 +487,8 @@ impl HttpCache {
 
     /// Vacía la caché (memoria y disco).
     pub fn clear(&self) {
-        *self.memory.lock().unwrap_or_else(|e| e.into_inner()) = Memory::default();
-        if let Some(dir) = &self.dir
+        *self.inner.memory.lock().unwrap_or_else(|e| e.into_inner()) = Memory::default();
+        if let Some(dir) = &self.inner.dir
             && let Ok(list) = std::fs::read_dir(dir)
         {
             for f in list.flatten() {
@@ -468,7 +499,8 @@ impl HttpCache {
 
     /// Cuántas URLs hay guardadas en memoria.
     pub fn len(&self) -> usize {
-        self.memory
+        self.inner
+            .memory
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entries
@@ -480,7 +512,7 @@ impl HttpCache {
     }
 
     fn load(&self, key: &str) -> Vec<Entry> {
-        let mut mem = self.memory.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mem = self.inner.memory.lock().unwrap_or_else(|e| e.into_inner());
         mem.tick += 1;
         let tick = mem.tick;
         if let Some((entries, used)) = mem.entries.get_mut(key) {
@@ -488,7 +520,7 @@ impl HttpCache {
             return entries.clone();
         }
         drop(mem);
-        let Some(dir) = &self.dir else {
+        let Some(dir) = &self.inner.dir else {
             return Vec::new();
         };
         let entries = disk::read(&disk::path(dir, key), key).unwrap_or_default();
@@ -500,7 +532,7 @@ impl HttpCache {
 
     /// Guarda las entradas de `key` (en memoria y, con `persist`, en disco).
     fn remember(&self, key: &str, entries: Vec<Entry>, persist: bool) {
-        if persist && let Some(dir) = &self.dir {
+        if persist && let Some(dir) = &self.inner.dir {
             let path = disk::path(dir, key);
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&path);
@@ -508,7 +540,7 @@ impl HttpCache {
                 disk::trim(dir, DISK_LIMIT);
             }
         }
-        let mut mem = self.memory.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mem = self.inner.memory.lock().unwrap_or_else(|e| e.into_inner());
         let size = |v: &Vec<Entry>| v.iter().map(|e| e.response.body.len()).sum::<usize>();
         if let Some((old, _)) = mem.entries.remove(key) {
             mem.bytes -= size(&old);
@@ -547,10 +579,89 @@ impl HttpCache {
 
     /// El salto *HTTP-network-or-cache fetch*: sirve de la caché o llama a `network` con las
     /// cabeceras a mandar (las de la petición más las que añaden el modo y la validación).
+    /// Si completar una parcial guardada (§3.4) da otro 206 que no se puede combinar, ese 206
+    /// es la respuesta: [`HttpCache::fetch_mut`] repite en cambio la petición entera.
     pub fn fetch<E>(
         &self,
         req: &CacheRequest<'_>,
         network: impl FnOnce(&Headers) -> Result<CacheResponse, E>,
+    ) -> Result<(CacheResponse, CacheUse), E> {
+        let mut network = Some(network);
+        self.fetch_inner(req, &mut |h| network.take().map(|n| n(h)))
+    }
+
+    /// Como [`HttpCache::fetch`], con una `network` que se puede llamar dos veces.
+    pub fn fetch_mut<E>(
+        &self,
+        req: &CacheRequest<'_>,
+        mut network: impl FnMut(&Headers) -> Result<CacheResponse, E>,
+    ) -> Result<(CacheResponse, CacheUse), E> {
+        self.fetch_inner(req, &mut |h| Some(network(h)))
+    }
+
+    /// Las revalidaciones en segundo plano pendientes (RFC 5861 §3); quien las toma las hace
+    /// con [`HttpCache::revalidate`].
+    pub fn take_revalidations(&self) -> Vec<Revalidation> {
+        std::mem::take(
+            &mut *self
+                .inner
+                .revalidations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
+    /// Valida (con `no-cache`: §4.3.1) la respuesta de `rv` con `network` y guarda lo que
+    /// llegue: un 304 la refresca, un 200 la reemplaza.
+    pub fn revalidate<E>(
+        &self,
+        rv: &Revalidation,
+        network: impl FnOnce(&Headers) -> Result<CacheResponse, E>,
+    ) -> Result<CacheUse, E> {
+        let req = CacheRequest {
+            method: "GET",
+            url: &rv.url,
+            headers: &rv.headers,
+            mode: CacheMode::NoCache,
+            credentials: rv.credentials,
+        };
+        let result = self.fetch(&req, network);
+        self.inner
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&rv.key);
+        result.map(|(_, used)| used)
+    }
+
+    /// Deja pendiente la revalidación de `key`, si no hay una en curso.
+    fn queue_revalidation(&self, key: &str, req: &CacheRequest<'_>) {
+        let new = self
+            .inner
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_owned());
+        if new {
+            self.inner
+                .revalidations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Revalidation {
+                    url: req.url.clone(),
+                    headers: req.headers.clone(),
+                    credentials: req.credentials,
+                    key: key.to_owned(),
+                });
+        }
+    }
+
+    /// `network` devuelve `None` si ya no se puede llamar otra vez.
+    #[allow(clippy::type_complexity)]
+    fn fetch_inner<E>(
+        &self,
+        req: &CacheRequest<'_>,
+        network: &mut dyn FnMut(&Headers) -> Option<Result<CacheResponse, E>>,
     ) -> Result<(CacheResponse, CacheUse), E> {
         let method = req.method.to_ascii_uppercase();
         let mut headers = req.headers.clone();
@@ -599,16 +710,70 @@ impl HttpCache {
             && !matches!(mode, CacheMode::NoStore | CacheMode::Reload)
             && !request_cc.has("no-store");
         let mut validating: Option<Entry> = None;
+        // §4.3.1: guardadas que `Vary` no deja elegir (§4.1), validadas para que el servidor
+        // elija una con un 304 (p. ej. `Vary: Cookie` cuando cambia alguna cookie de sesión).
+        let mut unselected: Vec<Entry> = Vec::new();
+        // §3.4: una parcial guardada desde el byte 0 se completa pidiendo lo que falta; si no
+        // sale, se repite la petición con `plain_headers`.
+        let mut completing: Option<Entry> = None;
+        let plain_headers = headers.clone();
         if readable {
-            let mut candidates: Vec<Entry> = self
-                .load(&key)
-                .into_iter()
+            let stored = self.load(&key);
+            let now = self.now();
+            let mut candidates: Vec<Entry> = stored
+                .iter()
                 .filter(|e| e.matches(&headers))
                 .filter(|e| serve_range(e, range, req.headers.get("range")).is_some())
+                .cloned()
                 .collect();
             candidates.sort_by(|a, b| b.response_time.total_cmp(&a.response_time));
+            if candidates.is_empty()
+                && range.is_none()
+                && method == "GET"
+                && !only_if_cached
+                && mode != CacheMode::NoCache
+                && !request_no_cache
+            {
+                completing = stored
+                    .iter()
+                    .filter(|e| e.matches(&headers) && e.range.is_some_and(|(s, _, _)| s == 0))
+                    .filter(|e| usable(e, &request_cc, now))
+                    .max_by(|a, b| a.response_time.total_cmp(&b.response_time))
+                    .cloned();
+                if let Some((_, end, _)) = completing.as_ref().and_then(|e| e.range) {
+                    headers.push("Range", &format!("bytes={}-", end + 1));
+                    // RFC 9110 §13.1.5: con validador fuerte, el resto solo si no cambió.
+                    if let Some(v) = completing
+                        .as_ref()
+                        .and_then(|e| strong_validator(&e.response.headers))
+                    {
+                        headers.push("If-Range", &v);
+                    }
+                }
+            }
+            if completing.is_none() && candidates.is_empty() && range.is_none() && !only_if_cached {
+                unselected = stored
+                    .into_iter()
+                    .filter(|e| {
+                        let (etag, lm) = e.validators();
+                        e.range.is_none() && (etag.is_some() || lm.is_some())
+                    })
+                    .collect();
+                unselected.sort_by(|a, b| b.response_time.total_cmp(&a.response_time));
+                let mut etags: Vec<&str> = Vec::new();
+                for etag in unselected.iter().filter_map(|e| e.validators().0) {
+                    if !etags.contains(&etag) {
+                        etags.push(etag);
+                    }
+                }
+                if !etags.is_empty() {
+                    headers.push("If-None-Match", &etags.join(", "));
+                }
+                if let Some(lm) = unselected.iter().find_map(|e| e.validators().1) {
+                    headers.push("If-Modified-Since", lm);
+                }
+            }
             if let Some(entry) = candidates.into_iter().next() {
-                let now = self.now();
                 if matches!(mode, CacheMode::ForceCache | CacheMode::OnlyIfCached) {
                     return Ok((self.serve(&entry, &method, range, req, now), CacheUse::Hit));
                 }
@@ -616,6 +781,15 @@ impl HttpCache {
                     && !request_no_cache
                     && usable(&entry, &request_cc, now)
                 {
+                    return Ok((self.serve(&entry, &method, range, req, now), CacheUse::Hit));
+                }
+                // RFC 5861 §3: caducada hace poco: se sirve y se valida en segundo plano.
+                if mode == CacheMode::Default
+                    && !request_no_cache
+                    && entry.range.is_none()
+                    && stale_while_revalidate(&entry, &request_cc, now)
+                {
+                    self.queue_revalidation(&key, req);
                     return Ok((self.serve(&entry, &method, range, req, now), CacheUse::Hit));
                 }
                 if only_if_cached {
@@ -638,9 +812,26 @@ impl HttpCache {
             return Ok((gateway_timeout(), CacheUse::Unavailable));
         }
 
-        let request_time = self.now();
-        let response = network(&headers)?;
-        let response_time = self.now();
+        let mut request_time = self.now();
+        let mut response = network(&headers).expect("la primera llamada a la red")?;
+        let mut response_time = self.now();
+
+        // §3.4: el resto de una parcial. Un 206 que se combina con ella la completa; si no, se
+        // pide la representación entera (si `network` se puede llamar otra vez).
+        if let Some(partial) = completing {
+            if let Some(full) = self.complete(&key, partial, &response, request_time, response_time)
+            {
+                let served = self.serve(&full, &method, None, req, response_time);
+                return Ok((served, CacheUse::Network));
+            }
+            if response.status == 206 {
+                request_time = self.now();
+                if let Some(r) = network(&plain_headers) {
+                    response = r?;
+                    response_time = self.now();
+                }
+            }
+        }
 
         // §4.3.3–4.3.4: un 304 a nuestra validación actualiza y sirve lo guardado.
         if response.status == 304
@@ -651,6 +842,29 @@ impl HttpCache {
             entry.response_time = response_time;
             let served = self.serve(&entry, &method, None, req, response_time);
             if self.storable(&method, &entry.response, req, mode, false) {
+                self.store(&key, entry);
+            }
+            return Ok((served, CacheUse::Revalidated));
+        }
+        if response.status == 304
+            && let Some(mut entry) = select_for_update(unselected, &response.headers)
+        {
+            let old_vary = std::mem::take(&mut entry.vary);
+            update_headers(&mut entry.response.headers, &response.headers);
+            entry.request_time = request_time;
+            entry.response_time = response_time;
+            let served = self.serve(&entry, &method, None, req, response_time);
+            // La elegida pasa a ser la variante de esta petición (sus cabeceras de `Vary`).
+            if let Some(names) = vary_names(&entry.response.headers)
+                && self.storable(&method, &entry.response, req, mode, false)
+            {
+                let mut entries = self.load(&key);
+                entries.retain(|e| e.range.is_some() || e.vary != old_vary);
+                self.remember(&key, entries, true);
+                entry.vary = names
+                    .iter()
+                    .map(|n| (n.clone(), vary_value(req.headers, n)))
+                    .collect();
                 self.store(&key, entry);
             }
             return Ok((served, CacheUse::Revalidated));
@@ -700,11 +914,13 @@ impl HttpCache {
             } else {
                 None
             };
+            let mut stored = response.clone();
+            let range = range.and_then(|r| normalize_partial(r, &mut stored.body));
             if response.status != 206 || range.is_some() {
                 self.store(
                     &key,
                     Entry {
-                        response: response.clone(),
+                        response: stored,
                         vary,
                         request_time,
                         response_time,
@@ -754,13 +970,64 @@ impl HttpCache {
             || heuristically_cacheable(response.status)
     }
 
-    /// Guarda `entry` en lugar de las variantes con los mismos valores de `Vary`.
-    fn store(&self, key: &str, entry: Entry) {
+    /// §3.4: combina `partial` con el 206 `response` a la petición que la completaba. Con la
+    /// representación entera, la guarda y la devuelve; si no, guarda lo combinado (si se pudo).
+    fn complete(
+        &self,
+        key: &str,
+        partial: Entry,
+        response: &CacheResponse,
+        request_time: f64,
+        response_time: f64,
+    ) -> Option<Entry> {
+        if response.status != 206 || Directives::of(&response.headers).has("no-store") {
+            return None;
+        }
+        let mut new = Entry {
+            response: response.clone(),
+            vary: partial.vary.clone(),
+            request_time,
+            response_time,
+            range: None,
+            request_range: None,
+        };
+        new.range = response
+            .headers
+            .get("content-range")
+            .and_then(parse_content_range)
+            .and_then(|r| normalize_partial(r, &mut new.response.body));
+        if !mergeable(&partial, &new) {
+            return None;
+        }
+        let merged = merge(&partial, &new);
+        let complete = merged.range.is_none();
+        self.store(key, merged.clone());
+        complete.then_some(merged)
+    }
+
+    /// Guarda `entry` en lugar de las variantes con los mismos valores de `Vary`. Una parcial
+    /// se combina con las guardadas que puede (§3.4); una completa reemplaza a las parciales.
+    fn store(&self, key: &str, mut entry: Entry) {
         let mut entries = self.load(key);
+        if entry.range.is_some() {
+            while let Some(i) = entries
+                .iter()
+                .position(|e| e.vary == entry.vary && mergeable(e, &entry))
+            {
+                let old = entries.remove(i);
+                entry = merge(&old, &entry);
+                if entry.range.is_none() {
+                    break;
+                }
+            }
+        }
         entries.retain(|e| {
             e.vary != entry.vary
-                || (e.range.is_some() != entry.range.is_some())
-                || (e.range.is_some() && e.range != entry.range)
+                || match (entry.range, e.range) {
+                    (None, _) => false,
+                    (Some(_), None) => true,
+                    (Some(a), Some(b)) => a != b,
+                }
         });
         entries.push(entry);
         // Pocas variantes por URL: las más viejas se van.
@@ -855,7 +1122,12 @@ fn usable(entry: &Entry, request: &Directives, now: f64) -> bool {
     }
     let age = entry.age(now);
     let lifetime = entry.freshness_lifetime();
-    if let Some(max_age) = request.seconds("max-age") {
+    // RFC 8246 §2: `immutable` fresca no se valida aunque se pida `max-age=0` (una recarga);
+    // `no-cache` en la petición (recarga forzada) sí valida.
+    let immutable = response.has("immutable") && lifetime > age;
+    if let Some(max_age) = request.seconds("max-age")
+        && !immutable
+    {
         match max_age {
             // `max-age=0`: siempre a validar (la edad se mide en segundos enteros).
             Some(0) | None => return false,
@@ -879,6 +1151,144 @@ fn usable(entry: &Entry, request: &Directives, now: f64) -> bool {
         Some(Some(s)) => age - lifetime <= s as f64,
         Some(None) => true,
         None => false,
+    }
+}
+
+/// §4.3.4: cuál de las respuestas `stored` (la más reciente primero) actualiza un 304 que
+/// contesta a sus validadores: la del mismo `ETag` (comparación débil, RFC 9110 §8.8.3.2) o, sin
+/// él, la más reciente con el mismo `Last-Modified`. Si el 304 no trae validadores o no coincide
+/// con ninguna, la más reciente: solo pudo contestar a los validadores que mandamos, todos
+/// sacados de `stored`, y la petición no era condicional, así que un 304 no puede llegar al
+/// cliente (lo mismo que hace la validación de la variante elegida).
+fn select_for_update(mut stored: Vec<Entry>, fresh: &Headers) -> Option<Entry> {
+    let weak = |t: &str| t.trim().trim_start_matches("W/").to_owned();
+    let position = if let Some(etag) = fresh.get("etag") {
+        stored
+            .iter()
+            .position(|e| e.validators().0.is_some_and(|t| weak(t) == weak(etag)))
+    } else if let Some(lm) = fresh.get("last-modified") {
+        stored
+            .iter()
+            .position(|e| e.validators().1.is_some_and(|l| l.trim() == lm.trim()))
+    } else {
+        None
+    };
+    let position = position.unwrap_or(0);
+    (position < stored.len()).then(|| stored.swap_remove(position))
+}
+
+/// RFC 5861 §3: ¿se puede servir `entry`, caducada, mientras se valida en segundo plano? Si
+/// lleva menos de `stale-while-revalidate` segundos caducada, la respuesta no exige validar
+/// (`no-cache`, `must-revalidate`: RFC 9111 §5.2.2.2 manda sobre la extensión) y la petición no
+/// pide frescura (`max-age`, `min-fresh`).
+fn stale_while_revalidate(entry: &Entry, request: &Directives, now: f64) -> bool {
+    let response = entry.directives();
+    let Some(Some(window)) = response.seconds("stale-while-revalidate") else {
+        return false;
+    };
+    if response.has("no-cache")
+        || response.has("must-revalidate")
+        || request.has("max-age")
+        || request.has("min-fresh")
+    {
+        return false;
+    }
+    let stale_for = entry.age(now) - entry.freshness_lifetime();
+    stale_for >= 0.0 && stale_for <= window as f64
+}
+
+/// RFC 9110 §8.8.1: el validador fuerte de una respuesta: su `ETag` si no es débil o, sin
+/// `ETag`, un `Last-Modified` al menos 60 s anterior a su `Date` (§8.8.2.2).
+fn strong_validator(h: &Headers) -> Option<String> {
+    if let Some(tag) = h.get("etag") {
+        let tag = tag.trim();
+        return (!tag.starts_with("W/")).then(|| tag.to_owned());
+    }
+    let lm = h.get("last-modified")?;
+    let modified = parse_http_date(lm)?;
+    let date = parse_http_date(h.get("date")?)?;
+    (date - modified >= 60).then(|| lm.trim().to_owned())
+}
+
+/// El rango que de verdad trae un 206 (RFC 9110 §14.4): un cuerpo más largo que su
+/// `Content-Range` se recorta; uno más corto cubre menos y, si decía llegar hasta el final, lo
+/// que trae es el final. `None` sin cuerpo.
+fn normalize_partial(
+    (start, end, total): (u64, u64, Option<u64>),
+    body: &mut Vec<u8>,
+) -> Option<(u64, u64, Option<u64>)> {
+    let len = body.len() as u64;
+    if len == 0 || end < start {
+        return None;
+    }
+    let declared = end - start + 1;
+    if len >= declared {
+        body.truncate(declared as usize);
+        return Some((start, end, total));
+    }
+    let real_end = start + len - 1;
+    let total = if total == Some(end + 1) {
+        Some(real_end + 1)
+    } else {
+        total
+    };
+    Some((start, real_end, total))
+}
+
+/// §3.4: dos parciales se combinan si comparten un validador fuerte (y el largo total) y sus
+/// rangos se tocan.
+fn mergeable(old: &Entry, new: &Entry) -> bool {
+    let (Some((s1, e1, t1)), Some((s2, e2, t2))) = (old.range, new.range) else {
+        return false;
+    };
+    let validator = strong_validator(&new.response.headers);
+    validator.is_some()
+        && validator == strong_validator(&old.response.headers)
+        && (t1.is_none() || t2.is_none() || t1 == t2)
+        && s2 <= e1 + 1
+        && s1 <= e2 + 1
+}
+
+/// La combinación de dos parciales [`mergeable`]: los bytes de las dos (los de `new` mandan) y
+/// las cabeceras de `new` (§3.4, como en un 304: §3.2). Si cubre la representación entera, es
+/// un 200 completo.
+fn merge(old: &Entry, new: &Entry) -> Entry {
+    let ((s1, e1, t1), (s2, e2, t2)) = (
+        old.range.unwrap_or((0, 0, None)),
+        new.range.unwrap_or((0, 0, None)),
+    );
+    let (start, end, total) = (s1.min(s2), e1.max(e2), t2.or(t1));
+    let mut body = vec![0u8; (end - start + 1) as usize];
+    for (part, from) in [(old, s1), (new, s2)] {
+        let at = (from - start) as usize;
+        let len = part.response.body.len().min(body.len() - at);
+        body[at..at + len].copy_from_slice(&part.response.body[..len]);
+    }
+    let mut headers = new.response.headers.clone();
+    headers.0.retain(|(n, _)| {
+        !n.eq_ignore_ascii_case("content-range") && !n.eq_ignore_ascii_case("content-length")
+    });
+    headers.push("Content-Length", &body.len().to_string());
+    let complete = start == 0 && total == Some(end + 1);
+    let (status, status_text, range) = if complete {
+        (200, "OK", None)
+    } else {
+        let shown = total.map_or("*".to_owned(), |t| t.to_string());
+        headers.push("Content-Range", &format!("bytes {start}-{end}/{shown}"));
+        (206, "Partial Content", Some((start, end, total)))
+    };
+    Entry {
+        response: CacheResponse {
+            status,
+            status_text: status_text.into(),
+            headers,
+            body,
+        },
+        vary: new.vary.clone(),
+        request_time: new.request_time,
+        response_time: new.response_time,
+        range,
+        request_range: None,
     }
 }
 
@@ -1154,6 +1564,19 @@ mod tests {
             respond: &[(&str, &str)],
             status: u16,
         ) -> (CacheResponse, CacheUse, Headers) {
+            let body: &[u8] = if status == 304 { b"" } else { b"cuerpo" };
+            self.get_body(req_headers, mode, respond, status, body)
+        }
+
+        /// Como `get`, con el cuerpo que responde el servidor.
+        fn get_body(
+            &self,
+            req_headers: &[(&str, &str)],
+            mode: CacheMode,
+            respond: &[(&str, &str)],
+            status: u16,
+            body: &[u8],
+        ) -> (CacheResponse, CacheUse, Headers) {
             let mut h = Headers::default();
             for (n, v) in req_headers {
                 h.push(n, v);
@@ -1178,11 +1601,7 @@ mod tests {
                         status,
                         status_text: String::new(),
                         headers,
-                        body: if status == 304 {
-                            vec![]
-                        } else {
-                            b"cuerpo".to_vec()
-                        },
+                        body: body.to_vec(),
                     })
                 })
                 .unwrap();
@@ -1314,9 +1733,65 @@ mod tests {
         let (_, u, sent) = r.get(&[("Cookie", "GeoIP=x;b=2; a=1")], d, &[], 304);
         assert_eq!(u, CacheUse::Revalidated);
         assert!(sent.get("if-modified-since").is_some());
+        // Otra cookie: ninguna variante coincide; se valida igual (§4.3.1) y un 200 se guarda
+        // como variante nueva.
         let (_, u, sent) = r.get(&[("Cookie", "a=1; b=3")], d, &vary, 200);
         assert_eq!(u, CacheUse::Network);
-        assert!(sent.get("if-modified-since").is_none());
+        assert!(sent.get("if-modified-since").is_some());
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 2);
+    }
+
+    /// §4.3.1 y §4.3.4: sin variante que coincida por `Vary`, la petición lleva los validadores
+    /// de las guardadas; el 304 elige la del mismo `ETag`, la sirve y pasa a ser la variante de
+    /// las cabeceras nuevas (no se acumulan variantes). Es el caso de los gadgets de Wikipedia,
+    /// con `Vary: Cookie` y cookies `WMF-Last-Access` que cambian cada día.
+    #[test]
+    fn vary_mismatch_validates_stored_variants() {
+        let r = rig(None);
+        let d = Default::default();
+        let respond = |etag| {
+            [
+                ("Cache-Control", "private, max-age=0, must-revalidate"),
+                ("ETag", etag),
+                ("Vary", "Cookie"),
+            ]
+        };
+        r.get(&[("Cookie", "a=1")], d, &respond("\"v1\""), 200);
+        r.advance(1);
+        r.get(&[("Cookie", "a=2")], d, &respond("W/\"v2\""), 200);
+        r.advance(1);
+        let (res, u, sent) = r.get(&[("Cookie", "a=3")], d, &[("ETag", "\"v2\"")], 304);
+        assert_eq!(sent.get("if-none-match"), Some("W/\"v2\", \"v1\""));
+        assert_eq!((u, res.status), (CacheUse::Revalidated, 200));
+        assert_eq!(res.body, b"cuerpo");
+        let stored = r.cache.load(&HttpCache::key(&r.url, true));
+        assert_eq!(stored.len(), 2);
+        // La de `a=2` ahora es la de `a=3`: coincide y se valida sola.
+        let (_, u, sent) = r.get(&[("Cookie", "a=3")], d, &[], 304);
+        assert_eq!(u, CacheUse::Revalidated);
+        assert_eq!(sent.get("if-none-match"), Some("\"v2\""));
+        // Solo con `Last-Modified` (como `action=raw` de MediaWiki).
+        let r = rig(None);
+        let lm = "Tue, 14 Nov 2023 21:56:40 GMT";
+        let vary = [
+            (
+                "Cache-Control",
+                "private, s-maxage=0, max-age=0, must-revalidate",
+            ),
+            ("Last-Modified", lm),
+            ("Vary", "Accept-Encoding,Cookie"),
+        ];
+        r.get(&[("Cookie", "WMF-Last-Access=10-Nov-2026")], d, &vary, 200);
+        let (res, u, sent) = r.get(&[("Cookie", "WMF-Last-Access=11-Nov-2026")], d, &[], 304);
+        assert_eq!(sent.get("if-modified-since"), Some(lm));
+        assert_eq!(
+            (u, res.body.as_slice()),
+            (CacheUse::Revalidated, &b"cuerpo"[..])
+        );
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 1);
+        // `only-if-cached` sin variante que coincida sigue siendo un 504.
+        let (res, u, _) = r.get(&[("Cookie", "x=1")], CacheMode::OnlyIfCached, &[], 200);
+        assert_eq!((u, res.status), (CacheUse::Unavailable, 504));
     }
 
     #[test]
@@ -1333,6 +1808,285 @@ mod tests {
         assert_eq!(res.headers.get("content-range"), Some("bytes 1-2/6"));
         let (res, _, _) = r.get(&[("Range", "bytes=-2")], d, &[], 500);
         assert_eq!(res.body, b"po");
+    }
+
+    /// WPT `partial.any.js`: una parcial que dice `4-9/10` pero trae 5 bytes cubre 4–8, y ahí
+    /// termina la representación; de ella salen los rangos menores.
+    #[test]
+    fn partial_responses_serve_smaller_ranges() {
+        let r = rig(None);
+        let d = Default::default();
+        let partial = [
+            ("Cache-Control", "max-age=3600"),
+            ("Content-Range", "bytes 4-9/10"),
+        ];
+        r.get_body(&[("Range", "bytes=-5")], d, &partial, 206, b"01234");
+        for (range, body) in [
+            ("bytes=-5", &b"01234"[..]),
+            ("bytes=6-8", b"234"),
+            ("bytes=6-", b"234"),
+            ("bytes=-1", b"4"),
+        ] {
+            let (res, u, _) = r.get(&[("Range", range)], d, &[], 500);
+            assert_eq!(
+                (u, res.status, res.body.as_slice()),
+                (CacheUse::Hit, 206, body),
+                "{range}"
+            );
+        }
+    }
+
+    /// §3.4: una parcial desde 0 se completa pidiendo el resto (`Range: bytes=5-`); con
+    /// validador fuerte va con `If-Range`, y el 206 que llega se combina en un 200 completo.
+    #[test]
+    fn partial_is_completed() {
+        let d = Default::default();
+        // Sin validador: el servidor manda la entera (WPT "stores partial content and
+        // completes it"), que reemplaza a la parcial.
+        let r = rig(None);
+        r.get_body(
+            &[("Range", "bytes=0-4")],
+            d,
+            &[
+                ("Cache-Control", "max-age=3600"),
+                ("Content-Range", "bytes 0-4/10"),
+            ],
+            206,
+            b"01234",
+        );
+        let full = [("Cache-Control", "max-age=3600")];
+        let (res, u, sent) = r.get_body(&[], d, &full, 200, b"0123456789");
+        assert_eq!(
+            (sent.get("range"), sent.get("if-range")),
+            (Some("bytes=5-"), None)
+        );
+        assert_eq!((u, res.status), (CacheUse::Network, 200));
+        assert_eq!(r.get(&[], d, &[], 500).1, CacheUse::Hit);
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 1);
+        // Con ETag: `If-Range`, y el 206 del resto se combina.
+        let r = rig(None);
+        let tagged = |cr| {
+            [
+                ("Cache-Control", "max-age=3600"),
+                ("ETag", "\"e\""),
+                ("Content-Range", cr),
+            ]
+        };
+        r.get_body(
+            &[("Range", "bytes=0-4")],
+            d,
+            &tagged("bytes 0-4/10"),
+            206,
+            b"01234",
+        );
+        let (res, u, sent) = r.get_body(&[], d, &tagged("bytes 5-9/10"), 206, b"56789");
+        assert_eq!(
+            (sent.get("range"), sent.get("if-range")),
+            (Some("bytes=5-"), Some("\"e\""))
+        );
+        assert_eq!(
+            (u, res.status, res.body.as_slice()),
+            (CacheUse::Network, 200, &b"0123456789"[..])
+        );
+        assert_eq!(res.headers.get("content-range"), None);
+        let (res, u, _) = r.get(&[], d, &[], 500);
+        assert_eq!(
+            (u, res.body.as_slice()),
+            (CacheUse::Hit, &b"0123456789"[..])
+        );
+    }
+
+    /// Completar una parcial sin validador da otro 206 que no se puede combinar: `fetch_mut`
+    /// pide entonces la representación entera.
+    #[test]
+    fn uncombinable_completion_asks_for_the_whole() {
+        let r = rig(None);
+        let d = Default::default();
+        r.get_body(
+            &[("Range", "bytes=0-4")],
+            d,
+            &[
+                ("Cache-Control", "max-age=3600"),
+                ("Content-Range", "bytes 0-4/10"),
+            ],
+            206,
+            b"01234",
+        );
+        let none = Headers::default();
+        let req = CacheRequest {
+            method: "GET",
+            url: &r.url,
+            headers: &none,
+            mode: d,
+            credentials: true,
+        };
+        let mut calls = Vec::new();
+        let (res, u) = r
+            .cache
+            .fetch_mut(&req, |sent| {
+                calls.push(sent.get("range").map(str::to_owned));
+                let mut headers = Headers::default();
+                let (status, body) = if calls.len() == 1 {
+                    headers.push("Content-Range", "bytes 5-9/10");
+                    (206, &b"56789"[..])
+                } else {
+                    (200, &b"0123456789"[..])
+                };
+                Ok::<_, ()>(CacheResponse {
+                    status,
+                    status_text: String::new(),
+                    headers,
+                    body: body.to_vec(),
+                })
+            })
+            .unwrap();
+        assert_eq!(calls, [Some("bytes=5-".to_owned()), None]);
+        assert_eq!(
+            (u, res.status, res.body.as_slice()),
+            (CacheUse::Network, 200, &b"0123456789"[..])
+        );
+    }
+
+    /// §3.4: dos 206 que se tocan y comparten un validador fuerte se guardan como una sola
+    /// parcial; si cubren todo, es la respuesta completa. Con validador débil no se combinan.
+    #[test]
+    fn partials_are_combined() {
+        let r = rig(None);
+        let d = Default::default();
+        let h = |cr| {
+            [
+                ("Cache-Control", "max-age=3600"),
+                ("ETag", "\"e\""),
+                ("Content-Range", cr),
+            ]
+        };
+        r.get_body(
+            &[("Range", "bytes=0-3")],
+            d,
+            &h("bytes 0-3/10"),
+            206,
+            b"0123",
+        );
+        r.get_body(
+            &[("Range", "bytes=4-6")],
+            d,
+            &h("bytes 4-6/10"),
+            206,
+            b"456",
+        );
+        let stored = r.cache.load(&HttpCache::key(&r.url, true));
+        assert_eq!((stored.len(), stored[0].range), (1, Some((0, 6, Some(10)))));
+        let (res, u, _) = r.get(&[("Range", "bytes=2-5")], d, &[], 500);
+        assert_eq!((u, res.body.as_slice()), (CacheUse::Hit, &b"2345"[..]));
+        r.get_body(&[("Range", "bytes=7-")], d, &h("bytes 7-9/10"), 206, b"789");
+        let (res, u, _) = r.get(&[], d, &[], 500);
+        assert_eq!(
+            (u, res.status, res.body.as_slice()),
+            (CacheUse::Hit, 200, &b"0123456789"[..])
+        );
+        let r = rig(None);
+        let weak = |cr| {
+            [
+                ("Cache-Control", "max-age=3600"),
+                ("ETag", "W/\"e\""),
+                ("Content-Range", cr),
+            ]
+        };
+        r.get_body(
+            &[("Range", "bytes=0-3")],
+            d,
+            &weak("bytes 0-3/10"),
+            206,
+            b"0123",
+        );
+        r.get_body(
+            &[("Range", "bytes=4-6")],
+            d,
+            &weak("bytes 4-6/10"),
+            206,
+            b"456",
+        );
+        assert_eq!(r.cache.load(&HttpCache::key(&r.url, true)).len(), 2);
+    }
+
+    /// RFC 8246: fresca e `immutable`, una recarga (`max-age=0`) no la valida; `no-cache` (la
+    /// recarga forzada) sí, y caducada se valida como cualquiera.
+    #[test]
+    fn immutable_is_not_revalidated_on_reload() {
+        let r = rig(None);
+        let d = Default::default();
+        r.get(
+            &[],
+            d,
+            &[
+                ("Cache-Control", "max-age=100, immutable"),
+                ("ETag", "\"i\""),
+            ],
+            200,
+        );
+        let reload = [("Cache-Control", "max-age=0")];
+        assert_eq!(r.get(&reload, d, &[], 500).1, CacheUse::Hit);
+        let force = [("Cache-Control", "no-cache")];
+        assert_eq!(r.get(&force, d, &[], 304).1, CacheUse::Revalidated);
+        r.advance(200);
+        assert_eq!(r.get(&reload, d, &[], 304).1, CacheUse::Revalidated);
+    }
+
+    /// RFC 5861 §3: caducada dentro de la ventana se sirve y deja una revalidación pendiente
+    /// (una sola mientras está en curso); el 304 la refresca. Fuera de la ventana, o con
+    /// `must-revalidate`, se valida antes de servir.
+    #[test]
+    fn stale_while_revalidate_queues_a_revalidation() {
+        let r = rig(None);
+        let d = Default::default();
+        r.get(
+            &[],
+            d,
+            &[
+                ("Cache-Control", "max-age=10, stale-while-revalidate=30"),
+                ("ETag", "\"s\""),
+            ],
+            200,
+        );
+        r.advance(20);
+        assert_eq!(r.get(&[], d, &[], 500).1, CacheUse::Hit);
+        assert_eq!(r.get(&[], d, &[], 500).1, CacheUse::Hit);
+        let pending = r.cache.take_revalidations();
+        assert_eq!(pending.len(), 1);
+        let mut sent = Headers::default();
+        let used = r
+            .cache
+            .revalidate(&pending[0], |h| {
+                sent = h.clone();
+                Ok::<_, ()>(CacheResponse {
+                    status: 304,
+                    status_text: String::new(),
+                    headers: Headers::default(),
+                    body: Vec::new(),
+                })
+            })
+            .unwrap();
+        assert_eq!(used, CacheUse::Revalidated);
+        assert_eq!(sent.get("if-none-match"), Some("\"s\""));
+        assert_eq!(r.get(&[], d, &[], 500).1, CacheUse::Hit);
+        assert!(r.cache.take_revalidations().is_empty());
+        r.advance(60);
+        assert_eq!(r.get(&[], d, &[], 304).1, CacheUse::Revalidated);
+        let r = rig(None);
+        r.get(
+            &[],
+            d,
+            &[
+                (
+                    "Cache-Control",
+                    "max-age=10, stale-while-revalidate=30, must-revalidate",
+                ),
+                ("ETag", "\"m\""),
+            ],
+            200,
+        );
+        r.advance(20);
+        assert_eq!(r.get(&[], d, &[], 304).1, CacheUse::Revalidated);
     }
 
     #[test]

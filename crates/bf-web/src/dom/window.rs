@@ -61,16 +61,8 @@ pub fn install(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     let et = agent.heap[wp].proto;
     let saved = agent.current_realm;
     agent.current_realm = realm;
-    let props = agent.new_object(et);
-    let tag = PropertyKey::Symbol(agent.well_known.to_string_tag);
-    agent.put_data(
-        props,
-        tag,
-        Value::str("WindowProperties"),
-        false,
-        false,
-        true,
-    );
+    // E1: con las propiedades con nombre (HTML §7.2.2.3).
+    let props = crate::html::named::window_properties(agent, realm, et);
     agent.heap[wp].proto = Some(props);
     agent.current_realm = saved;
     track_rejections(agent, realm);

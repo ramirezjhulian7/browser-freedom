@@ -38,14 +38,18 @@ fn parse_from_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             let opts = bf_html::ParseOptions {
                 scripting: false,
                 iframe_srcdoc: false,
+                allow_declarative_shadow_roots: false, // E1: DOMParser no los permite.
             };
             let (mut d, _) = bf_html::parse_document(&text, &opts);
             d.content_type = "text/html".into();
             d
         }
         "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => {
-            let mut d = bf_html::parse_xml_document(&text);
-            d.is_html = false;
+            // Un error de buena formación deja solo un `parsererror` (paso 2 de
+            // `parseFromString`, HTML §8.5.1).
+            // Con *XML scripting support disabled* (paso 3): los `script` quedan inertes.
+            let mut d = bf_html::parse_xml_inert(&text)
+                .unwrap_or_else(|e| bf_html::parsererror_document(&e));
             d.content_type = type_.as_str().into();
             d
         }
@@ -59,7 +63,12 @@ fn parse_from_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     // La URL es la del documento asociado a la ventana (paso 3).
     let ctx = WebContextHandle::current(agent);
     doc.url = ctx.get(agent).document().url.clone();
+    let xml = !doc.is_html;
     let i = ctx.get_mut(agent).add_document(doc);
+    // Con un tipo XML la interfaz es `Document`, no `XMLDocument` (paso 1: "a new Document").
+    if xml {
+        crate::dom::state::state(agent).plain_documents.insert(i);
+    }
     let root = ctx.get(agent).doc(i).root();
     Ok(wrap_node(agent, NodeRef::new(i, root)))
 }

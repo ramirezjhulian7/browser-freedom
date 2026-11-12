@@ -1111,6 +1111,7 @@ fn document_write_while_parsing() {
     let mut parser = bf_web::Parser::new(&bf_html::ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        ..bf_html::ParseOptions::default()
     });
     parser.feed(html, &mut bf_dom::events::NoScript);
     let url = Url::parse("https://example.com/", None).expect("url");
@@ -1270,11 +1271,28 @@ fn document_interfaces_and_dom_parser() {
               new Document() instanceof XMLDocument, \
               document.implementation.createDocument(null, 'r') instanceof XMLDocument].join()"
         ),
-        "true,true,urn:x,application/xml,true,hola,false,true"
+        // `DOMParser` con un tipo XML crea un `Document`, no un `XMLDocument` (HTML §8.5.1;
+        // WPT `domparsing/DOMParser-parseFromString-xml.html`).
+        "true,false,urn:x,application/xml,true,hola,false,true"
     );
     assert!(
         p.error("new DOMParser().parseFromString('x', 'text/plain')")
             .contains("enum")
+    );
+}
+
+/// E10: `Document.rootElement` (SVG 2): el `svg` raíz o `null`.
+#[test]
+fn document_root_element() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var s = new DOMParser().parseFromString('<svg xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); \
+             var g = new DOMParser().parseFromString('<g xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); \
+             [s.rootElement === s.documentElement, g.rootElement, document.rootElement, \
+              'rootElement' in Document.prototype].join()"
+        ),
+        "true,,,true"
     );
 }
 
