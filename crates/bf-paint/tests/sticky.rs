@@ -18,6 +18,10 @@ const VIEWPORT: Size = Size {
 };
 
 fn page(html: &str) -> bf_paint::Page {
+    page_and_doc(html).0
+}
+
+fn page_and_doc(html: &str) -> (bf_paint::Page, bf_dom::Document) {
     let (doc, _) = parse_document(html, &ParseOptions::default());
     let base = Url::parse("about:blank", None).unwrap();
     let ctx = PageContext {
@@ -27,7 +31,8 @@ fn page(html: &str) -> bf_paint::Page {
         fonts: Arc::new(FontDb::from_faces(Vec::new())),
         extra: &[],
     };
-    prepare_page_with_frames(&doc, &ctx, VIEWPORT, &[], &[])
+    let page = prepare_page_with_frames(&doc, &ctx, VIEWPORT, &[], &[]);
+    (page, doc)
 }
 
 fn px(p: &Pixmap, x: u32, y: u32) -> [u8; 3] {
@@ -83,4 +88,29 @@ fn sticky_inside_a_scroll_container_has_no_sticky_item() {
             .iter()
             .any(|i| matches!(i, DisplayItem::PushSticky { .. }))
     );
+}
+
+fn applied(p: &bf_paint::Page) -> Vec<(f32, f32)> {
+    p.display_list
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            DisplayItem::PushSticky { applied, .. } => Some(*applied),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn page_scroll_with_sticky_items_does_not_rebuild_the_list() {
+    let (mut p, doc) = page_and_doc(STICKY);
+    assert_eq!(applied(&p), [(0.0, 0.0)]);
+    // El árbol se pone al día (hit testing) y hay que volver a pintar...
+    assert!(p.apply_scroll(&doc, &[], (0.0, 100.0)));
+    assert_ne!(p.tree.scroll.sticky.values().next(), Some(&(0.0, 0.0)));
+    // ...pero la lista es la misma: el raster resuelve el desplazamiento.
+    assert_eq!(applied(&p), [(0.0, 0.0)]);
+    let b = render_scrolled(&p.display_list, VIEWPORT, 1.0, Rgba::WHITE, (0.0, 100.0));
+    assert_eq!(px(&b, 50, 5), GREEN);
+    assert_eq!(px(&b, 50, 15), WHITE);
 }
