@@ -10,9 +10,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod blob; // E2: el almacén de URLs blob:
 pub mod cache;
 pub mod cookies;
+pub mod dns;
 mod error;
 mod eyeballs;
 pub mod hpack;
@@ -27,7 +29,7 @@ pub mod websocket; // E2: cliente WebSocket (RFC 6455)
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -37,6 +39,7 @@ use bf_url::{Host, Url};
 
 pub use cache::{CacheMode, CacheUse, HttpCache};
 pub use cookies::CookieJar;
+pub use dns::Dns;
 pub use error::{FetchError, NetErrorKind, TlsError, TlsReason};
 pub use hsts::HstsStore;
 pub use http::Headers;
@@ -281,17 +284,36 @@ fn server_name(host: &str) -> Result<rustls_pki_types::ServerName<'static>, Fetc
     .map_err(|e| FetchError::Tls(TlsError::new(TlsReason::Other, e.to_string())))
 }
 
-/// Conexión TCP con Happy Eyeballs (RFC 8305, [`eyeballs`]): las direcciones de las dos
-/// familias se intercalan y los intentos se escalonan cada 250 ms en paralelo.
+/// La resolución de las conexiones que no son de un [`Fetcher`] (WebSocket, respuestas por
+/// partes): el resolvedor del sistema con caché.
+fn system_dns() -> &'static Dns {
+    static DNS: OnceLock<Dns> = OnceLock::new();
+    DNS.get_or_init(Dns::default)
+}
+
 fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, FetchError> {
-    let addrs: Vec<_> = (host.trim_start_matches('[').trim_end_matches(']'), port)
-        .to_socket_addrs()
-        .map_err(FetchError::Dns)?
-        .collect();
-    let addrs = eyeballs::interleave(addrs);
-    let tcp = eyeballs::race(&addrs, eyeballs::ATTEMPT_DELAY, CONNECT_TIMEOUT, |a| {
-        TcpStream::connect_timeout(&a, CONNECT_TIMEOUT)
-    })?;
+    connect_tcp_with(system_dns(), host, port)
+}
+
+fn attempt_tcp(a: std::net::SocketAddr) -> io::Result<TcpStream> {
+    TcpStream::connect_timeout(&a, CONNECT_TIMEOUT)
+}
+
+/// Conexión TCP con Happy Eyeballs (RFC 8305): la resolución de [`dns`] (§3, con caché), las
+/// direcciones de las dos familias intercaladas y los intentos escalonados cada 250 ms en
+/// paralelo ([`eyeballs`], §4–5); la familia que se resolvió tarde se suma a la lista en curso.
+fn connect_tcp_with(dns: &Dns, host: &str, port: u16) -> Result<TcpStream, FetchError> {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let resolution = dns.resolve(bare).map_err(FetchError::Dns)?;
+    let addrs = eyeballs::interleave(Dns::socket_addrs(&resolution.addrs, port));
+    let late = resolution.late.map(|rx| (rx, port));
+    let tcp = eyeballs::race_with_late(
+        addrs,
+        late,
+        eyeballs::ATTEMPT_DELAY,
+        CONNECT_TIMEOUT,
+        attempt_tcp,
+    )?;
     tcp.set_read_timeout(Some(READ_TIMEOUT))?;
     tcp.set_write_timeout(Some(READ_TIMEOUT))?;
     let _ = tcp.set_nodelay(true);
@@ -380,6 +402,13 @@ pub struct Fetcher {
     pub cache: Option<HttpCache>,
     /// Los *Known HSTS Hosts* (RFC 6797).
     pub hsts: HstsStore,
+    /// Autenticación HTTP: quien aporta credenciales ante un 401/407 ([`auth`]).
+    pub authenticator: Option<Arc<auth::Authenticator>>,
+    /// Las credenciales aceptadas, por origen y *realm*.
+    auth: auth::AuthCache,
+    /// La resolución de nombres con caché (RFC 8305 §3); el resolvedor se puede cambiar con
+    /// `Fetcher::dns = Arc::new(Dns::new(...))`.
+    pub dns: Arc<Dns>,
 }
 
 /// Una petición del registro de red de un [`Fetcher`].
@@ -436,7 +465,7 @@ impl Fetcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(key);
-        let mut tcp = connect_tcp(host, port)?;
+        let mut tcp = connect_tcp_with(&self.dns, host, port)?;
         if !tls {
             if allow_h2 && self.h2_prior_knowledge {
                 return Ok(Opened::H2(http2::start(http2::Transport::Plain(tcp))?));
@@ -530,11 +559,7 @@ impl Fetcher {
             return None;
         }
         let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let addrs: Vec<IpAddr> = (bare, key.1)
-            .to_socket_addrs()
-            .ok()?
-            .map(|a| a.ip())
-            .collect();
+        let addrs: Vec<IpAddr> = self.dns.lookup_all(bare).ok()?;
         let name = server_name(host).ok()?;
         let verifier = self.verifier()?;
         for (other, (ip, certs)) in candidates {
@@ -764,7 +789,6 @@ impl Fetcher {
         referrer: Option<&Url>,
         accept: &str,
     ) -> Result<Response, FetchError> {
-        let method = extra.method;
         let body = extra.body;
         let tls = url.scheme == "https";
         if matches!(url.host, Some(Host::Empty) | None) {
@@ -809,19 +833,165 @@ impl Fetcher {
             headers.push(n, v);
         }
         let target = request_target(url);
+        self.authenticate(url, extra, &headers, &target, has("authorization"))
+    }
+
+    /// Credenciales para el *realm* `realm` del origen de `url`: se mandan cuando el servidor
+    /// lo pida (ver [`auth`]). Para reintentar tras un 401 sin [`Fetcher::authenticator`].
+    pub fn set_credentials(&self, url: &Url, realm: &str, creds: auth::Credentials) {
+        self.auth.remember(url, false, realm, creds);
+    }
+
+    /// RFC 9110 §11 (Fetch §4.5 pasos 8.21 y 14): el salto con autenticación. Manda sin esperar
+    /// el reto las credenciales guardadas para el espacio de `url` o, si no hay, las de la URL
+    /// (Basic). Ante un 401/407 con un reto Basic o Digest, busca credenciales (guardadas, de la
+    /// URL, del embebedor) y repite; si el servidor las acepta, las guarda. Las peticiones sin
+    /// credenciales (`credentials: omit`) o con `Authorization` del autor no se autentican.
+    fn authenticate(
+        &self,
+        url: &Url,
+        extra: &HttpExtra<'_>,
+        headers: &Headers,
+        target: &str,
+        author_authorization: bool,
+    ) -> Result<Response, FetchError> {
+        const MAX_ATTEMPTS: usize = 4;
+        let method = extra.method;
+        let allowed = extra.credentials && !author_authorization;
+        let url_creds = auth::Credentials::from_url(url);
+        let mut sent: Option<(&str, String)> = None;
+        let mut url_basic_sent = false;
+        if allowed {
+            if let Some(a) = self.auth.preemptive(url, method, target) {
+                sent = Some(("Authorization", a));
+            } else if let Some(c) = &url_creds {
+                sent = Some(("Authorization", auth::basic(c)));
+                url_basic_sent = true;
+            }
+        }
+        let mut used_url = false;
+        let mut used_cached: Option<String> = None;
+        // Las credenciales del último intento.
+        let mut current: Option<Attempt> = None;
+        let mut attempts = 0;
+        loop {
+            let mut h = headers.clone();
+            if let Some((name, value)) = &sent {
+                h.push(name, value);
+            }
+            let response = self.hop(url, extra, &h, target)?;
+            let proxy = response.status == 407;
+            if !allowed || !(response.status == 401 || proxy) {
+                if !matches!(response.status, 401 | 407)
+                    && let Some(a) = current
+                {
+                    self.auth.store(url, a.proxy, &a.realm, a.creds, a.digest);
+                }
+                return Ok(response);
+            }
+            if attempts >= MAX_ATTEMPTS {
+                return Ok(response);
+            }
+            let header = if proxy {
+                "proxy-authenticate"
+            } else {
+                "www-authenticate"
+            };
+            let challenges = auth::challenges(&response.headers, header);
+            let Some(chosen) = auth::choose(&challenges) else {
+                return Ok(response);
+            };
+            let realm = chosen.realm().unwrap_or("").to_owned();
+            let mut digest = if chosen.scheme == "digest" {
+                auth::DigestState::from_challenge(chosen)
+            } else {
+                None
+            };
+            // RFC 7616 §3.3: `stale=true`: las credenciales valían, el `nonce` no.
+            let stale = digest.is_some()
+                && chosen
+                    .param("stale")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            if url_basic_sent && chosen.scheme == "basic" {
+                used_url = true;
+            }
+            url_basic_sent = false;
+            if let Some(a) = &current
+                && !stale
+            {
+                self.auth.forget(url, a.proxy, &a.realm);
+            }
+            let origin = auth::origin_of(url);
+            let creds = if let (true, Some(a)) = (stale, &current) {
+                Some(a.creds.clone())
+            } else if used_cached.as_deref() != Some(realm.as_str())
+                && let Some(c) = self.auth.credentials(&origin, proxy, &realm)
+            {
+                used_cached = Some(realm.clone());
+                Some(c)
+            } else if !used_url && let Some(c) = &url_creds {
+                used_url = true;
+                Some(c.clone())
+            } else if let Some(ask) = &self.authenticator {
+                let mut bare = url.clone();
+                bare.username.clear();
+                bare.password.clear();
+                ask(&auth::AuthPrompt {
+                    url: bare,
+                    proxy,
+                    realm: chosen.realm().map(str::to_owned),
+                    scheme: chosen.scheme.clone(),
+                    challenges: challenges.clone(),
+                    retry: current.is_some(),
+                })
+            } else {
+                None
+            };
+            let Some(creds) = creds else {
+                return Ok(response);
+            };
+            let value = match &mut digest {
+                Some(d) => d.authorization(&creds, method, target, &auth::cnonce()),
+                None => auth::basic(&creds),
+            };
+            let name = if proxy {
+                "Proxy-Authorization"
+            } else {
+                "Authorization"
+            };
+            sent = Some((name, value));
+            current = Some(Attempt {
+                realm,
+                proxy,
+                creds,
+                digest,
+            });
+            attempts += 1;
+        }
+    }
+
+    /// Un salto: por la caché HTTP (si hay) o directo a la red, y al registro.
+    fn hop(
+        &self,
+        url: &Url,
+        extra: &HttpExtra<'_>,
+        headers: &Headers,
+        target: &str,
+    ) -> Result<Response, FetchError> {
+        let method = extra.method;
         let response = match &self.cache {
-            None => self.send(url, extra, &headers, &target)?,
+            None => self.send(url, extra, headers, target)?,
             Some(cache) => {
                 let req = cache::CacheRequest {
                     method,
                     url,
-                    headers: &headers,
+                    headers,
                     mode: extra.cache,
                     credentials: extra.credentials,
                 };
                 let mut protocol = Protocol::Local;
                 let (r, used) = cache.fetch_mut(&req, |h| {
-                    let r = self.send(url, extra, h, &target)?;
+                    let r = self.send(url, extra, h, target)?;
                     protocol = r.protocol;
                     Ok::<_, FetchError>(cache::CacheResponse {
                         status: r.status,
@@ -859,18 +1029,24 @@ impl Fetcher {
         Ok(response)
     }
 
-    /// RFC 5861 §3: valida `rv` en otro hilo, con un `Fetcher` propio (las mismas raíces TLS y
-    /// el mismo h2c; sus conexiones aparte). Las cabeceras son las de la petición original
-    /// (cookies incluidas); las `Set-Cookie` y `Strict-Transport-Security` de la validación no
-    /// llegan a la jarra ni a la lista HSTS de este `Fetcher`.
+    /// RFC 5861 §3: valida `rv` en otro hilo, con un `Fetcher` propio que comparte la jarra de
+    /// cookies y la lista HSTS de este (las `Set-Cookie` y `Strict-Transport-Security` de la
+    /// validación llegan aquí), las raíces TLS y el h2c; sus conexiones van aparte. Las
+    /// cabeceras son las de la petición original (cookies incluidas).
     fn revalidate_in_background(&self, cache: HttpCache, rv: cache::Revalidation) {
         let tls = self.tls.clone();
         let roots = self.roots.clone();
+        let cookies = self.cookies.clone();
+        let hsts = self.hsts.clone();
+        let dns = self.dns.clone();
         let h2_prior_knowledge = self.h2_prior_knowledge;
         std::thread::spawn(move || {
             let bg = Fetcher {
                 tls,
                 roots,
+                cookies,
+                hsts,
+                dns,
                 h2_prior_knowledge,
                 ..Fetcher::default()
             };
@@ -1076,6 +1252,14 @@ impl Fetcher {
             "la conexión se cerró",
         )))
     }
+}
+
+/// Las credenciales de un intento de autenticación (para guardarlas si el servidor las acepta).
+struct Attempt {
+    realm: String,
+    proxy: bool,
+    creds: auth::Credentials,
+    digest: Option<auth::DigestState>,
 }
 
 /// El *request-target* en forma de origen (RFC 9112 §3.2.1): ruta y consulta.

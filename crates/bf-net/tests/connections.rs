@@ -9,8 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bf_net::{CacheUse, FetchOptions, Fetcher, HttpCache, MAX_CONNECTIONS_PER_HOST, NetErrorKind};
+use bf_net::dns::{Family, Resolver};
+use bf_net::{
+    CacheUse, Dns, FetchOptions, Fetcher, HttpCache, MAX_CONNECTIONS_PER_HOST, NetErrorKind,
+};
 use bf_url::Url;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Una petición vista por el servidor: ruta y cabeceras (en minúsculas).
 type Seen = (String, Vec<(String, String)>);
@@ -192,7 +196,9 @@ fn stale_while_revalidate_in_the_background() {
         if h.iter().any(|(n, v)| n == "if-none-match" && v == "\"v1\"") {
             return (
                 304,
-                "Cache-Control: max-age=10, stale-while-revalidate=60\r\n".into(),
+                "Cache-Control: max-age=10, stale-while-revalidate=60\r\n\
+                 Set-Cookie: revalidada=1\r\n"
+                    .into(),
                 Vec::new(),
             );
         }
@@ -237,12 +243,56 @@ fn stale_while_revalidate_in_the_background() {
             .iter()
             .any(|(n, v)| n == "if-none-match" && v == "\"v1\"")
     );
-    // El 304 la refrescó: otra vez de la caché, sin red.
+    // El 304 la refrescó: otra vez de la caché, sin red. Su `Set-Cookie` llegó a la jarra
+    // del `Fetcher` (la revalidación la comparte).
     thread::sleep(Duration::from_millis(300));
+    assert_eq!(f.cookies.cookie_header(&u).as_deref(), Some("revalidada=1"));
     assert_eq!(get().cache, CacheUse::Hit);
     assert_eq!(stats.requests().len(), 2);
     // Fuera de la ventana: se valida antes de responder.
     clock.fetch_add(200, Ordering::SeqCst);
     assert_eq!(get().cache, CacheUse::Revalidated);
     assert_eq!(stats.requests().len(), 3);
+}
+
+/// Un resolvedor de prueba: cualquier nombre es `::1` y `127.0.0.1`; cuenta las búsquedas.
+#[derive(Default)]
+struct Loopback(AtomicUsize);
+
+impl Resolver for Loopback {
+    fn lookup(&self, _: &str, family: Family) -> std::io::Result<Vec<IpAddr>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![match family {
+            Family::V6 => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            Family::V4 => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        }])
+    }
+}
+
+/// El `Fetcher` resuelve con su `Dns`: un nombre inventado llega al servidor (solo IPv4: `::1`
+/// no conecta y Happy Eyeballs pasa a `127.0.0.1`), y la segunda conexión no vuelve a
+/// preguntar (caché de DNS).
+#[test]
+fn fetcher_uses_its_dns_cache() {
+    let close = |_: &str, _: &[(String, String)]| {
+        (
+            200,
+            "Connection: close\r\nCache-Control: no-store\r\n".into(),
+            b"ok".to_vec(),
+        )
+    };
+    let (port, stats) = serve(Duration::ZERO, Arc::new(close));
+    let resolver = Arc::new(Loopback::default());
+    let mut f = Fetcher::new();
+    f.dns = Arc::new(Dns::new(resolver.clone()));
+    let u = Url::parse(&format!("http://inventado.test:{port}/"), None).unwrap();
+    for _ in 0..2 {
+        assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().body, b"ok");
+    }
+    assert_eq!(stats.accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        resolver.0.load(Ordering::SeqCst),
+        2,
+        "AAAA y A, una sola vez"
+    );
 }

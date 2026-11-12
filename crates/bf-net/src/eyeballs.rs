@@ -1,13 +1,13 @@
 //! Happy Eyeballs, versión 2 (RFC 8305): conexiones TCP escalonadas entre IPv6 e IPv4.
 //!
-//! La resolución (§3) la hace `getaddrinfo` (vía [`std::net::ToSocketAddrs`]), que pide AAAA y A
-//! a la vez y devuelve las dos familias juntas, ya ordenadas por RFC 6724; por eso no hay
-//! *Resolution Delay* aquí. Lo que sigue es §4 (intercalar familias) y §5 (intentos escalonados
-//! que siguen vivos en paralelo: el primero que conecta gana).
+//! La resolución (§3: AAAA y A en paralelo, *Resolution Delay*, caché) está en [`crate::dns`].
+//! Aquí, §4 (intercalar familias) y §5 (intentos escalonados que siguen vivos en paralelo: el
+//! primero que conecta gana).
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -43,6 +43,7 @@ pub fn interleave(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
 /// `attempt` debería tener además su propio límite).
 ///
 /// Los intentos perdedores terminan en su hilo y su conexión se cierra al soltarla.
+#[cfg(test)]
 pub fn race<T, F>(
     addrs: &[SocketAddr],
     delay: Duration,
@@ -53,15 +54,35 @@ where
     T: Send + 'static,
     F: Fn(SocketAddr) -> io::Result<T> + Send + Sync + 'static,
 {
-    match addrs {
-        [] => {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "el host no tiene direcciones",
-            ));
+    race_with_late(addrs.to_vec(), None, delay, timeout, attempt)
+}
+
+/// Como [`race`], con las direcciones de la familia que se resolvió tarde (RFC 8305 §3: "if
+/// new addresses arrive while connection attempts are in progress, add them to the list"):
+/// cuando llegan, se intercalan con las que faltan por intentar; si ya no queda ninguna, se
+/// esperan antes de rendirse.
+pub fn race_with_late<T, F>(
+    mut addrs: Vec<SocketAddr>,
+    mut late: Option<(Receiver<Vec<IpAddr>>, u16)>,
+    delay: Duration,
+    timeout: Duration,
+    attempt: F,
+) -> io::Result<T>
+where
+    T: Send + 'static,
+    F: Fn(SocketAddr) -> io::Result<T> + Send + Sync + 'static,
+{
+    if late.is_none() {
+        match addrs.as_slice() {
+            [] => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "el host no tiene direcciones",
+                ));
+            }
+            [only] => return attempt(*only),
+            _ => {}
         }
-        [only] => return attempt(*only),
-        _ => {}
     }
     let attempt = Arc::new(attempt);
     let (tx, rx) = mpsc::channel();
@@ -69,6 +90,24 @@ where
     let mut pending = 0usize;
     let mut last = io::Error::new(io::ErrorKind::NotFound, "el host no tiene direcciones");
     loop {
+        // Las direcciones tardías: si no queda nada que intentar, se esperan.
+        if let Some((rx, port)) = &late {
+            let nothing_left = next >= addrs.len() && pending == 0;
+            let more = if nothing_left {
+                rx.recv_timeout(timeout).ok()
+            } else {
+                rx.try_recv().ok()
+            };
+            let closed = nothing_left || more.is_some();
+            if let Some(more) = more {
+                let mut rest: Vec<SocketAddr> = addrs.drain(next..).collect();
+                rest.extend(more.into_iter().map(|ip| SocketAddr::new(ip, *port)));
+                addrs.extend(interleave(rest));
+            }
+            if closed {
+                late = None;
+            }
+        }
         if let Some(&addr) = addrs.get(next) {
             next += 1;
             let tx = tx.clone();
@@ -85,19 +124,24 @@ where
             }
         }
         if pending == 0 {
-            if next < addrs.len() {
+            if next < addrs.len() || late.is_some() {
                 continue;
             }
             return Err(last);
         }
-        let wait = if next < addrs.len() { delay } else { timeout };
+        // Con direcciones tardías por llegar, se mira cada `delay` si llegaron.
+        let wait = if next < addrs.len() || late.is_some() {
+            delay
+        } else {
+            timeout
+        };
         match rx.recv_timeout(wait) {
             Ok(Ok(conn)) => return Ok(conn),
             Ok(Err(e)) => {
                 pending -= 1;
                 last = e;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) if next < addrs.len() => {}
+            Err(mpsc::RecvTimeoutError::Timeout) if next < addrs.len() || late.is_some() => {}
             Err(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,

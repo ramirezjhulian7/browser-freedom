@@ -776,6 +776,52 @@ fn hsts_upgrades_http_to_https() {
     );
 }
 
+/// E6: el caso negativo de RFC 9113 §9.1.1: `otro.test` resuelve (resolvedor inyectado) a la
+/// misma IP que la conexión h2 con `localhost`, pero el certificado no vale para ese nombre: no
+/// se reutiliza; la conexión nueva falla con `NameMismatch`.
+#[test]
+fn h2_is_not_coalesced_when_the_certificate_does_not_cover_the_name() {
+    struct Ipv4Only;
+    impl bf_net::dns::Resolver for Ipv4Only {
+        fn lookup(
+            &self,
+            _: &str,
+            family: bf_net::dns::Family,
+        ) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(match family {
+                bf_net::dns::Family::V4 => vec![std::net::Ipv4Addr::LOCALHOST.into()],
+                bf_net::dns::Family::V6 => Vec::new(),
+            })
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let config = tls_server_config(&[b"h2", b"http/1.1"]);
+        let stream = tls_accept(&listener, config.clone());
+        let mut s = Server::handshake(stream, &[]);
+        let r = s.request(false);
+        s.respond(r.id, "200", &[], b"ok");
+        // La segunda conexión: el cliente corta el handshake al ver el certificado.
+        let mut second = tls_accept(&listener, config);
+        let _ = second.read(&mut [0u8; 16]);
+        s
+    });
+    let mut f = test_fetcher();
+    f.dns = Arc::new(bf_net::Dns::new(Arc::new(Ipv4Only)));
+    let first = Url::parse(&format!("https://localhost:{port}/"), None).unwrap();
+    let res = f.fetch(&first, &FetchOptions::default()).unwrap();
+    assert_eq!(res.protocol, Protocol::H2);
+    let other = Url::parse(&format!("https://otro.test:{port}/"), None).unwrap();
+    let err = f.fetch(&other, &FetchOptions::default()).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        bf_net::NetErrorKind::Tls(bf_net::TlsReason::NameMismatch)
+    );
+    assert_eq!(*f.connections_opened.lock().unwrap(), 2);
+    server.join().unwrap();
+}
+
 /// La red de verdad: Wikipedia habla h2. `cargo test -p bf-net --test h2 -- --ignored`.
 #[test]
 #[ignore]
