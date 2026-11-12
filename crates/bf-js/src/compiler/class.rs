@@ -357,7 +357,8 @@ impl<'t> Codegen<'t> {
             has_prototype: false,
             decls: None,
             dynamic: false,
-
+            // Los constructores de clase no van por la llamada rápida.
+            direct_args: None,
             ics: Default::default(),
         })
     }

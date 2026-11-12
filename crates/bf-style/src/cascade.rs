@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use bf_css::media::MediaContext;
-use bf_css::selectors::{MatchContext, PseudoElement, Specificity};
-use bf_css::stylesheet::{MatchedDeclaration, Origin, Stylesheet, matching_declarations};
+use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch, ShadowMode, Specificity};
+use bf_css::stylesheet::{MatchedDeclaration, Origin, Stylesheet, matching_declarations_in};
 use bf_css::syntax::{
     ComponentValue, Declaration, Function, NestedItem, SimpleBlock, parse_block_contents,
     parse_declaration,
@@ -88,6 +88,9 @@ const UNLAYERED: usize = usize::MAX;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Precedence {
     band: u8,
+    /// E1: el *context* (Cascade 5 §6.1): para las normales gana el árbol exterior; para las
+    /// `!important`, el interior.
+    context: u8,
     attached: bool,
     layer: usize,
     specificity: Specificity,
@@ -109,6 +112,8 @@ fn band(origin: Origin, important: bool) -> u8 {
 struct Source<'a> {
     origin: Origin,
     important: bool,
+    /// E1: la profundidad del árbol de shadow de la regla (0 = documento).
+    depth: u8,
     attached: bool,
     /// `UNLAYERED` o el índice de la capa (menor = menos precedencia para normales).
     layer: usize,
@@ -131,6 +136,11 @@ impl Source<'_> {
         };
         Precedence {
             band: band(self.origin, self.important),
+            context: if self.important {
+                self.depth
+            } else {
+                u8::MAX - self.depth
+            },
             attached: self.attached,
             layer,
             specificity: self.specificity,
@@ -622,6 +632,8 @@ struct Styler<'a> {
     doc: &'a Document,
     ua: Vec<&'a Stylesheet>,
     author: Vec<&'a Stylesheet>,
+    /// E1: las hojas de autor de cada shadow root.
+    shadow_author: HashMap<NodeId, Vec<&'a Stylesheet>>,
     user: Vec<&'a Stylesheet>,
     media: &'a MediaContext,
     ctx: &'a MatchContext,
@@ -650,11 +662,12 @@ impl<'a> Styler<'a> {
         node: NodeId,
         pseudo: Option<PseudoElement>,
         sheets: &[&'a Stylesheet],
+        shadow: ShadowMatch,
     ) -> Vec<MatchedDeclaration<'a>> {
         if sheets.is_empty() {
             return Vec::new();
         }
-        matching_declarations(
+        matching_declarations_in(
             self.doc,
             node,
             pseudo,
@@ -662,23 +675,89 @@ impl<'a> Styler<'a> {
             self.media,
             &is_supported,
             self.ctx,
+            shadow,
         )
+    }
+
+    /// E1: las hojas de autor del árbol con raíz `root` (el documento o un shadow root) y su
+    /// contexto de árbol.
+    fn tree_author(&self, root: NodeId) -> (&[&'a Stylesheet], Option<NodeId>) {
+        if self.doc.is_shadow_root(root) {
+            let sheets = self
+                .shadow_author
+                .get(&root)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            (sheets, Some(root))
+        } else {
+            (&self.author, None)
+        }
+    }
+
+    /// E1: las reglas de autor de otros árboles que alcanzan a `node` (CSS Scoping §3): las
+    /// `:host` de su shadow tree, las `::slotted()` de los slots a los que está asignado y
+    /// las `::part()` del árbol de su host. Cada una con la profundidad de su árbol.
+    fn tree_contexts(&self, node: NodeId) -> Vec<(&[&'a Stylesheet], ShadowMatch, u8)> {
+        let mut out = Vec::new();
+        if !self.doc.has_shadow_roots() {
+            return out;
+        }
+        if let Some(sr) = self.doc.shadow_root(node) {
+            let (sheets, scope) = self.tree_author(sr);
+            let mode = ShadowMode::Host;
+            out.push((
+                sheets,
+                ShadowMatch { scope, mode },
+                self.doc.shadow_depth(sr),
+            ));
+        }
+        let mut slotted = node;
+        while let Some(slot) = self.doc.assigned_slot(slotted) {
+            let root = self.doc.tree_root(slot);
+            let (sheets, scope) = self.tree_author(root);
+            let mode = ShadowMode::Slotted(slot);
+            out.push((
+                sheets,
+                ShadowMatch { scope, mode },
+                self.doc.shadow_depth(slot),
+            ));
+            slotted = slot;
+        }
+        if self
+            .doc
+            .element(node)
+            .is_some_and(|e| e.attr("part").is_some())
+            && let Some(sr) = self.doc.containing_shadow_root(node)
+            && let Some(host) = self.doc.shadow_host(sr)
+        {
+            let root = self.doc.tree_root(host);
+            let (sheets, scope) = self.tree_author(root);
+            let mode = ShadowMode::Part(host);
+            out.push((
+                sheets,
+                ShadowMatch { scope, mode },
+                self.doc.shadow_depth(host),
+            ));
+        }
+        out
     }
 
     /// Todas las declaraciones aplicables a `node`/`pseudo` y las generadas para él.
     fn sources<'d>(
         &self,
         owned: &'d [(Origin, bool, Declaration)],
-        matched: &'d [(u64, usize, MatchedDeclaration<'a>)],
+        matched: &'d [(u64, usize, u8, MatchedDeclaration<'a>)],
+        depth: u8,
     ) -> Vec<Source<'d>>
     where
         'a: 'd,
     {
         let mut sources: Vec<Source<'d>> = Vec::new();
-        for (group, unlayered, m) in matched {
+        for (group, unlayered, d, m) in matched {
             sources.push(Source {
                 origin: m.origin,
                 important: m.important,
+                depth: *d,
                 attached: false,
                 layer: if m.layer_index >= *unlayered {
                     UNLAYERED
@@ -713,6 +792,7 @@ impl<'a> Styler<'a> {
             sources.push(Source {
                 origin: *origin,
                 important: decl.important,
+                depth,
                 attached: *attached,
                 layer: UNLAYERED,
                 specificity,
@@ -731,18 +811,32 @@ impl<'a> Styler<'a> {
         is_root: bool,
     ) -> ComputedStyle {
         let sheets = ua_sheets();
-        let mut matched: Vec<(u64, usize, MatchedDeclaration<'a>)> = Vec::new();
-        let groups: [(u64, &[&'a Stylesheet]); 3] =
-            [(0, &self.ua), (4, &self.author), (5, &self.user)];
+        let mut matched: Vec<(u64, usize, u8, MatchedDeclaration<'a>)> = Vec::new();
+        // E1: las hojas de autor del árbol del elemento.
+        let root = self.doc.tree_root(node);
+        let (author, scope) = self.tree_author(root);
+        let own = ShadowMatch {
+            scope,
+            mode: ShadowMode::Tree,
+        };
+        let depth = self.doc.shadow_depth(node);
+        let groups: [(u64, &[&'a Stylesheet]); 3] = [(0, &self.ua), (4, author), (5, &self.user)];
         for (group, list) in groups {
             let unlayered = unlayered_index(list);
-            for m in self.matched(node, pseudo, list) {
-                matched.push((group, unlayered, m));
+            for m in self.matched(node, pseudo, list, own) {
+                matched.push((group, unlayered, depth, m));
+            }
+        }
+        // E1: `:host`, `::slotted()` y `::part()` de otros árboles.
+        for (list, shadow, d) in self.tree_contexts(node) {
+            let unlayered = unlayered_index(list);
+            for m in self.matched(node, pseudo, list, shadow) {
+                matched.push((4, unlayered, d, m));
             }
         }
         let hints_sheet: [&'a Stylesheet; 1] = [&sheets.hints];
-        for m in self.matched(node, pseudo, &hints_sheet) {
-            matched.push((2, usize::MAX, m));
+        for m in self.matched(node, pseudo, &hints_sheet, own) {
+            matched.push((2, usize::MAX, depth, m));
         }
         let mut owned: Vec<(Origin, bool, Declaration)> = Vec::new();
         if pseudo.is_none() {
@@ -775,7 +869,7 @@ impl<'a> Styler<'a> {
                 }
             }
         }
-        let sources = self.sources(&owned, &matched);
+        let sources = self.sources(&owned, &matched, depth);
         self.compute(&sources, parent, is_root)
     }
 
@@ -1031,7 +1125,23 @@ pub fn style_document_with_sheets(
     if doc.mode == QuirksMode::Quirks {
         ua_list.push(&ua.quirks);
     }
+    // E1: las `adoptedStyleSheets` del documento y las hojas de cada shadow root.
+    let adopted: Vec<Stylesheet> = doc
+        .adopted_style_texts(doc.root())
+        .iter()
+        .map(|t| Stylesheet::parse(t, Origin::Author))
+        .collect();
+    let shadow_owned: Vec<(NodeId, Vec<Stylesheet>)> = doc
+        .shadow_roots()
+        .into_iter()
+        .map(|r| (r, crate::loader::shadow_tree_stylesheets(doc, r, media)))
+        .collect();
+    let shadow_author: HashMap<NodeId, Vec<&Stylesheet>> = shadow_owned
+        .iter()
+        .map(|(r, s)| (*r, s.iter().collect()))
+        .collect();
     let mut author: Vec<&Stylesheet> = document_sheets.iter().collect();
+    author.extend(adopted.iter());
     let mut user = Vec::new();
     for s in sheets {
         match s.origin {
@@ -1044,6 +1154,7 @@ pub fn style_document_with_sheets(
         doc,
         ua: ua_list,
         author,
+        shadow_author,
         user,
         media,
         ctx,
@@ -1078,8 +1189,10 @@ pub fn style_document_with_sheets(
             let marker = styler.style_for(node, Some(PseudoElement::Marker), Some(&style), false);
             map.insert((node, Some(PseudoElement::Marker)), Arc::new(marker));
         }
+        // E1: los hijos en el flat tree (shadow trees y slots).
         let children: Vec<NodeId> = doc
-            .children(node)
+            .flat_tree_children(node)
+            .into_iter()
             .filter(|&c| doc.element(c).is_some())
             .collect();
         for child in children.into_iter().rev() {

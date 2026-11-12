@@ -36,7 +36,7 @@ pub fn run(agent: &mut Agent, doc: DocIndex, a: Activation) {
         }
         Activation::Reset(s) => {
             if let Some(form) = form_owner_of(agent, NodeRef::new(doc, s)) {
-                forms::reset_form(agent, form);
+                forms::reset_form(agent, form, true);
             }
         }
         Activation::Label(l) => {

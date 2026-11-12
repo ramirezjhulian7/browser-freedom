@@ -1208,11 +1208,11 @@ impl NetLoader {
         net.fetcher.cache = Some(cache);
         net
     }
-}
 
-impl ResourceLoader for NetLoader {
-    fn load(&self, url: &Url) -> Option<Resource> {
-        match self.fetcher.fetch(url, &FetchOptions::default()) {
+    /// Como [`ResourceLoader::load`], con las opciones de la petición: el shell pasa el
+    /// referente y la política del documento a sus subrecursos (Fetch §2.2.5, *client*).
+    pub fn load_with(&self, url: &Url, opts: &FetchOptions) -> Option<Resource> {
+        match self.fetcher.fetch(url, opts) {
             Ok(r) if r.ok() => Some(Resource {
                 content_type: r.headers.get("content-type").map(str::to_owned),
                 bytes: r.body,
@@ -1233,5 +1233,11 @@ impl ResourceLoader for NetLoader {
                 None
             }
         }
+    }
+}
+
+impl ResourceLoader for NetLoader {
+    fn load(&self, url: &Url) -> Option<Resource> {
+        self.load_with(url, &FetchOptions::default())
     }
 }

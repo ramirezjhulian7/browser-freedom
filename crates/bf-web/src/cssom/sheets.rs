@@ -725,6 +725,22 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
     ids
 }
 
+/// E1: la hoja de un wrapper `CSSStyleSheet` y si fue construida (`new CSSStyleSheet()`).
+pub fn sheet_of(agent: &Agent, v: &Value) -> Option<SheetId> {
+    agent.host_unwrap::<SheetPayload>(v).map(|s| s.0)
+}
+
+/// E1: ¿Es una hoja construida? y su texto (para `adoptedStyleSheets`).
+pub fn constructed_sheet(agent: &mut Agent, id: SheetId) -> Option<(bool, String)> {
+    let s = state(agent).sheets.sheets.get(&id)?;
+    let text = if s.disabled {
+        String::new()
+    } else {
+        sheet_text(s)
+    };
+    Some((s.constructed, text))
+}
+
 /// "Fetch and process the linked resource" de un `<link rel=stylesheet>` (HTML §4.2.4,
 /// §4.6.7.1): en una tarea se carga la hoja y se dispara `load` (o `error`) en el elemento.
 /// Solo vale la última carga pedida: si cambió el `href` o el elemento salió del documento,

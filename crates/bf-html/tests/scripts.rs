@@ -17,6 +17,7 @@ fn opts() -> ParseOptions {
     ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        ..ParseOptions::default()
     }
 }
 
@@ -505,6 +506,7 @@ fn scripting_disabled() {
         &ParseOptions {
             scripting: false,
             iframe_srcdoc: false,
+            ..ParseOptions::default()
         },
     );
     p.finish(&mut host);

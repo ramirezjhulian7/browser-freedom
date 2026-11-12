@@ -113,6 +113,7 @@ fn run(test: &DatTest, scripting: bool) -> String {
     let opts = ParseOptions {
         scripting,
         iframe_srcdoc: false,
+        ..ParseOptions::default()
     };
     match &test.fragment {
         Some(context) => {
@@ -136,6 +137,7 @@ fn run_scripted(test: &DatTest) -> Option<String> {
     let opts = ParseOptions {
         scripting: true,
         iframe_srcdoc: false,
+        ..ParseOptions::default()
     };
     let mut host = TestHost::new();
     let mut parser = Parser::with_input(&input, &opts);
@@ -153,6 +155,7 @@ fn run_incremental(test: &DatTest, scripting: bool) -> String {
     let opts = ParseOptions {
         scripting,
         iframe_srcdoc: false,
+        ..ParseOptions::default()
     };
     let mut host = TestHost::new();
     let mut parser = Parser::new(&opts);
