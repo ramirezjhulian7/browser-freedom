@@ -652,6 +652,7 @@ fn send(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         referrer: Some(super::base_url(agent)),
         referrer_policy: String::new(),
         use_preflight: false,
+        cache: bf_net::CacheMode::Default,
     };
     let generation = with_st(agent, t, |x| {
         x.upload_complete = !has_body;

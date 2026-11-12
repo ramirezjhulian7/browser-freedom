@@ -641,8 +641,6 @@ fn versionchange_across_tabs() {
     let mut b = Page::new(Some(dir.clone()));
     assert_eq!(
         a.run(
-            // E1: `seen` global (un `var` dentro de la función async no se ve desde
-            // `eval_string`).
             "var db = await openDb('t', 1, (db) => db.createObjectStore('s')); globalThis.seen = []; \
              db.onversionchange = (e) => { seen.push(e.oldVersion + '->' + e.newVersion + ' ' + (e instanceof IDBVersionChangeEvent)); db.close(); }; finish('ok');"
         ),
@@ -686,7 +684,6 @@ fn delete_across_tabs() {
     let mut a = Page::new(Some(dir.clone()));
     let mut b = Page::new(Some(dir.clone()));
     a.run(
-        // E1: `seen` global, como en `versionchange_across_tabs`.
         "var db = await openDb('t', 2); globalThis.seen = []; db.onversionchange = (e) => { seen.push(e.oldVersion + ' ' + e.newVersion); db.close(); }; finish('ok');",
     );
     let r = b.run_with(

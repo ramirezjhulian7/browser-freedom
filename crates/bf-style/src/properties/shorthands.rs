@@ -214,6 +214,44 @@ fn overflow(input: &[ComponentValue]) -> Option<Vec<Value>> {
     pair([L::OverflowX, L::OverflowY], input)
 }
 
+const MASK: &[L] = &[
+    L::MaskImage,
+    L::MaskRepeat,
+    L::MaskPosition,
+    L::MaskSize,
+    L::MaskOrigin,
+    L::MaskClip,
+];
+
+/// `mask` (E7): las capas se leen como las de `background` (sin color ni `attachment`), y cada
+/// valor pasa a su longhand de máscara. `mask-origin` y `mask-clip` empiezan en `border-box`.
+fn mask(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let mut out: Vec<Value> = background(input)?
+        .into_iter()
+        .filter_map(|v| match v {
+            Value::BackgroundImage(x) => Some(Value::MaskImage(x)),
+            Value::BackgroundRepeat(x) => Some(Value::MaskRepeat(x)),
+            Value::BackgroundPosition(x) => Some(Value::MaskPosition(x)),
+            Value::BackgroundSize(x) => Some(Value::MaskSize(x)),
+            Value::BackgroundClip(x) => Some(Value::MaskClip(x)),
+            _ => None,
+        })
+        .collect();
+    let explicit_box = components(input)
+        .iter()
+        .any(|v| ident(v).and_then(BackgroundBox::from_ident).is_some());
+    if !explicit_box {
+        out.retain(|v| !matches!(v, Value::MaskClip(_)));
+        out.push((L::MaskClip.def().parse)(
+            &bf_css::syntax::parse_component_value_list("border-box"),
+        )?);
+    }
+    out.push((L::MaskOrigin.def().parse)(
+        &bf_css::syntax::parse_component_value_list("border-box"),
+    )?);
+    Some(out)
+}
+
 /// Keywords de los longhands de `background` que todavía no se soportan: se aceptan y se
 /// descartan para no invalidar el shorthand entero.
 /// `background` (CSS Backgrounds 3 §3.10): por capa `<bg-image> || <bg-position> [ / <bg-size> ]?
@@ -1171,6 +1209,23 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
         longhands: &[L::BorderLeftColor, L::BorderRightColor],
         expand: |i| pair([L::BorderLeftColor, L::BorderRightColor], i),
     },
+    // E7: `mask` (CSS Masking 1 §7.10) y los alias `-webkit-mask-*` que usan los sitios.
+    ShorthandDef {
+        name: "mask",
+        longhands: MASK,
+        expand: mask,
+    },
+    ShorthandDef {
+        name: "-webkit-mask",
+        longhands: MASK,
+        expand: mask,
+    },
+    alias!("-webkit-mask-image" => MaskImage),
+    alias!("-webkit-mask-repeat" => MaskRepeat),
+    alias!("-webkit-mask-position" => MaskPosition),
+    alias!("-webkit-mask-size" => MaskSize),
+    alias!("-webkit-mask-origin" => MaskOrigin),
+    alias!("-webkit-mask-clip" => MaskClip),
     // Alias legado (CSS UI 4 §7.2).
     alias!("-webkit-appearance" => Appearance),
     // E5: nombres de `flow-tolerance` en otras versiones de CSS Grid 3 (§4.2).
