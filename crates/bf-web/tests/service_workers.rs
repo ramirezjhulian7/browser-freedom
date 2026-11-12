@@ -591,3 +591,29 @@ fn service_worker_serves_from_cache() {
         "guardado|sin caché|v1"
     );
 }
+
+// --- XMLHttpRequest por el service worker ---
+
+#[test]
+fn xhr_goes_through_the_service_worker() {
+    let mut p = controlled_page();
+    let xhr = |path: &str, method: &str| {
+        format!(
+            "const x = new XMLHttpRequest(); x.open('{method}', '{path}'); \
+             x.onload = () => finish([x.status, x.getResponseHeader('x-sw'), x.responseURL, x.responseText].join('|')); \
+             x.onerror = () => finish('error ' + x.readyState); x.send('cuerpo');"
+        )
+    };
+    // `respondWith`: la respuesta sale del service worker.
+    assert_eq!(
+        p.run(&xhr("hola", "POST")),
+        "200|1|https://sw.test/dir/hola|desde el SW POST true"
+    );
+    // Sin `respondWith`: a la red.
+    assert_eq!(
+        p.run(&xhr("real.txt", "GET")),
+        "200||https://sw.test/dir/real.txt|de la red"
+    );
+    // Una promesa rechazada en `respondWith`: error de red en el XHR.
+    assert_eq!(p.run(&xhr("rechazo", "GET")), "error 4");
+}
