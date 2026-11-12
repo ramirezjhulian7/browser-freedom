@@ -1337,7 +1337,7 @@ impl<'a> Layout<'a> {
                 lowest[c.row] = lowest[c.row].max(f.content_rect().bottom());
             }
             if f.clip.is_some() {
-                f.clip = Some(f.padding_rect());
+                f.clip = crate::scroll::overflow_clip(&f, true);
             }
             // Capas de la tabla detrás de la celda (§17.5.1).
             let mut layers: Vec<(Arc<ComputedStyle>, Rect)> = Vec::new();
