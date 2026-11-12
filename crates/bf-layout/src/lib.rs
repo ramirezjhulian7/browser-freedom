@@ -8,7 +8,6 @@ pub mod bidi; // E9: UAX #9
 mod block;
 pub mod box_tree;
 mod clamp; // E12
-mod text_overflow; // E12
 pub mod controls;
 mod flex;
 pub mod float;
@@ -20,6 +19,7 @@ pub mod linebreak; // E9: UAX #14
 mod positioned;
 pub mod scroll; // E12
 mod table; // E4
+mod text_overflow; // E12
 pub mod unicode; // E9: Script y Vertical_Orientation
 mod unicode_tables; // E9: generado por tools/gen_unicode_text.py
 

@@ -101,7 +101,7 @@ fn truncate(children: &mut Vec<Fragment>, path: &[usize]) -> (f32, bool) {
         let end = inner + f.padding.bottom + f.border.bottom;
         f.rect.height = (end - f.rect.y).max(0.0);
         if f.clip.is_some() {
-            f.clip = Some(f.padding_rect());
+            f.clip = crate::scroll::overflow_clip(f, true);
         }
     }
     (f.rect.bottom() + f.margin.bottom, removed || more)

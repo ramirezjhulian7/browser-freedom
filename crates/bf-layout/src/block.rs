@@ -1090,12 +1090,9 @@ impl<'a> Layout<'a> {
         fragment.margin = margins;
         fragment.border = border;
         fragment.padding = padding;
-        if style.overflow_x != Overflow::Visible
-            || style.overflow_y != Overflow::Visible
-            || b.control.as_ref().is_some_and(Control::clips)
-        {
-            fragment.clip = Some(fragment.padding_rect());
-        }
+        // E12: borde de recorte por eje con `overflow-clip-margin` (CSS Overflow 3 §3.2).
+        fragment.clip =
+            crate::scroll::overflow_clip(&fragment, b.control.as_ref().is_some_and(Control::clips));
         if let Some(control) = &b.control {
             fragment.widget = control.widget();
             // Baseline de un control de una línea: la de su texto o, si está vacío, la de una

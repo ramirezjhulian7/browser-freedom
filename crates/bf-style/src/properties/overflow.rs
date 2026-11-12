@@ -105,9 +105,11 @@ pub enum VisualBox {
     BorderBox,
 }
 
-/// `overflow-clip-margin: <visual-box> || <length [0,∞]>` (CSS Overflow 3 §3.2): el borde de
+/// `overflow-clip-margin: <visual-box> || <length>` (CSS Overflow 3 §3.2): el borde de
 /// recorte de `overflow: clip` es la caja indicada (por omisión, la padding box) agrandada en
-/// la longitud. Computado, la longitud está en px.
+/// la longitud. Computado, la longitud está en px. La gramática del TR pide `[0,∞]`, pero los
+/// WPT actuales (`overflow-clip-margin-016`/`017`/`019`/`020`) usan longitudes negativas para
+/// encoger el borde: se aceptan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverflowClipMargin {
     pub visual_box: VisualBox,
@@ -135,7 +137,7 @@ impl PropValue for OverflowClipMargin {
                 Some(b) if visual_box.is_none() => visual_box = Some(b),
                 Some(_) => return None,
                 None if length.is_none() => {
-                    let l = parse_length(v).filter(|l| l.value >= 0.0)?;
+                    let l = parse_length(v)?;
                     length = Some(LengthPercentage::Length(l));
                 }
                 None => return None,
@@ -208,7 +210,8 @@ mod tests {
         let m = p("20px content-box").unwrap();
         assert_eq!((m.visual_box, m.px()), (VisualBox::ContentBox, 20.0));
         assert_eq!(p("border-box").unwrap().px(), 0.0);
-        assert_eq!(p("-1px"), None);
+        assert_eq!(p("padding-box -10px").unwrap().px(), -10.0);
+        assert_eq!(p("auto"), None);
         assert_eq!(p("border-box content-box"), None);
     }
 }

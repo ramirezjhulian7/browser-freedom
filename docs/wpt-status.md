@@ -43,7 +43,7 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 
 | Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
 |---|---:|---:|---:|---:|---:|---:|
-| css/css-overflow | 254 | 250 | 402 | 1 | 907 | 50.3% |
+| css/css-overflow | 312 | 193 | 402 | 0 | 907 | 61.8% |
 | css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
 | css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
 
@@ -106,10 +106,11 @@ Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte 
   851 de los 1567 tests ejecutables de `css/css-grid` son de `grid-lanes` (masonry, 101 pasan);
   sin ellos pasan 534 de 716 (74.6%), y `css/css-grid/subgrid` 56 de 88. `css/css-sizing` (no
   está en `GROUPS`): 338 pass, 188 fail, 237 needs-js (64.3%).
-- `css/css-overflow`: falta `text-overflow` (60 fallos, con los de `line-clamp` que lo
-  combinan), `::scroll-marker`/`::scroll-button` (44), `overflow-clip-margin` (20), el
-  `line-clamp` que depende de `transform` (containing block de los fijos, 13) y ocultar las
-  absolutas tras el clamp point.
+- `css/css-overflow` (E12, 2026-11-12, `army/e12`; antes 50.5%): con `text-overflow` y
+  `overflow-clip-margin`, faltan `::scroll-marker`/`::scroll-button` (44), `text-overflow` en
+  RTL/bidi, vertical, ruby, `<textarea>` y con fuentes CJK de `@font-face`, el recorte por eje
+  del `<svg>` raíz, el `line-clamp` que depende de `transform` (13) y ocultar las absolutas
+  tras el clamp point.
   `css/css-position/sticky`: casi todo es testharness o desplaza con script; falla
   `position-sticky-rtl` (scroll containers RTL, con el origen a la derecha).
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.
