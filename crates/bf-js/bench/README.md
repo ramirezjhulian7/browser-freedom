@@ -29,6 +29,8 @@ cargo run --release -p bf-js --bin bf-bench -- --filter fib       # solo los que
 | `concat.js` | `s += …`, templates y concatenación en bucle |
 | `regexp.js` | `match`, `exec`, `replace`, `split` y `test` sobre un texto de 168 KB |
 | `dom.js` | objetos al estilo de nodos del DOM (18 propiedades): árbol, layout, recorridos |
+| `calls.js` | costo de una llamada: `add(a, b)` 3 M veces desde un bucle |
+| `globals.js` | bucle con `var` en el código global (lee y escribe el objeto global) |
 
 ## Comparación A/B y resultados
 
