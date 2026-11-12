@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- CSS Logical 1 §4: margin-inline-start, padding-inline y border-inline-end se asignan al lado físico según el direction del elemento (rtl: inline-start es la derecha) y compiten en cascada con las físicas. CSS 2.2 §10.3.3: sobre-restringido, con el containing block rtl se ignora margin-left; con el bloque rtl dentro de uno ltr, margin-right. -->
+<style>body{margin:0} .b{width:100px;height:10px;margin-inline-start:30px;padding-inline:10px 0;border-inline-end:5px solid} #c{margin-right:7px}</style>
+<div class=b></div>
+<div dir=rtl><div class=b></div><div class=b id=c></div></div>
+<div class=b dir=rtl></div>
+<!-- expect
+Block <html> 0,0 800×40
+  Block <body> 0,0 800×40
+    Block <div.b> 30,0 115×10
+    Block <div> 0,10 800×20
+      Block <div.b> 655,10 115×10
+      Block <div#c.b> 678,20 115×10
+    Block <div.b> 0,30 115×10
+-->

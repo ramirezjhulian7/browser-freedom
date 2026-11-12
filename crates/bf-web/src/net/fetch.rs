@@ -3,8 +3,8 @@
 //!
 //! La petición pasa por "main fetch" con CORS ([`super::cors`]: tainting, preflight y su
 //! caché, redirecciones salto a salto) y la respuesta se filtra según el tainting. Con red
-//! real el cuerpo llega por partes. `cache` se acepta pero no hay caché HTTP (todo es
-//! `no-store`).
+//! real el cuerpo llega por partes. `cache` llega a la caché HTTP de `bf-net` (RFC 9111) como
+//! *cache mode* (Fetch §4.5).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1155,6 +1155,7 @@ pub fn fetch_params(
         referrer,
         referrer_policy: r.referrer_policy.clone(),
         use_preflight: false,
+        cache: bf_net::CacheMode::parse(&r.cache).unwrap_or_default(),
     }
 }
 
@@ -1685,6 +1686,8 @@ fn send_beacon(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             redirect: bf_net::RedirectMode::Follow,
             credentials: true,
             referrer: Some(base),
+            cache: bf_net::CacheMode::Default,
+            ..Default::default() // E6: `referrer_policy` por defecto.
         },
     };
     super::start(agent, req, Box::new(|_, _| {}));

@@ -69,6 +69,9 @@ pub enum Envelope {
     /// Service Workers: un aviso del registro, del ciclo de vida o un mensaje
     /// ([`service::Msg`]).
     Service(Box<service::Msg>),
+    /// Algo que otro hilo pide correr en este agente (IndexedDB entre pestañas,
+    /// `storage::shared`, E2).
+    Run(Box<dyn FnOnce(&mut Agent) + Send>),
 }
 
 /// Un evento de un worker para su dueño.
@@ -297,6 +300,7 @@ fn handle(agent: &mut Agent, e: Envelope) {
             message,
         } => ports::deliver_broadcast(agent, local, origin, message),
         Envelope::Service(m) => service::deliver(agent, *m),
+        Envelope::Run(f) => f(agent),
     }
 }
 
@@ -334,6 +338,7 @@ fn poll_tick(agent: &mut Agent, _: &bf_js::vm::function::CallArgs<'_>) -> JsResu
         .any(|w| !w.control.closed.load(Ordering::SeqCst))
         || !h.shared.is_empty()
         || ports::has_remote_ports(agent)
+        || crate::storage::shared::active(agent)
         || service::keeps_polling(agent);
     if !alive && let Some((_, t)) = host(agent).poll.take() {
         agent.clear_timer(t);

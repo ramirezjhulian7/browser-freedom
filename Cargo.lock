@@ -404,6 +404,7 @@ dependencies = [
  "bf-infra",
  "bf-layout",
  "bf-style",
+ "bf-svg",
  "bf-url",
  "tiny-skia",
 ]
@@ -439,6 +440,17 @@ dependencies = [
  "bf-dom",
  "bf-html",
  "bf-infra",
+]
+
+[[package]]
+name = "bf-svg"
+version = "0.1.0"
+dependencies = [
+ "bf-css",
+ "bf-dom",
+ "bf-html",
+ "bf-infra",
+ "bf-style",
 ]
 
 [[package]]

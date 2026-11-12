@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<!-- CSS Flexbox 1 §4.4: un ítem con visibility: collapse mide 0 en el eje principal al formar las líneas de la segunda pasada, pero su línea conserva su tamaño cruzado de la primera (strut, 25px). -->
+<style>body{margin:0} .f{display:flex;flex-wrap:wrap;align-content:flex-start;align-items:flex-start;width:30px} .c{visibility:collapse;width:15px;height:25px} .h{width:15px;height:15px} .w{width:30px;height:20px}</style>
+<div class=f><div class=c></div><div class=h></div><div class=w></div></div>
+<!-- expect
+Block <html> 0,0 800×45
+  Block <body> 0,0 800×45
+    Block <div.f> 0,0 30×45
+      Block <div.h> 0,0 15×15
+      Block <div.c> 0,0 0×0
+      Block <div.w> 0,25 30×20
+-->
