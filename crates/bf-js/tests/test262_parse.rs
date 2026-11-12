@@ -5,9 +5,10 @@
 //! `_FIXTURE.js` son módulos auxiliares y no se cuentan.
 //!
 //! Sin `BF_FULL`, parsea una muestra determinista (1 de cada [`SAMPLE_STEP`] archivos en orden
-//! de ruta) para que `cargo test --workspace` tarde minutos; con `BF_FULL=1` parsea el árbol
-//! entero y solo entonces escribe el resumen por directorio en la sección "Parsing" de
-//! `docs/test262-status.md`.
+//! de ruta) que lee de `tests/data/test262-sample.txt`, sin recorrer el árbol; con `BF_FULL=1`
+//! parsea el árbol entero y solo entonces escribe el resumen por directorio en la sección
+//! "Parsing" de `docs/test262-status.md` y regenera ese índice. Si el índice no es del commit
+//! de `tools/test262-commit.txt`, la muestra se saca recorriendo el árbol (lento).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -165,13 +166,15 @@ fn check(path: &Path) -> Outcome {
     Outcome::Passed
 }
 
+/// Recorre el árbol entero. El tipo sale de `DirEntry::file_type` (en Windows viene de
+/// `FindNextFile`), sin un `stat` extra por archivo como haría `Path::is_dir`.
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
             collect(&p, out);
         } else if p.extension().is_some_and(|x| x == "js")
             && !p.to_string_lossy().contains("_FIXTURE")
@@ -179,6 +182,59 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(p);
         }
     }
+}
+
+/// Índice de la muestra (rutas relativas a `tests/test262/test`, una por línea), generado con
+/// `BF_FULL=1`. Recorrer los ~52 000 archivos del árbol cuesta minutos con el disco cargado;
+/// leer este índice, nada.
+fn sample_index() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/test262-sample.txt")
+}
+
+/// Commit de test262 que espera el repo (`tools/test262-commit.txt`).
+fn test262_commit() -> String {
+    fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/test262-commit.txt"),
+    )
+    .unwrap_or_default()
+    .trim()
+    .to_owned()
+}
+
+/// Las rutas del índice, si fue generado para el commit de test262 actual.
+fn read_sample_index(test_dir: &Path) -> Option<Vec<PathBuf>> {
+    let text = fs::read_to_string(sample_index()).ok()?;
+    let commit = test262_commit();
+    let mut lines = text.lines();
+    let header = lines.find(|l| l.starts_with("# test262 "))?;
+    if commit.is_empty() || header.trim_start_matches("# test262 ").trim() != commit {
+        return None;
+    }
+    Some(
+        lines
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| test_dir.join(l))
+            .collect(),
+    )
+}
+
+fn write_sample_index(rels: &[String]) {
+    let mut text = format!(
+        "# Muestra de tests/test262_parse.rs sin BF_FULL: 1 de cada {SAMPLE_STEP} archivos .js de\n\
+         # tests/test262/test en orden de ruta (sin _FIXTURE). Generado por\n\
+         # `BF_FULL=1 cargo test -p bf-js --test test262_parse`; no editar a mano.\n\
+         # test262 {}\n",
+        test262_commit()
+    );
+    for rel in rels.iter().step_by(SAMPLE_STEP) {
+        text.push_str(rel);
+        text.push('\n');
+    }
+    let path = sample_index();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, text);
 }
 
 /// `language/expressions`, `built-ins/Array`, `annexB/language`…
@@ -205,18 +261,56 @@ fn test262_parse() {
         test_dir.exists(),
         "falta tests/test262: correr tools/fetch-test262.sh o tools/fetch-test262.ps1"
     );
-    let mut files = Vec::new();
-    collect(&test_dir, &mut files);
-    files.sort();
+    let rel_of = |p: &Path| {
+        p.strip_prefix(&test_dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let started = std::time::Instant::now();
     let full = full();
-    if !full {
-        let total = files.len();
-        files = files.into_iter().step_by(SAMPLE_STEP).collect();
-        println!(
-            "muestra de {} de {total} archivos (1 de cada {SAMPLE_STEP}); BF_FULL=1 corre todos",
-            files.len()
-        );
-    }
+    let indexed = if full {
+        None
+    } else {
+        read_sample_index(&test_dir)
+    };
+    let files = match indexed {
+        Some(files) => {
+            println!(
+                "muestra de {} archivos (1 de cada {SAMPLE_STEP}) leída de {}; BF_FULL=1 corre todos",
+                files.len(),
+                sample_index().display()
+            );
+            files
+        }
+        None => {
+            let mut files = Vec::new();
+            collect(&test_dir, &mut files);
+            files.sort();
+            if full {
+                let rels: Vec<String> = files.iter().map(|p| rel_of(p)).collect();
+                write_sample_index(&rels);
+                files
+            } else {
+                // Sin índice para este commit de test262: se recorre el árbol (lento).
+                println!(
+                    "{} no corresponde a test262 {}: se recorre el árbol; \
+                     BF_FULL=1 lo regenera",
+                    sample_index().display(),
+                    test262_commit()
+                );
+                let total = files.len();
+                let files: Vec<PathBuf> = files.into_iter().step_by(SAMPLE_STEP).collect();
+                println!(
+                    "muestra de {} de {total} archivos (1 de cada {SAMPLE_STEP})",
+                    files.len()
+                );
+                files
+            }
+        }
+    };
+    println!("enumeración: {:.1} s", started.elapsed().as_secs_f64());
+    let started = std::time::Instant::now();
     let results: Mutex<Vec<(String, Outcome)>> = Mutex::new(Vec::with_capacity(files.len()));
     let next = Mutex::new(0usize);
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -233,11 +327,7 @@ fn test262_parse() {
                             i
                         };
                         let Some(path) = files.get(i) else { break };
-                        let rel = path
-                            .strip_prefix(&test_dir)
-                            .unwrap()
-                            .to_string_lossy()
-                            .replace('\\', "/");
+                        let rel = rel_of(path);
                         // Un pánico es un fallo del parser, no del harness.
                         let outcome = std::panic::catch_unwind(|| check(path))
                             .unwrap_or_else(|_| Outcome::Failed("pánico del parser".into()));
@@ -247,6 +337,7 @@ fn test262_parse() {
                 .expect("hilo del harness");
         }
     });
+    println!("parsing: {:.1} s", started.elapsed().as_secs_f64());
     let mut results = results.into_inner().unwrap();
     results.sort_by(|a, b| a.0.cmp(&b.0));
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
@@ -319,10 +410,7 @@ fn test262_parse() {
 }
 
 fn write_status(table: &str, ran: usize) {
-    let commit = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/test262-commit.txt"),
-    )
-    .unwrap_or_default();
+    let commit = test262_commit();
     let features: String = UNSUPPORTED_FEATURES
         .iter()
         .map(|(f, why)| format!("- `{f}`: {why}.\n"))

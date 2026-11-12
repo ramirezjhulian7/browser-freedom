@@ -513,8 +513,12 @@ cargo run --release -p bf-paint --bin wpt-reftests -- css/css-flexbox   # un sub
 Sin la variable `BF_FULL`, los tests de `bf-js` que recorren corpus de test262
 (`test262_parse`, `parser_tests` y `regexp_property_escapes`) prueban una muestra determinista:
 1 de cada 50 archivos en orden de ruta, para que `cargo test --workspace` tarde minutos y no
-horas. Con `BF_FULL=1` recorren todo, y solo entonces `test262_parse` escribe su sección de
-[`docs/test262-status.md`](docs/test262-status.md). Los tests `#[ignore]` (reftests, fuzz,
+horas. `test262_parse` lee su muestra de `crates/bf-js/tests/data/test262-sample.txt` en vez
+de recorrer los ~52 000 archivos del árbol (recorrerlo cuesta minutos con el disco cargado).
+Con `BF_FULL=1` recorren todo, y solo entonces `test262_parse` escribe su sección de
+[`docs/test262-status.md`](docs/test262-status.md) y regenera ese índice (hay que hacerlo al
+cambiar `tools/test262-commit.txt`; con un índice de otro commit, la muestra se saca
+recorriendo el árbol). Los tests `#[ignore]` (reftests, fuzz,
 regresión de test262) siguen igual: se corren con `--ignored`.
 
 Los reftests no hacen fallar `cargo test`: escriben el resumen en
