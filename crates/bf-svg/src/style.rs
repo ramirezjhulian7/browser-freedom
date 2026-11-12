@@ -40,6 +40,8 @@ const PRESENTATION: &[&str] = &[
     "mask",
     "mask-type",
     "opacity",
+    // SVG 2 §6.6 (lo leen `marker`, `svg` anidado, `symbol` e `image`).
+    "overflow",
     "paint-order",
     "stop-color",
     "stop-opacity",
@@ -52,6 +54,8 @@ const PRESENTATION: &[&str] = &[
     "stroke-opacity",
     "stroke-width",
     "text-anchor",
+    // CSS Transforms 1 §6; atributo de presentación (SVG 2 §6.6).
+    "transform-origin",
     "vector-effect",
     "visibility",
     "word-spacing",

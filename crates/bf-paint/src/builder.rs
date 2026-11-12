@@ -156,6 +156,56 @@ fn background(style: &ComputedStyle) -> Rgba {
     style.background_color.resolve(style.color.rgba())
 }
 
+/// E12: radios del borde de recorte por `overflow` (CSS Overflow 3 §3.2). Dentro de la border
+/// box, los del borde encogidos en la distancia a cada lado (`overflow-clip-margin:
+/// content-box 1em` con un borde de 4em redondea 1em: `overflow-clip-margin-border-radius-002`);
+/// fuera, la curva de la caja de `overflow-clip-margin` agrandada en su longitud como la sombra
+/// de un `box-shadow` con ese `spread` (`overflow-clip-margin-010`). Un eje que no recorta
+/// (`overflow-x: clip` solo) no redondea (`rounded-overflow-clip-visible`).
+fn clip_radii(f: &Fragment, clip: &Rect) -> Radii {
+    use bf_style::properties::overflow::VisualBox;
+    let unclipped = 2.0 * bf_layout::scroll::UNCLIPPED_HALF;
+    if clip.width >= unclipped || clip.height >= unclipped {
+        return Radii::default();
+    }
+    let base = border_radii(&f.style, &f.rect);
+    let inset = |outer: &Rect| Edges {
+        top: clip.y - outer.y,
+        right: outer.right() - clip.right(),
+        bottom: outer.bottom() - clip.bottom(),
+        left: clip.x - outer.x,
+    };
+    let d = inset(&f.rect);
+    if d.top.min(d.right).min(d.bottom).min(d.left) >= -0.01 {
+        let pos = |v: f32| v.max(0.0);
+        return base.shrink(&Edges {
+            top: pos(d.top),
+            right: pos(d.right),
+            bottom: pos(d.bottom),
+            left: pos(d.left),
+        });
+    }
+    let (box_inset, visual) = match f.style.overflow_clip_margin.visual_box {
+        VisualBox::BorderBox => (Edges::default(), f.rect),
+        VisualBox::PaddingBox => (f.border, f.padding_rect()),
+        VisualBox::ContentBox => (
+            Edges {
+                top: f.border.top + f.padding.top,
+                right: f.border.right + f.padding.right,
+                bottom: f.border.bottom + f.padding.bottom,
+                left: f.border.left + f.padding.left,
+            },
+            f.content_rect(),
+        ),
+    };
+    let outset = -inset(&visual).left;
+    crate::effects::spread_radii(
+        &base.shrink(&box_inset),
+        outset,
+        (visual.width, visual.height),
+    )
+}
+
 /// Radios de la border box (CSS Backgrounds 3 §5).
 fn border_radii(style: &ComputedStyle, rect: &Rect) -> Radii {
     let r = |c: &bf_style::properties::types::CornerRadius| {
@@ -221,7 +271,7 @@ impl<'a> Builder<'a> {
         if let Some(rect) = f.clip
             && !to_viewport
         {
-            let radii = border_radii(&f.style, &f.rect).shrink(&f.border);
+            let radii = clip_radii(f, &rect);
             chain.push(Clip { rect, radii });
         }
         chain
@@ -1730,13 +1780,24 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
         let m = f.margin_rect();
         r.0 = r.0.max(m.right());
         r.1 = r.1.max(m.bottom());
-        if f.clip.is_none() {
-            for c in &f.children {
-                walk(c, r);
+        match f.clip {
+            None => {
+                for c in &f.children {
+                    walk(c, r);
+                }
             }
-        } else {
-            for c in f.children.iter().filter(|c| positioned(c)) {
-                walk(c, r);
+            Some(clip) => {
+                for c in &f.children {
+                    if positioned(c) {
+                        walk(c, r);
+                    } else {
+                        // E12: hasta el borde de recorte (todo en un eje que no recorta).
+                        let mut inner = *r;
+                        walk(c, &mut inner);
+                        r.0 = r.0.max(inner.0.min(clip.right()));
+                        r.1 = r.1.max(inner.1.min(clip.bottom()));
+                    }
+                }
             }
         }
     }

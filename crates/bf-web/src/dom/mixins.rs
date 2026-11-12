@@ -141,6 +141,10 @@ pub fn nodes_arg(
                 let n = adopt_into(agent, n, doc)?;
                 out.push(NodeOrString::Node(n.node));
             }
+            // E1: un nodo de otra ventana no es un string.
+            None if crate::dom::is_foreign_node(agent, v) => {
+                return crate::dom::throw_foreign_node(agent);
+            }
             None => out.push(NodeOrString::String(to_dom_string(agent, v)?)),
         }
     }

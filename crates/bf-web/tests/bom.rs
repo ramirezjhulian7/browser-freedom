@@ -1303,3 +1303,49 @@ fn dom_inserted_external_scripts_run() {
     p.idle();
     assert_eq!(p.show("log.join()"), "sync,dyn:true,load,error");
 }
+
+// E1: un nodo o un rango de otra ventana (otro realm, otra arena de nodos) da un error del
+// DOM, o la respuesta del DOM para "otra raíz", en vez de resolverse contra la arena de esta
+// ventana: antes era un pánico (`bf-dom` `Document::get`, índice fuera de rango, o
+// `Document::live_range`).
+#[test]
+fn nodes_and_ranges_of_another_window_do_not_panic() {
+    let mut p = framed(
+        "<p id=a>uno</p><iframe id=f srcdoc=\"<p id=b>dos</p><p>tres</p><p>cuatro</p>\"></iframe>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "(function () { \
+               var fd = document.getElementById('f').contentDocument; \
+               var mine = document.getElementById('a'), theirs = fd.getElementById('b'); \
+               var out = []; \
+               function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+               out.push(err(function () { fd.adoptNode(mine); })); \
+               out.push(err(function () { fd.importNode(mine, true); })); \
+               out.push(err(function () { document.body.appendChild(theirs); })); \
+               out.push(err(function () { theirs.appendChild(mine); })); \
+               out.push(err(function () { mine.append(theirs); })); \
+               out.push(mine.contains(theirs), mine.isSameNode(theirs), \
+                        document.isSameNode(fd), mine.isEqualNode(theirs)); \
+               var p1 = mine.compareDocumentPosition(theirs), p2 = theirs.compareDocumentPosition(mine); \
+               out.push((p1 & 33) === 33 && (p2 & 33) === 33 && ((p1 | p2) & 6) === 6 && (p1 & 6) !== 6); \
+               var r = document.createRange(); r.selectNodeContents(mine); \
+               var fr = fd.createRange(); fr.selectNodeContents(fd.body); \
+               out.push(err(function () { r.compareBoundaryPoints(Range.START_TO_START, fr); })); \
+               out.push(err(function () { r.comparePoint(theirs, 0); })); \
+               out.push(r.isPointInRange(theirs, 0), r.intersectsNode(theirs)); \
+               out.push(err(function () { r.setStart(theirs, 0); })); \
+               getSelection().removeAllRanges(); getSelection().addRange(fr); \
+               out.push(getSelection().rangeCount); \
+               out.push(err(function () { Range.prototype.collapse.call(fr); })); \
+               out.push(fr.toString(), r.toString()); \
+               return out.join(); \
+             })()"
+        ),
+        "NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError,\
+         NotSupportedError,false,false,false,false,true,WrongDocumentError,\
+         WrongDocumentError,false,false,NotSupportedError,0,NotSupportedError,\
+         dostrescuatro,uno"
+    );
+}

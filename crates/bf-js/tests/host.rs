@@ -908,6 +908,109 @@ fn webidl_sequence_conversion() {
     assert!(err.message.starts_with("TypeError"), "{}", err.message);
 }
 
+// --- Rutas rápidas de la VM (E8): globales con inline cache y argumentos directos ---
+
+/// Asignar a globales con la cache de `GetGlobal` caliente (bucles de 300 vueltas) tiene que
+/// seguir §9.1.1.4.5 SetMutableBinding cuando la propiedad cambia entre vuelta y vuelta.
+#[test]
+fn global_assignment_fast_path_keeps_the_semantics() {
+    let mut e = Env::new();
+    // Bucle global con `var` e `i++` (GetRefValue + PutRef).
+    assert_eq!(
+        e.show("var s = 0; for (var i = 0; i < 300; i++) { s = s + i; } s + ':' + i"),
+        "44850:300"
+    );
+    // La propiedad pasa a no escribible a mitad del bucle: en código no estricto la
+    // asignación se ignora.
+    assert_eq!(
+        e.show(
+            "var w = 0; for (var k = 0; k < 300; k++) { \
+               if (k === 100) Object.defineProperty(globalThis, 'w', { writable: false }); \
+               w = w + 1; } w"
+        ),
+        "100"
+    );
+    // En código estricto, TypeError.
+    let err = e.eval_err(
+        "'use strict'; var w2 = 0; for (var k2 = 0; k2 < 300; k2++) { \
+           if (k2 === 100) Object.defineProperty(globalThis, 'w2', { writable: false }); \
+           w2 = w2 + 1; }",
+    );
+    assert!(err.message.starts_with("TypeError"), "{}", err.message);
+    // Se borra entre ResolveBinding y PutValue: en código no estricto se vuelve a crear.
+    assert_eq!(
+        e.show(
+            "d = 0; for (var j = 0; j < 300; j++) { d = (j === 200 ? (delete globalThis.d, j) : d + 1); } \
+             d + ':' + Object.getOwnPropertyDescriptor(globalThis, 'd').configurable"
+        ),
+        "299:true"
+    );
+    // La propiedad pasa a ser un accessor (mismo shape: los atributos van con el valor).
+    assert_eq!(
+        e.show(
+            "acc = 0; var hits = 0; for (var m = 0; m < 300; m++) { \
+               if (m === 150) Object.defineProperty(globalThis, 'acc', { set(v) { hits++; }, configurable: true }); \
+               acc = (acc | 0) * 0 + m; } hits"
+        ),
+        "150"
+    );
+    // Un `let` global de un script posterior tapa a la propiedad: la cache de `bumpP` (de
+    // antes) ya no vale y el binding pasa a ser el declarativo.
+    assert_eq!(
+        e.show(
+            "p = 0; function bumpP() { p = p + 1; return p; } \
+             for (var q = 0; q < 300; q++) bumpP(); p"
+        ),
+        "300"
+    );
+    assert_eq!(
+        e.show("let p = 'lex'; bumpP(); bumpP(); p + ':' + globalThis.p"),
+        "lex11:300"
+    );
+}
+
+/// Llamadas rápidas a funciones cuyos argumentos van directo a los locales.
+#[test]
+fn direct_args_fast_call() {
+    let mut e = Env::new();
+    assert_eq!(
+        e.show(
+            "function add(a, b) { return a + b; } var t = 0; \
+             for (var i = 0; i < 300; i++) t = add(t, i); t"
+        ),
+        "44850"
+    );
+    // Menos argumentos que parámetros, de más, y parámetros repetidos (no estricto).
+    assert_eq!(
+        e.show(
+            "function two(a, b) { return String(b); } \
+             function dup(a, a) { return a; } \
+             function one(a) { return a; } \
+             var r = ''; for (var i = 0; i < 300; i++) r = two(1) + dup(1, 2) + one(3, 4, 5); r"
+        ),
+        "undefined23"
+    );
+    // `arguments`, rest y valores por defecto siguen leyendo el vector de argumentos.
+    assert_eq!(
+        e.show(
+            "function f(a) { return arguments.length + ':' + arguments[1]; } \
+             function g(a, ...r) { return a + r.length; } \
+             function h(a, b = 7) { return a + b; } \
+             var r = ''; for (var i = 0; i < 300; i++) r = f(1, 2) + '|' + g(1, 2, 3) + '|' + h(1); r"
+        ),
+        "2:2|3|8"
+    );
+    // Recursión con llamadas en posición de cola en código estricto.
+    assert_eq!(
+        e.show(
+            "'use strict'; function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } \
+             function loop(n, acc) { if (n === 0) return acc; return loop(n - 1, acc + n); } \
+             fib(20) + ':' + loop(100000, 0)"
+        ),
+        "6765:5000050000"
+    );
+}
+
 #[test]
 fn eval_script_in_another_realm() {
     let mut e = dom_env();

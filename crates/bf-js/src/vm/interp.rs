@@ -2979,6 +2979,45 @@ fn fast_op(f: &mut Frame, heap: &mut crate::heap::Heap, cx: &FastCx, op: Op) -> 
                 f.stack.push(Value::Undefined);
             }
         }
+        // E8: asignar a una variable global (`var` o propiedad del objeto global) con la
+        // inline cache de `GetGlobal`: ResolveBinding da el Global Environment sin buscar, y
+        // PutValue (§6.2.5.6 → GlobalEnv SetMutableBinding, §9.1.1.4.5 → OrdinarySet) es
+        // escribir el valor de una propiedad de datos propia y escribible.
+        Op::ResolveGlobalRef(c) => {
+            if global_ic_slot(heap, &f.code, c, genv).is_none() {
+                return Fast::Slow;
+            }
+            f.rare_mut().refs.push(Some(genv));
+        }
+        Op::GetRefValue(c) => {
+            if !top_ref_is_global(f, genv) {
+                return Fast::Slow;
+            }
+            let Some(v) = fast_ic_global(heap, &f.code, c, genv) else {
+                return Fast::Slow;
+            };
+            f.stack.push(v);
+        }
+        Op::PutRef(c, _) => {
+            if !top_ref_is_global(f, genv) {
+                return Fast::Slow;
+            }
+            let Some((object, slot)) = global_ic_slot(heap, &f.code, c, genv) else {
+                return Fast::Slow;
+            };
+            match heap[object].props.slot_mut(slot) {
+                Some(crate::object::Prop {
+                    value:
+                        crate::object::PropValue::Data {
+                            value,
+                            writable: true,
+                        },
+                    ..
+                }) => *value = f.stack.last().expect("pila").clone(),
+                _ => return Fast::Slow,
+            }
+            f.rare_mut().refs.pop();
+        }
         // Literales: crear un objeto no recolecta (la recolección es en los safepoints).
         Op::NewObject => {
             let o = heap.alloc(Object::ordinary(Some(cx.object_proto)));
@@ -3373,29 +3412,54 @@ fn fast_ic_global(
     c: u32,
     genv: Gc<Env>,
 ) -> Option<Value> {
+    let (object, slot) = global_ic_slot(heap, code, c, genv)?;
+    match heap[object].props.slot(slot) {
+        Some(crate::object::Prop {
+            value: crate::object::PropValue::Data { value, .. },
+            ..
+        }) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// El objeto global y el slot de su propiedad propia `c` si la inline cache `Ic::Global`
+/// acierta: el shape del objeto y la cantidad de bindings léxicos globales son los del
+/// llenado, así que el nombre no está en el registro declarativo y es una propiedad propia
+/// del objeto global (§9.1.1.4: el binding es la propiedad).
+#[inline]
+fn global_ic_slot(
+    heap: &crate::heap::Heap,
+    code: &FunctionCode,
+    c: u32,
+    genv: Gc<Env>,
+) -> Option<(Gc<Object>, usize)> {
     use crate::vm::ic::Ic;
     let g = heap[genv].global()?;
     let (object, decl_len) = (g.object, g.decl.len() as u32);
-    let props = &heap[object].props;
-    let shape = props.shape_id();
-    code.ics
+    let shape = heap[object].props.shape_id();
+    let slot = code
+        .ics
         .with(c, |site| {
             site.ways.iter().find_map(|w| match w {
                 Ic::Global {
                     shape: s,
                     slot,
                     decl_len: d,
-                } if *s == shape && *d == decl_len => match props.slot(*slot as usize) {
-                    Some(crate::object::Prop {
-                        value: crate::object::PropValue::Data { value, .. },
-                        ..
-                    }) => Some(value.clone()),
-                    _ => None,
-                },
+                } if *s == shape && *d == decl_len => Some(*slot as usize),
                 _ => None,
             })
         })
-        .flatten()
+        .flatten()?;
+    Some((object, slot))
+}
+
+/// E8: ¿la referencia del tope se resolvió al Global Environment?
+#[inline]
+fn top_ref_is_global(f: &Frame, genv: Gc<Env>) -> bool {
+    f.rare
+        .as_ref()
+        .and_then(|r| r.refs.last())
+        .is_some_and(|r| *r == Some(genv))
 }
 
 /// `l + r` con un string y un string o un número (ToString del número, §6.1.6.1.20).
@@ -3519,8 +3583,30 @@ fn fast_call(
             Some(Op::Jump(t)) => matches!(f.code.ops.get(*t as usize), Some(Op::Return)),
             _ => false,
         };
-    let mut args = pools.values.pop().unwrap_or_default();
-    args.extend(f.stack.drain(base + 2..));
+    let mut locals = pools.locals.pop().unwrap_or_default();
+    locals.resize(code.num_locals as usize, None);
+    // E8: si los argumentos solo se leen en el prólogo de `ArgToLocal`, van directo a los
+    // locales (lo mismo que haría el prólogo) y el frame no guarda el vector.
+    let (args, pc) = match code.direct_args {
+        Some(k) => {
+            for op in &code.ops[..k as usize] {
+                if let Op::ArgToLocal(i, s) = *op {
+                    let v = if i < argc {
+                        f.stack[base + 2 + i as usize].clone()
+                    } else {
+                        Value::Undefined
+                    };
+                    locals[s as usize] = Some(v);
+                }
+            }
+            (Vec::new(), k as usize)
+        }
+        None => {
+            let mut args = pools.values.pop().unwrap_or_default();
+            args.extend(f.stack.drain(base + 2..));
+            (args, 0)
+        }
+    };
     f.stack.truncate(base);
     f.pc += 1;
     if tail {
@@ -3528,9 +3614,8 @@ fn fast_call(
         recycle_into(old, pools.values, pools.locals);
     }
     let stack = pools.values.pop().unwrap_or_else(|| Vec::with_capacity(16));
-    let mut locals = pools.locals.pop().unwrap_or_default();
-    locals.resize(code.num_locals as usize, None);
     let mut frame = Frame::with_buffers(code, env, realm, stack, locals);
+    frame.pc = pc;
     frame.this = this_value;
     frame.callee = Some(fo);
     frame.inline = true;
@@ -3569,7 +3654,8 @@ pub(crate) fn recycle_into(
         ..
     } = frame;
     for v in [&mut stack, &mut args] {
-        if v.capacity() <= MAX_CAPACITY && value_pool.len() < MAX_POOL {
+        // Un vector sin reserva (los `args` de una llamada con `direct_args`) no ahorra nada.
+        if v.capacity() != 0 && v.capacity() <= MAX_CAPACITY && value_pool.len() < MAX_POOL {
             v.clear();
             value_pool.push(std::mem::take(v));
         }

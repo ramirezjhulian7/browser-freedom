@@ -319,13 +319,43 @@ pub fn wrap_opt(agent: &mut Agent, doc: DocIndex, n: Option<bf_dom::NodeId>) -> 
     }
 }
 
-/// El nodo de un wrapper.
-///
-/// E4: el wrapper de un nodo de otra ventana (un `<iframe>`) no cuenta: su `NodeRef` se
-/// refiere a los documentos de su `WebContext`, no a los de la ventana en curso.
+/// El nodo de un wrapper de este realm (`None` si `v` no es un nodo o si es de otra ventana,
+/// ver [`is_foreign_node`]).
 pub fn unwrap_node(agent: &Agent, v: &Value) -> Option<NodeRef> {
     let n = agent.host_unwrap::<NodeRef>(v).copied()?;
-    (foreign_realm(agent, v, n).is_none()).then_some(n)
+    (!foreign(agent, v, n)).then_some(n)
+}
+
+/// E1: ¿`v` es el wrapper de un nodo de otra ventana (un `<iframe>`, el padre)? Un
+/// [`NodeRef`] solo tiene sentido en el [`crate::WebContext`] de su realm: el mismo índice de
+/// documento y de nodo en otro realm es otro nodo (o ninguno, y resolverlo es un pánico de
+/// índice fuera de rango en `bf-dom`). Cada wrapper de nodo está registrado en el realm de su
+/// ventana (`wrap_node`), así que el de otro realm no es el que este realm tiene para la clave.
+pub fn is_foreign_node(agent: &Agent, v: &Value) -> bool {
+    match agent.host_unwrap::<NodeRef>(v) {
+        Some(&n) => foreign(agent, v, n),
+        None => false,
+    }
+}
+
+fn foreign(agent: &Agent, v: &Value, n: NodeRef) -> bool {
+    let Value::Object(o) = v else {
+        return false;
+    };
+    agent.host_lookup(agent.current_realm, n.key()) != Some(*o)
+}
+
+/// E1: el error para un nodo de otra ventana donde el DOM lo admitiría (adoptarlo, insertarlo,
+/// usarlo de boundary point): mover nodos entre las arenas de dos `WebContext` no está hecho,
+/// y es mejor un `NotSupportedError` que resolverlo contra la arena equivocada.
+pub fn throw_foreign_node<T>(agent: &mut Agent) -> JsResult<T> {
+    let e = exception::create(
+        agent,
+        DomException::NotSupportedError.name(),
+        "The node belongs to the document of another window; moving nodes between \
+         browsing contexts is not supported",
+    );
+    Err(bf_js::vm::Throw::Value(e))
 }
 
 /// El nodo de `this` (el trampolín ya hizo el brand check).
@@ -337,34 +367,12 @@ pub fn this_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
 }
 
 /// Un argumento que debe ser un `Node` (TypeError si no lo es).
-///
-/// E4: un nodo de otra ventana (un `<iframe>`) no se puede usar: cada `NodeRef` se interpreta
-/// contra el `WebContext` de la ventana en curso y los documentos de dos ventanas no comparten
-/// arena, así que adoptarlo o insertarlo entre browsing contexts (DOM §4.5 "adopt") lanza
-/// `NotSupportedError` en vez de tocar un nodo equivocado.
 pub fn arg_node(agent: &mut Agent, v: &Value, what: &str) -> JsResult<NodeRef> {
-    match agent.host_unwrap::<NodeRef>(v).copied() {
-        Some(n) if foreign_realm(agent, v, n).is_some() => {
-            throw_dom(agent, DomException::NotSupportedError)
-        }
+    match unwrap_node(agent, v) {
         Some(n) => Ok(n),
+        None if is_foreign_node(agent, v) => throw_foreign_node(agent),
         None => agent.type_error(&format!("{what} is not of type 'Node'")),
     }
-}
-
-/// E4: si el wrapper `v` del nodo `n` es de la ventana de otro realm, ese realm.
-pub fn foreign_realm(agent: &Agent, v: &Value, n: NodeRef) -> Option<bf_js::vm::RealmId> {
-    let Value::Object(o) = v else {
-        return None;
-    };
-    if agent.realms.len() < 2 {
-        return None;
-    }
-    let current = agent.current_realm;
-    if agent.host_lookup(current, n.key()) == Some(*o) {
-        return None;
-    }
-    (0..agent.realms.len()).find(|&r| r != current && agent.host_lookup(r, n.key()) == Some(*o))
 }
 
 /// Un `Node?`.

@@ -29,11 +29,11 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| svg (E7, 2026-11-07) | 286 | 168 | 968 | 0 | 1422 | 63.0% |
-| **Total** | 5551 | 2033 | 6141 | 4 | 13729 | 73.2% |
+| svg (E7, 2026-11-12) | 318 | 133 | 971 | 0 | 1422 | 70.5% |
+| **Total** | 5583 | 1998 | 6144 | 4 | 13729 | 73.6% |
 
-La fila `svg` se midió aparte el 2026-11-07 en `army/e7` con el mismo commit de WPT
-(`cargo test --release -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
+La fila `svg` se midió aparte el 2026-11-12 en `army/e7` con el mismo commit de WPT
+(`cargo test -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
 filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo) y el resto es del
 2026-10-20.
 
@@ -43,7 +43,7 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 
 | Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
 |---|---:|---:|---:|---:|---:|---:|
-| css/css-overflow | 254 | 250 | 402 | 1 | 907 | 50.3% |
+| css/css-overflow | 312 | 193 | 402 | 0 | 907 | 61.8% |
 | css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
 | css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
 
@@ -106,10 +106,11 @@ Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte 
   851 de los 1567 tests ejecutables de `css/css-grid` son de `grid-lanes` (masonry, 101 pasan);
   sin ellos pasan 534 de 716 (74.6%), y `css/css-grid/subgrid` 56 de 88. `css/css-sizing` (no
   está en `GROUPS`): 338 pass, 188 fail, 237 needs-js (64.3%).
-- `css/css-overflow`: falta `text-overflow` (60 fallos, con los de `line-clamp` que lo
-  combinan), `::scroll-marker`/`::scroll-button` (44), `overflow-clip-margin` (20), el
-  `line-clamp` que depende de `transform` (containing block de los fijos, 13) y ocultar las
-  absolutas tras el clamp point.
+- `css/css-overflow` (E12, 2026-11-12, `army/e12`; antes 50.5%): con `text-overflow` y
+  `overflow-clip-margin`, faltan `::scroll-marker`/`::scroll-button` (44), `text-overflow` en
+  RTL/bidi, vertical, ruby, `<textarea>` y con fuentes CJK de `@font-face`, el recorte por eje
+  del `<svg>` raíz, el `line-clamp` que depende de `transform` (13) y ocultar las absolutas
+  tras el clamp point.
   `css/css-position/sticky`: casi todo es testharness o desplaza con script; falla
   `position-sticky-rtl` (scroll containers RTL, con el origen a la derecha).
 - `border-image` no existe todavía (unos 50 fallos de `css/css-backgrounds`), ni `transform`.

@@ -977,8 +977,12 @@ impl<'a> Layout<'a> {
             auto_h
         } else {
             let max_h = Some(height_limits(style, cb.height, edges_v).1).filter(|h| h.is_finite());
-            self.line_clamp(style, &mut children, content_top, auto_h, spec_h, max_h)
-                .unwrap_or(auto_h)
+            let h = self
+                .line_clamp(style, &mut children, content_top, auto_h, spec_h, max_h)
+                .unwrap_or(auto_h);
+            // E12: `text-overflow` (CSS Overflow 3 §5) en las líneas que desbordan.
+            self.text_overflow(style, &mut children);
+            h
         };
         let mut content_h = spec_h.unwrap_or(auto_h);
         // E5: el alto por `aspect-ratio` con `min-height: auto` no baja del contenido (CSS
@@ -1086,12 +1090,9 @@ impl<'a> Layout<'a> {
         fragment.margin = margins;
         fragment.border = border;
         fragment.padding = padding;
-        if style.overflow_x != Overflow::Visible
-            || style.overflow_y != Overflow::Visible
-            || b.control.as_ref().is_some_and(Control::clips)
-        {
-            fragment.clip = Some(fragment.padding_rect());
-        }
+        // E12: borde de recorte por eje con `overflow-clip-margin` (CSS Overflow 3 §3.2).
+        fragment.clip =
+            crate::scroll::overflow_clip(&fragment, b.control.as_ref().is_some_and(Control::clips));
         if let Some(control) = &b.control {
             fragment.widget = control.widget();
             // Baseline de un control de una línea: la de su texto o, si está vacío, la de una
