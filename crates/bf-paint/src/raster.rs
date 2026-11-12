@@ -1571,6 +1571,19 @@ pub fn render_scrolled(
                 }
             }
             DisplayItem::PushFixed => canvas.transforms.push(Transform::from_scale(scale, scale)),
+            // E7: `filter`, `clip-path` y `mix-blend-mode` (ver `crate::filters`).
+            DisplayItem::PushEffect => {
+                let layer = Pixmap::new(width, height).expect("tamaño de pixmap válido");
+                canvas.layers.push((layer, 1.0));
+            }
+            DisplayItem::PopEffect(fx) => {
+                if canvas.layers.len() > 1 {
+                    let (layer, _) = canvas.layers.pop().expect("capa abierta");
+                    let ts = canvas.ts();
+                    let clip = canvas.masks.last().cloned();
+                    crate::filters::compose(layer, canvas.target(), fx, ts, clip.as_ref());
+                }
+            }
         }
     }
     while canvas.layers.len() > 1 {

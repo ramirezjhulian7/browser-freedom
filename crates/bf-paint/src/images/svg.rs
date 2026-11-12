@@ -5,6 +5,8 @@
 //! (`filter`) se aplican en [`filter`].
 
 mod filter;
+/// E7: los filtros de SVG también aplican los de CSS (`crate::filters`).
+pub(crate) use filter::apply as apply_filter;
 mod text;
 
 use super::{SVG_IMAGE_DEPTH, SVG_OVERSAMPLE, SvgImage, SvgResources};

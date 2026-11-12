@@ -3,6 +3,7 @@
 //! Los shorthands están en [`shorthands`].
 
 pub mod clamp; // E12
+pub mod effects; // E7
 pub mod gradient; // E4
 pub mod grid; // E4
 pub mod shorthands;
@@ -16,6 +17,10 @@ use bf_css::syntax::ComponentValue;
 
 use crate::values::{Color, LengthContext, LengthPercentage};
 use clamp::{BoxOrient, LineClamp, WebkitLineClamp};
+use effects::{
+    BorderImageOutset, BorderImageRepeat, BorderImageSlice, BorderImageWidth, ClipPath, Filter,
+    Isolation, MixBlendMode,
+}; // E7
 use types::*;
 
 /// Contexto de cómputo de un elemento.
@@ -182,6 +187,17 @@ longhands! {
     MaskSize "mask-size" mask_size: BackgroundSize = "auto", inherited: false, animatable: true;
     MaskOrigin "mask-origin" mask_origin: BackgroundOrigin = "border-box", inherited: false, animatable: false;
     MaskClip "mask-clip" mask_clip: BackgroundClip = "border-box", inherited: false, animatable: false;
+    // E7: `border-image` (CSS Backgrounds 3 §6), `filter` (Filter Effects 1 §5), `clip-path`
+    // (CSS Masking 1 §5), `mix-blend-mode` e `isolation` (Compositing and Blending 1 §3).
+    BorderImageSource "border-image-source" border_image_source: Image = "none", inherited: false, animatable: false;
+    BorderImageSlice "border-image-slice" border_image_slice: BorderImageSlice = "100%", inherited: false, animatable: false;
+    BorderImageWidth "border-image-width" border_image_width: BorderImageWidth = "1", inherited: false, animatable: false;
+    BorderImageOutset "border-image-outset" border_image_outset: BorderImageOutset = "0", inherited: false, animatable: false;
+    BorderImageRepeat "border-image-repeat" border_image_repeat: BorderImageRepeat = "stretch", inherited: false, animatable: false;
+    Filter "filter" filter: Filter = "none", inherited: false, animatable: false;
+    ClipPath "clip-path" clip_path: ClipPath = "none", inherited: false, animatable: false;
+    MixBlendMode "mix-blend-mode" mix_blend_mode: MixBlendMode = "normal", inherited: false, animatable: false;
+    Isolation "isolation" isolation: Isolation = "auto", inherited: false, animatable: false;
     FontFamily "font-family" font_family: FontFamily = "serif", inherited: true, animatable: false;
     FontSize "font-size" font_size: FontSize = "medium", inherited: true, animatable: true;
     FontWeight "font-weight" font_weight: FontWeight = "normal", inherited: true, animatable: true;

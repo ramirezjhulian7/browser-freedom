@@ -270,6 +270,17 @@ impl Svg {
     }
 
     /// Si la raíz tiene un `viewBox` válido (o lo da la vista del fragmento).
+    /// Ancho y alto del `viewBox` efectivo (el de la vista del fragmento o el de la raíz).
+    pub fn view_box_size(&self) -> Option<(f32, f32)> {
+        let vb = self.view.as_ref().and_then(|v| v.view_box).or_else(|| {
+            self.nodes
+                .first()
+                .filter(|r| r.name == "svg")
+                .and_then(build::root_view_box)
+        })?;
+        Some((vb.2, vb.3))
+    }
+
     pub fn has_view_box(&self) -> bool {
         self.view.as_ref().and_then(|v| v.view_box).is_some()
             || self
