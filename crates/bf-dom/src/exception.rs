@@ -29,6 +29,9 @@ pub enum DomException {
     QuotaExceededError,
     /// `TypeError` de ECMAScript.
     TypeError,
+    /// `TypeError` de ECMAScript con el detalle de qué falló (los bindings le anteponen la
+    /// interfaz y el método: "Failed to execute 'x' on 'Y': …").
+    TypeErrorWith(&'static str),
 }
 
 impl DomException {
@@ -55,7 +58,7 @@ impl DomException {
             DomException::InvalidNodeTypeError => "InvalidNodeTypeError",
             DomException::DataCloneError => "DataCloneError",
             DomException::QuotaExceededError => "QuotaExceededError",
-            DomException::TypeError => "TypeError",
+            DomException::TypeError | DomException::TypeErrorWith(_) => "TypeError",
         }
     }
 
@@ -91,6 +94,7 @@ impl DomException {
             DomException::DataCloneError => "The object can not be cloned.",
             DomException::QuotaExceededError => "The quota has been exceeded.",
             DomException::TypeError => "Type error.",
+            DomException::TypeErrorWith(m) => m,
         }
     }
 
@@ -117,8 +121,16 @@ impl DomException {
             DomException::InvalidNodeTypeError => 24,
             DomException::DataCloneError => 25,
             DomException::QuotaExceededError => 22,
-            DomException::TypeError => 0,
+            DomException::TypeError | DomException::TypeErrorWith(_) => 0,
         }
+    }
+
+    /// ¿Es un `TypeError` de ECMAScript (con o sin detalle)?
+    pub fn is_type_error(self) -> bool {
+        matches!(
+            self,
+            DomException::TypeError | DomException::TypeErrorWith(_)
+        )
     }
 }
 

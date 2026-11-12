@@ -6,6 +6,7 @@ pub mod canvas;
 pub mod custom_elements;
 pub mod elements;
 pub mod forms;
+pub mod legacy_factories;
 pub mod misc;
 pub mod named;
 pub mod reflect;
@@ -28,4 +29,5 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     submission::register(agent);
     forms::register_collections(agent); // E1
     elements::register(agent, realm, ctx);
+    legacy_factories::register(agent, realm); // E3: `Image`, `Audio`, `Option`
 }
