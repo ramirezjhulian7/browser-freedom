@@ -5,7 +5,7 @@ use super::iso::{self, IsoDate, IsoDateTime, NS_PER_DAY, Time};
 use super::options::{Unit, UnitGroup};
 use super::parse::{self, Goal};
 use super::{
-    DATE_FIELDS, Fields, ISO8601, Required, TemporalData, calendar_annotation, class, create,
+    Cal, DATE_FIELDS, Fields, ISO8601, Required, TemporalData, calendar_annotation, class, create,
     data_of, getters, js_str,
 };
 use crate::builtins::FnEntry;
@@ -15,8 +15,11 @@ use crate::value::{PropertyKey, Value};
 use crate::vm::function::{CallArgs, NativeFn};
 use crate::vm::{Agent, JsResult};
 
-/// Un campo de calendario de una fecha ISO (los getters de Table 1).
-pub fn calendar_field(d: IsoDate, name: &str) -> Value {
+/// Un campo de calendario de una fecha (los getters de Table 1, con CalendarISOToDate).
+pub fn calendar_field(d: IsoDate, cal: Cal, name: &str) -> Value {
+    if !cal.is_iso() {
+        return non_iso_field(d, cal, name);
+    }
     let y = i64::from(d.year);
     let n = |x: i64| Value::Number(x as f64);
     match name {
@@ -35,6 +38,29 @@ pub fn calendar_field(d: IsoDate, name: &str) -> Value {
         "daysInYear" => n(iso::days_in_year(y)),
         "monthsInYear" => n(12),
         "inLeapYear" => Value::Boolean(iso::is_leap_year(y)),
+        _ => Value::Undefined,
+    }
+}
+
+/// Los campos de un calendario que no es ISO 8601 (sin semanas numeradas).
+fn non_iso_field(d: IsoDate, cal: Cal, name: &str) -> Value {
+    let c = cal.to_cal(d);
+    let n = |x: i64| Value::Number(x as f64);
+    match name {
+        "calendarId" => js_str(cal.id()),
+        "era" => cal.era(d, &c).map_or(Value::Undefined, |(e, _)| js_str(e)),
+        "eraYear" => cal.era(d, &c).map_or(Value::Undefined, |(_, y)| n(y)),
+        "year" => n(c.year),
+        "month" => n(c.month.into()),
+        "monthCode" => js_str(&c.code.text()),
+        "day" => n(c.day.into()),
+        "dayOfWeek" => n(d.day_of_week()),
+        "dayOfYear" => n(cal.day_of_year(&c)),
+        "daysInWeek" => n(7),
+        "daysInMonth" => n(cal.days_in_month(c.year, c.month).into()),
+        "daysInYear" => n(cal.days_in_year(c.year)),
+        "monthsInYear" => n(cal.months_in_year(c.year).into()),
+        "inLeapYear" => Value::Boolean(cal.in_leap_year(c.year)),
         _ => Value::Undefined,
     }
 }
@@ -63,8 +89,8 @@ macro_rules! temporal_date_getters {
     ($table:ident, $date:path, $($name:literal => $f:ident),* $(,)?) => {
         $(
             fn $f(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-                let d = $date(agent, &a.this, $name)?;
-                Ok(calendar_field(d, $name))
+                let (d, cal) = $date(agent, &a.this, $name)?;
+                Ok(calendar_field(d, cal, $name))
             }
         )*
         const $table: &[(&str, NativeFn)] = &[$(($name, $f)),*];
@@ -106,11 +132,11 @@ pub fn init(agent: &mut Agent, temporal: Gc<Object>) -> Gc<Object> {
     proto
 }
 
-fn this_date(agent: &mut Agent, this: &Value, method: &str) -> JsResult<IsoDate> {
+fn this_date(agent: &mut Agent, this: &Value, method: &str) -> JsResult<(IsoDate, Cal)> {
     match super::this_data(agent, this, "PlainDate", method, |d| {
-        matches!(d, TemporalData::PlainDate(_))
+        matches!(d, TemporalData::PlainDate(..))
     })? {
-        TemporalData::PlainDate(d) => Ok(d),
+        TemporalData::PlainDate(d, c) => Ok((d, c)),
         _ => unreachable!(),
     }
 }
@@ -120,36 +146,37 @@ impl Agent {
     pub fn temporal_create_date(
         &mut self,
         d: IsoDate,
+        cal: Cal,
         new_target: Option<Gc<Object>>,
     ) -> JsResult<Value> {
         self.temporal_check_date(d)?;
-        create(self, TemporalData::PlainDate(d), new_target)
+        create(self, TemporalData::PlainDate(d, cal), new_target)
     }
 
     /// ToTemporalDate.
-    pub fn to_temporal_date(&mut self, item: &Value, options: &Value) -> JsResult<IsoDate> {
+    pub fn to_temporal_date(&mut self, item: &Value, options: &Value) -> JsResult<(IsoDate, Cal)> {
         if let Value::Object(o) = item {
             match data_of(self, item) {
-                Some(TemporalData::PlainDate(d)) => {
+                Some(TemporalData::PlainDate(d, c)) => {
                     self.temporal_overflow_of(options)?;
-                    return Ok(d);
+                    return Ok((d, c));
                 }
-                Some(TemporalData::ZonedDateTime { ns, tz }) => {
+                Some(TemporalData::ZonedDateTime { ns, tz, cal }) => {
                     let dt = super::date_time_for(&tz, ns);
                     self.temporal_overflow_of(options)?;
-                    return Ok(dt.date);
+                    return Ok((dt.date, cal));
                 }
-                Some(TemporalData::PlainDateTime(dt)) => {
+                Some(TemporalData::PlainDateTime(dt, c)) => {
                     self.temporal_overflow_of(options)?;
-                    return Ok(dt.date);
+                    return Ok((dt.date, c));
                 }
                 _ => {}
             }
             let o = *o;
-            self.temporal_calendar_with_default(o)?;
-            let f = self.temporal_prepare_fields(o, DATE_FIELDS, Required::List(&[]))?;
+            let cal = self.temporal_calendar_with_default(o)?;
+            let f = self.temporal_prepare_fields(cal, o, DATE_FIELDS, Required::List(&[]))?;
             let reject = self.temporal_overflow_of(options)?;
-            return self.temporal_date_from_fields(f, reject);
+            return Ok((self.temporal_date_from_fields(cal, f, reject)?, cal));
         }
         let Value::String(s) = item else {
             return self.type_error("date must be an object or a string");
@@ -158,11 +185,11 @@ impl Agent {
         let Some(r) = parse::parse_iso_date_time(&s, &[Goal::DateTime { zoned: false }]) else {
             return self.range_error(&format!("Invalid date: {s}"));
         };
-        self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
+        let cal = self.temporal_canonicalize_calendar(r.calendar.as_deref().unwrap_or(ISO8601))?;
         self.temporal_overflow_of(options)?;
         let d = IsoDate::new(r.year.unwrap_or(0), r.month, r.day.unwrap_or(1));
         self.temporal_check_date(d)?;
-        Ok(d)
+        Ok((d, cal))
     }
 
     /// ToTimeRecordOrMidnight.
@@ -182,34 +209,36 @@ fn date_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let y = agent.to_integer_with_truncation(&a.arg(0))?;
     let m = agent.to_integer_with_truncation(&a.arg(1))?;
     let d = agent.to_integer_with_truncation(&a.arg(2))?;
-    agent.temporal_calendar_arg(&a.arg(3))?;
+    let cal = agent.temporal_calendar_arg(&a.arg(3))?;
     if !iso::is_valid_date(y as i64, m as i64, d as i64) || !iso::within_i32(y as i64) {
         return agent.range_error("invalid date");
     }
-    agent.temporal_create_date(IsoDate::new(y as i64, m as i64, d as i64), Some(nt))
+    agent.temporal_create_date(IsoDate::new(y as i64, m as i64, d as i64), cal, Some(nt))
 }
 
 fn date_from(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = agent.to_temporal_date(&a.arg(0), &a.arg(1))?;
-    agent.temporal_create_date(d, None)
+    let (d, cal) = agent.to_temporal_date(&a.arg(0), &a.arg(1))?;
+    agent.temporal_create_date(d, cal, None)
 }
 
 fn date_compare(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let one = agent.to_temporal_date(&a.arg(0), &Value::Undefined)?;
-    let two = agent.to_temporal_date(&a.arg(1), &Value::Undefined)?;
+    let (one, _) = agent.to_temporal_date(&a.arg(0), &Value::Undefined)?;
+    let (two, _) = agent.to_temporal_date(&a.arg(1), &Value::Undefined)?;
     Ok(Value::Number(f64::from(iso::compare_date(one, two))))
 }
 
 fn to_plain_year_month(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_date(agent, &a.this, "toPlainYearMonth")?;
-    let r = agent.temporal_year_month_from_fields(Fields::from_date(d, true, true), false)?;
-    create(agent, TemporalData::PlainYearMonth(r), None)
+    let (d, cal) = this_date(agent, &a.this, "toPlainYearMonth")?;
+    let f = Fields::from_date(cal, d, true, false);
+    let r = agent.temporal_year_month_from_fields(cal, f, false)?;
+    create(agent, TemporalData::PlainYearMonth(r, cal), None)
 }
 
 fn to_plain_month_day(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let d = this_date(agent, &a.this, "toPlainMonthDay")?;
-    let r = agent.temporal_month_day_from_fields(Fields::from_date(d, true, true), false)?;
-    create(agent, TemporalData::PlainMonthDay(r), None)
+    let (d, cal) = this_date(agent, &a.this, "toPlainMonthDay")?;
+    let f = Fields::from_date(cal, d, false, true);
+    let r = agent.temporal_month_day_from_fields(cal, f, false)?;
+    create(agent, TemporalData::PlainMonthDay(r, cal), None)
 }
 
 impl Agent {
@@ -226,15 +255,15 @@ impl Agent {
 
 /// AddDurationToDate.
 fn add(agent: &mut Agent, a: &CallArgs<'_>, subtract: bool) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, if subtract { "subtract" } else { "add" })?;
+    let (date, cal) = this_date(agent, &a.this, if subtract { "subtract" } else { "add" })?;
     let mut d = agent.to_temporal_duration(&a.arg(0))?;
     if subtract {
         d = d.negated();
     }
     let dd = agent.temporal_date_duration_without_time(&d)?;
     let reject = agent.temporal_overflow_of(&a.arg(1))?;
-    let r = agent.temporal_date_add(date, dd, reject)?;
-    agent.temporal_create_date(r, None)
+    let r = agent.temporal_date_add(cal, date, dd, reject)?;
+    agent.temporal_create_date(r, cal, None)
 }
 
 fn date_add(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -247,7 +276,7 @@ fn date_subtract(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// Temporal.PlainDate.prototype.with ( temporalDateLike [ , options ] ).
 fn date_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "with")?;
+    let (date, cal) = this_date(agent, &a.this, "with")?;
     let like = a.arg(0);
     if !agent.temporal_is_partial(&like)? {
         return agent.type_error("with() requires a partial date object");
@@ -255,31 +284,35 @@ fn date_with(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Value::Object(o) = like else {
         unreachable!()
     };
-    let fields = Fields::from_date(date, true, true);
-    let partial = agent.temporal_prepare_fields(o, DATE_FIELDS, Required::Partial)?;
-    let merged = fields.merge(partial);
+    let fields = Fields::from_date(cal, date, true, true);
+    let partial = agent.temporal_prepare_fields(cal, o, DATE_FIELDS, Required::Partial)?;
+    let merged = fields.merge(cal, partial);
     let reject = agent.temporal_overflow_of(&a.arg(1))?;
-    let r = agent.temporal_date_from_fields(merged, reject)?;
-    agent.temporal_create_date(r, None)
+    let r = agent.temporal_date_from_fields(cal, merged, reject)?;
+    agent.temporal_create_date(r, cal, None)
 }
 
 fn date_with_calendar(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "withCalendar")?;
-    agent.to_temporal_calendar(&a.arg(0))?;
-    agent.temporal_create_date(date, None)
+    let (date, _) = this_date(agent, &a.this, "withCalendar")?;
+    let cal = agent.to_temporal_calendar(&a.arg(0))?;
+    agent.temporal_create_date(date, cal, None)
 }
 
 /// DifferenceTemporalPlainDate.
 fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, if since { "since" } else { "until" })?;
-    let other = agent.to_temporal_date(&a.arg(0), &Value::Undefined)?;
+    let (date, cal) = this_date(agent, &a.this, if since { "since" } else { "until" })?;
+    let (other, other_cal) = agent.to_temporal_date(&a.arg(0), &Value::Undefined)?;
+    if cal != other_cal {
+        return agent
+            .range_error("cannot compute the difference between dates of different calendars");
+    }
     let o = agent.temporal_options_object(&a.arg(1))?;
     let (largest, smallest, increment, mode) =
         agent.temporal_difference_settings(since, o, UnitGroup::Date, &[], Unit::Day, Unit::Day)?;
     if date == other {
         return agent.temporal_create_duration([0.0; 10], None);
     }
-    let dd = super::duration::date_until(date, other, largest);
+    let dd = super::duration::date_until(cal, date, other, largest);
     let mut d = Internal { date: dd, time: 0 };
     if smallest != Unit::Day || increment != 1 {
         let start = IsoDateTime {
@@ -291,6 +324,7 @@ fn difference(agent: &mut Agent, a: &CallArgs<'_>, since: bool) -> JsResult<Valu
             time: Time::MIDNIGHT,
         };
         d = agent.temporal_round_relative(
+            cal,
             d,
             start.epoch_ns(),
             end.epoch_ns(),
@@ -318,20 +352,20 @@ fn date_since(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn date_equals(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "equals")?;
+    let this = this_date(agent, &a.this, "equals")?;
     let other = agent.to_temporal_date(&a.arg(0), &Value::Undefined)?;
-    Ok(Value::Boolean(date == other))
+    Ok(Value::Boolean(this == other))
 }
 
 fn to_plain_date_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "toPlainDateTime")?;
+    let (date, cal) = this_date(agent, &a.this, "toPlainDateTime")?;
     let time = agent.temporal_time_or_midnight(&a.arg(0))?;
-    agent.temporal_create_date_time(IsoDateTime { date, time }, None)
+    agent.temporal_create_date_time(IsoDateTime { date, time }, cal, None)
 }
 
 /// Temporal.PlainDate.prototype.toZonedDateTime ( item ).
 fn to_zoned_date_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "toZonedDateTime")?;
+    let (date, cal) = this_date(agent, &a.this, "toZonedDateTime")?;
     let item = a.arg(0);
     let (tz, time) = if let Value::Object(o) = item {
         let tzl = agent.get(o, &PropertyKey::from("timeZone"), item.clone())?;
@@ -353,26 +387,38 @@ fn to_zoned_date_time(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         agent.temporal_check_date_time(dt)?;
         agent.temporal_epoch_ns_for(&tz, dt)?
     };
-    create(agent, TemporalData::ZonedDateTime { ns, tz }, None)
+    create(agent, TemporalData::ZonedDateTime { ns, tz, cal }, None)
 }
 
 fn date_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "toString")?;
+    let (date, cal) = this_date(agent, &a.this, "toString")?;
     let o = agent.temporal_options_object(&a.arg(0))?;
     let show = agent.temporal_show_calendar(o)?;
     Ok(js_str(&format!(
         "{}{}",
         iso::date_string(date),
-        calendar_annotation(&show)
+        calendar_annotation(cal, &show)
     )))
 }
 
 fn date_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&iso::date_string(date)))
+    this_date(agent, &a.this, "toLocaleString")?;
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Date,
+        crate::builtins::intl::date_time_format::Defaults::Date,
+        None,
+    )
 }
 
 fn date_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let date = this_date(agent, &a.this, "toJSON")?;
-    Ok(js_str(&iso::date_string(date)))
+    let (date, cal) = this_date(agent, &a.this, "toJSON")?;
+    Ok(js_str(&format!(
+        "{}{}",
+        iso::date_string(date),
+        calendar_annotation(cal, "auto")
+    )))
 }

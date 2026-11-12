@@ -314,7 +314,15 @@ fn set_prototype_of(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let Value::Object(obj) = o else { return Ok(o) };
     if !agent.set_prototype_of(obj, proto)? {
-        return agent.type_error("Cannot set prototype");
+        // [[SetPrototypeOf]] falla en un objeto no extensible (o un ciclo, o un exótico
+        // inmutable como %Object.prototype%).
+        let d = agent.describe(&o);
+        let why = if agent.heap[obj].extensible {
+            "would create a cycle or the prototype is immutable"
+        } else {
+            "is not extensible"
+        };
+        return agent.type_error(&format!("Object.setPrototypeOf: {d} {why}"));
     }
     Ok(o)
 }

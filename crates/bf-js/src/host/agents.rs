@@ -198,7 +198,7 @@ impl SharedBlock {
             let m = Self::mask(size) << shift;
             let bits = (v << shift) & m;
             if let Some(w) = self.word(index / 8) {
-                let _ = w.fetch_update(SEQ, SEQ, |x| Some((x & !m) | bits));
+                let _ = w.try_update(SEQ, SEQ, |x| Some((x & !m) | bits));
             }
             return;
         }
@@ -218,7 +218,7 @@ impl SharedBlock {
             return 0;
         };
         let mut old = 0;
-        let _ = w.fetch_update(SEQ, SEQ, |x| {
+        let _ = w.try_update(SEQ, SEQ, |x| {
             old = (x >> shift) & m;
             f(old).map(|n| (x & !(m << shift)) | ((n & m) << shift))
         });

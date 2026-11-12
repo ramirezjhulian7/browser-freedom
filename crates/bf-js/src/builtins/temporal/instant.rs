@@ -285,8 +285,16 @@ fn instant_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn instant_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let ns = this_instant(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&instant_string(ns, None, Precision::Auto)))
+    this_instant(agent, &a.this, "toLocaleString")?;
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Any,
+        crate::builtins::intl::date_time_format::Defaults::All,
+        None,
+    )
 }
 
 fn instant_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -298,5 +306,6 @@ fn instant_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn to_zoned_date_time_iso(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let ns = this_instant(agent, &a.this, "toZonedDateTimeISO")?;
     let tz = agent.to_temporal_time_zone(&a.arg(0))?;
-    create(agent, TemporalData::ZonedDateTime { ns, tz }, None)
+    let cal = super::Cal::Iso;
+    create(agent, TemporalData::ZonedDateTime { ns, tz, cal }, None)
 }

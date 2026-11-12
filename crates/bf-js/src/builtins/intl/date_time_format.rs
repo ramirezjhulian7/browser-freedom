@@ -59,6 +59,11 @@ pub struct DateTimeFormat {
     /// El patrón de CLDR resultante.
     pub pattern: String,
     pub bound_format: Option<Gc<Object>>,
+    /// E8: las opciones de componentes que dio el usuario (sin los valores por defecto), para
+    /// los formatos de los tipos de Temporal (GetDateTimeFormat con `inherit`).
+    pub options: Vec<(&'static str, Option<String>)>,
+    /// E8: el ciclo horario resuelto (aunque el patrón no tenga hora).
+    pub hc: String,
 }
 
 pub fn init(agent: &mut Agent, realm: RealmId, intl: Gc<Object>) {
@@ -138,6 +143,22 @@ pub fn create_date_time_format(
     required: Required,
     defaults: Defaults,
 ) -> JsResult<Gc<Object>> {
+    create_date_time_format_in(
+        agent, new_target, locales, options, required, defaults, None,
+    )
+}
+
+/// CreateDateTimeFormat con `toLocaleStringTimeZone` (el de ZonedDateTime.toLocaleString:
+/// la opción `timeZone` es entonces un TypeError).
+pub fn create_date_time_format_in(
+    agent: &mut Agent,
+    new_target: Gc<Object>,
+    locales: &Value,
+    options: &Value,
+    required: Required,
+    defaults: Defaults,
+    zone: Option<&str>,
+) -> JsResult<Gc<Object>> {
     let requested = locale::canonicalize_locale_list(agent, locales)?;
     let options = coerce_options_to_object(agent, options)?;
     get_string_option(
@@ -209,7 +230,13 @@ pub fn create_date_time_format(
     };
     // La zona horaria.
     let tzv = agent.get_str(options, "timeZone")?;
-    let time_zone = if tzv.is_undefined() {
+    let time_zone = if let Some(z) = zone {
+        if !tzv.is_undefined() {
+            return agent
+                .type_error("timeZone option is not allowed in ZonedDateTime.toLocaleString");
+        }
+        z.to_owned()
+    } else if tzv.is_undefined() {
         crate::builtins::date::system_time_zone_identifier()
     } else {
         let s = agent.to_string(&tzv)?.to_string_lossy();
@@ -238,6 +265,7 @@ pub fn create_date_time_format(
         }
         comps.push((prop, v));
     }
+    let explicit_comps = comps.clone();
     get_string_option(
         agent,
         options,
@@ -318,11 +346,13 @@ pub fn create_date_time_format(
         calendar: r.get("ca").unwrap_or("gregory").to_owned(),
         numbering_system: r.get("nu").unwrap_or("latn").to_owned(),
         time_zone,
-        hour_cycle: has_hour.then_some(hc),
+        hour_cycle: has_hour.then(|| hc.clone()),
         date_style,
         time_style,
         pattern,
         bound_format: None,
+        options: explicit_comps,
+        hc,
     };
     create_intl_object(
         agent,
@@ -936,6 +966,203 @@ fn format_pattern(dtf: &DateTimeFormat, pattern: &str, t: f64) -> Vec<(&'static 
     out
 }
 
+// --- Temporal (ECMA-402 con Temporal: HandleDateTimeValue, GetDateTimeFormat) ---
+
+/// El tipo de un valor de Temporal que se formatea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalKind {
+    Date,
+    YearMonth,
+    MonthDay,
+    Time,
+    DateTime,
+    Instant,
+}
+
+const DATE_OPTS: &[&str] = &["weekday", "year", "month", "day"];
+const TIME_OPTS: &[&str] = &[
+    "dayPeriod",
+    "hour",
+    "minute",
+    "second",
+    "fractionalSecondDigits",
+];
+
+impl DateTimeFormat {
+    /// GetDateTimeFormat para un tipo de Temporal: los campos que ese tipo tiene (o los de
+    /// por defecto). `None` si las opciones solo piden campos que el tipo no tiene (el
+    /// formato es entonces un TypeError).
+    pub fn temporal_pattern(&self, kind: TemporalKind) -> Option<String> {
+        use TemporalKind as K;
+        let data = &locale::data_for(&self.data_locale).dates;
+        if self.date_style.is_some() || self.time_style.is_some() {
+            let (ds, ts) = match kind {
+                K::Date | K::YearMonth | K::MonthDay => (Some(self.date_style.as_deref()?), None),
+                K::Time => (None, Some(self.time_style.as_deref()?)),
+                K::DateTime | K::Instant => {
+                    (self.date_style.as_deref(), self.time_style.as_deref())
+                }
+            };
+            let p = style_pattern(data, ds, ts, &self.hc);
+            // AdjustDateTimeStyleFormat: solo los campos del tipo.
+            let keep: &[char] = match kind {
+                K::YearMonth => &['G', 'y', 'M', 'L'],
+                K::MonthDay => &['M', 'L', 'd'],
+                _ => return Some(p),
+            };
+            let want: Vec<(char, usize)> = pattern_fields(&p)
+                .into_iter()
+                .filter(|(c, _)| keep.contains(c))
+                .collect();
+            return Some(match_available(data, &want, &self.hc).unwrap_or_else(|| fallback(&want)));
+        }
+        let (required, defaults): (Vec<&str>, &[&str]) = match kind {
+            K::Date => (DATE_OPTS.to_vec(), &["year", "month", "day"]),
+            K::YearMonth => (vec!["year", "month"], &["year", "month"]),
+            K::MonthDay => (vec!["month", "day"], &["month", "day"]),
+            K::Time => (TIME_OPTS.to_vec(), &["hour", "minute", "second"]),
+            K::DateTime | K::Instant => (
+                [DATE_OPTS, TIME_OPTS].concat(),
+                &["year", "month", "day", "hour", "minute", "second"],
+            ),
+        };
+        // `inherit`: todas las opciones para Instant; para los demás, las del tipo y la era
+        // (si el tipo tiene año).
+        let inherit_all = kind == K::Instant;
+        let era = matches!(kind, K::Date | K::YearMonth | K::DateTime);
+        let mut opts: Vec<(&'static str, Option<String>)> = self
+            .options
+            .iter()
+            .map(|(k, v)| {
+                let keep = inherit_all || required.contains(k) || (*k == "era" && era);
+                (*k, if keep { v.clone() } else { None })
+            })
+            .collect();
+        let need_defaults = !opts
+            .iter()
+            .any(|(k, v)| v.is_some() && required.contains(k));
+        if need_defaults {
+            // Pidió campos de fecha u hora, pero ninguno de este tipo (`era` y
+            // `timeZoneName` solos no cuentan).
+            let any_present = self
+                .options
+                .iter()
+                .any(|(k, v)| v.is_some() && (DATE_OPTS.contains(k) || TIME_OPTS.contains(k)));
+            if !inherit_all && any_present {
+                return None;
+            }
+            for k in defaults {
+                set_comp(&mut opts, k, "numeric");
+            }
+        }
+        Some(best_fit_pattern(data, &opts, &self.hc))
+    }
+}
+
+/// ToDateTimeFormattable + HandleDateTimeValue: el formato a usar (con el patrón del tipo
+/// de Temporal) y el instante en ms. Los tipos sin zona se formatean en UTC con la hora de
+/// pared como instante.
+fn formattable(
+    agent: &mut Agent,
+    dtf: &DateTimeFormat,
+    v: &Value,
+) -> JsResult<(DateTimeFormat, f64, Option<TemporalKind>)> {
+    use crate::builtins::temporal::TemporalData;
+    use crate::builtins::temporal::iso::{IsoDate, IsoDateTime, Time};
+    use TemporalKind as K;
+    let data = crate::builtins::temporal::data_of(agent, v);
+    let noon = |date| IsoDateTime {
+        date,
+        time: Time::NOON,
+    };
+    // (tipo, hora de pared, calendario, ¿el calendario tiene que ser el del formato?)
+    let (kind, wall, cal, strict) = match data {
+        Some(TemporalData::PlainDate(d, c)) => (K::Date, noon(d), Some(c), false),
+        Some(TemporalData::PlainYearMonth(d, c)) => (K::YearMonth, noon(d), Some(c), true),
+        Some(TemporalData::PlainMonthDay(d, c)) => (K::MonthDay, noon(d), Some(c), true),
+        Some(TemporalData::PlainTime(t)) => (
+            K::Time,
+            IsoDateTime {
+                date: IsoDate::new(1970, 1, 1),
+                time: t,
+            },
+            None,
+            false,
+        ),
+        Some(TemporalData::PlainDateTime(dt, c)) => (K::DateTime, dt, Some(c), false),
+        Some(TemporalData::Instant(ns)) => {
+            let mut f = dtf.clone();
+            f.pattern = dtf.temporal_pattern(K::Instant).unwrap_or_default();
+            return Ok((f, ns.div_euclid(1_000_000) as f64, Some(K::Instant)));
+        }
+        Some(TemporalData::ZonedDateTime { .. }) => {
+            return agent.type_error(
+                "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use toLocaleString",
+            );
+        }
+        _ => {
+            let t = time_value(agent, v)?;
+            return Ok((dtf.clone(), t, None));
+        }
+    };
+    if let Some(c) = cal {
+        let ok = c.id() == dtf.calendar || (!strict && c.is_iso());
+        if !ok {
+            return agent.range_error(&format!(
+                "the calendar {} does not match the calendar of the format ({})",
+                c.id(),
+                dtf.calendar
+            ));
+        }
+    }
+    let Some(pattern) = dtf.temporal_pattern(kind) else {
+        return agent.type_error("the format options have no fields for this Temporal type");
+    };
+    let mut f = dtf.clone();
+    f.pattern = pattern;
+    f.time_zone = "UTC".into();
+    Ok((f, wall.epoch_ns().div_euclid(1_000_000) as f64, Some(kind)))
+}
+
+/// `toLocaleString` de los tipos de Temporal: CreateDateTimeFormat con `required` y
+/// `defaults` del tipo, y FormatDateTime. `zoned`: (ns, zona, calendario) de un
+/// ZonedDateTime, que se formatea como su instante en su zona.
+#[allow(clippy::too_many_arguments)]
+pub fn temporal_to_locale_string(
+    agent: &mut Agent,
+    value: &Value,
+    locales: &Value,
+    options: &Value,
+    required: Required,
+    defaults: Defaults,
+    zoned: Option<(i128, &str, &str)>,
+) -> JsResult<Value> {
+    let ctor =
+        crate::builtins::web::registry_get(agent, agent.current_realm, "Intl.DateTimeFormat")
+            .expect("Intl.DateTimeFormat");
+    let zone = zoned.map(|(_, z, _)| z);
+    let o = create_date_time_format_in(agent, ctor, locales, options, required, defaults, zone)?;
+    let dtf = dtf_of(agent, o);
+    if let Some((ns, _, cal)) = zoned {
+        if cal != "iso8601" && cal != dtf.calendar {
+            return agent.range_error(&format!(
+                "the calendar {cal} does not match the calendar of the format ({})",
+                dtf.calendar
+            ));
+        }
+        let mut f = dtf.clone();
+        f.pattern = dtf
+            .temporal_pattern(TemporalKind::Instant)
+            .unwrap_or_default();
+        return Ok(str_value(&format_string(
+            &f,
+            ns.div_euclid(1_000_000) as f64,
+        )));
+    }
+    let (f, t, _) = formattable(agent, &dtf, value)?;
+    Ok(str_value(&format_string(&f, t)))
+}
+
 fn time_value(agent: &mut Agent, v: &Value) -> JsResult<f64> {
     let x = if v.is_undefined() {
         crate::builtins::date::now_ms()
@@ -1196,15 +1423,15 @@ fn format_function(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Undefined);
     };
     let dtf = dtf_of(agent, o);
-    let t = time_value(agent, &a.arg(0))?;
-    Ok(str_value(&format_string(&dtf, t)))
+    let (f, t, _) = formattable(agent, &dtf, &a.arg(0))?;
+    Ok(str_value(&format_string(&f, t)))
 }
 
 /// Intl.DateTimeFormat.prototype.formatToParts ( date ) (§11.3.4).
 fn format_to_parts(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let o = this_dtf(agent, &a.this, "formatToParts")?;
     let dtf = dtf_of(agent, o);
-    let t = time_value(agent, &a.arg(0))?;
+    let (dtf, t, _) = formattable(agent, &dtf, &a.arg(0))?;
     let parts: Vec<(&str, String, Option<&str>)> = format_pattern(&dtf, &dtf.pattern, t)
         .into_iter()
         .map(|(t, v)| (t, v, None))
@@ -1212,26 +1439,50 @@ fn format_to_parts(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     parts_array(agent, &parts)
 }
 
-fn range_args(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(f64, f64)> {
+/// Los dos extremos de un rango (del mismo tipo, si son de Temporal) y el formato a usar.
+fn range_args(
+    agent: &mut Agent,
+    dtf: &DateTimeFormat,
+    a: &CallArgs<'_>,
+) -> JsResult<(DateTimeFormat, f64, f64)> {
     let (s, e) = (a.arg(0), a.arg(1));
     if s.is_undefined() || e.is_undefined() {
         return agent.type_error("startDate and endDate must not be undefined");
     }
-    let x = agent.to_number(&s)?;
-    let y = agent.to_number(&e)?;
-    let x = crate::builtins::date::time_clip(x);
-    let y = crate::builtins::date::time_clip(y);
-    if x.is_nan() || y.is_nan() {
-        return agent.range_error("Invalid time value");
+    // ToDateTimeFormattable de los dos extremos (ToNumber si no son de Temporal) y
+    // SameTemporalType (PartitionDateTimeRangePattern, paso 5) antes de HandleDateTimeValue:
+    // un TimeClip(NaN) no puede tapar el TypeError de tipos distintos.
+    let (s, k1) = to_date_time_formattable(agent, s)?;
+    let (e, k2) = to_date_time_formattable(agent, e)?;
+    if k1 != k2 {
+        return agent.type_error("startDate and endDate must be of the same type");
     }
-    Ok((x, y))
+    let (f, x, _) = formattable(agent, dtf, &s)?;
+    let (_, y, _) = formattable(agent, dtf, &e)?;
+    Ok((f, x, y))
+}
+
+/// ToDateTimeFormattable ( value ): el valor (un número si no es de Temporal) y el tipo de
+/// Temporal, si lo es.
+fn to_date_time_formattable(
+    agent: &mut Agent,
+    v: Value,
+) -> JsResult<(
+    Value,
+    Option<std::mem::Discriminant<crate::builtins::temporal::TemporalData>>,
+)> {
+    if let Some(d) = crate::builtins::temporal::data_of(agent, &v) {
+        return Ok((v, Some(std::mem::discriminant(&d))));
+    }
+    let n = agent.to_number(&v)?;
+    Ok((Value::Number(n), None))
 }
 
 /// Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ) (§11.3.5).
 fn format_range(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let o = this_dtf(agent, &a.this, "formatRange")?;
     let dtf = dtf_of(agent, o);
-    let (x, y) = range_args(agent, a)?;
+    let (dtf, x, y) = range_args(agent, &dtf, a)?;
     let s: String = range_parts(&dtf, x, y).into_iter().map(|p| p.1).collect();
     Ok(str_value(&s))
 }
@@ -1240,7 +1491,7 @@ fn format_range(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn format_range_to_parts(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let o = this_dtf(agent, &a.this, "formatRangeToParts")?;
     let dtf = dtf_of(agent, o);
-    let (x, y) = range_args(agent, a)?;
+    let (dtf, x, y) = range_args(agent, &dtf, a)?;
     let parts = range_parts(&dtf, x, y);
     parts_array(agent, &parts)
 }
@@ -1373,6 +1624,8 @@ mod tests {
             time_style: None,
             pattern: pattern.into(),
             bound_format: None,
+            options: Vec::new(),
+            hc: "h12".into(),
         }
     }
 
