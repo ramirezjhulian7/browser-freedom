@@ -28,6 +28,27 @@ use crate::{DocumentOwner, WebContext};
 /// El origen desde el que se sirven los tests (`tests/wpt` montado).
 pub const ORIGIN: &str = "http://web-platform.test:8000";
 
+/// E3: el origen de los tests `.https.` (los mismos archivos; sin TLS de verdad: el runner
+/// carga del disco). Solo con `FREEDOM_WPT_HTTPS=1` (ver [`https_enabled`]).
+pub const HTTPS_ORIGIN: &str = "https://web-platform.test:8443";
+
+/// E3: ¿corre el runner los tests `.https.` (en [`HTTPS_ORIGIN`])? Opcional
+/// (`FREEDOM_WPT_HTTPS=1`) para no cambiar la cuenta de los demás directorios hasta que se
+/// decida activarlo para todos.
+pub fn https_enabled() -> bool {
+    std::env::var("FREEDOM_WPT_HTTPS").is_ok_and(|v| v == "1")
+}
+
+/// El origen desde el que se sirve el test `rel`.
+fn origin_for(rel: &str) -> &'static str {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if name.contains(".https.") {
+        HTTPS_ORIGIN
+    } else {
+        ORIGIN
+    }
+}
+
 /// Un documento de test: la ruta de WPT (con la variante), su URL y su HTML.
 #[derive(Debug, Clone)]
 pub struct TestDoc {
@@ -149,7 +170,9 @@ pub fn is_test_file(rel: &str) -> bool {
         || name.contains("-notref.")
         || name.contains("-expected.");
     // `.sub.` (sustituciones del servidor), HTTPS y HTTP/2 necesitan wptserve.
-    let server = name.contains(".sub.") || name.contains(".https.") || name.contains(".h2.");
+    let server = name.contains(".sub.")
+        || (name.contains(".https.") && !https_enabled())
+        || name.contains(".h2.");
     if support || server {
         return false;
     }
@@ -218,7 +241,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         let name = rel.rsplit('/').next().unwrap_or(rel);
         return vec![TestDoc {
             path: format!("{base}.html"),
-            url: format!("{ORIGIN}/{base}.html"),
+            url: format!("{}/{base}.html", origin_for(rel)),
             html: worker_page(&format!("new Worker({:?})", name)),
             long: meta_lines(&src)
                 .iter()
@@ -238,7 +261,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
         };
         return vec![TestDoc {
             path: rel.to_owned(),
-            url: format!("{ORIGIN}/{rel}"),
+            url: format!("{}/{rel}", origin_for(rel)),
             long: has_long_timeout(&src),
             html: src,
             encoding,
@@ -270,7 +293,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
             for v in &variants {
                 docs.push(TestDoc {
                     path: format!("{base}.{page}.html{v}"),
-                    url: format!("{ORIGIN}/{base}.{page}.html{v}"),
+                    url: format!("{}/{base}.{page}.html{v}", origin_for(rel)),
                     html: worker_page(&format!("new {ctor}({:?})", format!("{worker_js}{v}"))),
                     long,
                     encoding: Encoding::Utf8,
@@ -306,7 +329,7 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
     ));
     docs.extend(variants.into_iter().map(|v| TestDoc {
         path: format!("{base}.html{v}"),
-        url: format!("{ORIGIN}/{base}.html{v}"),
+        url: format!("{}/{base}.html{v}", origin_for(rel)),
         html: html.clone(),
         long,
         encoding: Encoding::Utf8,
@@ -489,13 +512,19 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     let g = rt.agent.realms[realm].global_object;
     bf_js::builtins::method(&mut rt.agent, g, "__freedom_report", 1, freedom_report);
     let origin = Url::parse(&format!("{ORIGIN}/"), None).expect("origen");
-    let loader =
-        crate::net::wptserve::SubLoader(FileLoader::new().mount(&origin, root.to_path_buf()));
-    let mut resources = PageResources::new(Arc::new(loader));
-    resources.overrides.insert(
-        format!("{ORIGIN}/resources/testharnessreport.js"),
-        TESTHARNESS_REPORT.to_owned(),
+    let https = Url::parse(&format!("{HTTPS_ORIGIN}/"), None).expect("origen");
+    let loader = crate::net::wptserve::SubLoader(
+        FileLoader::new()
+            .mount(&origin, root.to_path_buf())
+            .mount(&https, root.to_path_buf()),
     );
+    let mut resources = PageResources::new(Arc::new(loader));
+    for o in [ORIGIN, HTTPS_ORIGIN] {
+        resources.overrides.insert(
+            format!("{o}/resources/testharnessreport.js"),
+            TESTHARNESS_REPORT.to_owned(),
+        );
+    }
     rt.agent.set_realm_data(realm, resources);
     // E3: el runner vacía la bandeja de los workers y los espera en tiempo real.
     crate::workers::set_manual_pump(&mut rt.agent);

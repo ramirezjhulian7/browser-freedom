@@ -69,7 +69,45 @@ const BORDER: &[L] = &[
     L::BorderRightColor,
     L::BorderBottomColor,
     L::BorderLeftColor,
+    // E7: `border` reinicia `border-image` (CSS Backgrounds 3 §4.4).
+    L::BorderImageSource,
+    L::BorderImageSlice,
+    L::BorderImageWidth,
+    L::BorderImageOutset,
+    L::BorderImageRepeat,
 ];
+
+/// E7: longhands de `border-image` (CSS Backgrounds 3 §6.7).
+const BORDER_IMAGE: &[L] = &[
+    L::BorderImageSource,
+    L::BorderImageSlice,
+    L::BorderImageWidth,
+    L::BorderImageOutset,
+    L::BorderImageRepeat,
+];
+
+/// E7: `border-image`; lo que se omite vuelve a su valor inicial.
+fn border_image(input: &[ComponentValue]) -> Option<Vec<Value>> {
+    let p = super::effects::parse_border_image(input)?;
+    Some(vec![
+        p.source.map_or_else(
+            || initial_of(L::BorderImageSource),
+            Value::BorderImageSource,
+        ),
+        p.slice
+            .map_or_else(|| initial_of(L::BorderImageSlice), Value::BorderImageSlice),
+        p.width
+            .map_or_else(|| initial_of(L::BorderImageWidth), Value::BorderImageWidth),
+        p.outset.map_or_else(
+            || initial_of(L::BorderImageOutset),
+            Value::BorderImageOutset,
+        ),
+        p.repeat.map_or_else(
+            || initial_of(L::BorderImageRepeat),
+            Value::BorderImageRepeat,
+        ),
+    ])
+}
 
 /// Parsea un único component value con el parser del longhand `id`.
 fn one(id: L, v: &ComponentValue) -> Option<Value> {
@@ -166,6 +204,7 @@ fn border(input: &[ComponentValue]) -> Option<Vec<Value>> {
             out.push(retarget(&side[i], id));
         }
     }
+    out.extend(BORDER_IMAGE.iter().map(|&id| initial_of(id))); // E7
     Some(out)
 }
 
@@ -1208,6 +1247,12 @@ pub static SHORTHANDS: &[ShorthandDef] = &[
         name: "border-inline-color",
         longhands: &[L::BorderLeftColor, L::BorderRightColor],
         expand: |i| pair([L::BorderLeftColor, L::BorderRightColor], i),
+    },
+    // E7: `border-image` (CSS Backgrounds 3 §6.7).
+    ShorthandDef {
+        name: "border-image",
+        longhands: BORDER_IMAGE,
+        expand: border_image,
     },
     // E7: `mask` (CSS Masking 1 §7.10) y los alias `-webkit-mask-*` que usan los sitios.
     ShorthandDef {

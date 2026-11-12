@@ -150,7 +150,7 @@ fn device_vec(ts: &Transform, dx: f32, dy: f32) -> (f32, f32) {
 /// Aplica `filter` al grupo que `paint` pinta (con la transformación que recibe) sobre un
 /// lienzo de `canvas_w`×`canvas_h`; `ts` es la transformación del grupo. Devuelve la imagen
 /// filtrada y la posición de su esquina en el lienzo, o `None` si no queda nada que pintar.
-pub(super) fn apply(
+pub(crate) fn apply(
     f: &Filter,
     canvas_w: u32,
     canvas_h: u32,

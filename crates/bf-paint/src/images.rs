@@ -8,6 +8,7 @@
 //! un instante. Nada de esto programa trabajo: quien anima (el bucle de cuadros) pregunta.
 
 mod svg;
+pub(crate) use svg::apply_filter; // E7
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -569,6 +570,9 @@ pub fn load_images(
             }
         }
         if let Image::Url(u) = &style.list_style_image {
+            want(u.clone(), &mut urls);
+        }
+        if let Image::Url(u) = &style.border_image_source {
             want(u.clone(), &mut urls);
         }
     }

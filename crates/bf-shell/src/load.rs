@@ -400,7 +400,17 @@ pub fn fetch_document_with(
         } else {
             EncodingSource::Default
         };
-        (bf_html::parse_xml_document(&text), enc, source)
+        // E10, cambio mínimo: al navegar, un error de buena formación se informa en línea
+        // con un `parsererror` (HTML, "page load processing model for XML files").
+        let mut doc = bf_html::parse_xml_document_with_error_report(&text);
+        // El content type del documento (DOM §4.5): el de la respuesta o, sin él, el de la
+        // extensión (E10, cambio mínimo).
+        doc.content_type = match &content_type {
+            Some(ct) => ct.essence.as_str().into(),
+            None if path.ends_with(".svg") => "image/svg+xml".into(),
+            None => "application/xhtml+xml".into(),
+        };
+        (doc, enc, source)
     } else {
         let ct = content_type
             .as_ref()

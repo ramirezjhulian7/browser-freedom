@@ -2,13 +2,15 @@
 
 #![forbid(unsafe_code)]
 
+mod border_image; // E7
 pub mod builder;
 pub mod display_list;
 mod effects; // E4
+pub mod filters;
 pub mod images;
 pub mod raster;
 pub mod reftest;
-pub mod scrollbars; // E12
+pub mod scrollbars; // E12 // E7
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

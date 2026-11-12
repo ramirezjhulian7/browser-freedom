@@ -14,8 +14,8 @@
 use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bf_url::{Host, Url};
@@ -198,13 +198,15 @@ fn same_site_request(url: &Url, ctx: Option<&CookieContext>) -> bool {
     }
 }
 
-#[derive(Debug, Default)]
+/// E6: clonarla da otra referencia a la misma jarra (la usa la revalidación en segundo plano
+/// de la caché HTTP, que corre en otro hilo).
+#[derive(Debug, Default, Clone)]
 pub struct CookieJar {
-    cookies: Mutex<Vec<Cookie>>,
-    counter: Mutex<u64>,
+    cookies: Arc<Mutex<Vec<Cookie>>>,
+    counter: Arc<Mutex<u64>>,
     /// No mandar ni guardar cookies en peticiones entre sitios (opción del navegador; por
     /// defecto `false`).
-    block_third_party: AtomicBool,
+    block_third_party: Arc<AtomicBool>,
     /// E6: dónde se guardan las cookies persistentes ([`CookieJar::on_disk`]).
     file: Option<PathBuf>,
 }
@@ -501,9 +503,9 @@ impl CookieJar {
         }
         let counter = cookies.iter().map(|c| c.creation).max().unwrap_or(0);
         CookieJar {
-            cookies: Mutex::new(cookies),
-            counter: Mutex::new(counter),
-            block_third_party: AtomicBool::new(false),
+            cookies: Arc::new(Mutex::new(cookies)),
+            counter: Arc::new(Mutex::new(counter)),
+            block_third_party: Arc::new(AtomicBool::new(false)),
             file: Some(file),
         }
     }

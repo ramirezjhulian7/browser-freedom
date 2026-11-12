@@ -189,6 +189,11 @@ pub enum DisplayItem {
     /// desplazamiento del scroll.
     PushFixed,
     PopFixed,
+    /// E7: abre la capa de un elemento con `filter`, `clip-path` o `mix-blend-mode`.
+    PushEffect,
+    /// E7: cierra la capa de [`DisplayItem::PushEffect`] aplicándole el efecto (ver
+    /// [`crate::filters`]).
+    PopEffect(Box<crate::filters::Effect>),
 }
 
 /// Parámetros de una sombra de caja ya resueltos a px CSS.

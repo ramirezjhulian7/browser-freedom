@@ -24,7 +24,9 @@
 pub mod abort;
 mod character_data;
 pub mod collections;
+mod constraint_validity; // E10
 pub mod custom; // E1
+mod custom_states; // E10
 mod document;
 mod element;
 pub mod events;
@@ -252,8 +254,12 @@ pub struct Document {
     pub(crate) aborts: abort::AbortState,
     pub(crate) scripts: script::ScriptLists,
     pub(crate) live_ranges: range::LiveRanges, // E3
-    pub(crate) shadow: shadow::ShadowState,    // E1
-    pub(crate) custom: custom::CustomState,    // E1
+    /// E10: el *states set* de cada custom element (`:state()`, ver `custom_states`).
+    custom_states: HashMap<NodeId, Vec<DomString>>,
+    /// E10: la validez que anota el host (`:valid`/`:invalid`, ver `constraint_validity`).
+    constraint_validity: HashMap<NodeId, bool>,
+    pub(crate) shadow: shadow::ShadowState, // E1
+    pub(crate) custom: custom::CustomState, // E1
     /// E1: los form owners que asoció el parser (HTML §13.2.6.1, *parser inserted flag*).
     pub(crate) parser_form_owners: HashMap<NodeId, NodeId>,
 }
@@ -283,9 +289,11 @@ impl Document {
             aborts: abort::AbortState::default(),
             scripts: script::ScriptLists::default(),
             live_ranges: range::LiveRanges::default(), // E3
-            shadow: shadow::ShadowState::default(),    // E1
-            custom: custom::CustomState::default(),    // E1
-            parser_form_owners: HashMap::new(),        // E1
+            custom_states: HashMap::new(),
+            constraint_validity: HashMap::new(),    // E10
+            shadow: shadow::ShadowState::default(), // E1
+            custom: custom::CustomState::default(), // E1
+            parser_form_owners: HashMap::new(),     // E1
         };
         doc.push(NodeData::Document);
         doc

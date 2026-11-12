@@ -36,6 +36,9 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .attribute("contentType", Some(content_type), None)
         .attribute("doctype", Some(doctype), None)
         .attribute("documentElement", Some(document_element), None)
+        // E10: SVG 2 `partial interface Document { readonly attribute SVGSVGElement?
+        // rootElement; }`.
+        .attribute("rootElement", Some(root_element), None)
         .attribute("title", Some(get_title), Some(set_title))
         .attribute("head", Some(head), None)
         .attribute("body", Some(body), None)
@@ -154,6 +157,13 @@ fn doctype(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn document_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     let e = with_doc(agent, doc, |d| d.document_element());
+    Ok(wrap_opt(agent, doc, e))
+}
+
+/// E10: `Document.rootElement` (SVG 2): el document element si es un `svg` SVG, o `null`.
+fn root_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let doc = this_doc(agent, a)?;
+    let e = with_doc(agent, doc, |d| d.svg_root_element());
     Ok(wrap_opt(agent, doc, e))
 }
 
@@ -383,7 +393,11 @@ fn create_tree_walker(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `importNode(node, subtree = false)` (§4.5): una copia en este documento.
 fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'importNode' on 'Document': parameter 1",
+    )?;
     let deep = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let kind = with_doc(agent, n.doc, |d| d.get(n.node).data.clone());
     if matches!(kind, NodeData::Document) {
@@ -418,7 +432,11 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn adopt_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let n = arg_node(agent, &a.arg(0), "parameter 1")?;
+    let n = arg_node(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'adoptNode' on 'Document': parameter 1",
+    )?;
     let r = adopt_into(agent, n, doc)?;
     Ok(wrap_node(agent, r))
 }
