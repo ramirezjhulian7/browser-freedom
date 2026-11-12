@@ -675,6 +675,12 @@ pub const GROUPS: &[&str] = &[
     "css/css-overflow",
     "css/css-position",
     "css/css-images",
+    // E2: colores (CSS Color 4/5), valores y unidades, `env()`, `@property` y variables.
+    "css/css-color",
+    "css/css-values",
+    "css/css-env",
+    "css/css-properties-values-api",
+    "css/css-variables",
 ];
 
 /// ¿Puede haber tests del grupo `g` (`css/css-position`) cuya ruta contenga `flt`? Un filtro

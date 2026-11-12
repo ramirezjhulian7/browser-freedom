@@ -85,6 +85,31 @@ arriba). La columna `master` es la medición de la rama sin los cambios de la ro
 Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte con
 `writing-mode` vertical pasaba por casualidad.
 
+## E2: `color-mix()`, espacios de color, `env()`, `@property` y math functions (2026-11-12)
+
+Medido con `REFTEST_GROUPS=css/css-color,css/css-values,css/css-env,css/css-properties-values-api,css/css-variables cargo test -p bf-paint --test wpt_reftests_groups -- --ignored --test-threads=4`
+sobre `army/e2` (`master` `9a10f87`). La columna `master` es la misma rama sin los cambios de
+bf-style de la ronda (mismo checkout de WPT y misma máquina). Los grupos entran en `GROUPS`.
+
+| Directorio | master | army/e2 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/css-color | 144/296 (48.6 %) | 232/296 (78.4 %) | 81 | 0 |
+| css/css-values | 83/167 (49.7 %) | 83/167 (49.7 %) | 330 | 0 |
+| css/css-env | – | – | 11 | 0 |
+| css/css-properties-values-api | 1/6 (16.7 %) | 3/6 (50.0 %) | 111 | 0 |
+| css/css-variables | 156/181 (86.2 %) | 156/181 (86.2 %) | 64 | 0 |
+| **Total** | 384/650 (59.1 %) | 474/650 (72.9 %) | 597 | 0 |
+
+92 tests pasan de "fail" a "pass". Pasan de "pass" a "fail"
+`css/css-color/color-mix-currentcolor-002.html` y
+`color-mix-currentcolor-nested-for-color-property.html`: antes la prueba y la referencia eran
+inválidas por igual (las dos pintaban el color de reserva); ahora la referencia es válida y la
+prueba usa `currentcolor` dentro de `color-mix()`, que todavía no se admite. Lo que más falla en
+`css-color`: sintaxis relativa (`relative-currentcolor-*`), `display-p3-linear`, imágenes con
+perfil de color (`tagged-images-*`), `contrast-color()` y los `deprecated-sameas-*` (colores
+del sistema obsoletos). Las math functions, `env()` y `@property` se miden sobre todo con
+testharness (`needs-js`); sus pruebas propias están en `bf-style/tests/modern.rs`.
+
 ## Tests con expectativa dudosa
 
 - `css/CSS2/text/letter-spacing-080.xht`: el test pide `letter-spacing: 6em` con `font: 20px`
