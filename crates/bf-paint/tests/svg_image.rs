@@ -510,3 +510,53 @@ fn filter_merge_and_composite() {
     assert_eq!(px(&p, 50, 50), (0, 0, 255, 255));
     assert_eq!(px(&p, 10, 10).3, 0);
 }
+
+/// Las celdas de un `pattern` no se mezclan en sus bordes (SVG 2 §14.4) con una transformación
+/// que gira la tesela (`matrix(-2 0 0 1 …)`, como `css-transforms/matrix/svg-matrix-005`): la
+/// tesela, ya a la resolución de destino, se muestrea sin el bicúbico de tiny-skia, que mezclaba
+/// 1/18 de cada vecino incluso en el centro de los texels.
+#[test]
+fn pattern_cells_have_no_seams() {
+    let p = raster(
+        &format!(
+            "<svg {SVG_NS} width='100' height='100'>\
+             <pattern id='p' patternUnits='userSpaceOnUse' width='50' height='100'>\
+             <rect width='25' height='100' fill='#f0f'/>\
+             <rect x='25' width='25' height='100' fill='#0f0'/></pattern>\
+             <rect width='50' height='100' fill='url(#p)' transform='matrix(-2 0 0 1 100 0)'/></svg>"
+        ),
+        100,
+        100,
+    );
+    // La celda verde queda a la izquierda (x 0..50) y la fucsia a la derecha.
+    for x in [0, 1, 48, 49] {
+        assert_eq!(px(&p, x, 50), (0, 255, 0, 255), "x = {x}");
+    }
+    for x in [50, 51, 98, 99] {
+        assert_eq!(px(&p, x, 50), (255, 0, 255, 255), "x = {x}");
+    }
+}
+
+/// Un rectángulo rojo de proporción 2:1 sin `width` ni `height`, solo `viewBox`, como data URL.
+const RATIO_ONLY: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 1'%3E%3Crect width='2' height='1' fill='red'/%3E%3C/svg%3E";
+
+/// Un SVG con solo `viewBox` no tiene dimensiones naturales, solo proporción (CSS Images 3
+/// §5.3.1; SVG 2 §8.2): con ancho y alto `auto` ocupa el ancho disponible (CSS 2.2 §10.3.2), no
+/// 300×150. Como `css-flexbox/align-items-007`, también como ítem de una columna flex centrada.
+#[test]
+fn img_svg_with_only_view_box() {
+    for container in [
+        "style='width:16px'",
+        "style='display:flex;flex-direction:column;align-items:center;width:16px;height:20px'",
+    ] {
+        let p = page(&format!(
+            "<!DOCTYPE html><body style='margin:0'><div {container}>\
+             <img src=\"{RATIO_ONLY}\" style='display:block'></div>"
+        ));
+        // 16×8.
+        assert_eq!(px(&p, 0, 0), (255, 0, 0, 255), "{container}");
+        assert_eq!(px(&p, 15, 7), (255, 0, 0, 255), "{container}");
+        assert_eq!(px(&p, 15, 9), (255, 255, 255, 255), "{container}");
+        assert_eq!(px(&p, 17, 3), (255, 255, 255, 255), "{container}");
+    }
+}

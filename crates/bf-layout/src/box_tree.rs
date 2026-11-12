@@ -33,7 +33,8 @@ pub enum BoxKind {
     InlineBlock,
     /// Elemento reemplazado; `natural` es su tamaño natural (o el tamaño por defecto de 300×150).
     /// `natural`: dimensiones naturales (o las de por defecto); `ratio`: relación de aspecto
-    /// natural (ancho / alto) si la tiene.
+    /// natural (ancho / alto) si la tiene. `natural` de 0×0 con `ratio` es una imagen sin
+    /// dimensiones naturales, solo con proporción ([`ImageState::Ratio`]).
     Replaced { natural: Size, ratio: Option<f32> },
     /// `<br>`: salto de línea forzado.
     LineBreak,
@@ -180,6 +181,9 @@ impl LayoutReport {
 pub enum ImageState {
     /// Decodificada, con sus dimensiones naturales en px.
     Loaded(Size),
+    /// Decodificada sin ancho ni alto naturales pero con relación de aspecto natural (ancho /
+    /// alto): un SVG con solo `viewBox` (CSS Images 3 §5.3.1; SVG 2 §8.2, "intrinsic sizing").
+    Ratio(f32),
     /// No se pudo cargar o decodificar (o el formato no está soportado).
     Broken,
 }
@@ -293,6 +297,13 @@ fn replaced_size(doc: &Document, node: NodeId, images: &ImageSizes) -> Option<(S
     {
         let ratio = (s.width > 0.0 && s.height > 0.0).then(|| s.width / s.height);
         return Some((*s, ratio));
+    }
+    if is_image_element(el)
+        && let Some(&ImageState::Ratio(r)) = images.get(&node)
+        && r > 0.0
+        && r.is_finite()
+    {
+        return Some((Size::default(), Some(r)));
     }
     // E1: las dimensiones naturales de un `canvas` son las de su bitmap (HTML §4.12.5), y sin
     // bitmap publicado, las de sus atributos `width`/`height` (300×150 por defecto).

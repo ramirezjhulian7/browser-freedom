@@ -583,6 +583,12 @@ impl<'a> Layout<'a> {
         // Con `<ratio>` (sin `auto`) la relación se aplica a la caja de `box-sizing`; la
         // natural, al content box.
         let bb = s.box_sizing == BoxSizing::BorderBox;
+        // Sin dimensiones naturales y con proporción (un SVG con solo `viewBox`): con ancho y
+        // alto `auto`, el ancho es el del containing block, como un bloque en flujo (CSS 2.2
+        // §10.3.2, la sugerencia para este caso). Sin ese ancho (al medir tamaños intrínsecos,
+        // `cb.width` 0) se usa el tamaño de objeto por defecto, 300×150, con `contain` (CSS
+        // Images 3 §5.3.2, "default sizing algorithm").
+        let ratio_only = natural.width <= 0.0 && natural.height <= 0.0 && ratio.is_some();
         let (natural, ratio, ratio_bb) = match s.aspect_ratio.preferred() {
             Some(r) if !s.aspect_ratio.auto || ratio.is_none() => {
                 let bb = bb && !s.aspect_ratio.auto;
@@ -637,6 +643,20 @@ impl<'a> Layout<'a> {
         let (hmin, hmax) = height_limits(s, cb.height, ev);
         let (wmax, hmax) = (wmax.max(wmin), hmax.max(hmin));
         match (sw, sh, ratio) {
+            (None, None, Some(r)) if ratio_only && r > 0.0 => {
+                let w = if cb.width > 0.0 {
+                    let margins = margin_value(&s.margin_left, cb.width).unwrap_or(0.0)
+                        + margin_value(&s.margin_right, cb.width).unwrap_or(0.0);
+                    (cb.width - margins - eh).max(0.0)
+                } else {
+                    (150.0 * r).min(300.0)
+                };
+                let (w, h) = constrain_with_ratio(w, w_to_h(w, r), (wmin, wmax), (hmin, hmax));
+                LayoutSize {
+                    width: w,
+                    height: h,
+                }
+            }
             (None, None, Some(_)) => {
                 let (w, h) = (natural.width, natural.height);
                 let (w, h) = constrain_with_ratio(w, h, (wmin, wmax), (hmin, hmax));
