@@ -328,6 +328,69 @@ fn dynamic_state_and_scope() {
     assert_eq!(select_in(&d, ":focus-visible", &ctx, &ns), ["i2"]);
 }
 
+/// E10: `:state(<ident>)` (HTML §4.13.7.4) contra el *states set* que guarda `bf_dom`.
+#[test]
+fn custom_state_pseudo_class() {
+    let ns = NamespaceMap::default();
+    for selector in [
+        ":state()",
+        ":state(a b)",
+        ":state(\"a\")",
+        ":state(1)",
+        ":state(a, b)",
+    ] {
+        assert!(
+            parse_selector_list(selector, &ns).is_err(),
+            "debería ser inválido: {selector:?}"
+        );
+    }
+    let list = parse_selector_list("my-el:state(  open )", &ns).unwrap();
+    assert_eq!(list.to_string(), "my-el:state(open)");
+    assert_eq!(list.0[0].specificity(), Specificity(0, 1, 1));
+
+    let mut d = doc(DOC);
+    let custom = node_by_id(&d, "custom");
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, ":state(open)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    let v = d.version();
+    assert!(d.add_custom_state(custom, "open"));
+    assert!(!d.add_custom_state(custom, "open"));
+    assert!(d.add_custom_state(custom, "Busy"));
+    assert!(
+        d.version() > v,
+        "un cambio del states set invalida el estilo"
+    );
+    assert_eq!(d.custom_states(custom), ["open", "Busy"]);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(select_in(&d, ":state(open)", &ctx, &ns), ["custom"]);
+    assert_eq!(select_in(&d, "my-el:state(Busy)", &ctx, &ns), ["custom"]);
+    // Distingue mayúsculas.
+    assert_eq!(
+        select_in(&d, ":state(busy)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        select_in(&d, ":not(:state(open))#custom", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    assert!(d.delete_custom_state(custom, "open"));
+    assert!(!d.delete_custom_state(custom, "open"));
+    assert_eq!(
+        select_in(&d, ":state(open)", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    let v = d.version();
+    d.clear_custom_states(custom);
+    assert!(d.custom_states(custom).is_empty());
+    assert!(d.version() > v);
+    let v = d.version();
+    d.clear_custom_states(custom);
+    assert_eq!(d.version(), v, "vaciar un set vacío no cambia nada");
+}
+
 #[test]
 fn root_quirks_and_namespaces() {
     let d = doc("<!DOCTYPE html><html id=h><body id=b class=Foo><p id=p class=Bar></p>");
@@ -405,4 +468,127 @@ fn collects_declarations_through_layers_media_supports_and_nesting() {
         .map(|m| m.declaration.name.clone())
         .collect();
     assert_eq!(p2, ["margin", "border", "display", "gap"]);
+}
+
+/// E10: `:valid`/`:invalid` (HTML §4.16.3) en controles, `form` y `fieldset`, con la validez
+/// que anota el host para los form-associated custom elements.
+#[test]
+fn valid_and_invalid_pseudo_classes() {
+    let ns = NamespaceMap::default();
+    let list = parse_selector_list("form:valid, fieldset:INVALID", &ns).unwrap();
+    assert_eq!(list.to_string(), "form:valid, fieldset:invalid");
+    assert_eq!(list.0[0].specificity(), Specificity(0, 1, 1));
+
+    let mut d = doc(r#"<!DOCTYPE html>
+<form id=f1>
+  <input id=a required>
+  <input id=b required value=x>
+  <input id=c required disabled>
+  <input id=h type=hidden required>
+  <fieldset id=fs1><input id=d type=checkbox required></fieldset>
+  <fieldset id=fs2><input id=e type=checkbox required checked></fieldset>
+  <select id=s1 required><option value="">elige</option><option>uno</option></select>
+  <select id=s2 required><option value="">elige</option><option selected>uno</option></select>
+  <textarea id=t required></textarea>
+  <input id=r1 type=radio name=g required><input id=r2 type=radio name=g>
+  <input id=ro required readonly>
+  <button id=btn></button><button id=bb type=button></button>
+  <datalist><input id=dl required></datalist>
+</form>
+<form id=f2><fieldset id=fs3><x-face id=face></x-face></fieldset></form>
+<form id=f3></form>
+<input id=out required form=f3>
+<form id=f4><input id=ok value=v></form>
+<p id=p></p>"#);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, ":invalid", &ctx, &ns),
+        ["f1", "a", "fs1", "d", "s1", "t", "r1", "r2", "f3", "out"]
+    );
+    assert_eq!(
+        select_in(&d, ":valid", &ctx, &ns),
+        ["b", "fs2", "e", "s2", "btn", "f2", "fs3", "f4", "ok"]
+    );
+
+    // Un form-associated custom element: el host anota su validez (`setValidity()`).
+    let face = node_by_id(&d, "face");
+    d.set_custom_element_state(face, bf_dom::custom::CustomElementState::Custom);
+    d.set_form_associated(face, true);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, "#f2:valid, #fs3:valid, #face:valid", &ctx, &ns),
+        ["f2", "fs3", "face"]
+    );
+    let v = d.version();
+    d.set_constraint_validity(face, Some(false));
+    assert!(d.version() > v, "un cambio de validez invalida el estilo");
+    let v = d.version();
+    d.set_constraint_validity(face, Some(false));
+    assert_eq!(d.version(), v, "anotar lo mismo no cambia nada");
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, "#f2:invalid, #fs3:invalid, #face:invalid", &ctx, &ns),
+        ["f2", "fs3", "face"]
+    );
+    // `readonly` lo excluye de la validación (HTML §4.13.7.4).
+    let mut ro = doc("<!DOCTYPE html><form id=f><x-face id=face readonly></x-face></form>");
+    let ro_face = node_by_id(&ro, "face");
+    ro.set_custom_element_state(ro_face, bf_dom::custom::CustomElementState::Custom);
+    ro.set_form_associated(ro_face, true);
+    ro.set_constraint_validity(ro_face, Some(false));
+    let ctx = MatchContext::for_document(&ro);
+    assert_eq!(select_in(&ro, ":valid", &ctx, &ns), ["f"]);
+    assert_eq!(select_in(&ro, ":invalid", &ctx, &ns), Vec::<String>::new());
+    // Quitar la anotación vuelve al cálculo propio.
+    d.set_constraint_validity(face, None);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(select_in(&d, "#face:valid", &ctx, &ns), ["face"]);
+}
+
+/// E10: los selectores guardan el prefijo de namespace y lo serializan como se escribió
+/// (CSSOM §6.7.2, `css/cssom/serialize-namespaced-type-selectors.html`).
+#[test]
+fn namespace_prefixes_serialize_as_written() {
+    let mut map = NamespaceMap::default();
+    map.prefixes.insert("ns".into(), "urn:ns".into());
+    map.prefixes.insert("d".into(), "urn:default".into());
+    let ser = |s: &str, map: &NamespaceMap| parse_selector_list(s, map).unwrap().to_string();
+    for (selector, expected) in [
+        ("e", "e"),
+        ("*", "*"),
+        ("|e", "|e"),
+        ("|*", "|*"),
+        ("*|e", "*|e"),
+        ("*|*", "*|*"),
+        ("ns|e", "ns|e"),
+        ("ns|*", "ns|*"),
+        ("ns|e.c", "ns|e.c"),
+        (":not(ns|e)", ":not(ns|e)"),
+        ("[ns|attr]", "[ns|attr]"),
+        ("[*|attr=\"v\"]", "[*|attr=\"v\"]"),
+        ("[|attr]", "[attr]"),
+    ] {
+        assert_eq!(ser(selector, &map), expected, "{selector}");
+    }
+    // Con default namespace: sin prefijo sigue sin prefijo; los prefijos escritos se conservan.
+    map.default = Some("urn:default".into());
+    for (selector, expected) in [
+        ("e", "e"),
+        ("*", "*"),
+        ("*|e", "*|e"),
+        ("|e", "|e"),
+        ("d|e", "d|e"),
+        ("ns|e", "ns|e"),
+    ] {
+        assert_eq!(ser(selector, &map), expected, "{selector}");
+    }
+    // El significado no cambia: `*|a` casa en cualquier namespace aunque haya default.
+    let s = doc("<!DOCTYPE html><svg><a id=svga></a></svg><a id=htmla></a>");
+    let ctx = MatchContext::for_document(&s);
+    let html = NamespaceMap {
+        default: Some("http://www.w3.org/1999/xhtml".into()),
+        ..NamespaceMap::default()
+    };
+    assert_eq!(select_in(&s, "*|a", &ctx, &html), ["svga", "htmla"]);
+    assert_eq!(select_in(&s, "a", &ctx, &html), ["htmla"]);
 }

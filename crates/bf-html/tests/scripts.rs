@@ -918,3 +918,46 @@ fn load_waits_for_browser_resources() {
     assert_eq!(p.status(), ParserStatus::Complete);
     assert_eq!(host.log, ["win:load@document(complete)"]);
 }
+
+// --- E10: aviso al host por los `link` que inserta el parser ---
+
+/// Host que anota los `link` de los que se entera (con su `href` y si ya hay un `body`).
+struct LinkHost {
+    log: Vec<String>,
+}
+
+impl bf_dom::events::ScriptHost for LinkHost {
+    fn call_listener(&mut self, _: &mut Document, _: u64, _: &mut bf_dom::events::Event) -> bool {
+        false
+    }
+}
+
+impl ScriptHost for LinkHost {
+    fn execute(&mut self, parser: &mut Parser, _: NodeId) {
+        parser.write(self, &"<link href=w>".into()).unwrap();
+    }
+
+    fn link_inserted(&mut self, parser: &mut Parser, link: NodeId) {
+        let doc = parser.document();
+        assert!(doc.is_connected(link));
+        let href = doc.element(link).and_then(|e| e.attr("href")).unwrap_or("");
+        let body = doc
+            .inclusive_descendants(doc.root())
+            .into_iter()
+            .any(|n| doc.element(n).is_some_and(|e| e.is_html("body")));
+        self.log.push(format!("{href}:{body}"));
+    }
+}
+
+#[test]
+fn parser_reports_inserted_links() {
+    let mut host = LinkHost { log: Vec::new() };
+    parse_with(
+        &mut host,
+        "<link href=a><template><link href=t></template><svg><link href=s/></svg>\
+         <script>1</script><p><link href=b>",
+    );
+    // En orden y apenas se insertan; no los del contenido del `template` ni los de otro
+    // namespace; sí el que escribe `document.write`.
+    assert_eq!(host.log, ["a:false", "w:true", "b:true"]);
+}

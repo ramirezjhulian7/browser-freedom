@@ -9,4 +9,8 @@ pub mod xml;
 
 pub use tree_builder::script::{Parser, ParserStatus, ScriptDisposition, ScriptHost};
 pub use tree_builder::{FragmentContext, ParseOptions, parse_document, parse_fragment};
-pub use xml::parse_xml_document;
+pub use xml::{
+    PARSERERROR_NAMESPACE, XmlError, parse_xml, parse_xml_document,
+    parse_xml_document_with_error_report, parse_xml_inert, parse_xml_partial,
+    parse_xml_partial_with, parsererror_document,
+};

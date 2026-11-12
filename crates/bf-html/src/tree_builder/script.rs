@@ -50,6 +50,15 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
     fn execute(&mut self, doc: &mut Parser, script: NodeId) {
         let _ = (doc, script);
     }
+
+    /// E10: el parser insertó el elemento `link` del namespace HTML en el documento (ya está
+    /// conectado y tiene sus atributos). Es el momento en que el `link` "becomes
+    /// browsing-context connected" (HTML §4.6.7) y el host puede buscar el recurso y, al
+    /// terminar, disparar `load`/`error` en él. Se llama al volver del tree builder, antes de
+    /// procesar el token siguiente.
+    fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
+        let _ = (doc, link);
+    }
 }
 
 impl ScriptHost for NoScript {}
@@ -314,6 +323,12 @@ impl Parser {
                 return;
             };
             self.b.process_token(tok);
+            for link in std::mem::take(&mut self.b.inserted_links) {
+                host.link_inserted(self, link);
+            }
+            if self.generation != generation {
+                return;
+            }
             if let Some(script) = self.b.script_end.take() {
                 self.script_end_tag(host, script);
             }

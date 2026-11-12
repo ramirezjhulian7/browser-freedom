@@ -25,14 +25,21 @@ pub struct NamespaceMap {
 }
 
 /// Restricción de namespace de un type/universal selector.
+///
+/// E10: además de la URL se guarda cómo se escribió el prefijo, para serializar el selector
+/// (CSSOM §6.7.2, "serialize a simple selector") sin cambiar su significado al volver a
+/// parsearlo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NsConstraint {
-    /// Sin prefijo y sin default namespace, o `*|`.
+    /// Sin prefijo y sin default namespace.
     Any,
+    /// `*|E`: cualquier namespace, escrito explícitamente.
+    ExplicitAny,
     /// `|E`: elementos sin namespace.
     None,
-    /// Un namespace concreto (URL).
-    Url(String),
+    /// Un namespace concreto (URL). `prefix` es el prefijo escrito (`ns|E`), o `None` si es
+    /// el default namespace sin prefijo (`E` con `@namespace "url"`).
+    Url { url: String, prefix: Option<String> },
 }
 
 /// Restricción de namespace de un atributo.
@@ -42,7 +49,8 @@ pub enum AttrNs {
     None,
     /// `*|attr`.
     Any,
-    Url(String),
+    /// `prefix|attr` (E10: con el prefijo escrito, para serializar).
+    Url { url: String, prefix: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +147,13 @@ pub enum PseudoClass {
     /// `:heading` (vacío) o `:heading(<integer>#)` de HTML: elementos `h1`–`h6` con esos
     /// niveles.
     Heading(Vec<i32>),
+    /// E10: `:state(<ident>)` (HTML §4.13.7.4): custom elements cuyo *states set* contiene
+    /// el identificador.
+    State(String),
+    /// E10: `:valid` y `:invalid` (HTML §4.16.3): candidatos para la validación de
+    /// restricciones que las satisfacen (o no), y los `form` y `fieldset` según sus controles.
+    Valid,
+    Invalid,
     /// E1: `:host` y `:host(<compound-selector>)` (CSS Scoping §3.2.1).
     Host(Option<SelectorList>),
     /// E1: `:host-context(<compound-selector>)`.
@@ -454,11 +469,18 @@ impl fmt::Display for ComplexSelector {
     }
 }
 
+/// E10: el prefijo de namespace de un type/universal selector tal como se escribió (CSSOM
+/// §6.7.2). Como Gecko y Blink, `*|` y `ns|` se conservan aunque el prefijo apunte al
+/// default namespace, para que el selector serializado signifique lo mismo al reparsearlo.
 fn write_ns(f: &mut fmt::Formatter<'_>, ns: &NsConstraint) -> fmt::Result {
     match ns {
-        NsConstraint::Any => Ok(()),
+        NsConstraint::Any | NsConstraint::Url { prefix: None, .. } => Ok(()),
+        NsConstraint::ExplicitAny => f.write_str("*|"),
         NsConstraint::None => f.write_str("|"),
-        NsConstraint::Url(url) => write!(f, "{{{url}}}|"),
+        NsConstraint::Url {
+            prefix: Some(prefix),
+            ..
+        } => write!(f, "{prefix}|"),
     }
 }
 
@@ -480,7 +502,7 @@ impl fmt::Display for Simple {
                 match &a.ns {
                     AttrNs::None => {}
                     AttrNs::Any => f.write_str("*|")?,
-                    AttrNs::Url(url) => write!(f, "{{{url}}}|")?,
+                    AttrNs::Url { prefix, .. } => write!(f, "{prefix}|")?,
                 }
                 f.write_str(&a.name)?;
                 if let Some((op, value, flag)) = &a.matcher {
@@ -566,6 +588,7 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
             let levels: Vec<String> = levels.iter().map(ToString::to_string).collect();
             return write!(f, ":heading({})", levels.join(", "));
         }
+        PseudoClass::State(state) => return write!(f, ":state({state})"),
         PseudoClass::Dir(d) => {
             return f.write_str(match d {
                 Dir::Ltr => ":dir(ltr)",
@@ -599,6 +622,8 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
         PseudoClass::PlaceholderShown => "placeholder-shown",
         PseudoClass::Scope => "scope",
         PseudoClass::Defined => "defined",
+        PseudoClass::Valid => "valid",
+        PseudoClass::Invalid => "invalid",
     };
     write!(f, ":{simple}")
 }
