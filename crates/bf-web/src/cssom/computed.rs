@@ -158,6 +158,7 @@ fn resolved(
             | "right"
             | "bottom"
             | "left"
+            | "transform" // E4
     );
     if !layout_dependent || pseudo.is_some() || style.display == Display::None {
         return computed;
@@ -227,6 +228,15 @@ fn used_value(
                 "bottom" => px(cb.bottom() - r.bottom()),
                 _ => px(cb.right() - r.right()),
             }
+        }
+        // E4: CSS Transforms 1 §9: la matriz de `transform` (sin el origen), con los porcentajes
+        // resueltos contra la border box.
+        "transform" => {
+            if style.transform.is_none() {
+                return Some("none".to_owned());
+            }
+            let m = style.transform.matrix(f.rect.width, f.rect.height);
+            bf_style::properties::transform::matrix_css(&m)
         }
         _ => return None,
     })

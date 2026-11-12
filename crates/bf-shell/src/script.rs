@@ -497,6 +497,9 @@ pub struct Engine {
     reported_rejections: usize,
     /// Los tamaños de las imágenes del último layout (para el [`ShellLayout`]).
     images: Rc<RefCell<bf_layout::ImageSizes>>,
+    /// Las cabeceras `Cross-Origin-Opener-Policy` y `Cross-Origin-Embedder-Policy` de la
+    /// respuesta de la navegación ([`Engine::set_navigation_policies`]).
+    navigation_policies: (Option<String>, Option<String>),
 }
 
 impl Engine {
@@ -523,7 +526,15 @@ impl Engine {
             rejections,
             reported_rejections: 0,
             images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
+            navigation_policies: (None, None),
         }
+    }
+
+    /// E4: las cabeceras COOP y COEP de la respuesta de la navegación (HTML §7.1.3.2 y
+    /// §7.1.4.4); [`Engine::parse`] las pasa a la ventana al crearla, para
+    /// `crossOriginIsolated` y la política de inserción de sus workers.
+    pub fn set_navigation_policies(&mut self, coop: Option<&str>, coep: Option<&str>) {
+        self.navigation_policies = (coop.map(str::to_owned), coep.map(str::to_owned));
     }
 
     /// Un motor que escribe la consola en stderr (línea de comandos).
@@ -697,6 +708,14 @@ impl Engine {
         }
         let realm = self.realm;
         let agent = &mut self.rt.agent;
+        let (coop, coep) = &self.navigation_policies;
+        bf_web::workers::isolation::set_document_policies(
+            agent,
+            realm,
+            url,
+            coop.as_deref(),
+            coep.as_deref(),
+        );
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
@@ -1036,6 +1055,31 @@ impl Engine {
         n
     }
 
+    /// E4: ¿hay callbacks de `requestAnimationFrame` esperando un cuadro, o animaciones y
+    /// transiciones CSS en curso?
+    pub fn wants_frame(&self) -> bool {
+        self.rt.agent.has_animation_frame_callbacks()
+            || (self.has_window()
+                && bf_web::bom::animation::wants_frame(&self.rt.agent, self.realm, false))
+    }
+
+    /// E4: el paso de "update the rendering" (HTML §8.1.7.3, paso 16) que corre los callbacks
+    /// de animation frame (§8.11.1) con la hora del cuadro.
+    pub fn run_animation_frames(&mut self) {
+        let now = self.rt.agent.host.hooks.now();
+        self.rt.agent.options.deadline = Some(Instant::now() + TASK_DEADLINE);
+        // "Update animations and send events" antes de los callbacks (HTML §8.1.7.3).
+        if self.has_window() {
+            bf_web::bom::animation::update_and_send_events(&mut self.rt.agent, self.realm);
+        }
+        let r = self.rt.run_animation_frames(now);
+        self.rt.agent.options.deadline = None;
+        if let Err(e) = r {
+            self.report_error(&e);
+        }
+        self.flush_rejections();
+    }
+
     /// Cuánto falta para el próximo temporizador: `None` si no hay ninguno.
     pub fn next_wake(&mut self) -> Option<Duration> {
         let at = self.rt.next_wake()?;
@@ -1103,6 +1147,27 @@ mod tests {
         );
         assert_eq!(texts(&log), ["uno x", "dos 2"]);
         assert_eq!(engine.counts(), (2, 0));
+    }
+
+    /// E4: las cabeceras COOP/COEP de la navegación llegan a la ventana (HTML §7.1.3, §7.1.4).
+    #[test]
+    fn navigation_policies_make_the_window_isolated() {
+        let run = |coop: Option<&str>, coep: Option<&str>| {
+            let (mut engine, log) = engine_with_log();
+            engine.set_navigation_policies(coop, coep);
+            let url = Url::parse("https://example.test/", None).unwrap();
+            let env = env();
+            engine.parse(
+                "<script>console.log(String(crossOriginIsolated))</script>",
+                &url,
+                loader(&env),
+                &env,
+            );
+            texts(&log)
+        };
+        assert_eq!(run(Some("same-origin"), Some("require-corp")), ["true"]);
+        assert_eq!(run(Some("same-origin"), None), ["false"]);
+        assert_eq!(run(None, None), ["false"]);
     }
 
     #[test]

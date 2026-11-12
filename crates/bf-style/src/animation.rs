@@ -19,8 +19,7 @@ use bf_dom::{Document, NodeId};
 use crate::StyleMap;
 use crate::cascade::is_supported;
 use crate::properties::animations::{
-    AnimationDirection, FillMode, PlayState, TimingFunction, TransitionBehavior,
-    TransitionProperty,
+    AnimationDirection, FillMode, PlayState, TimingFunction, TransitionBehavior, TransitionProperty,
 };
 use crate::properties::shorthands::shorthand_by_name;
 use crate::properties::transform::{Mat4, Transform, TransformFunction, matrix_css};
@@ -79,7 +78,11 @@ fn lerp_color(a: &Color, b: &Color, current: (Rgba, Rgba), p: f64) -> Color {
 }
 
 /// Interpola dos funciones del mismo tipo (CSS Transforms 1 §9).
-fn lerp_function(a: &TransformFunction, b: &TransformFunction, p: f64) -> Option<TransformFunction> {
+fn lerp_function(
+    a: &TransformFunction,
+    b: &TransformFunction,
+    p: f64,
+) -> Option<TransformFunction> {
     use TransformFunction as T;
     Some(match (a, b) {
         (
@@ -90,7 +93,10 @@ fn lerp_function(a: &TransformFunction, b: &TransformFunction, p: f64) -> Option
                 z: az,
             },
             T::Translate {
-                x: bx, y: by, z: bz, ..
+                x: bx,
+                y: by,
+                z: bz,
+                ..
             },
         ) => T::Translate {
             name: *name,
@@ -106,7 +112,10 @@ fn lerp_function(a: &TransformFunction, b: &TransformFunction, p: f64) -> Option
                 z: az,
             },
             T::Scale {
-                x: bx, y: by, z: bz, ..
+                x: bx,
+                y: by,
+                z: bz,
+                ..
             },
         ) => T::Scale {
             name: *name,
@@ -136,14 +145,7 @@ fn lerp_function(a: &TransformFunction, b: &TransformFunction, p: f64) -> Option
             z: *z,
             angle: lerp(*aa, *ba, p),
         },
-        (
-            T::Skew {
-                name,
-                x: ax,
-                y: ay,
-            },
-            T::Skew { x: bx, y: by, .. },
-        ) => T::Skew {
+        (T::Skew { name, x: ax, y: ay }, T::Skew { x: bx, y: by, .. }) => T::Skew {
             name: *name,
             x: lerp(*ax, *bx, p),
             y: lerp(*ay, *by, p),
@@ -267,21 +269,22 @@ pub fn lerp_transform(a: &Transform, b: &Transform, p: f64, size: (f32, f32)) ->
     let neutral_list = |list: &[TransformFunction]| -> Option<Vec<TransformFunction>> {
         list.iter().map(neutral).collect()
     };
-    let (fa, fb): (Vec<TransformFunction>, Vec<TransformFunction>) = if fa.is_empty() && fb.is_empty() {
-        return Transform::default();
-    } else if fa.is_empty() {
-        match neutral_list(fb) {
-            Some(n) => (n, fb.clone()),
-            None => (Vec::new(), fb.clone()),
-        }
-    } else if fb.is_empty() {
-        match neutral_list(fa) {
-            Some(n) => (fa.clone(), n),
-            None => (fa.clone(), Vec::new()),
-        }
-    } else {
-        (fa.clone(), fb.clone())
-    };
+    let (fa, fb): (Vec<TransformFunction>, Vec<TransformFunction>) =
+        if fa.is_empty() && fb.is_empty() {
+            return Transform::default();
+        } else if fa.is_empty() {
+            match neutral_list(fb) {
+                Some(n) => (n, fb.clone()),
+                None => (Vec::new(), fb.clone()),
+            }
+        } else if fb.is_empty() {
+            match neutral_list(fa) {
+                Some(n) => (fa.clone(), n),
+                None => (fa.clone(), Vec::new()),
+            }
+        } else {
+            (fa.clone(), fb.clone())
+        };
     if fa.len() == fb.len() {
         let pairwise: Option<Vec<TransformFunction>> = fa
             .iter()
@@ -363,33 +366,35 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
         (V::MinHeight(x), V::MinHeight(y)) => size_v(x, y).map(V::MinHeight),
         (V::MaxWidth(x), V::MaxWidth(y)) => max_v(x, y).map(V::MaxWidth),
         (V::MaxHeight(x), V::MaxHeight(y)) => max_v(x, y).map(V::MaxHeight),
-        (V::PaddingTop(x), V::PaddingTop(y)) => {
-            Some(V::PaddingTop(NonNegative(clamp0(lerp_lp(&nn(&x.0), &y.0, p)))))
-        }
+        (V::PaddingTop(x), V::PaddingTop(y)) => Some(V::PaddingTop(NonNegative(clamp0(lerp_lp(
+            &nn(&x.0),
+            &y.0,
+            p,
+        ))))),
         (V::PaddingRight(x), V::PaddingRight(y)) => {
             Some(V::PaddingRight(NonNegative(clamp0(lerp_lp(&x.0, &y.0, p)))))
         }
-        (V::PaddingBottom(x), V::PaddingBottom(y)) => {
-            Some(V::PaddingBottom(NonNegative(clamp0(lerp_lp(&x.0, &y.0, p)))))
-        }
+        (V::PaddingBottom(x), V::PaddingBottom(y)) => Some(V::PaddingBottom(NonNegative(clamp0(
+            lerp_lp(&x.0, &y.0, p),
+        )))),
         (V::PaddingLeft(x), V::PaddingLeft(y)) => {
             Some(V::PaddingLeft(NonNegative(clamp0(lerp_lp(&x.0, &y.0, p)))))
         }
         (V::BorderTopWidth(x), V::BorderTopWidth(y)) => Some(V::BorderTopWidth(BorderWidth(
             Length::px(lerp(x.px(), y.px(), p).max(0.0)),
         ))),
-        (V::BorderRightWidth(x), V::BorderRightWidth(y)) => Some(V::BorderRightWidth(
-            BorderWidth(Length::px(lerp(x.px(), y.px(), p).max(0.0))),
-        )),
+        (V::BorderRightWidth(x), V::BorderRightWidth(y)) => Some(V::BorderRightWidth(BorderWidth(
+            Length::px(lerp(x.px(), y.px(), p).max(0.0)),
+        ))),
         (V::BorderBottomWidth(x), V::BorderBottomWidth(y)) => Some(V::BorderBottomWidth(
             BorderWidth(Length::px(lerp(x.px(), y.px(), p).max(0.0))),
         )),
-        (V::BorderLeftWidth(x), V::BorderLeftWidth(y)) => Some(V::BorderLeftWidth(
-            BorderWidth(Length::px(lerp(x.px(), y.px(), p).max(0.0))),
-        )),
-        (V::OutlineWidth(x), V::OutlineWidth(y)) => Some(V::OutlineWidth(BorderWidth(
+        (V::BorderLeftWidth(x), V::BorderLeftWidth(y)) => Some(V::BorderLeftWidth(BorderWidth(
             Length::px(lerp(x.px(), y.px(), p).max(0.0)),
         ))),
+        (V::OutlineWidth(x), V::OutlineWidth(y)) => Some(V::OutlineWidth(BorderWidth(Length::px(
+            lerp(x.px(), y.px(), p).max(0.0),
+        )))),
         (V::BorderTopColor(x), V::BorderTopColor(y)) => {
             Some(V::BorderTopColor(lerp_color(x, y, colors, p)))
         }
@@ -408,15 +413,17 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
         (V::TextDecorationColor(x), V::TextDecorationColor(y)) => {
             Some(V::TextDecorationColor(lerp_color(x, y, colors, p)))
         }
-        (V::OutlineColor(x), V::OutlineColor(y)) => {
-            Some(V::OutlineColor(OutlineColor(lerp_color(&x.0, &y.0, colors, p))))
-        }
+        (V::OutlineColor(x), V::OutlineColor(y)) => Some(V::OutlineColor(OutlineColor(
+            lerp_color(&x.0, &y.0, colors, p),
+        ))),
         (V::Color(x), V::Color(y)) => Some(V::Color(ColorProperty(Color::Rgba(lerp_rgba(
             x.rgba(),
             y.rgba(),
             p,
         ))))),
-        (V::Opacity(x), V::Opacity(y)) => Some(V::Opacity(Opacity(lerp(x.0, y.0, p).clamp(0.0, 1.0)))),
+        (V::Opacity(x), V::Opacity(y)) => {
+            Some(V::Opacity(Opacity(lerp(x.0, y.0, p).clamp(0.0, 1.0))))
+        }
         (V::FlexGrow(x), V::FlexGrow(y)) => {
             Some(V::FlexGrow(NonNegativeNumber(lerp(x.0, y.0, p).max(0.0))))
         }
@@ -441,7 +448,9 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
         (
             V::LineHeight(LineHeight::LengthPercentage(x)),
             V::LineHeight(LineHeight::LengthPercentage(y)),
-        ) => Some(V::LineHeight(LineHeight::LengthPercentage(lerp_lp(x, y, p)))),
+        ) => Some(V::LineHeight(LineHeight::LengthPercentage(lerp_lp(
+            x, y, p,
+        )))),
         (V::LetterSpacing(Spacing::Length(x)), V::LetterSpacing(Spacing::Length(y))) => Some(
             V::LetterSpacing(Spacing::Length(Length::px(lerp(x.value, y.value, p)))),
         ),
@@ -452,12 +461,18 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
         (V::OutlineOffset(x), V::OutlineOffset(y)) => {
             Some(V::OutlineOffset(LengthPx(lerp_lp(&x.0, &y.0, p))))
         }
-        (V::BorderTopLeftRadius(x), V::BorderTopLeftRadius(y)) => Some(V::BorderTopLeftRadius(
-            CornerRadius(clamp0(lerp_lp(&x.0, &y.0, p)), clamp0(lerp_lp(&x.1, &y.1, p))),
-        )),
-        (V::BorderTopRightRadius(x), V::BorderTopRightRadius(y)) => Some(V::BorderTopRightRadius(
-            CornerRadius(clamp0(lerp_lp(&x.0, &y.0, p)), clamp0(lerp_lp(&x.1, &y.1, p))),
-        )),
+        (V::BorderTopLeftRadius(x), V::BorderTopLeftRadius(y)) => {
+            Some(V::BorderTopLeftRadius(CornerRadius(
+                clamp0(lerp_lp(&x.0, &y.0, p)),
+                clamp0(lerp_lp(&x.1, &y.1, p)),
+            )))
+        }
+        (V::BorderTopRightRadius(x), V::BorderTopRightRadius(y)) => {
+            Some(V::BorderTopRightRadius(CornerRadius(
+                clamp0(lerp_lp(&x.0, &y.0, p)),
+                clamp0(lerp_lp(&x.1, &y.1, p)),
+            )))
+        }
         (V::BorderBottomRightRadius(x), V::BorderBottomRightRadius(y)) => {
             Some(V::BorderBottomRightRadius(CornerRadius(
                 clamp0(lerp_lp(&x.0, &y.0, p)),
@@ -470,15 +485,18 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
                 clamp0(lerp_lp(&x.1, &y.1, p)),
             )))
         }
-        (V::VerticalAlign(VerticalAlign::LengthPercentage(x)), V::VerticalAlign(VerticalAlign::LengthPercentage(y))) => {
-            Some(V::VerticalAlign(VerticalAlign::LengthPercentage(lerp_lp(x, y, p))))
-        }
+        (
+            V::VerticalAlign(VerticalAlign::LengthPercentage(x)),
+            V::VerticalAlign(VerticalAlign::LengthPercentage(y)),
+        ) => Some(V::VerticalAlign(VerticalAlign::LengthPercentage(lerp_lp(
+            x, y, p,
+        )))),
         (V::RowGap(Gap::LengthPercentage(x)), V::RowGap(Gap::LengthPercentage(y))) => {
             Some(V::RowGap(Gap::LengthPercentage(clamp0(lerp_lp(x, y, p)))))
         }
-        (V::ColumnGap(Gap::LengthPercentage(x)), V::ColumnGap(Gap::LengthPercentage(y))) => {
-            Some(V::ColumnGap(Gap::LengthPercentage(clamp0(lerp_lp(x, y, p)))))
-        }
+        (V::ColumnGap(Gap::LengthPercentage(x)), V::ColumnGap(Gap::LengthPercentage(y))) => Some(
+            V::ColumnGap(Gap::LengthPercentage(clamp0(lerp_lp(x, y, p)))),
+        ),
         // `visibility` (CSS Values 4 §3): `visible` si uno de los extremos lo es, en (0, 1).
         (V::Visibility(x), V::Visibility(y)) => {
             let vis = Visibility::Visible;
@@ -491,13 +509,13 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
             }))
         }
         (V::Transform(x), V::Transform(y)) => Some(V::Transform(lerp_transform(x, y, p, size))),
-        (V::TransformOrigin(x), V::TransformOrigin(y)) => {
-            Some(V::TransformOrigin(crate::properties::transform::TransformOrigin {
+        (V::TransformOrigin(x), V::TransformOrigin(y)) => Some(V::TransformOrigin(
+            crate::properties::transform::TransformOrigin {
                 x: lerp_lp(&x.x, &y.x, p),
                 y: lerp_lp(&x.y, &y.y, p),
                 z: lerp_lp(&x.z, &y.z, p),
-            }))
-        }
+            },
+        )),
         (V::Translate(x), V::Translate(y)) => {
             let zero = || {
                 (
@@ -506,12 +524,17 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
                     LengthPercentage::zero(),
                 )
             };
-            let (tx, ty) = (x.0.clone().unwrap_or_else(zero), y.0.clone().unwrap_or_else(zero));
-            Some(V::Translate(crate::properties::transform::Translate(Some((
-                lerp_lp(&tx.0, &ty.0, p),
-                lerp_lp(&tx.1, &ty.1, p),
-                lerp_lp(&tx.2, &ty.2, p),
-            )))))
+            let (tx, ty) = (
+                x.0.clone().unwrap_or_else(zero),
+                y.0.clone().unwrap_or_else(zero),
+            );
+            Some(V::Translate(crate::properties::transform::Translate(Some(
+                (
+                    lerp_lp(&tx.0, &ty.0, p),
+                    lerp_lp(&tx.1, &ty.1, p),
+                    lerp_lp(&tx.2, &ty.2, p),
+                ),
+            ))))
         }
         (V::Scale(x), V::Scale(y)) => {
             let (sx, sy) = (x.0.unwrap_or([1.0; 3]), y.0.unwrap_or([1.0; 3]));
@@ -589,7 +612,11 @@ struct ComputedKeyframe {
 
 /// Computa los keyframes de `rule` para el estilo `base` (CSS Animations 1 §4: las
 /// declaraciones `!important` se ignoran; las propiedades de animación también).
-fn compute_keyframes(rule: &KeyframesRule, base: &ComputedStyle, parent: Option<&ComputedStyle>) -> Vec<ComputedKeyframe> {
+fn compute_keyframes(
+    rule: &KeyframesRule,
+    base: &ComputedStyle,
+    parent: Option<&ComputedStyle>,
+) -> Vec<ComputedKeyframe> {
     let len = LengthContext {
         font_size: base.font_size_px(),
         line_height: base
@@ -737,11 +764,19 @@ impl Timing {
         };
         // Progreso total y de la iteración (§4.8).
         let overall = if self.duration == 0.0 {
-            if phase == Phase::Before { 0.0 } else { self.iterations }
+            if phase == Phase::Before {
+                0.0
+            } else {
+                self.iterations
+            }
         } else {
             at / self.duration
         };
-        let mut simple = if overall.is_infinite() { 0.0 } else { overall % 1.0 };
+        let mut simple = if overall.is_infinite() {
+            0.0
+        } else {
+            overall % 1.0
+        };
         if simple == 0.0
             && (phase == Phase::Active || phase == Phase::After)
             && at == active
@@ -766,8 +801,7 @@ impl Timing {
             }
         };
         let directed = if forwards { simple } else { 1.0 - simple };
-        let before_flag = phase == Phase::Before
-            || (!forwards && phase == Phase::After && false);
+        let before_flag = phase == Phase::Before || (!forwards && phase == Phase::After && false);
         ComputedTiming {
             phase,
             active_time: Some(at),
@@ -778,6 +812,18 @@ impl Timing {
 }
 
 // --- Animaciones y transiciones en curso ---
+
+/// ¿El estilo declara animaciones CSS o transiciones que puedan arrancar?
+fn declares_animations(s: &ComputedStyle) -> bool {
+    s.animation_name.0.iter().any(|n| n.name().is_some())
+        || (!s.transition_property.0.is_empty()
+            && s.transition_property.0[0] != TransitionProperty::None
+            && (s.transition_duration.0.iter().any(|d| d.secs() > 0.0)
+                || s.transition_delay.0.iter().any(|d| d.0 > 0.0)
+                || s.transition_behavior
+                    .0
+                    .contains(&TransitionBehavior::AllowDiscrete)))
+}
 
 /// Una animación CSS en curso (CSS Animations 1 §3).
 #[derive(Debug, Clone)]
@@ -865,6 +911,9 @@ pub struct Animator {
     next_id: u64,
     /// ¿Queda algo animándose (hace falta otro cuadro)?
     active: bool,
+    /// Los estilos de la cascada del último "style change event": el "before-change style"
+    /// de los elementos que todavía no tenían estado (CSS Transitions 1 §3).
+    previous: StyleMap,
 }
 
 /// Lo que cada elemento animado necesita del documento para actualizarse.
@@ -890,6 +939,11 @@ impl Animator {
         self.elements
             .values()
             .all(|e| e.animations.is_empty() && e.transitions.is_empty())
+    }
+
+    /// ¿Hay eventos pendientes de despachar?
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
     }
 
     /// Los eventos pendientes, en orden.
@@ -931,8 +985,26 @@ impl Animator {
             .filter(|(_, e)| !e.animations.is_empty() || !e.transitions.is_empty())
             .map(|(k, _)| *k)
             .collect();
-        keys.sort_by_key(|k| (order.get(&k.0).copied().unwrap_or(usize::MAX), k.1.map(|p| p as u8)));
+        keys.sort_by_key(|k| {
+            (
+                order.get(&k.0).copied().unwrap_or(usize::MAX),
+                k.1.map(|p| p as u8),
+            )
+        });
         keys
+    }
+
+    /// ¿Algún elemento de `styles` tiene animaciones o transiciones declaradas, o queda alguna en
+    /// curso? Si no, [`Animator::update`] no cambiaría nada y basta [`Animator::note_styles`].
+    pub fn needed(&self, styles: &StyleMap) -> bool {
+        !self.is_empty() || styles.values().any(|s| declares_animations(s))
+    }
+
+    /// Un "style change event" sin nada que animar: solo se recuerdan los estilos (el
+    /// "before-change style" de la próxima transición).
+    pub fn note_styles(&mut self, styles: &StyleMap) {
+        self.active = false;
+        self.previous = styles.clone();
     }
 
     /// Anota el tamaño de la caja de referencia de `key` (tras el layout).
@@ -952,6 +1024,7 @@ impl Animator {
     pub fn update(&mut self, styles: &mut StyleMap, input: &UpdateInput<'_>) {
         let now = input.now;
         self.active = false;
+        let cascade = styles.clone();
         // Elementos que ya no tienen estilo (o con `display: none`): se cancelan.
         let gone: Vec<Key> = self
             .elements
@@ -1043,9 +1116,27 @@ impl Animator {
                 && base.transition_property.0[0] != TransitionProperty::None
                 && (base.transition_duration.0.iter().any(|d| d.secs() > 0.0)
                     || base.transition_delay.0.iter().any(|d| d.0 > 0.0)
-                    || base.transition_behavior.0.iter().any(|b| *b == TransitionBehavior::AllowDiscrete));
+                    || base
+                        .transition_behavior
+                        .0
+                        .contains(&TransitionBehavior::AllowDiscrete));
             if !has_anims && !has_transitions && !self.elements.contains_key(&key) {
                 continue;
+            }
+            // Un elemento que empieza a transicionar: su estilo anterior es el de la cascada del
+            // último cambio (no había valores animados).
+            if has_transitions
+                && !self.elements.contains_key(&key)
+                && let Some(prev) = self.previous.get(&key)
+            {
+                self.elements.insert(
+                    key,
+                    ElementState {
+                        base: Some(prev.clone()),
+                        shown: Some(prev.clone()),
+                        ..ElementState::default()
+                    },
+                );
             }
             let shown = self.update_element(key, &base, parent_style.as_deref(), input);
             if !Arc::ptr_eq(&shown, &base) || !Arc::ptr_eq(&base, &styles[&key]) {
@@ -1065,6 +1156,7 @@ impl Animator {
                 styles.insert(key, shown);
             }
         }
+        self.previous = cascade;
     }
 
     /// Actualiza un elemento y devuelve el estilo a mostrar.
@@ -1100,7 +1192,11 @@ impl Animator {
                     .get(i)
                     .copied()
                     .unwrap_or(AnimationDirection::Normal),
-                fill: base.animation_fill_mode.get(i).copied().unwrap_or(FillMode::None),
+                fill: base
+                    .animation_fill_mode
+                    .get(i)
+                    .copied()
+                    .unwrap_or(FillMode::None),
                 easing: TimingFunction::Linear,
             };
             let paused = base.animation_play_state.get(i) == Some(&PlayState::Paused);
@@ -1149,9 +1245,9 @@ impl Animator {
         // Las que ya no están se cancelan (CSS Animations 2 §4.2, `animationcancel`).
         for a in old {
             if matches!(a.last_phase, Some(Phase::Active) | Some(Phase::Before)) {
-                let elapsed = a
-                    .local_time(now)
-                    .map_or(0.0, |t| (t - a.timing.delay).clamp(0.0, a.timing.active_duration()));
+                let elapsed = a.local_time(now).map_or(0.0, |t| {
+                    (t - a.timing.delay).clamp(0.0, a.timing.active_duration())
+                });
                 events.push(AnimationEvent {
                     target: key,
                     kind: "animationcancel",
@@ -1189,7 +1285,8 @@ impl Animator {
                     .get(i)
                     .cloned()
                     .unwrap_or(TimingFunction::EASE);
-                let can_animate = is_interpolable(id) || behavior == TransitionBehavior::AllowDiscrete;
+                let can_animate =
+                    is_interpolable(id) || behavior == TransitionBehavior::AllowDiscrete;
                 let combined = duration.max(0.0) + delay;
                 if let Some(r) = running {
                     if transitions[r].to == after {
@@ -1204,23 +1301,29 @@ impl Animator {
                     }
                     events.push(cancel_event(key, &old_t, now));
                     let id_n = self.id();
-                    let (from, factor, adj_from, dur, del) = if after == old_t.reversing_adjusted_from
-                    {
-                        // Inversión: se acorta (§3, paso 4.4).
-                        let progress = old_t
-                            .timing
-                            .at(now - old_t.start_time, false)
-                            .progress
-                            .unwrap_or(0.0)
-                            .clamp(0.0, 1.0);
-                        let factor = (progress * old_t.reversing_shortening
-                            + (1.0 - old_t.reversing_shortening))
-                            .clamp(0.0, 1.0);
-                        let del = if delay < 0.0 { delay * factor } else { delay };
-                        (current.clone(), factor, old_t.to.clone(), duration * factor, del)
-                    } else {
-                        (current.clone(), 1.0, current.clone(), duration, delay)
-                    };
+                    let (from, factor, adj_from, dur, del) =
+                        if after == old_t.reversing_adjusted_from {
+                            // Inversión: se acorta (§3, paso 4.4).
+                            let progress = old_t
+                                .timing
+                                .at(now - old_t.start_time, false)
+                                .progress
+                                .unwrap_or(0.0)
+                                .clamp(0.0, 1.0);
+                            let factor = (progress * old_t.reversing_shortening
+                                + (1.0 - old_t.reversing_shortening))
+                                .clamp(0.0, 1.0);
+                            let del = if delay < 0.0 { delay * factor } else { delay };
+                            (
+                                current.clone(),
+                                factor,
+                                old_t.to.clone(),
+                                duration * factor,
+                                del,
+                            )
+                        } else {
+                            (current.clone(), 1.0, current.clone(), duration, delay)
+                        };
                     let t = Transition {
                         property: id,
                         from,
@@ -1324,11 +1427,12 @@ impl Animator {
                         kind,
                         name: t.name.clone(),
                         elapsed,
-                        time: t.start_time + if kind == "transitionend" {
-                            t.timing.end_time()
-                        } else {
-                            t.timing.delay.max(0.0)
-                        },
+                        time: t.start_time
+                            + if kind == "transitionend" {
+                                t.timing.end_time()
+                            } else {
+                                t.timing.delay.max(0.0)
+                            },
                     });
                 };
                 match (prev_phase, ct.phase) {
@@ -1379,7 +1483,14 @@ impl Animator {
             };
             let s = shown.get_or_insert_with(|| (**base).clone());
             let keyframes = compute_keyframes(rule, base, parent);
-            apply_keyframes(s, base, &keyframes, &a.keyframe_easing, progress, state.size);
+            apply_keyframes(
+                s,
+                base,
+                &keyframes,
+                &a.keyframe_easing,
+                progress,
+                state.size,
+            );
         }
         state.animations = anims;
         state.base = Some(base.clone());
@@ -1421,10 +1532,18 @@ impl Animator {
         // CSS Animations 2 §4.2: eventos según el cambio de fase.
         match (prev, ct.phase) {
             (None | Some(Phase::Before), Phase::Active) => {
-                push("animationstart", start_elapsed, start + a.timing.delay.max(0.0));
+                push(
+                    "animationstart",
+                    start_elapsed,
+                    start + a.timing.delay.max(0.0),
+                );
             }
             (None | Some(Phase::Before), Phase::After) => {
-                push("animationstart", start_elapsed, start + a.timing.delay.max(0.0));
+                push(
+                    "animationstart",
+                    start_elapsed,
+                    start + a.timing.delay.max(0.0),
+                );
                 push("animationend", end_elapsed, start + a.timing.end_time());
             }
             (Some(Phase::Active), Phase::Before) => {
@@ -1490,7 +1609,7 @@ fn values_interpolate(a: &Value, b: &Value) -> bool {
 /// (la última que los nombra gana, CSS Transitions 1 §2.1).
 fn transition_properties(style: &ComputedStyle) -> Vec<(LonghandId, usize)> {
     let mut out: Vec<(LonghandId, usize)> = Vec::new();
-    let mut add = |id: LonghandId, i: usize, out: &mut Vec<(LonghandId, usize)>| {
+    let add = |id: LonghandId, i: usize, out: &mut Vec<(LonghandId, usize)>| {
         if is_animation_property(id) {
             return;
         }
@@ -1591,6 +1710,7 @@ fn apply_keyframes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::properties::PropValue;
 
     #[test]
     fn timing_phases() {
@@ -1634,5 +1754,106 @@ mod tests {
             interpolate(&a, &b, 0.4, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
             a
         );
+    }
+
+    fn transform(css: &str) -> Transform {
+        let tokens = bf_css::syntax::parse_component_value_list(css);
+        <Transform as PropValue>::parse(&tokens).expect("transform válido")
+    }
+
+    #[test]
+    fn timing_zero_duration_and_infinite_iterations() {
+        let base = Timing {
+            delay: 0.0,
+            duration: 0.0,
+            iterations: 1.0,
+            direction: AnimationDirection::Normal,
+            fill: FillMode::Forwards,
+            easing: TimingFunction::Linear,
+        };
+        // Web Animations 1 §4.8.3: con duración 0 el efecto salta al final y se queda.
+        let at = base.at(0.0, false);
+        assert_eq!(at.phase, Phase::After);
+        assert_eq!(at.progress, Some(1.0));
+        assert_eq!(base.end_time(), 0.0);
+        let infinite = Timing {
+            duration: 100.0,
+            iterations: f64::INFINITY,
+            fill: FillMode::None,
+            ..base
+        };
+        assert_eq!(infinite.end_time(), f64::INFINITY);
+        let t = infinite.at(1025.0, false);
+        assert_eq!(t.phase, Phase::Active);
+        assert_eq!(t.current_iteration, Some(10.0));
+        assert!((t.progress.unwrap() - 0.25).abs() < 1e-9);
+        // `reverse`: el progreso va de 1 a 0.
+        let rev = Timing {
+            direction: AnimationDirection::Reverse,
+            ..infinite
+        };
+        assert!((rev.at(1025.0, false).progress.unwrap() - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visibility_and_discrete_values() {
+        let a = Value::Visibility(Visibility::Hidden);
+        let b = Value::Visibility(Visibility::Visible);
+        // CSS Transitions 1 §6 / Web Animations: `visible` en todo el intervalo abierto.
+        assert_eq!(
+            interpolate(&a, &b, 0.1, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            b
+        );
+        assert_eq!(
+            interpolate(&a, &b, 0.0, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            a
+        );
+        let a = Value::Display(Display::Block);
+        let b = Value::Display(Display::None);
+        assert_eq!(
+            interpolate(&a, &b, 0.49, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            a
+        );
+        assert_eq!(
+            interpolate(&a, &b, 0.5, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            b
+        );
+        assert!(is_interpolable(LonghandId::Transform));
+        assert!(is_interpolable(LonghandId::Opacity));
+        assert!(!is_interpolable(LonghandId::Display));
+    }
+
+    #[test]
+    fn transform_interpolation() {
+        let size = (100.0, 100.0);
+        // Mismas funciones: una por una (CSS Transforms 1 §9).
+        let t = lerp_transform(&transform("scale(1)"), &transform("scale(3)"), 0.5, size);
+        assert_eq!(t.to_css(), "scale(2)");
+        // `none` con una lista: la función neutra.
+        let t = lerp_transform(
+            &transform("none"),
+            &transform("translateX(100px)"),
+            0.25,
+            size,
+        );
+        assert_eq!(t.to_css(), "translateX(25px)");
+        // Funciones distintas: por matrices descompuestas; los extremos son las matrices de
+        // cada lado.
+        let a = transform("translateX(100px)");
+        let b = transform("rotate(90deg)");
+        assert_eq!(
+            transform_css(&lerp_transform(&a, &b, 0.0, size), size),
+            "matrix(1, 0, 0, 1, 100, 0)"
+        );
+        assert_eq!(
+            transform_css(&lerp_transform(&a, &b, 1.0, size), size),
+            "matrix(0, 1, -1, 0, 0, 0)"
+        );
+        let mid = lerp_transform(&a, &b, 0.5, size).matrix(size.0, size.1);
+        let m = crate::properties::transform::to_affine(&mid);
+        // A mitad: rotación de 45° y traslación de 50px.
+        assert!((m[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert!((m[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert!((m[4] - 50.0).abs() < 1e-3);
     }
 }

@@ -96,8 +96,8 @@ impl Page {
     }
 
     /// Aplica las posiciones de desplazamiento de los elementos y el scroll de la página (para
-    /// las cajas `sticky` del viewport) y, si cambió el árbol, rehace la lista. Devuelve si
-    /// cambió.
+    /// las cajas `sticky` del viewport) y, si cambió el árbol, rehace la lista (salvo si solo
+    /// cambió lo `sticky` y la lista lleva `PushSticky`, E4). Devuelve si hay que repintar.
     pub fn apply_scroll(
         &mut self,
         doc: &Document,
@@ -110,7 +110,16 @@ impl Page {
             .any(|(n, o)| boxes.get(n).is_some_and(|b| b.clamp(*o) != b.offset));
         bf_layout::scroll::apply_offsets(&mut self.tree, offsets.iter().copied());
         let sticky = bf_layout::scroll::page_scrolled(&mut self.tree, page_scroll);
-        if moved || sticky {
+        // E4: si la lista ya lleva `PushSticky`, el raster desplaza lo `sticky` del viewport
+        // con el scroll del cuadro: basta con volver a rasterizar, sin rehacer la lista (el
+        // árbol queda al día para el hit testing).
+        let rasterized = sticky
+            && self
+                .display_list
+                .items
+                .iter()
+                .any(|i| matches!(i, DisplayItem::PushSticky { .. }));
+        if moved || (sticky && !rasterized) {
             self.repaint(doc);
         }
         moved || sticky

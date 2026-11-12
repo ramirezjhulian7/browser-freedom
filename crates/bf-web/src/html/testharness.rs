@@ -471,6 +471,9 @@ pub fn run_doc(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     }
 }
 
+/// E4: duración de un cuadro del reloj virtual, en ms.
+const FRAME_MS: f64 = 16.0;
+
 fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     let deadline = Instant::now() + limit;
     let clock = Rc::new(Cell::new(0.0));
@@ -504,6 +507,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     });
     parser.document_mut().url = url.clone();
     parser.document_mut().character_set = doc.encoding.name().into();
+    // E4: los `<iframe>` del documento demoran su `load` (HTML §4.8.5, "iframe load event
+    // steps"; §8.4 "the end"): se suelta después de cargar los marcos.
+    parser.delay_load_event();
     crate::install(
         &mut rt.agent,
         realm,
@@ -536,6 +542,11 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         p.feed(&doc.html, host);
         p.finish(host);
     });
+    // E4: los `<iframe>` (HTML §4.8.5), como en el hilo de la pestaña: tras el parseo y cada
+    // vez que el bucle queda sin trabajo (srcdoc, src servido por wptserve, about:blank, el
+    // `load` del elemento).
+    crate::bom::frames::sync_frames(&mut rt.agent, realm);
+    with_parser(&mut rt.agent, realm, |p, host| p.release_load_event(host));
     // El bucle de eventos hasta el completion callback.
     loop {
         if rt
@@ -561,6 +572,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             Err(Throw::Value(_)) => {}
         }
         with_parser(&mut rt.agent, realm, |p, host| p.run_tasks(host));
+        if crate::bom::frames::sync_frames(&mut rt.agent, realm) {
+            continue;
+        }
         if rt
             .agent
             .embedder_data::<Report>()
@@ -580,6 +594,24 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             let next = rt.agent.next_wake().unwrap_or(f64::INFINITY);
             clock.set((clock.get() + elapsed).min(next.max(clock.get())));
             continue;
+        }
+        // E4: "update the rendering" (HTML §8.1.7.3): con callbacks de `requestAnimationFrame`,
+        // el reloj virtual salta al próximo cuadro (cada 16 ms) si llega antes que el próximo
+        // temporizador, y se corren con esa hora.
+        // También hay cuadro con animaciones o transiciones CSS en curso, eventos de animación
+        // pendientes o un documento cambiado ("update animations and send events").
+        if rt.agent.has_animation_frame_callbacks()
+            || crate::bom::animation::wants_frame(&rt.agent, realm, true)
+        {
+            let frame = (clock.get() / FRAME_MS).floor() * FRAME_MS + FRAME_MS;
+            if rt.agent.next_wake().is_none_or(|t| frame <= t) {
+                clock.set(frame);
+                crate::bom::animation::update_and_send_events(&mut rt.agent, realm);
+                if let Err(Throw::Terminate(_)) = rt.agent.run_animation_frames(frame) {
+                    return result(Harness::NoResult("tiempo agotado".into()), vec![]);
+                }
+                continue;
+            }
         }
         match rt.agent.next_wake() {
             Some(t) if t > clock.get() => clock.set(t),

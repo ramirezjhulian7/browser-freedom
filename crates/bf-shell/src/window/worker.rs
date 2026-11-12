@@ -262,6 +262,8 @@ struct State {
     view: Arc<Mutex<View>>,
     current: Option<Current>,
     last_frame: Instant,
+    /// E4: el último cuadro de `requestAnimationFrame`.
+    last_raf: Instant,
     /// Puntero y foco del documento actual.
     input: super::events::InputState,
     /// El viewport y el scroll del último `resize`/`scroll` despachado.
@@ -296,6 +298,7 @@ impl DocumentThread {
                     view: shared,
                     current: None,
                     last_frame: Instant::now(),
+                    last_raf: Instant::now(),
                     input: super::events::InputState::default(),
                     last_viewport: None,
                     last_scroll: (0.0, 0.0),
@@ -458,12 +461,21 @@ impl State {
         let mut queue: VecDeque<Job> = VecDeque::new();
         loop {
             if queue.is_empty() {
-                // Dormir hasta el próximo temporizador o el próximo mensaje.
+                // Dormir hasta el próximo temporizador, el próximo cuadro (si hay callbacks de
+                // `requestAnimationFrame`; sin ellos no hay cuadros y el hilo duerme) o el
+                // próximo mensaje.
+                let to_frame = FRAME.saturating_sub(self.last_raf.elapsed());
                 let wait = self
                     .current
                     .as_mut()
                     .and_then(|c| c.engine.as_mut())
-                    .and_then(Engine::next_wake);
+                    .and_then(|e| {
+                        let frame = e.wants_frame().then_some(to_frame);
+                        match (e.next_wake(), frame) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        }
+                    });
                 let msg = match wait {
                     Some(d) => match rx.recv_timeout(d) {
                         Ok(m) => Some(m),
@@ -756,7 +768,13 @@ impl State {
         let Some(engine) = &mut current.engine else {
             return;
         };
-        let ran = engine.run_due_tasks();
+        let mut ran = engine.run_due_tasks();
+        // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
+        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME {
+            self.last_raf = Instant::now();
+            engine.run_animation_frames();
+            ran += 1;
+        }
         if let Some((x, y)) = engine.take_scroll_request() {
             let _ = self.tx.send(FromDoc::Request {
                 tab: self.tab,

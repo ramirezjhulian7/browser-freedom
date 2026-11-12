@@ -421,6 +421,10 @@ pub fn fetch_document_with(
         let (text, enc) = encoding::decode(&response.body, enc);
         let doc = match engine {
             Some((engine, env)) => {
+                engine.set_navigation_policies(
+                    response.headers.get("cross-origin-opener-policy"),
+                    response.headers.get("cross-origin-embedder-policy"),
+                );
                 parse_with_scripts(&text, &response.url, engine, loader.clone(), env)
             }
             // E1: un documento de navegación permite declarative shadow roots.

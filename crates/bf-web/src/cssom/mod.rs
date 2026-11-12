@@ -105,6 +105,8 @@ pub struct CssomState {
     pub sheets_generation: u64,
     styles: Option<(u64, u64, Arc<StyleMap>)>,
     layout: Option<(u64, u64, Arc<FragmentTree>)>,
+    /// E4: los estilos con que se hizo `layout` (ver [`current_layout`]).
+    layout_styles: Option<Arc<StyleMap>>,
     /// El viewport cuando no hay snapshot.
     pub viewport: Size,
     pub device_pixel_ratio: f32,
@@ -124,6 +126,7 @@ impl Default for CssomState {
             sheets_generation: 0,
             styles: None,
             layout: None,
+            layout_styles: None,
             viewport: Size {
                 width: 800.0,
                 height: 600.0,
@@ -349,7 +352,16 @@ pub fn media_context(agent: &mut Agent) -> MediaContext {
 }
 
 /// Los estilos computados del documento de la ventana, al día.
+///
+/// E4: con las animaciones y transiciones CSS de la ventana aplicadas en la hora actual
+/// (`crate::bom::animation::animate`, el "style change event").
 pub fn current_styles(agent: &mut Agent) -> Arc<StyleMap> {
+    let base = cascade_styles(agent);
+    crate::bom::animation::animate(agent, base)
+}
+
+/// Los estilos de la cascada (sin animaciones) del documento de la ventana.
+fn cascade_styles(agent: &mut Agent) -> Arc<StyleMap> {
     if let Some(s) = fresh_snapshot(agent) {
         return s.styles;
     }
@@ -389,13 +401,21 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     }
     let version = h.get(agent).document().version();
     let generation = sheets_generation(agent, h.realm);
-    if let Some((v, g, t)) = &state(agent).layout
+    // E4: los estilos mostrados (con animaciones y transiciones) también son parte de la
+    // clave: mientras algo se anima cambian sin que cambie el documento, y la geometría
+    // (`getBoundingClientRect`, el valor resuelto de `width`…) debe seguirlos.
+    let styles = current_styles(agent);
+    let st = state(agent);
+    if let Some((v, g, t)) = &st.layout
         && *v == version
         && *g == generation
+        && st
+            .layout_styles
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, &styles))
     {
         return t.clone();
     }
-    let styles = current_styles(agent);
     let viewport = window_metrics(agent).viewport;
     let mut provider = state(agent).provider.take();
     let doc = h.get(agent).document();
@@ -408,6 +428,7 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     let tree = Arc::new(tree);
     let st = state(agent);
     st.layout = Some((version, generation, tree.clone()));
+    st.layout_styles = Some(styles);
     tree
 }
 

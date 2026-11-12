@@ -1026,6 +1026,74 @@ fn srcdoc_frame_has_its_own_window_and_document() {
     assert_eq!(p.show("loads"), "1");
 }
 
+/// E4: adoptar o insertar un nodo de otra ventana (DOM §4.5 "adopt" entre browsing contexts)
+/// lanza `NotSupportedError` sin tocar ninguno de los dos documentos (antes: pánico en
+/// `adopt_into`, `CustomElementRegistry-constructor-and-callbacks-are-held-strongly.html`).
+#[test]
+fn nodes_from_another_window_cannot_be_adopted() {
+    let mut p = framed(
+        "<div id=d>hola</div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
+        &[],
+    );
+    let try_ = |what: &str| {
+        format!(
+            "(function () {{ var fd = document.getElementById('f').contentDocument; \
+             try {{ {what}; return 'sin error'; }} catch (e) {{ return e.name; }} }})()"
+        )
+    };
+    assert_eq!(
+        p.show(&try_("fd.adoptNode(document.getElementById('d'))")),
+        "NotSupportedError"
+    );
+    assert_eq!(
+        p.show(&try_("fd.body.appendChild(document.createElement('b'))")),
+        "NotSupportedError"
+    );
+    assert_eq!(
+        p.show(&try_(
+            "document.body.appendChild(fd.getElementById('dentro'))"
+        )),
+        "NotSupportedError"
+    );
+    // Los dos documentos quedan como estaban; dentro de cada ventana, todo sigue igual.
+    assert!(p.truthy(
+        "var fd = document.getElementById('f').contentDocument; \
+         document.getElementById('d').textContent === 'hola' && \
+         fd.getElementById('dentro').textContent === 'x' && \
+         fd.body.childNodes.length === 1 && \
+         fd.body.appendChild(fd.createElement('i')).parentNode === fd.body && \
+         fd.adoptNode(fd.createElement('u')).ownerDocument === fd"
+    ));
+}
+
+/// E4: una operación de la interfaz de un `<iframe>` aplicada a un objeto de la ventana corre
+/// en el realm del objeto (WebIDL §3.9, DOM §4.4 "create a node"); antes leía el `NodeRef` en
+/// el documento del marco (pánico de índice en `node-creation-realm.html`). Un nodo de otra
+/// ventana pasado a `append` lanza `NotSupportedError`.
+#[test]
+fn interface_operations_run_in_the_realm_of_this() {
+    let mut p = framed(
+        "<div id=d></div><iframe id=f srcdoc='<p id=dentro>x</p>'></iframe>",
+        &[],
+    );
+    assert!(p.truthy(concat!(
+        "var inner = document.getElementById('f').contentWindow;",
+        "var t = inner.Document.prototype.createTextNode.call(document, 'x');",
+        "var c = inner.Node.prototype.cloneNode.call(document.getElementById('d'));",
+        "var e = inner.Node.prototype.appendChild.call(document.body, document.createElement('i'));",
+        "t instanceof Text && !(t instanceof inner.Text) && t.ownerDocument === document &&",
+        "c instanceof HTMLDivElement && c.id === 'd' && e.parentNode === document.body",
+    )));
+    assert_eq!(
+        p.show(concat!(
+            "(function () { var fd = document.getElementById('f').contentDocument;",
+            "try { document.body.append(fd.getElementById('dentro')); return 'sin error'; }",
+            "catch (e) { return e.name; } })()",
+        )),
+        "NotSupportedError"
+    );
+}
+
 // E1: los atributos `on…` de un `<iframe>` (HTML §8.1.8.1) corren con el `load` del marco
 // (HTML §4.8.5 "iframe load event steps") y `document.activeElement` sigue al foco (§6.6.3).
 #[test]
@@ -1342,6 +1410,9 @@ fn performance_observer_api_and_errors() {
 // `Document::live_range`).
 #[test]
 fn nodes_and_ranges_of_another_window_do_not_panic() {
+    // E4: una operación de la interfaz de esta ventana aplicada a un objeto del marco corre en
+    // el realm del objeto (WebIDL §3.9, "relevant realm"; el trampolín de bf-js), así que
+    // `Range.prototype.collapse.call(fr)` funciona y colapsa `fr`, como en los navegadores.
     let mut p = framed(
         "<p id=a>uno</p><iframe id=f srcdoc=\"<p id=b>dos</p><p>tres</p><p>cuatro</p>\"></iframe>",
         &[],
@@ -1377,7 +1448,6 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
         ),
         "NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError,\
          NotSupportedError,false,false,false,false,true,WrongDocumentError,\
-         WrongDocumentError,false,false,NotSupportedError,0,NotSupportedError,\
-         dostrescuatro,uno"
+         WrongDocumentError,false,false,NotSupportedError,0,ok,,uno"
     );
 }
