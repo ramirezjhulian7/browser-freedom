@@ -348,6 +348,8 @@ pub struct Group {
     /// marcadores con `markerUnits="strokeWidth"` de un trazo `non-scaling-stroke`, que se
     /// escalan por el ancho del trazo en el host (SVG 2 §13.7.2).
     pub host_units: bool,
+    /// Pinturas del elemento de contexto para `context-fill`/`context-stroke` del contenido.
+    pub context: Option<Box<ContextPaints>>,
     pub children: Vec<Node>,
 }
 
@@ -544,6 +546,26 @@ pub enum Paint {
     Color(Rgba),
     Gradient(Box<Gradient>),
     Pattern(Box<Pattern>),
+    /// `context-fill`/`context-stroke` (SVG 2 §13.3) cuando la pintura del elemento de contexto
+    /// es un servidor de pintura: la da el [`Group::context`] más cercano, que la define en su
+    /// propio sistema de coordenadas (los colores y `none` ya vienen resueltos).
+    Context(ContextPaint),
+}
+
+/// Qué pintura del elemento de contexto se usa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPaint {
+    Fill,
+    Stroke,
+}
+
+/// Pinturas de un elemento de contexto (SVG 2 §13.3: el `use`, o la forma que pinta un
+/// marcador), en el sistema del grupo que las lleva (tras su `transform`). Una pintura puede
+/// ser a su vez [`Paint::Context`]: se resuelve con el contexto exterior.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ContextPaints {
+    pub fill: Option<Paint>,
+    pub stroke: Option<Paint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -633,6 +655,9 @@ pub struct Span {
     pub baseline_shift: f32,
     /// `paint-order` con el trazo antes que el relleno (SVG 2 §13.7.3).
     pub stroke_first: bool,
+    /// `line-height` en unidades de usuario (`None`: `normal`, con las métricas de la fuente).
+    /// Solo cuenta en el texto con `inline-size`.
+    pub line_height: Option<f32>,
 }
 
 /// *Text chunk* (§11.8.3): empieza en una posición absoluta (o donde terminó el anterior) y
@@ -662,6 +687,9 @@ pub struct Text {
     pub transform: Transform,
     pub chunks: Vec<Chunk>,
     pub paths: Vec<TextPath>,
+    /// `inline-size` (SVG 2 §11.4.1) en unidades de usuario: el texto (un solo chunk) se corta
+    /// en líneas de ese ancho como máximo.
+    pub inline_size: Option<f32>,
 }
 
 /// `clipPath`: la unión de las formas, cada una con su regla y su transformación.
@@ -671,4 +699,7 @@ pub struct ClipPath {
     pub shapes: Vec<(Vec<Seg>, FillRule, Transform)>,
     /// Textos del recorte (se usan sus contornos).
     pub texts: Vec<Text>,
+    /// `clip-path` del propio `clipPath` (CSS Masking 1 §6.3): el recorte es la intersección.
+    /// Está en el mismo sistema que este recorte (antes de su `transform`).
+    pub clip: Option<Box<ClipPath>>,
 }
