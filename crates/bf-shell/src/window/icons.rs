@@ -28,6 +28,27 @@ pub enum Icon {
     Plus,
     /// Cerrar una pestaña (la misma cruz que detener, más chica).
     Close,
+    /// Una página del historial (las sugerencias de la barra): un reloj.
+    Clock,
+    /// Marcador: la estrella hueca (sin guardar) y rellena (guardada).
+    Star,
+    StarFilled,
+    /// Anterior y siguiente (la barra de búsqueda): chevrones.
+    Up,
+    Down,
+    /// Descargas: una flecha que baja a una bandeja.
+    Download,
+}
+
+/// Los vértices de la estrella de cinco puntas en la grilla de 16 (punta arriba).
+fn star_points() -> Vec<(f32, f32)> {
+    (0..10)
+        .map(|i| {
+            let r = if i % 2 == 0 { 6.5 } else { 2.8 };
+            let a = (-90.0 + 36.0 * i as f32).to_radians();
+            (8.0 + r * a.cos(), 8.6 + r * a.sin())
+        })
+        .collect()
 }
 
 /// El contorno del logo (`assets/freedom.png` vectorizado) en la grilla de 16: el
@@ -181,6 +202,38 @@ pub fn icon(icon: Icon, rect: Rect, color: Rgba) -> Vec<DisplayItem> {
             pen.arc(8.0, 8.0, 6.0, 0.0, 360.0, true);
             pen.m(8.0, 4.8).l(8.0, 8.6);
             pen.m(8.0, 11.0).l(8.0, 11.2);
+        }
+        Icon::Clock => {
+            pen.arc(8.0, 8.0, 6.0, 0.0, 360.0, true);
+            pen.m(8.0, 4.5).l(8.0, 8.0).l(10.5, 9.5);
+        }
+        Icon::Star | Icon::StarFilled => {
+            for (i, (x, y)) in star_points().into_iter().enumerate() {
+                if i == 0 {
+                    pen.m(x, y);
+                } else {
+                    pen.l(x, y);
+                }
+            }
+            pen.ops.push(PathOp::Close);
+            if icon == Icon::StarFilled {
+                return vec![DisplayItem::Path {
+                    ops: pen.ops,
+                    fill: Some(color),
+                    stroke: Some((STROKE * k, color)),
+                }];
+            }
+        }
+        Icon::Up => {
+            pen.m(4.0, 10.0).l(8.0, 6.0).l(12.0, 10.0);
+        }
+        Icon::Down => {
+            pen.m(4.0, 6.0).l(8.0, 10.0).l(12.0, 6.0);
+        }
+        Icon::Download => {
+            pen.m(8.0, 2.5).l(8.0, 10.0);
+            pen.m(4.8, 7.0).l(8.0, 10.2).l(11.2, 7.0);
+            pen.m(2.5, 11.0).l(2.5, 13.5).l(13.5, 13.5).l(13.5, 11.0);
         }
     }
     vec![DisplayItem::Path {

@@ -744,6 +744,7 @@ pub(crate) fn foreign_objects(
             loader: ctx.loader.clone(),
             fonts: ctx.fonts.clone(),
             extra: &extra,
+            text_zoom: ctx.text_zoom,
         };
         let page = crate::prepare_page(&child, &child_ctx, size);
         // Se pinta todo lo maquetado (con `overflow: visible` se ve lo que desborda); el

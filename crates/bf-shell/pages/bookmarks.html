@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Marcadores</title>
+<style>
+{{theme}}
+{{style}}
+form { margin: 0; }
+input {
+  height: 38px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+button {
+  height: 38px;
+  margin-left: 8px;
+  padding: 0 16px;
+  border-radius: 9px;
+  border: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-weight: 600;
+}
+button.quiet { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.find { display: flex; align-items: center; margin: 18px 0 10px; }
+.find input { flex: 1; min-width: 0; }
+.tools { display: flex; flex-wrap: wrap; align-items: center; }
+.tools a {
+  display: block;
+  margin: 0 8px 8px 0;
+  padding: 7px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.tools form { display: flex; align-items: center; margin: 0 0 8px auto; }
+.tools input { width: 200px; }
+.edit { margin-top: 18px; }
+.edit .field { display: flex; align-items: center; margin-bottom: 10px; }
+.edit .field span { width: 90px; flex: none; color: var(--text2); }
+.edit .field input { flex: 1; min-width: 0; }
+.edit .chips { display: flex; flex-wrap: wrap; margin: -2px 0 10px 90px; font-size: 12px; color: var(--text2); }
+.edit .chips span { margin-right: 10px; }
+.edit .actions { display: flex; justify-content: flex-end; align-items: center; }
+.edit .actions a { margin-right: 6px; }
+.folder { display: flex; align-items: baseline; }
+.folder h2 { flex: 1; }
+.folder a { font-size: 12px; color: var(--text2); }
+.row { display: flex; align-items: center; padding: 8px 10px 8px 16px; border-top: 1px solid var(--border); }
+.row:first-child { border-top: 0; }
+.row .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--text); }
+.row .h { flex: none; max-width: 34%; overflow: hidden; white-space: nowrap; margin-left: 12px; color: var(--text2); font-size: 13px; }
+.row .e { flex: none; margin-left: 12px; font-size: 13px; }
+.row .x {
+  flex: none;
+  display: block;
+  width: 24px;
+  height: 24px;
+  margin-left: 6px;
+  border-radius: 6px;
+  text-align: center;
+  line-height: 24px;
+  color: var(--text2);
+}
+.empty { padding: 9px 16px; margin: 0; color: var(--text2); }
+.note { margin-top: 28px; font-size: 13px; }
+</style>
+<main>
+  <h1>Marcadores</h1>
+  <p class="muted">{{summary}}</p>
+  {{edit}}
+  <form class="find" action="freedom://bookmarks" method="get"><input name="q" value="{{query}}" placeholder="Buscar en los marcadores"><button type="submit">Buscar</button></form>
+  <div class="tools"><a href="bf:bookmark-import">Importar HTML…</a><a href="bf:bookmark-export">Exportar HTML…</a><form action="bf:bookmark-folder" method="get"><input name="u" placeholder="Carpeta nueva"><button class="quiet" type="submit">Crear</button></form></div>
+  {{folders}}
+  <p class="note muted">Ctrl+D guarda o quita la página actual · se guardan en {{path}} · <a href="freedom://history">Historial</a></p>
+</main>
+</html>

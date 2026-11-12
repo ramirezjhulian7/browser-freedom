@@ -26,13 +26,15 @@ body { padding-top: 8px; }
 .search .caret { flex: none; display: block; width: 2px; height: 22px; border-radius: 1px; background: var(--accent); margin-right: 12px; }
 .search .text { flex: 1; min-width: 0; }
 .search .kbd { margin: 0 0 0 4px; }
-.tiles { display: flex; margin: 16px -6px 0; }
+.tiles { display: flex; flex-wrap: wrap; margin: 16px -6px 0; }
 .tile {
   --under: var(--surface);
   display: block;
-  flex: 1;
+  flex: none;
+  width: calc(25% - 12px);
+  box-sizing: border-box;
   min-width: 0;
-  margin: 0 6px;
+  margin: 0 6px 12px;
   padding: 16px;
   border-radius: 12px;
   background: var(--surface);
@@ -61,6 +63,7 @@ body { padding-top: 8px; }
     <p class="muted">Navega libre. Un navegador independiente, hecho desde cero.</p>
   </div>
   <a class="search" href="bf:focus-url"><span class="caret"></span><span class="text">Busca en Google o escribe una dirección</span><span class="kbd">Ctrl</span><span class="kbd">L</span></a>
+  <h2>Más visitados</h2>
   <div class="tiles">{{tiles}}</div>
   <h2>Recientes</h2>
   <div class="card recent">{{recent}}</div>

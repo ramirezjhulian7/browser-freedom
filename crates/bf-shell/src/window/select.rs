@@ -195,6 +195,18 @@ impl TextIndex {
         }
     }
 
+    /// Los fragmentos para buscar en la página (`Ctrl+F`, E11): sus caracteres y su línea, en
+    /// el orden de los `Point` de la selección. Solo lectura.
+    pub fn find_runs(&self) -> Vec<crate::find::Run<'_>> {
+        self.runs
+            .iter()
+            .map(|r| crate::find::Run {
+                chars: &r.chars,
+                line: r.line,
+            })
+            .collect()
+    }
+
     /// Todo el texto de la página.
     pub fn all(&self) -> Option<Selection> {
         let last = self.runs.len().checked_sub(1)?;

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Opciones</title>
+<style>
+{{theme}}
+{{style}}
+h2 { margin: 28px 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text2); }
+.row { display: flex; align-items: center; padding: 14px 16px; border-top: 1px solid var(--border); }
+.row:first-child { border-top: 0; }
+.row .main { flex: 1; min-width: 0; margin-right: 16px; }
+.row .n { display: block; color: var(--text); font-weight: 600; }
+.row .d { display: block; margin-top: 2px; font-size: 13px; color: var(--text2); }
+.toggle { flex: none; display: block; width: 40px; height: 22px; border-radius: 11px; background: var(--border); position: relative; }
+.toggle .knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 8px; background: var(--text2); }
+.toggle.on { background: var(--accent); }
+.toggle.on .knob { left: 21px; background: var(--on-accent); }
+.zoom { flex: none; display: flex; align-items: center; }
+.zoom a { display: block; width: 30px; height: 30px; line-height: 30px; text-align: center; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-weight: 600; }
+.zoom .v { width: 64px; text-align: center; }
+.zoom a.reset { width: auto; padding: 0 12px; margin-left: 8px; font-weight: 400; font-size: 13px; }
+.note { margin-top: 28px; font-size: 13px; }
+</style>
+<main>
+  <h1>Opciones</h1>
+  <p class="muted">Se aplican al momento y se guardan en el perfil.</p>
+  <h2>Al abrir</h2>
+  <div class="card">
+    <div class="row">
+      <span class="main"><span class="n">Continuar donde lo dejaste</span>
+      <span class="d">Al abrir Freedom vuelven las ventanas y pestañas de la última vez, con su historial de atrás y adelante. Las pestañas se cargan al mostrarlas.</span></span>
+      <a class="toggle{{restore_on}}" href="bf:setting-restore-session" title="{{restore_state}}"><span class="knob"></span></a>
+    </div>
+  </div>
+  <h2>Privacidad</h2>
+  <div class="card">
+    <div class="row">
+      <span class="main"><span class="n">Bloquear cookies de terceros</span>
+      <span class="d">Las peticiones entre sitios no mandan ni guardan cookies (RFC 6265bis §7.1). Algunos inicios de sesión integrados pueden dejar de funcionar.</span></span>
+      <a class="toggle{{cookies_on}}" href="bf:setting-third-party-cookies" title="{{cookies_state}}"><span class="knob"></span></a>
+    </div>
+  </div>
+  <h2>Lectura</h2>
+  <div class="card">
+    <div class="row">
+      <span class="main"><span class="n">Zoom de texto</span>
+      <span class="d">Agranda solo las letras, sin cambiar el ancho de la página. Ctrl+Shift con la rueda del ratón también lo cambia.</span></span>
+      <span class="zoom"><a href="bf:setting-text-zoom?out" title="Reducir">−</a><span class="v">{{text_zoom}}</span><a href="bf:setting-text-zoom?in" title="Agrandar">+</a><a class="reset" href="bf:setting-text-zoom?reset">Restablecer</a></span>
+    </div>
+  </div>
+  <h2>Descargas</h2>
+  <div class="card">
+    <div class="row">
+      <span class="main"><span class="n">Carpeta de descargas</span>
+      <span class="d">{{downloads_dir}}</span></span>
+      <a class="button quiet" href="freedom://downloads">Ver descargas</a>
+    </div>
+  </div>
+  <p class="note muted">Perfil: {{profile}} · <a href="freedom://history">Historial</a> · <a href="freedom://bookmarks">Marcadores</a></p>
+</main>
+</html>

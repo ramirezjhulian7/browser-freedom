@@ -1763,6 +1763,27 @@ pub enum FontSize {
 }
 
 impl FontSize {
+    /// ¿El valor no depende de la fuente del padre ni del root (palabras clave absolutas y
+    /// longitudes absolutas)? Son los que escala el zoom de texto del navegador; `em`, `%`,
+    /// `rem`, `smaller`/`larger` y `calc()` ya parten de un tamaño escalado.
+    pub fn is_absolute(&self) -> bool {
+        use crate::values::{LengthPercentage, LengthUnit};
+        match self {
+            FontSize::Absolute(_) | FontSize::Px(_) => true,
+            FontSize::LengthPercentage(LengthPercentage::Length(l)) => matches!(
+                l.unit,
+                LengthUnit::Px
+                    | LengthUnit::Cm
+                    | LengthUnit::Mm
+                    | LengthUnit::Q
+                    | LengthUnit::In
+                    | LengthUnit::Pt
+                    | LengthUnit::Pc
+            ),
+            _ => false,
+        }
+    }
+
     pub fn px(&self) -> f32 {
         match self {
             FontSize::Px(px) => *px,

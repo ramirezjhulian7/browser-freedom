@@ -429,6 +429,7 @@ dependencies = [
  "bf-web",
  "rfd",
  "softbuffer",
+ "unicode-normalization",
  "winit",
 ]
 

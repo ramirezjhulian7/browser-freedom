@@ -375,6 +375,7 @@ fn foreign_object_html_content() {
         loader: std::sync::Arc::new(FileLoader::new()),
         fonts: std::sync::Arc::new(bf_font::FontDb::from_faces(Vec::new())),
         extra: &[],
+        text_zoom: 1.0,
     };
     let viewport = Size {
         width: 40.0,
