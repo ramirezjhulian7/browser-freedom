@@ -151,7 +151,8 @@ fn islamic_leap(y: i64) -> bool {
 
 // --- Persa (aritmético de ICU: 8 años bisiestos cada 33) ---
 
-const PERSIAN_EPOCH: i64 = 226_896;
+/// 1 Farvardin del año 1: el día juliano 1948320 de ICU (R.D. 226 895).
+const PERSIAN_EPOCH: i64 = 226_895;
 const PERSIAN_CUM: [i64; 12] = [0, 31, 62, 93, 124, 155, 186, 216, 246, 276, 306, 336];
 
 fn persian_fixed(y: i64, m: i64, d: i64) -> i64 {
@@ -445,12 +446,12 @@ impl Cal {
                 self.month_day_from_offset(y, d.epoch_days() - start.epoch_days())
             }
             Cal::Hebrew => {
+                // El mayor año desde `approx - 1` cuyo año nuevo no es posterior (CC 8.4).
                 let approx = fdiv((rd - HEBREW_EPOCH) * 98_496, 35_975_351) + 1;
-                let y = if hebrew_new_year(approx) <= rd {
-                    approx
-                } else {
-                    approx - 1
-                };
+                let y = (approx - 1..=approx + 1)
+                    .rev()
+                    .find(|y| hebrew_new_year(*y) <= rd)
+                    .unwrap_or(approx - 1);
                 self.month_day_from_offset(y, rd - hebrew_new_year(y))
             }
             _ => unreachable!("calendario gregoriano"),
@@ -832,8 +833,9 @@ mod tests {
     use super::*;
 
     fn roundtrip(cal: Cal) {
-        let mut d = IsoDate::new(1800, 1, 1);
-        for _ in 0..2000 {
+        // ~4000 años desde el 1000 a. C. (años negativos en todos los calendarios).
+        let mut d = IsoDate::new(-1000, 1, 1);
+        for _ in 0..15_000 {
             let c = cal.to_cal(d);
             assert!(
                 c.month >= 1 && c.month <= cal.months_in_year(c.year),
@@ -872,9 +874,11 @@ mod tests {
         // 1 Chaitra 1946 = 2024-03-21 (año bisiesto).
         let i = Cal::Indian.to_cal(IsoDate::new(2024, 3, 21));
         assert_eq!((i.year, i.month, i.day), (1946, 1, 1));
-        // 1 Muharram 1446 (civil) = 2024-07-07.
-        let m = Cal::IslamicCivil.to_cal(IsoDate::new(2024, 7, 7));
+        // 1 Muharram 1446 tabular civil = 2024-07-08 (el astronómico es el 7).
+        let m = Cal::IslamicCivil.to_cal(IsoDate::new(2024, 7, 8));
         assert_eq!((m.year, m.month, m.day), (1446, 1, 1));
+        let t = Cal::IslamicTbla.to_cal(IsoDate::new(2024, 7, 7));
+        assert_eq!((t.year, t.month, t.day), (1446, 1, 1));
         // Adar I de 5784 (bisiesto) es M05L.
         let a = Cal::Hebrew.to_cal(IsoDate::new(2024, 2, 15));
         assert_eq!(a.code, MonthCode { num: 5, leap: true });

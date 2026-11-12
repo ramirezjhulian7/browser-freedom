@@ -496,13 +496,13 @@ pub enum Required<'a> {
 }
 
 impl Fields {
-    /// ISODateToFields (con CalendarISOToDate del calendario). Sin año (un month-day) va
-    /// solo el código de mes: el mes ordinal depende del año.
+    /// ISODateToFields (con CalendarISOToDate del calendario). Fuera de ISO 8601 va solo el
+    /// código de mes: el mes ordinal depende del año (y se recalcula si `with` lo cambia).
     pub fn from_date(cal: Cal, d: IsoDate, year: bool, day: bool) -> Fields {
         let c = cal.to_cal(d);
         Fields {
             year: year.then_some(c.year as f64),
-            month: year.then_some(f64::from(c.month)),
+            month: (year && cal.is_iso()).then_some(f64::from(c.month)),
             month_code: Some(c.code.text()),
             day: day.then_some(f64::from(c.day)),
             ..Fields::default()

@@ -533,7 +533,15 @@ fn default_string(ns: i128, tz: &str, cal: Cal) -> String {
 
 fn zdt_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (ns, tz, cal) = this_zdt(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&default_string(ns, &tz, cal)))
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Any,
+        crate::builtins::intl::date_time_format::Defaults::All,
+        Some((ns, &tz, cal.id())),
+    )
 }
 
 fn zdt_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

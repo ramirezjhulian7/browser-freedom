@@ -402,12 +402,16 @@ fn date_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn date_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (date, cal) = this_date(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&format!(
-        "{}{}",
-        iso::date_string(date),
-        calendar_annotation(cal, "auto")
-    )))
+    this_date(agent, &a.this, "toLocaleString")?;
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Date,
+        crate::builtins::intl::date_time_format::Defaults::Date,
+        None,
+    )
 }
 
 fn date_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

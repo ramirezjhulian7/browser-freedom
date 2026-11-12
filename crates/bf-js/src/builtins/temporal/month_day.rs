@@ -175,8 +175,16 @@ fn md_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn md_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (d, cal) = this_md(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&md_string(d, cal, "auto")))
+    this_md(agent, &a.this, "toLocaleString")?;
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Date,
+        crate::builtins::intl::date_time_format::Defaults::Date,
+        None,
+    )
 }
 
 fn md_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

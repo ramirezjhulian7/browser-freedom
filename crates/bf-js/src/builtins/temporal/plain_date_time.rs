@@ -357,12 +357,16 @@ fn dt_to_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn dt_to_locale_string(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let (dt, cal) = this_dt(agent, &a.this, "toLocaleString")?;
-    Ok(js_str(&format!(
-        "{}{}",
-        iso::date_time_string(dt, iso::Precision::Auto),
-        calendar_annotation(cal, "auto")
-    )))
+    this_dt(agent, &a.this, "toLocaleString")?;
+    crate::builtins::intl::date_time_format::temporal_to_locale_string(
+        agent,
+        &a.this,
+        &a.arg(0),
+        &a.arg(1),
+        crate::builtins::intl::date_time_format::Required::Any,
+        crate::builtins::intl::date_time_format::Defaults::All,
+        None,
+    )
 }
 
 fn dt_to_json(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
