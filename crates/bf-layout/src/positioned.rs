@@ -35,15 +35,12 @@ fn inset(v: &LengthPercentageAuto, basis: Option<f32>) -> Option<f32> {
 /// box will be used to layout for all of its absolute-position descendants, fixed-position
 /// descendants"; CSS Transforms 2 §5: lo mismo con `translate`, `rotate` y `scale`.
 ///
-/// TODO(E4): `transform`, `translate`, `rotate` y `scale` todavía no son longhands de
-/// `ComputedStyle` (`bf-style/src/properties/transform.rs` está sin enlazar). Al registrarlos,
-/// el cuerpo pasa a ser `!(style.transform.is_none() && style.translate.0.is_none() &&
-/// style.rotate.0.is_none() && style.scale.0.is_none())` y se quita el `#[ignore]` de
-/// `transform_contains_absolute_and_fixed_descendants` en `bf-layout/tests/scroll.rs`; el resto
-/// (marcos de absolutos, fijos aparte, `unfix`, rejilla) ya está hecho.
+/// E4: los cuatro longhands viven en `bf_style::properties::transform`.
 pub(crate) fn transform_contains(style: &ComputedStyle) -> bool {
-    let _ = style;
-    false
+    !(style.transform.is_none()
+        && style.translate.0.is_none()
+        && style.rotate.0.is_none()
+        && style.scale.0.is_none())
 }
 
 /// Marca como `absolute` el fragmento de una caja `fixed` cuyo containing block es un

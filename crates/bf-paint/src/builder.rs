@@ -86,6 +86,8 @@ struct Builder<'a> {
     viewport_overflow: Option<&'a Fragment>,
     /// Las listas de los documentos de los `<iframe>` y su desplazamiento (E4).
     frames: &'a FrameLists<'a>,
+    /// Estado de scroll de la maqueta: cajas `sticky` del viewport (E4, `PushSticky`).
+    scroll: &'a bf_layout::scroll::ScrollState,
 }
 
 /// La lista de visualización (en coordenadas de su viewport) y el desplazamiento del
@@ -111,6 +113,9 @@ fn real_sc(f: &Fragment) -> bool {
         && ((positioned(f) && f.z_index.is_some())
             || f.style.opacity.0 < 1.0
             || f.style.position == Position::Fixed
+            // E4: también `sticky` (CSS Position 3 §3.4; así lo que contiene sigue a su
+            // `PushSticky`).
+            || f.style.position == Position::Sticky
             || transformed(f)
             || masked(&f.style))
 }
@@ -327,7 +332,12 @@ impl<'a> Builder<'a> {
     fn child_context(&mut self, e: &Entry<'a>) {
         // Dentro de una caja transformada, lo `fixed` se mueve con ella (E4).
         if e.f.style.position != Position::Fixed || self.in_transform > 0 {
+            let sticky = self.push_sticky(e.f, &e.clip);
             self.stacking_context(e.f, &e.clip);
+            if sticky {
+                self.set_clip(&e.clip);
+                self.list.push(DisplayItem::PopSticky);
+            }
             return;
         }
         let none = Vec::new();
@@ -336,6 +346,30 @@ impl<'a> Builder<'a> {
         self.stacking_context(e.f, &none);
         self.set_clip(&none);
         self.list.push(DisplayItem::PopFixed);
+    }
+
+    /// E4: abre un `PushSticky` si `f` es una caja `sticky` cuyo scrollport es el viewport
+    /// (las de otros scroll containers ya están desplazadas en la maqueta). Los recortes de
+    /// afuera quedan aplicados antes, sin desplazar.
+    fn push_sticky(&mut self, f: &Fragment, clip: &ClipChain) -> bool {
+        let Some((node, constraints)) = f
+            .node
+            .filter(|_| f.style.position == Position::Sticky && f.pseudo.is_none())
+            .and_then(|n| Some((n, *self.scroll.viewport_constraints.get(&n)?)))
+        else {
+            return false;
+        };
+        let applied = self.scroll.sticky.get(&node).copied().unwrap_or((0.0, 0.0));
+        self.set_clip(clip);
+        self.list.push(DisplayItem::PushSticky {
+            constraints,
+            applied,
+            viewport: bf_layout::fragment::Size {
+                width: self.viewport.width,
+                height: self.viewport.height,
+            },
+        });
+        true
     }
 
     /// Floats, atómicos inline y posicionados con `z-index: auto`: como un stacking context,
@@ -885,6 +919,10 @@ impl<'a> Builder<'a> {
                     dy: scroll.1,
                 },
                 DisplayItem::PopFixed => DisplayItem::PopTransform,
+                // E4: el raster desplaza lo `sticky` con el scroll de la página, no con el del
+                // marco: dentro de un marco queda como lo dejó su maqueta.
+                DisplayItem::PushSticky { .. } => DisplayItem::PushTransform { dx: 0.0, dy: 0.0 },
+                DisplayItem::PopSticky => DisplayItem::PopTransform,
                 other => other.clone(),
             });
         }
@@ -1756,6 +1794,7 @@ pub fn build_display_list_with_frames(
         root: tree.root.as_ref(),
         viewport_overflow: None,
         frames,
+        scroll: &tree.scroll,
     };
     // Raíz sin caja (`display: none`): el canvas queda sin fondo (CSS Backgrounds 3 §2.11.2;
     // CSS2/box-display/root-box-003 espera lo contrario, según CSS 2.1).

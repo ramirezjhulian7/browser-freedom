@@ -1710,6 +1710,7 @@ fn apply_keyframes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::properties::PropValue;
 
     #[test]
     fn timing_phases() {
@@ -1753,5 +1754,106 @@ mod tests {
             interpolate(&a, &b, 0.4, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
             a
         );
+    }
+
+    fn transform(css: &str) -> Transform {
+        let tokens = bf_css::syntax::parse_component_value_list(css);
+        <Transform as PropValue>::parse(&tokens).expect("transform válido")
+    }
+
+    #[test]
+    fn timing_zero_duration_and_infinite_iterations() {
+        let base = Timing {
+            delay: 0.0,
+            duration: 0.0,
+            iterations: 1.0,
+            direction: AnimationDirection::Normal,
+            fill: FillMode::Forwards,
+            easing: TimingFunction::Linear,
+        };
+        // Web Animations 1 §4.8.3: con duración 0 el efecto salta al final y se queda.
+        let at = base.at(0.0, false);
+        assert_eq!(at.phase, Phase::After);
+        assert_eq!(at.progress, Some(1.0));
+        assert_eq!(base.end_time(), 0.0);
+        let infinite = Timing {
+            duration: 100.0,
+            iterations: f64::INFINITY,
+            fill: FillMode::None,
+            ..base
+        };
+        assert_eq!(infinite.end_time(), f64::INFINITY);
+        let t = infinite.at(1025.0, false);
+        assert_eq!(t.phase, Phase::Active);
+        assert_eq!(t.current_iteration, Some(10.0));
+        assert!((t.progress.unwrap() - 0.25).abs() < 1e-9);
+        // `reverse`: el progreso va de 1 a 0.
+        let rev = Timing {
+            direction: AnimationDirection::Reverse,
+            ..infinite
+        };
+        assert!((rev.at(1025.0, false).progress.unwrap() - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visibility_and_discrete_values() {
+        let a = Value::Visibility(Visibility::Hidden);
+        let b = Value::Visibility(Visibility::Visible);
+        // CSS Transitions 1 §6 / Web Animations: `visible` en todo el intervalo abierto.
+        assert_eq!(
+            interpolate(&a, &b, 0.1, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            b
+        );
+        assert_eq!(
+            interpolate(&a, &b, 0.0, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            a
+        );
+        let a = Value::Display(Display::Block);
+        let b = Value::Display(Display::None);
+        assert_eq!(
+            interpolate(&a, &b, 0.49, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            a
+        );
+        assert_eq!(
+            interpolate(&a, &b, 0.5, (Rgba::BLACK, Rgba::BLACK), (0.0, 0.0)),
+            b
+        );
+        assert!(is_interpolable(LonghandId::Transform));
+        assert!(is_interpolable(LonghandId::Opacity));
+        assert!(!is_interpolable(LonghandId::Display));
+    }
+
+    #[test]
+    fn transform_interpolation() {
+        let size = (100.0, 100.0);
+        // Mismas funciones: una por una (CSS Transforms 1 §9).
+        let t = lerp_transform(&transform("scale(1)"), &transform("scale(3)"), 0.5, size);
+        assert_eq!(t.to_css(), "scale(2)");
+        // `none` con una lista: la función neutra.
+        let t = lerp_transform(
+            &transform("none"),
+            &transform("translateX(100px)"),
+            0.25,
+            size,
+        );
+        assert_eq!(t.to_css(), "translateX(25px)");
+        // Funciones distintas: por matrices descompuestas; los extremos son las matrices de
+        // cada lado.
+        let a = transform("translateX(100px)");
+        let b = transform("rotate(90deg)");
+        assert_eq!(
+            transform_css(&lerp_transform(&a, &b, 0.0, size), size),
+            "matrix(1, 0, 0, 1, 100, 0)"
+        );
+        assert_eq!(
+            transform_css(&lerp_transform(&a, &b, 1.0, size), size),
+            "matrix(0, 1, -1, 0, 0, 0)"
+        );
+        let mid = lerp_transform(&a, &b, 0.5, size).matrix(size.0, size.1);
+        let m = crate::properties::transform::to_affine(&mid);
+        // A mitad: rotación de 45° y traslación de 50px.
+        assert!((m[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert!((m[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert!((m[4] - 50.0).abs() < 1e-3);
     }
 }

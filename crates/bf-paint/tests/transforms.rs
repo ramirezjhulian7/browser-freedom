@@ -94,7 +94,6 @@ fn transformed_descendants_and_clip() {
 }
 
 #[test]
-#[ignore = "necesita que el layout haga del transformado el bloque contenedor de los fixed \n            (positioned::transform_contains, army/e12): quitar el ignore al integrar"]
 fn fixed_inside_a_transform_moves_with_it() {
     // CSS Transforms 1 §3: la caja transformada es el bloque contenedor de los `fixed`, que se
     // pintan con su matriz y no respecto del viewport.

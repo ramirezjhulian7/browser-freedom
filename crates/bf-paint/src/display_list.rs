@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use bf_layout::fragment::{Edges, Rect};
+use bf_layout::fragment::{Edges, Rect, Size};
+use bf_layout::scroll::StickyConstraints;
 use bf_layout::{FontKey, Outline, Widget};
 use bf_style::properties::types::{BorderStyle, TextDecorationStyle};
 use bf_style::values::color::Rgba;
@@ -189,6 +190,18 @@ pub enum DisplayItem {
     /// desplazamiento del scroll.
     PushFixed,
     PopFixed,
+    /// E4 (pedido de E12): contenido de una caja `position: sticky` cuyo scrollport es el
+    /// viewport (CSS Position 3 §3.4). Los fragmentos ya traen `applied`, el desplazamiento
+    /// calculado con el scroll de la página de la maqueta; el raster recalcula el desplazamiento
+    /// con su scroll (`constraints.offset` contra el rectángulo de vista: scroll de la página
+    /// y `viewport`) y traslada lo que sigue hasta [`DisplayItem::PopSticky`] por la
+    /// diferencia. Así desplazar la página no obliga a rehacer la lista.
+    PushSticky {
+        constraints: StickyConstraints,
+        applied: (f32, f32),
+        viewport: Size,
+    },
+    PopSticky,
 }
 
 /// Parámetros de una sombra de caja ya resueltos a px CSS.

@@ -78,6 +78,75 @@ pub struct ScrollState {
     pub viewport_sticky: bool,
     /// Scroll de la página con el que se calcularon las cajas `sticky`.
     pub page_scroll: (f32, f32),
+    /// E4: las restricciones de cada caja `sticky` cuyo scrollport es el viewport, para que la
+    /// pintura (`DisplayItem::PushSticky` de bf-paint) resuelva su desplazamiento con el
+    /// scroll de la página sin rehacer la lista.
+    pub viewport_constraints: HashMap<NodeId, StickyConstraints>,
+}
+
+/// Lo que fija el desplazamiento de una caja `sticky` (CSS Position 3 §3.4), salvo el
+/// rectángulo de vista: su border box sin desplazar, sus márgenes, sus `inset` resueltos y la
+/// content box de su containing block (E4, extraído de `sticky_shift` de E12).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickyConstraints {
+    /// Border box de la caja sin el desplazamiento `sticky`.
+    pub rect: Rect,
+    /// Márgenes (los `auto` cuentan como 0).
+    pub margin: crate::fragment::Edges,
+    /// `top`, `right`, `bottom`, `left` resueltos contra el rectángulo de vista (`None`:
+    /// `auto`).
+    pub insets: [Option<f32>; 4],
+    /// Content box del containing block: el límite del desplazamiento.
+    pub containing: Rect,
+}
+
+impl StickyConstraints {
+    /// El desplazamiento `sticky` contra el rectángulo de vista `svr` (el scrollport menos su
+    /// padding). Si chocan, ganan `top` y `left` (ltr).
+    pub fn offset(&self, svr: Rect) -> (f32, f32) {
+        let (r, m, cb) = (self.rect, self.margin, self.containing);
+        let [top, right, bottom, left] = self.insets;
+        let axis = |start: Option<f32>,
+                    end: Option<f32>,
+                    (r0, r1): (f32, f32),
+                    (m0, m1): (f32, f32),
+                    (s0, s1): (f32, f32),
+                    (c0, c1): (f32, f32)| {
+            let mut d = 0.0f32;
+            if let Some(e) = end {
+                let limit = s1 - e;
+                if r1 > limit {
+                    // Hacia el inicio, sin que el margen salga del containing block.
+                    d = (limit - r1).max((c0 - (r0 - m0)).min(0.0));
+                }
+            }
+            if let Some(s) = start {
+                let limit = s0 + s;
+                if r0 + d < limit {
+                    // Hacia el final, sin que el margen salga del containing block.
+                    d = (limit - r0).min((c1 - (r1 + m1)).max(0.0));
+                }
+            }
+            d
+        };
+        let dx = axis(
+            left,
+            right,
+            (r.x, r.right()),
+            (m.left, m.right),
+            (svr.x, svr.right()),
+            (cb.x, cb.right()),
+        );
+        let dy = axis(
+            top,
+            bottom,
+            (r.y, r.bottom()),
+            (m.top, m.bottom),
+            (svr.y, svr.bottom()),
+            (cb.y, cb.bottom()),
+        );
+        (dx, dy)
+    }
 }
 
 /// El valor usado de `overflow-x`/`overflow-y` (CSS Overflow 3 §3.1: si un eje es
@@ -408,59 +477,29 @@ fn inset(v: &LengthPercentageAuto, basis: f32) -> Option<f32> {
     }
 }
 
-/// El desplazamiento `sticky` de una caja con border box `r` (sin desplazar) y márgenes `m`,
-/// contra el rectángulo de vista `svr` y la content box `cb` de su containing block (CSS
-/// Position 3 §3.4). Si chocan, ganan `top` y `left` (ltr).
-fn sticky_shift(style: &ComputedStyle, r: Rect, svr: Rect, cb: Rect) -> (f32, f32) {
+/// Las restricciones `sticky` de una caja con border box `r` (sin desplazar) contra un
+/// rectángulo de vista de tamaño `svr` y la content box `cb` de su containing block (CSS
+/// Position 3 §3.4). E4: antes `sticky_shift`; el cálculo pasó a [`StickyConstraints::offset`].
+fn sticky_constraints(style: &ComputedStyle, r: Rect, svr: Size, cb: Rect) -> StickyConstraints {
     // Los márgenes `auto` cuentan como 0 para el límite (Blink y Gecko; Gecko 1488080: una
     // caja sticky alineada con `margin-top: auto` en un flex sigue pegándose).
     let margin = |v: &LengthPercentageAuto| crate::block::margin_value(v, cb.width).unwrap_or(0.0);
-    let m = crate::fragment::Edges {
-        top: margin(&style.margin_top),
-        right: margin(&style.margin_right),
-        bottom: margin(&style.margin_bottom),
-        left: margin(&style.margin_left),
-    };
-    let axis = |start: Option<f32>,
-                end: Option<f32>,
-                (r0, r1): (f32, f32),
-                (m0, m1): (f32, f32),
-                (s0, s1): (f32, f32),
-                (c0, c1): (f32, f32)| {
-        let mut d = 0.0f32;
-        if let Some(e) = end {
-            let limit = s1 - e;
-            if r1 > limit {
-                // Hacia el inicio, sin que el margen salga del containing block.
-                d = (limit - r1).max((c0 - (r0 - m0)).min(0.0));
-            }
-        }
-        if let Some(s) = start {
-            let limit = s0 + s;
-            if r0 + d < limit {
-                // Hacia el final, sin que el margen salga del containing block.
-                d = (limit - r0).min((c1 - (r1 + m1)).max(0.0));
-            }
-        }
-        d
-    };
-    let dx = axis(
-        inset(&style.left, svr.width),
-        inset(&style.right, svr.width),
-        (r.x, r.right()),
-        (m.left, m.right),
-        (svr.x, svr.right()),
-        (cb.x, cb.right()),
-    );
-    let dy = axis(
-        inset(&style.top, svr.height),
-        inset(&style.bottom, svr.height),
-        (r.y, r.bottom()),
-        (m.top, m.bottom),
-        (svr.y, svr.bottom()),
-        (cb.y, cb.bottom()),
-    );
-    (dx, dy)
+    StickyConstraints {
+        rect: r,
+        margin: crate::fragment::Edges {
+            top: margin(&style.margin_top),
+            right: margin(&style.margin_right),
+            bottom: margin(&style.margin_bottom),
+            left: margin(&style.margin_left),
+        },
+        insets: [
+            inset(&style.top, svr.height),
+            inset(&style.right, svr.width),
+            inset(&style.bottom, svr.height),
+            inset(&style.left, svr.width),
+        ],
+        containing: cb,
+    }
 }
 
 /// El rectángulo de vista sticky de un scroll container: su scrollport menos su padding
@@ -507,12 +546,20 @@ pub fn update_sticky(tree: &mut FragmentTree, page_scroll: (f32, f32)) {
             let mut r = f.rect;
             r.translate(-old.0, -old.1);
             let style = f.style.clone();
-            let new = sticky_shift(&style, r, svr.0, cb);
+            let size = Size {
+                width: svr.0.width,
+                height: svr.0.height,
+            };
+            let constraints = sticky_constraints(&style, r, size, cb);
+            let new = constraints.offset(svr.0);
             if new != old {
                 f.translate(new.0 - old.0, new.1 - old.1);
             }
             ctx.state.sticky.insert(node, new);
             ctx.viewport_sticky |= svr.1;
+            if svr.1 {
+                ctx.state.viewport_constraints.insert(node, constraints);
+            }
         }
         let mut child_svr = svr;
         if let Some(node) = f.node
@@ -528,6 +575,8 @@ pub fn update_sticky(tree: &mut FragmentTree, page_scroll: (f32, f32)) {
     }
     let viewport = tree.viewport;
     let mut state = std::mem::take(&mut tree.scroll);
+    // E4: se rehacen todas en el recorrido.
+    state.viewport_constraints.clear();
     if let Some(root) = tree.root.as_mut() {
         let mut ctx = Ctx {
             state: &mut state,
