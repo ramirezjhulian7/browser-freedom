@@ -261,7 +261,7 @@ impl<'a> Layout<'a> {
             if c.is_absolutely_positioned() {
                 // §4.1: posición estática como si fuera el único ítem (aproximada: el inicio
                 // del content box).
-                self.add_abs(c, cb.x, cb.y);
+                self.add_abs(c, cb.x, cb.y, false);
                 continue;
             }
             if matches!(c.kind, BoxKind::Marker { .. }) {

@@ -379,6 +379,23 @@ impl Harness {
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
     }
 
+    /// E9: volcado del árbol de fragmentos de un archivo de WPT (ruta relativa a `tests/wpt`),
+    /// para depurar un fallo.
+    pub fn dump(&self, rel: &str) -> Option<String> {
+        let path = self.wpt.join(rel);
+        let (doc, _) = parse_file(&path)?;
+        let base = self.base(&path);
+        let ctx = crate::PageContext {
+            base: &base,
+            encoding: Encoding::Utf8,
+            loader: self.loader.clone(),
+            fonts: self.db.clone(),
+            extra: &[],
+        };
+        let page = crate::prepare_page(&doc, &ctx, VIEWPORT);
+        Some(bf_layout::dump(&doc, &page.tree))
+    }
+
     /// Un documento SVG suelto (E7): su raíz es el viewport, del tamaño de sus `width` y
     /// `height` absolutos o del viewport de la ventana, sobre fondo blanco.
     fn render_svg(&self, doc: &Document, path: &Path) -> Pixmap {

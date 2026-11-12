@@ -32,3 +32,27 @@ fn wpt_reftests_groups() {
     }
     let _ = std::fs::write(out.join("results.tsv"), tsv);
 }
+
+/// Volcado del árbol de fragmentos de los archivos de `REFTEST_DUMP` (rutas relativas a
+/// `tests/wpt`, separadas por comas):
+///
+/// `REFTEST_DUMP=css/css-writing-modes/x.xht cargo test -p bf-paint --test wpt_reftests_groups wpt_dump -- --ignored --nocapture`
+#[test]
+#[ignore = "herramienta de depuración: correr con --ignored y REFTEST_DUMP"]
+fn wpt_dump() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Ok(files) = std::env::var("REFTEST_DUMP") else {
+        eprintln!("aviso: falta REFTEST_DUMP; se salta");
+        return;
+    };
+    let harness = bf_paint::reftest::Harness::new(workspace.join("tests/wpt"), None);
+    for f in files.split(',').map(str::trim) {
+        println!("===== {f}");
+        println!(
+            "{}",
+            harness
+                .dump(f)
+                .unwrap_or_else(|| "(no se pudo leer)".into())
+        );
+    }
+}

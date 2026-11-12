@@ -2589,6 +2589,7 @@ impl<'a> Layout<'a> {
                         b: c,
                         static_x: content_box.x,
                         static_y: content_box.y,
+                        static_rtl: false,
                     };
                     this.absolute(p, content_box)
                 });
@@ -2598,7 +2599,7 @@ impl<'a> Layout<'a> {
                 } else {
                     dx
                 };
-                self.add_abs(c, content_box.x + dx, content_box.y + dy);
+                self.add_abs(c, content_box.x + dx, content_box.y + dy, false);
                 continue;
             }
             let area = abs_area(s);
@@ -2607,6 +2608,7 @@ impl<'a> Layout<'a> {
                     b: c,
                     static_x: area.x,
                     static_y: area.y,
+                    static_rtl: false,
                 },
                 area,
             );

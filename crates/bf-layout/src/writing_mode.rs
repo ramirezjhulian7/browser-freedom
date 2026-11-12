@@ -143,6 +143,44 @@ pub fn to_physical(style: &ComputedStyle, frame: Frame) -> ComputedStyle {
     convert(style, frame, true)
 }
 
+/// Pasa a píxeles los porcentajes de los márgenes y paddings de `style` con `basis`.
+fn resolve_box_percentages(style: &mut ComputedStyle, basis: f32) {
+    use bf_style::properties::types::{LengthPercentageAuto, NonNegative};
+    use bf_style::values::LengthPercentage;
+    for m in [
+        &mut style.margin_top,
+        &mut style.margin_right,
+        &mut style.margin_bottom,
+        &mut style.margin_left,
+    ] {
+        if let LengthPercentageAuto::LengthPercentage(lp) = m
+            && lp.has_percentage()
+        {
+            *m = LengthPercentageAuto::LengthPercentage(LengthPercentage::px(lp.resolve(basis)));
+        }
+    }
+    for p in [
+        &mut style.padding_top,
+        &mut style.padding_right,
+        &mut style.padding_bottom,
+        &mut style.padding_left,
+    ] {
+        if p.0.has_percentage() {
+            *p = NonNegative(LengthPercentage::px(p.0.resolve(basis).max(0.0)));
+        }
+    }
+}
+
+/// ¿La baseline dominante de un texto vertical con este estilo es la central? Lo es salvo
+/// con `sideways-*` o `text-orientation: sideways` (CSS Inline 3 §4.1).
+pub fn central_baseline(style: &ComputedStyle) -> bool {
+    use bf_style::properties::types::TextOrientation;
+    !matches!(
+        style.writing_mode,
+        WritingMode::SidewaysRl | WritingMode::SidewaysLr
+    ) && style.text_orientation != TextOrientation::Sideways
+}
+
 /// ¿Hay alguna caja con un modo de escritura vertical?
 pub fn has_vertical(b: &LayoutBox) -> bool {
     Frame::of(&b.style).is_vertical() || b.children.iter().any(has_vertical)
@@ -279,10 +317,19 @@ impl<'a> Layout<'a> {
     /// §7.3) y devuelve su fragmento en el marco en curso, con la esquina de su margin box en
     /// el origen. `cb` es el containing block en el marco en curso.
     pub(crate) fn orthogonal_fragment(&mut self, b: &LayoutBox, cb: Cb) -> Fragment {
+        self.orthogonal_fragment_with(b, cb, cb.width)
+    }
+
+    /// [`Layout::orthogonal_fragment`] con los porcentajes de márgenes y paddings de `b`
+    /// resueltos contra `pct_basis`: el tamaño inline de su containing block, que está en el
+    /// marco del padre (CSS Writing Modes 4 §7.2, CSS Box 4 §5), no en el suyo.
+    fn orthogonal_fragment_with(&mut self, b: &LayoutBox, cb: Cb, pct_basis: f32) -> Fragment {
         let parent = self.frame;
         let own = Frame::of(&b.style);
         let mut inner = b.clone();
-        inner.style = Arc::new(to_logical(&to_physical(&b.style, parent), own));
+        let mut style = to_logical(&to_physical(&b.style, parent), own);
+        resolve_box_percentages(&mut style, pct_basis);
+        inner.style = Arc::new(style);
         inner.independent = true;
         // Ejes cruzados: el eje inline de `b` es el de bloque del padre.
         let crossed = parent.is_vertical() != own.is_vertical();
@@ -295,9 +342,12 @@ impl<'a> Layout<'a> {
             self.viewport
         };
         // Espacio inline disponible: el tamaño del containing block en ese eje si es
-        // definido; si no, el del initial containing block (§7.3).
+        // definido; si no, su máximo fijo y si no, el del initial containing block (§7.3.1).
         let (inline, block) = if crossed {
-            (cb.height.unwrap_or(viewport.width), Some(cb.width))
+            (
+                cb.height.or(self.cb_max_height).unwrap_or(viewport.width),
+                Some(cb.width),
+            )
         } else {
             (cb.width, cb.height)
         };
@@ -333,6 +383,16 @@ impl<'a> Layout<'a> {
             let a = sub.absolute(p, border_box);
             f.children.push(a);
         }
+        // Los márgenes especificados (`auto` = 0): el sub-layout resolvió el inline-end como
+        // sobre-restringido contra todo el espacio disponible, y quien coloca esta caja (línea,
+        // float, absoluta, `orthogonal_block`) usa su margin box.
+        let mb = margin_value(&inner.style.margin_bottom, inline).unwrap_or(0.0);
+        f.margin = Edges {
+            top: mt,
+            right: mr,
+            bottom: mb,
+            left: ml,
+        };
         // Al físico (origen en la esquina de la margin box) y de ahí al marco del padre.
         let margin_block = f.margin.top + f.rect.height + f.margin.bottom;
         let margin_inline = f.margin.left + f.rect.width + f.margin.right;
@@ -371,7 +431,14 @@ impl<'a> Layout<'a> {
         };
         let mt = margin_value(&style.margin_top, cb.width).unwrap_or(0.0);
         let mb = margin_value(&style.margin_bottom, cb.width).unwrap_or(0.0);
-        let (dx, dy) = (avail.x + ml - f.rect.x, top - f.rect.y);
+        let (mut dx, mut dy) = (avail.x + ml - f.rect.x, top - f.rect.y);
+        // `position: relative` en el marco del padre (el sub-layout lo aplicó en el suyo y
+        // aquí se recoloca la caja).
+        if style.position == bf_style::properties::types::Position::Relative {
+            let (rx, ry) = self.relative_offset(style, cb);
+            dx += rx;
+            dy += ry;
+        }
         translate(&mut f, dx, dy);
         f.margin = Edges {
             top: mt,
@@ -389,9 +456,12 @@ impl<'a> Layout<'a> {
             x: 0.0,
             y: 0.0,
             width: self.viewport.width,
-            height: None,
+            // El alto definido del padre que se mide (`pct_height_basis`) es el espacio inline
+            // de `b` (§7.3); si no lo hay, el del initial containing block.
+            height: self.pct_height_basis,
         };
-        let f = self.orthogonal_fragment(b, cb);
+        // Al medir, los porcentajes de márgenes y paddings (cíclicos) cuentan como cero.
+        let f = self.orthogonal_fragment_with(b, cb, 0.0);
         let w = (f.rect.width - f.border.left - f.border.right - f.padding.left - f.padding.right)
             .max(0.0);
         (w, w)

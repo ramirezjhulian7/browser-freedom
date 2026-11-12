@@ -10,8 +10,8 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BoxSizing, Clear, ContentAlign, Display, LengthPercentageAuto, MaxSize, Overflow, Position,
-    Size, ZIndex,
+    BoxSizing, Clear, ContentAlign, Direction, Display, LengthPercentageAuto, MaxSize, Overflow,
+    Position, Size, ZIndex,
 };
 
 use crate::box_tree::{BoxKind, LayoutBox};
@@ -68,6 +68,9 @@ pub(crate) struct PendingAbs<'a> {
     pub b: &'a LayoutBox,
     pub static_x: f32,
     pub static_y: f32,
+    /// E9: el elemento que establece el containing block de la posición estática es `rtl`:
+    /// `static_x` es el borde derecho de la caja hipotética (CSS 2.2 §10.3.7).
+    pub static_rtl: bool,
 }
 
 pub(crate) struct Layout<'a> {
@@ -97,6 +100,9 @@ pub(crate) struct Layout<'a> {
     /// E9: marco (modo de escritura) del flujo en curso; una caja de otro modo es la raíz de
     /// un flujo ortogonal (`writing_mode.rs`).
     pub frame: crate::writing_mode::Frame,
+    /// E9: `max-height` (content box) del containing block de los hijos en curso cuando su alto
+    /// no es definido: espacio inline de un flujo ortogonal (CSS Writing Modes 4 §7.3.1).
+    pub cb_max_height: Option<f32>,
     /// E5: `direction: rtl` en el containing block del bloque en flujo que se va a maquetar
     /// (CSS 2.2 §10.3.3: sobre-restringido, se ignora `margin-left`).
     pub cb_rtl: bool,
@@ -339,6 +345,7 @@ impl<'a> Layout<'a> {
             subgrids: std::collections::HashMap::new(),
             pct_height_basis: None,
             frame: crate::writing_mode::Frame::Horizontal,
+            cb_max_height: None,
             cb_rtl: false,
             content_probe: false,
             subgrid_mask: std::collections::HashMap::new(),
@@ -350,7 +357,16 @@ impl<'a> Layout<'a> {
     }
 
     pub fn metrics(&self, style: &ComputedStyle) -> FontMetrics {
-        self.fonts.metrics(&Self::font_request(style))
+        let mut m = self.fonts.metrics(&Self::font_request(style));
+        // E9: en un flujo vertical la baseline dominante es la central salvo con glifos de lado
+        // (CSS Inline 3 §4.1, `dominant-baseline: auto`): en el marco lógico, el ascent y el
+        // descent son la mitad del em box cada uno.
+        if self.frame.is_vertical() && crate::writing_mode::central_baseline(style) {
+            let half = (m.ascent + m.descent) / 2.0;
+            m.ascent = half;
+            m.descent = half;
+        }
+        m
     }
 
     /// Glifos con `letter-spacing` y `word-spacing` aplicados.
@@ -933,6 +949,13 @@ impl<'a> Layout<'a> {
         let fl: &mut FloatContext = if bfc { &mut own_floats } else { floats };
         let mut trailing = CollapsedMargin::default();
         let outer_legend = std::mem::replace(&mut self.legend, legend_box);
+        let max_basis = if child_cb.height.is_none() {
+            let (_, hi) = height_limits(style, cb.height, edges_v);
+            hi.is_finite().then_some(hi)
+        } else {
+            None
+        };
+        let saved_max_height = std::mem::replace(&mut self.cb_max_height, max_basis);
         let (mut children, auto_h) = match &b.kind {
             BoxKind::Replaced { natural, ratio } => {
                 let size = self.replaced_size(b, *natural, *ratio, cb);
@@ -972,6 +995,7 @@ impl<'a> Layout<'a> {
                 (frags, h)
             }
         };
+        self.cb_max_height = saved_max_height;
         self.legend = outer_legend;
         // E5: con contención de tamaño (CSS Containment 2 §3.2) el alto automático es el de una
         // caja vacía o `contain-intrinsic-height` (CSS Sizing 4 §7.1).
@@ -1188,7 +1212,10 @@ impl<'a> Layout<'a> {
                     let f = self.float_box(child, cb, y, floats);
                     frags.push(f);
                 } else {
-                    self.add_abs(child, cb.x, y);
+                    // E9: en un contenedor `rtl`, la caja hipotética se alinea a la derecha.
+                    let rtl = b.style.direction == Direction::Rtl;
+                    let x = if rtl { cb.x + cb.width } else { cb.x };
+                    self.add_abs(child, x, y, rtl);
                 }
                 continue;
             }
