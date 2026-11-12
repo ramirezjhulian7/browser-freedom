@@ -1,7 +1,7 @@
 //! IndexedDB 3.0: la implementación está en `idb1.js` + `idb2.js` (evaluados una vez por
 //! realm); aquí están las funciones nativas que usa: eventos de confianza con el event path de
 //! IndexedDB (request → transaction → database), tareas, Blobs y el log en disco
-//! ([`super::backend`]).
+//! ([`super::backend`]) y el registro de conexiones entre agentes ([`super::shared`]).
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::{CallArgs, NativeFn};
 use bf_js::vm::{Agent, JsResult, RealmId};
 
-use super::{backend_mut, quota};
+use super::{backend_mut, quota, shared};
 use crate::dom::events::{EventData, dispatch_js_event, event_target_of};
 use crate::net::blob::{self, BlobData};
 
@@ -23,7 +23,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();
-    let fns: [(&str, u32, NativeFn); 14] = [
+    let fns: [(&str, u32, NativeFn); 19] = [
         ("fire", 2, fire),
         ("setParent", 2, set_parent),
         ("queueTask", 1, queue_task),
@@ -38,6 +38,11 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
         ("names", 0, names),
         ("estimate", 0, estimate),
         ("origin", 0, origin),
+        ("setHook", 1, shared::set_hook),
+        ("shareOpen", 2, shared::share_open),
+        ("shareClose", 2, shared::share_close),
+        ("shareNotify", 4, shared::share_notify),
+        ("shareGeneration", 1, shared::share_generation),
     ];
     for (name, len, f) in fns {
         bf_js::builtins::method(agent, native, name, len, f);
@@ -164,22 +169,23 @@ fn load(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn append(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let name = str_arg(agent, &a.arg(0))?;
     let text = str_arg(agent, &a.arg(1))?;
-    Ok(Value::Boolean(
-        backend_mut(agent).append(&name, &text).is_ok(),
-    ))
+    let ok = backend_mut(agent).append(&name, &text).is_ok();
+    shared::bump(agent, &name);
+    Ok(Value::Boolean(ok))
 }
 
 fn compact(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let name = str_arg(agent, &a.arg(0))?;
     let text = str_arg(agent, &a.arg(1))?;
-    Ok(Value::Boolean(
-        backend_mut(agent).compact(&name, &text).is_ok(),
-    ))
+    let ok = backend_mut(agent).compact(&name, &text).is_ok();
+    shared::bump(agent, &name);
+    Ok(Value::Boolean(ok))
 }
 
 fn remove(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let name = str_arg(agent, &a.arg(0))?;
     backend_mut(agent).remove(&name);
+    shared::bump(agent, &name);
     Ok(Value::Undefined)
 }
 
