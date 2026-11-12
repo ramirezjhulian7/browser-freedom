@@ -30,7 +30,13 @@ cargo run --release -p bf-js --bin bf-bench -- --filter fib       # solo los que
 | `regexp.js` | `match`, `exec`, `replace`, `split` y `test` sobre un texto de 168 KB |
 | `dom.js` | objetos al estilo de nodos del DOM (18 propiedades): árbol, layout, recorridos |
 | `calls.js` | costo de una llamada: `add(a, b)` 3 M veces desde un bucle |
+| `richards.js` | Richards de Octane (texto original, licencia BSD): planificador de tareas de un SO; 20 vueltas |
+| `deltablue.js` | DeltaBlue (implementación propia; el de Octane es GPL): restricciones incrementales; 10 vueltas de `chainTest(100)` + `projectionTest(100)` |
+| `navier-stokes.js` | NavierStokes de Octane (texto original, licencia MIT): fluido de 128×128; 15 cuadros |
 | `globals.js` | bucle con `var` en el código global (lee y escribe el objeto global) |
+
+Los tres de Octane tienen la misma carga por vuelta que el original y solo cambia cuántas
+vueltas hacen (ver `docs/perf.md`, "macOS y los tres de Octane").
 
 ## Comparación A/B y resultados
 

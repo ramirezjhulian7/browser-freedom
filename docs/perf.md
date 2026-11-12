@@ -308,6 +308,73 @@ Pedido en la ronda 4 del 2026-11-12 (~110 ns por llamada). No se hizo; el diseñ
   `try` (guardan `stack_len`) y el GC (las raíces pasan a ser `values`). Medir con
   `bench/calls.js` y `fib.js` por A/B como en las secciones de arriba.
 
+## macOS y los tres de Octane (2026-11-12)
+
+Primera medición en el Mac (Apple M4 de 10 núcleos, Rust 1.100.0, `master` `5b9a230`):
+`bf-bench --runs 5` (mejor de 5), todos los programas en una tanda. **La máquina estaba muy
+cargada**: carga media 118 al empezar y 175 al terminar (otros cinco ejecutores compilando),
+así que los tiempos son cotas superiores; valen para ver que todo termina y el orden de
+magnitud, no como línea base fina. `fib` da 632 ms frente a 363 ms en la última medición de
+Windows (con otra carga).
+
+### richards, deltablue y navier-stokes (criterio del roadmap, apartado 2.1)
+
+Los tres terminan sin error y con su comprobación en verde. Cada vuelta tiene la misma carga
+que la de Octane; lo que cambia es el número de vueltas (el modo determinista de Octane hace
+8 200, 4 400 y 180, que aquí serían minutos por programa):
+
+| benchmark | vuelta (la de Octane) | vueltas | comprobación | ms (macOS) | ms por vuelta |
+|---|---|---:|---|---:|---:|
+| `richards` | `runRichards()`: COUNT = 1000 | 20 | `queueCount` 2322 y `holdCount` 928 en cada vuelta | 590.6 | 29.5 |
+| `deltablue` | `chainTest(100)` + `projectionTest(100)` | 10 | la cadena y las cuatro proyecciones en cada vuelta | 460.8 | 46.1 |
+| `navier-stokes` | un cuadro de 128×128 con 20 iteraciones del resolvedor | 15 | suma de densidades 77 en el cuadro 15 | 9 551.7 | 636.8 |
+
+- `richards.js` y `navier-stokes.js` son el texto de Octane (`chromium/octane`, `master`) con
+  su cabecera de licencia (BSD de los autores de V8, y MIT de Oliver Hunt y los autores de V8);
+  solo se quitó el registro en el `BenchmarkSuite` de Octane y se añadió al final el bucle y el
+  `check` de `bf-bench`.
+- `deltablue.js` es una **implementación propia** (misma licencia que el repositorio) del
+  algoritmo publicado (Freeman-Benson, Maloney y Borning, CACM 1990): el `deltablue.js` de
+  Octane es GPL v2 y no puede entrar en un repositorio MIT/Apache. Conserva lo que define la
+  carga de Octane: las mismas dos pruebas con los mismos tamaños y comprobaciones, las listas
+  de trabajo vaciadas desde el final (el `removeFirst` de Octane es un `pop`) y la dirección de
+  las restricciones binarias decidida solo por las `walkStrength` (en Octane los casos por marca
+  se sobrescriben). Usa clases de ES2015 en vez de prototipos a mano.
+- `navier-stokes` es, con diferencia, el más lento: ~640 ms por cuadro, casi todo bucles con
+  índices calculados sobre arrays de 16 900 doubles (`lin_solve`, `advect`). Un microbenchmark
+  aparte (bucle con `a[i] = a[i - 1] * 0.5 + 1`) da ~2.2 µs por vuelta con la máquina así de
+  cargada, igual con `new Array(n)` que con un array denso: no es el array con huecos sino el
+  acceso por índice y la aritmética de doubles. Es el siguiente candidato para la VM.
+
+### Los 17 de antes, en el Mac
+
+Misma tanda. "Windows" es la columna E8 de la tabla del 2026-11-12 de arriba (otra máquina y
+otra carga: la razón no mide ninguna mejora ni regresión del motor).
+
+| benchmark | Windows ms | macOS ms |
+|---|---:|---:|
+| `alloc` | 144.5 | 160.9 |
+| `arrays` | 89.8 | 127.8 |
+| `calls` | 642.2 | 1 001.9 |
+| `closures` | 126.2 | 183.4 |
+| `concat` | 63.0 | 58.4 |
+| `dict` | 28.3 | 42.7 |
+| `dom` | 759.6 | 1 110.1 |
+| `fib` | 363.2 | 631.6 |
+| `globals` | 295.4 | 754.3 |
+| `json` | 39.9 | 38.4 |
+| `loops` | 136.7 | 332.9 |
+| `methods` | 126.9 | 219.8 |
+| `nbody` | 439.8 | 941.0 |
+| `poly` | 183.7 | 273.5 |
+| `props` | 98.1 | 132.5 |
+| `regexp` | 575.0 | 545.3 |
+| `strings` | 21.1 | 30.6 |
+
+Los que más se alejan (`globals`, `loops`, `nbody`, `fib`, `calls`) son los bucles cortos del
+intérprete, los más sensibles a compartir núcleos. Hay que repetir la tanda con la máquina libre
+antes de usarla como base de A/B en el Mac.
+
 ## Profundidad
 
 `thousand_levels_parse_and_run` (en `tests/depth.rs`, solo en release) parsea y corre 1000
