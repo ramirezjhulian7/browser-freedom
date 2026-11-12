@@ -1713,8 +1713,7 @@ fn rnl_radios(agent: &mut Agent, this: &Value) -> JsResult<(crate::DocIndex, Vec
             .into_iter()
             .filter(|&n| {
                 d.element(n).is_some_and(|e| {
-                    e.ns == Namespace::Html
-                        && e.name.to_string() == "input"
+                    e.is_html("input")
                         && e.attr("type")
                             .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
                 })
@@ -1747,7 +1746,7 @@ fn rnl_set_value(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let hit = radios
             .into_iter()
             .find(|&r| match d.element(r).and_then(|e| e.attr("value")) {
-                Some(x) => x.to_string() == v,
+                Some(x) => *x == v,
                 None => v == "on",
             });
         if let Some(r) = hit {
