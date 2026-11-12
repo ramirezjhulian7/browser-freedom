@@ -8,17 +8,29 @@
 //! §8.5.1, el elemento `parsererror`).
 //!
 //! - Prólogo: XML declaration (solo al principio), comentarios, processing instructions y un
-//!   DOCTYPE con su identificador externo y su subset interno. Del subset interno se usan las
-//!   declaraciones de entidades generales internas; `ELEMENT`, `ATTLIST` y `NOTATION` se
-//!   reconocen y se saltan, y las entidades externas no se cargan (HTML §14.2).
+//!   DOCTYPE con su identificador externo y su subset interno. Del subset interno se usa lo
+//!   que un procesador no validante debe usar (XML §5.1): las entidades generales internas,
+//!   las parameter entities internas (sus referencias entre declaraciones se expanden) y los
+//!   valores por defecto y tipos de `ATTLIST` (§3.3). `ELEMENT` y `NOTATION` se reconocen y se
+//!   saltan, y las entidades externas no se cargan (HTML §14.2). Tras una referencia a una
+//!   parameter entity que no se lee (externa o no declarada), las declaraciones `ENTITY` y
+//!   `ATTLIST` siguientes no se procesan, salvo con `standalone="yes"`.
 //! - Para los DOCTYPE con los public ids de HTML §14.2 (XHTML y MathML) las referencias
 //!   nombradas de HTML están definidas, como si se hubiera leído su DTD.
 //! - Referencias: las cinco predefinidas, las numéricas y las entidades internas (su texto de
 //!   reemplazo se parsea como contenido y debe estar balanceado). Una entidad no declarada es
 //!   error salvo que haya subset externo o referencias a parameter entities (WFC: Entity
 //!   Declared).
-//! - Atributos: normalización de XML §3.3.3. `xml:space` y `xml:lang` quedan como atributos
-//!   del namespace XML (el DOM no cambia el whitespace por ellos).
+//! - Atributos: normalización de XML §3.3.3 (también la de los tipos no `CDATA` declarados en
+//!   el subset interno) y los valores por defecto de `ATTLIST`, que se agregan antes de
+//!   resolver los namespaces (un `xmlns` por defecto declara un namespace). `xml:space`,
+//!   `xml:lang` y `xml:base` quedan como atributos del namespace XML: el DOM no cambia el
+//!   whitespace por `xml:space` (XML §2.10 es para la aplicación), `xml:lang` lo lee `:lang()`
+//!   y `xml:base` no cambia la base URL (HTML no lo soporta).
+//! - Errores al navegar: [`parse_xml_document_with_error_report`] muestra el documento hasta
+//!   el error con un `parsererror` en línea (HTML, "Page load processing model for XML
+//!   files": "error messages from the parse process ... may be reported inline by mutating
+//!   the Document"), como Blink y WebKit.
 //! - Fin de línea: CRLF y CR pasan a LF antes de parsear (XML §2.11).
 
 use std::collections::HashMap;
@@ -168,6 +180,15 @@ enum Reference {
     Entity(String),
 }
 
+/// Una definición de atributo de `ATTLIST` (XML §3.3).
+struct AttDef {
+    name: String,
+    /// Tipo `CDATA`: sin la normalización extra de los demás tipos (§3.3.3).
+    cdata: bool,
+    /// El valor por defecto (normalizado), salvo `#REQUIRED` e `#IMPLIED`.
+    default: Option<String>,
+}
+
 /// Una entrada que se está leyendo: el documento o el texto de reemplazo de una entidad.
 struct Frame {
     text: Rc<str>,
@@ -193,6 +214,15 @@ struct Parser {
     doc: Document,
     stack: Vec<Open>,
     entities: HashMap<String, Entity>,
+    /// Parameter entities del subset interno.
+    param_entities: HashMap<String, Entity>,
+    /// Las definiciones de atributos de cada tipo de elemento (por nombre calificado).
+    attlists: HashMap<String, Vec<AttDef>>,
+    /// `standalone="yes"` en la XML declaration.
+    standalone: bool,
+    /// Hubo una referencia a una parameter entity que no se lee: las declaraciones `ENTITY` y
+    /// `ATTLIST` siguientes no se procesan (XML §5.1).
+    skip_declarations: bool,
     /// DOCTYPE con un public id de HTML §14.2.
     html_entities: bool,
     /// Subset externo o referencias a parameter entities: una entidad no declarada no es
@@ -219,6 +249,10 @@ impl Parser {
             doc,
             stack: Vec::new(),
             entities: HashMap::new(),
+            param_entities: HashMap::new(),
+            attlists: HashMap::new(),
+            standalone: false,
+            skip_declarations: false,
             html_entities: false,
             undeclared_ok: false,
             seen_doctype: false,
@@ -474,6 +508,9 @@ impl Parser {
             if order <= seen || (seen == 0 && order != 1) || !ok {
                 return self.fail(format!("invalid XML declaration ({name}=\"{value}\")"));
             }
+            if name == "standalone" {
+                self.standalone = value == "yes";
+            }
             seen = order;
         }
         if seen == 0 {
@@ -593,11 +630,18 @@ impl Parser {
         Ok(())
     }
 
-    /// `intSubset` (XML §2.8), después de `[`; consume el `]`.
+    /// `intSubset` (XML §2.8), después de `[`; consume el `]`. Las parameter entities
+    /// internas referenciadas entre declaraciones se leen como un frame más: su texto de
+    /// reemplazo debe ser declaraciones completas (WFC: PE Between Declarations).
     fn internal_subset(&mut self) -> R<()> {
+        let base = self.frames.len();
         loop {
             self.skip_space();
-            if self.eat("]") {
+            if self.at_end() && self.frames.len() > base {
+                self.frames.pop();
+                continue;
+            }
+            if self.frames.len() == base && self.eat("]") {
                 return Ok(());
             }
             let r = self.rest();
@@ -605,24 +649,162 @@ impl Parser {
                 return self.fail("unterminated internal subset");
             } else if r.starts_with("<!ENTITY") {
                 self.entity_decl()?;
+            } else if r.starts_with("<!ATTLIST") {
+                self.attlist_decl()?;
             } else if r.starts_with("<!--") {
                 self.comment()?;
             } else if r.starts_with("<?") {
                 self.pi(false)?;
-            } else if ["<!ELEMENT", "<!ATTLIST", "<!NOTATION"]
-                .iter()
-                .any(|d| r.starts_with(d))
-            {
+            } else if ["<!ELEMENT", "<!NOTATION"].iter().any(|d| r.starts_with(d)) {
                 self.skip_declaration()?;
             } else if r.starts_with('%') {
                 self.advance(1);
-                self.name()?;
+                let name = self.name()?;
                 if !self.eat(";") {
                     return self.fail("expected ';' after a parameter entity reference");
                 }
-                self.undeclared_ok = true;
+                self.parameter_reference(name)?;
             } else {
                 return self.fail("invalid markup in the internal subset");
+            }
+        }
+    }
+
+    /// `PEReference` entre declaraciones del subset interno (XML §4.4.8 "Included as PE").
+    fn parameter_reference(&mut self, name: String) -> R<()> {
+        // Con referencias a parameter entities una entidad general no declarada no es error
+        // de buena formación (WFC: Entity Declared), salvo con `standalone="yes"`.
+        self.undeclared_ok = true;
+        match self.param_entities.get(&name).cloned() {
+            Some(Entity::Internal(text)) => {
+                let key = format!("%{name}");
+                if self
+                    .frames
+                    .iter()
+                    .any(|f| f.entity.as_deref() == Some(key.as_str()))
+                    || self.frames.len() > ENTITY_DEPTH_LIMIT
+                {
+                    return self.fail(format!("recursive parameter entity reference %{name};"));
+                }
+                self.count_expansion(text.len())?;
+                self.frames.push(Frame {
+                    text,
+                    pos: 0,
+                    entity: Some(key),
+                    depth: self.stack.len(),
+                });
+                Ok(())
+            }
+            // No se lee (externa) o no está declarada: lo que sigue podría estar redefinido
+            // ahí, así que no se procesa (XML §5.1), salvo con `standalone="yes"`, donde una
+            // no declarada es error (WFC: Entity Declared).
+            entity => {
+                if self.standalone {
+                    if entity.is_none() {
+                        return self.fail(format!("undefined parameter entity %{name};"));
+                    }
+                } else {
+                    self.skip_declarations = true;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `AttlistDecl` (XML §3.3), en `<!ATTLIST`. La primera definición de un atributo de un
+    /// tipo de elemento es la que vale.
+    fn attlist_decl(&mut self) -> R<()> {
+        self.advance("<!ATTLIST".len());
+        self.require_space("after '<!ATTLIST'")?;
+        let element = self.name()?;
+        loop {
+            let space = self.skip_space();
+            if self.eat(">") {
+                return Ok(());
+            }
+            if self.at_end() {
+                return self.fail("unterminated attribute-list declaration");
+            }
+            if !space {
+                return self.fail("expected whitespace in the attribute-list declaration");
+            }
+            let name = self.name()?;
+            self.require_space("after the attribute name")?;
+            // `AttType` (§3.3.1).
+            let cdata = if self.eat("CDATA") {
+                true
+            } else if self.rest().starts_with('(') {
+                self.enumeration(false)?;
+                false
+            } else if self.eat("NOTATION") {
+                self.require_space("after 'NOTATION'")?;
+                self.enumeration(true)?;
+                false
+            } else if [
+                "IDREFS", "IDREF", "ID", "ENTITIES", "ENTITY", "NMTOKENS", "NMTOKEN",
+            ]
+            .iter()
+            .any(|t| self.eat(t))
+            {
+                false
+            } else {
+                return self.fail(format!("invalid type for the attribute {name}"));
+            };
+            self.require_space("after the attribute type")?;
+            // `DefaultDecl` (§3.3.2).
+            let default = if self.eat("#REQUIRED") || self.eat("#IMPLIED") {
+                None
+            } else {
+                if self.eat("#FIXED") {
+                    self.require_space("after '#FIXED'")?;
+                }
+                let value = self.attribute_value()?;
+                Some(if cdata {
+                    value
+                } else {
+                    collapse_spaces(&value)
+                })
+            };
+            if !self.skip_declarations {
+                let defs = self.attlists.entry(element.clone()).or_default();
+                if !defs.iter().any(|d| d.name == name) {
+                    defs.push(AttDef {
+                        name,
+                        cdata,
+                        default,
+                    });
+                }
+            }
+        }
+    }
+
+    /// `Enumeration` o `NotationType` (XML §3.3.1), en `(`: nmtokens (o names) separados por
+    /// `|`.
+    fn enumeration(&mut self, names: bool) -> R<()> {
+        if !self.eat("(") {
+            return self.fail("expected '(' in an enumerated type");
+        }
+        loop {
+            self.skip_space();
+            if names {
+                self.name()?;
+            } else {
+                let r = self.rest();
+                let end = r
+                    .char_indices()
+                    .find(|&(_, c)| !is_name_char(c))
+                    .map_or(r.len(), |(i, _)| i);
+                if end == 0 {
+                    return self.fail("expected a name token in an enumerated type");
+                }
+                self.advance(end);
+            }
+            self.skip_space();
+            if self.eat(")") {
+                return Ok(());
+            }
+            if !self.eat("|") {
+                return self.fail("expected '|' or ')' in an enumerated type");
             }
         }
     }
@@ -699,8 +881,13 @@ impl Parser {
             return self.fail("expected '>' at the end of the entity declaration");
         }
         // La primera declaración manda (XML §4.2).
-        if !parameter {
-            self.entities.entry(name).or_insert(entity);
+        if !self.skip_declarations {
+            let table = if parameter {
+                &mut self.param_entities
+            } else {
+                &mut self.entities
+            };
+            table.entry(name).or_insert(entity);
         }
         Ok(())
     }
@@ -749,7 +936,7 @@ impl Parser {
         {
             return Ok(Some(v));
         }
-        if self.undeclared_ok {
+        if self.undeclared_ok && !self.standalone {
             Ok(None)
         } else {
             self.fail(format!("undefined entity &{name};"))
@@ -797,6 +984,23 @@ impl Parser {
             }
             raw_attrs.push((name, value));
         };
+        // Las definiciones de `ATTLIST` del subset interno (XML §3.3.3 y §3.3.2): los tipos
+        // que no son `CDATA` colapsan los espacios y los atributos omitidos con valor por
+        // defecto se agregan (antes de los namespaces: un `xmlns` por defecto cuenta).
+        if let Some(defs) = self.attlists.get(&qname) {
+            for (name, value) in &mut raw_attrs {
+                if defs.iter().any(|d| d.name == *name && !d.cdata) {
+                    *value = collapse_spaces(value);
+                }
+            }
+            for d in defs {
+                if let Some(default) = &d.default
+                    && !raw_attrs.iter().any(|(n, _)| *n == d.name)
+                {
+                    raw_attrs.push((d.name.clone(), default.clone()));
+                }
+            }
+        }
 
         // Declaraciones de namespace (Namespaces in XML §3, NSC: Reserved Prefixes and
         // Namespace Names, NSC: No Prefix Undeclaring).
@@ -1083,6 +1287,16 @@ impl Parser {
     }
 }
 
+/// La normalización extra de los atributos que no son `CDATA` (XML §3.3.3): sin espacios
+/// (U+0020) al principio ni al final y las secuencias de espacios reducidas a uno.
+fn collapse_spaces(value: &str) -> String {
+    value
+        .split(' ')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Línea y columna (1-based, en code points) del byte `offset` de `text`.
 fn position(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset.min(text.len())];
@@ -1144,6 +1358,94 @@ pub fn parse_xml(input: &str) -> Result<Document, XmlError> {
 /// parseado hasta el error.
 pub fn parse_xml_document(input: &str) -> Document {
     parse_xml_partial(input).0
+}
+
+/// Parsea un documento XHTML o XML para mostrarlo al navegar: ante un error de buena
+/// formación queda lo parseado hasta el error y se informa del error en línea, mutando el
+/// documento (HTML, "Page load processing model for XML files": "error messages from the
+/// parse process ... may be reported inline by mutating the Document"). Como Blink y
+/// WebKit: un `parsererror` XHTML con estilo propio, al principio del `body` (o del elemento
+/// raíz); si no hay elemento raíz, en un `html`/`body` nuevo, y si la raíz es un `svg`, ésta
+/// pasa dentro de ese `body` después del informe.
+pub fn parse_xml_document_with_error_report(input: &str) -> Document {
+    let (mut doc, error) = parse_xml_partial(input);
+    if let Some(error) = error {
+        insert_error_report(&mut doc, &error);
+    }
+    doc
+}
+
+fn insert_error_report(doc: &mut Document, error: &XmlError) {
+    let html = |doc: &mut Document, name: &str, style: Option<&str>| {
+        let mut el = Element::new(Namespace::Html, name);
+        if let Some(style) = style {
+            el.attrs.push(Attribute {
+                ns: None,
+                prefix: None,
+                name: "style".into(),
+                value: style.into(),
+            });
+        }
+        doc.create(NodeData::Element(el))
+    };
+    let text = |doc: &mut Document, parent: NodeId, data: &str| {
+        let t = doc.create(NodeData::Text(data.into()));
+        doc.append(parent, t);
+    };
+    let report = html(
+        doc,
+        "parsererror",
+        Some(
+            "display: block; white-space: pre; border: 2px solid #c77; padding: 0 1em 0 1em; \
+             margin: 1em; background-color: #fdd; color: black",
+        ),
+    );
+    let h3 = html(doc, "h3", None);
+    text(doc, h3, "This page contains the following errors:");
+    doc.append(report, h3);
+    let div = html(doc, "div", Some("font-family:monospace;font-size:12px"));
+    text(
+        doc,
+        div,
+        &format!(
+            "error on line {} at column {}: {}\n",
+            error.line, error.column, error.message
+        ),
+    );
+    doc.append(report, div);
+    let h3 = html(doc, "h3", None);
+    text(
+        doc,
+        h3,
+        "Below is a rendering of the page up to the first error.",
+    );
+    doc.append(report, h3);
+
+    let root = doc.document_element();
+    let is = |doc: &Document, n: NodeId, ns: Namespace, name: &str| {
+        doc.element(n).is_some_and(|e| e.ns == ns && e.name == name)
+    };
+    match root {
+        Some(r) if !is(doc, r, Namespace::Svg, "svg") => {
+            let parent = doc
+                .children(r)
+                .find(|&c| is(doc, c, Namespace::Html, "body"))
+                .unwrap_or(r);
+            let first = doc.children(parent).next();
+            doc.insert_before(parent, report, first);
+        }
+        _ => {
+            let document = doc.root();
+            let new_root = html(doc, "html", None);
+            let body = html(doc, "body", None);
+            doc.append(new_root, body);
+            doc.append(body, report);
+            if let Some(svg) = root {
+                doc.append(body, svg);
+            }
+            doc.append(document, new_root);
+        }
+    }
 }
 
 /// El documento de `DOMParser` para una entrada mal formada (HTML §8.5.1): solo un elemento

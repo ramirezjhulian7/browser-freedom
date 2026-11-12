@@ -311,3 +311,193 @@ fn inert_xml_parser_marks_scripts_already_started() {
     assert_eq!(started(&normal), [false, false, false]);
     assert!(bf_html::parse_xml_inert("<a>").is_err());
 }
+
+fn attr(doc: &Document, n: NodeId, name: &str) -> Option<String> {
+    doc.element(n)
+        .expect("elemento")
+        .attrs
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| a.value.to_string())
+}
+
+/// E10: las parameter entities internas se expanden entre declaraciones del subset interno
+/// (XML §4.4.8) y su texto de reemplazo debe ser declaraciones completas.
+#[test]
+fn parameter_entities_del_subset_interno() {
+    let doc = ok("<!DOCTYPE r [\n\
+         <!ENTITY % decl \"<!ENTITY t 'desde pe'>\">\n\
+         %decl;\n\
+         <!ENTITY % vacio \"\">%vacio;\n\
+         ]><r>&t;</r>");
+    assert_eq!(doc.text_content(root(&doc)), "desde pe");
+    // Una declaración partida entre la entidad y el subset no está bien formada.
+    assert!(!err("<!DOCTYPE r [<!ENTITY % p \"<!ENTITY t 'x'\"> %p; >]><r/>").is_empty());
+    // `]` dentro de una parameter entity.
+    assert!(err("<!DOCTYPE r [<!ENTITY % p \"]\"> %p; ]><r/>").contains("internal subset"));
+    // Recursión: `a` declara `b` (cuyo texto es `%a;`) y lo referencia.
+    assert!(
+        err("<!DOCTYPE r [<!ENTITY % a \"<!ENTITY &#37; b '&#38;#37;a;'> &#37;b;\"> %a; ]><r/>")
+            .contains("recursive")
+    );
+    // Un `%` literal en el valor de una entidad del subset interno es error.
+    assert!(
+        err("<!DOCTYPE r [<!ENTITY % a \"<!ENTITY &#37; b '&#37;a;'>\"> %a; ]><r/>")
+            .contains("parameter entity")
+    );
+}
+
+/// E10: tras una parameter entity que no se lee, las declaraciones `ENTITY`/`ATTLIST`
+/// siguientes no se procesan (XML §5.1), salvo con `standalone="yes"`.
+#[test]
+fn declaraciones_tras_una_parameter_entity_no_leida() {
+    let doc = ok("<!DOCTYPE r [\n\
+         <!ENTITY antes \"a\">\n\
+         <!ENTITY % ext SYSTEM \"ext.dtd\">\n\
+         %ext;\n\
+         <!ENTITY despues \"d\">\n\
+         <!ATTLIST r k CDATA \"v\">\n\
+         ]><r>&antes;&despues;</r>");
+    let r = root(&doc);
+    assert_eq!(doc.text_content(r), "a");
+    assert_eq!(attr(&doc, r, "k"), None);
+
+    let doc = ok("<?xml version=\"1.0\" standalone=\"yes\"?><!DOCTYPE r [\n\
+         <!ENTITY % ext SYSTEM \"ext.dtd\">\n\
+         %ext;\n\
+         <!ENTITY despues \"d\">\n\
+         ]><r>&despues;</r>");
+    assert_eq!(doc.text_content(root(&doc)), "d");
+    // Con standalone="yes" una entidad no declarada es error aunque haya subset externo o
+    // parameter entities.
+    assert!(
+        err("<?xml version=\"1.0\" standalone=\"yes\"?><!DOCTYPE r SYSTEM \"r.dtd\"><r>&x;</r>")
+            .contains("undefined entity")
+    );
+    assert!(
+        err("<?xml version=\"1.0\" standalone='yes'?><!DOCTYPE r [ %nada; ]><r/>")
+            .contains("undefined parameter entity")
+    );
+}
+
+/// E10: `ATTLIST` del subset interno: valores por defecto, `#FIXED`, normalización de los
+/// tipos que no son `CDATA` y `xmlns` por defecto (XML §3.3).
+#[test]
+fn attlist_del_subset_interno() {
+    let doc = ok("<!DOCTYPE r [\n\
+         <!ENTITY e \"ent\">\n\
+         <!ATTLIST r\n\
+             c CDATA \"  dos  espacios \"\n\
+             t NMTOKENS \"  a   b \"\n\
+             f CDATA #FIXED \"fijo&e;\"\n\
+             req ID #REQUIRED\n\
+             imp IDREF #IMPLIED\n\
+             en (uno|dos) 'uno'\n\
+             no NOTATION (n1 | n2) #IMPLIED>\n\
+         <!ATTLIST r c CDATA \"ignorado\" otro CDATA \"o\">\n\
+         <!ATTLIST x xmlns CDATA \"http://www.w3.org/2000/svg\" xmlns:p CDATA \"urn:p\">\n\
+         ]><r t=' x  y ' req='  i1 '><x p:k='1'/><r c='dado'/></r>");
+    let r = root(&doc);
+    assert_eq!(attr(&doc, r, "c").as_deref(), Some("  dos  espacios "));
+    assert_eq!(attr(&doc, r, "t").as_deref(), Some("x y"));
+    assert_eq!(attr(&doc, r, "req").as_deref(), Some("i1"));
+    assert_eq!(attr(&doc, r, "f").as_deref(), Some("fijoent"));
+    assert_eq!(attr(&doc, r, "en").as_deref(), Some("uno"));
+    assert_eq!(attr(&doc, r, "otro").as_deref(), Some("o"));
+    assert_eq!(attr(&doc, r, "imp"), None);
+    // Los defaults se agregan después de los atributos dados, en orden de declaración.
+    let names: Vec<String> = doc
+        .element(r)
+        .unwrap()
+        .attrs
+        .iter()
+        .map(|a| a.name.to_string())
+        .collect();
+    assert_eq!(names, ["t", "req", "c", "f", "en", "otro"]);
+    // Un `xmlns` por defecto declara el namespace del elemento y de sus prefijos.
+    let x = child(&doc, r, 0);
+    assert_eq!(ns(&doc, x), Namespace::Svg);
+    let k = doc
+        .element(x)
+        .unwrap()
+        .attrs
+        .iter()
+        .find(|a| a.name == "k")
+        .expect("p:k");
+    assert_eq!(k.ns.map(|n| n.uri().to_owned()).as_deref(), Some("urn:p"));
+    let inner = child(&doc, r, 1);
+    assert_eq!(attr(&doc, inner, "c").as_deref(), Some("dado"));
+    // Errores de sintaxis.
+    assert!(err("<!DOCTYPE r [<!ATTLIST r a BOGUS #IMPLIED>]><r/>").contains("invalid type"));
+    assert!(!err("<!DOCTYPE r [<!ATTLIST r a (x|) #IMPLIED>]><r/>").is_empty());
+    assert!(!err("<!DOCTYPE r [<!ATTLIST r a CDATA>]><r/>").is_empty());
+    assert!(err("<!DOCTYPE r [<!ATTLIST r a CDATA \"<\">]><r/>").contains("'<'"));
+    assert!(err("<!DOCTYPE r [<!ATTLIST r a CDATA \"&nada;\">]><r/>").contains("undefined"));
+}
+
+/// E10: `xml:space`, `xml:lang` y `xml:base` son atributos del namespace XML con el prefijo
+/// `xml`; no cambian el árbol (ni el whitespace ni la base URL).
+#[test]
+fn atributos_xml_space_lang_base() {
+    let doc = ok(
+        "<r xml:space='preserve' xml:lang='es' xml:base='http://e.com/'>\n  <a xml:space='default'>  b  </a>\n</r>",
+    );
+    let r = root(&doc);
+    let el = doc.element(r).unwrap();
+    assert_eq!(el.attrs.len(), 3);
+    for a in &el.attrs {
+        assert_eq!(a.ns, Some(Namespace::Xml));
+        assert_eq!(
+            a.prefix.as_ref().map(ToString::to_string).as_deref(),
+            Some("xml")
+        );
+    }
+    assert_eq!(doc.text_content(r), "\n    b  \n");
+    // `xmlns:xml` con el namespace XML se permite; con otro, o otro prefijo para él, no.
+    ok("<r xmlns:xml='http://www.w3.org/XML/1998/namespace' xml:lang='en'/>");
+    assert!(err("<r xmlns:xml='urn:x'/>").contains("namespace declaration"));
+    assert!(
+        err("<r xmlns:y='http://www.w3.org/XML/1998/namespace'/>")
+            .contains("namespace declaration")
+    );
+}
+
+/// E10: al navegar, el error se informa en línea con un `parsererror` (como Blink/WebKit).
+#[test]
+fn parsererror_en_linea_al_navegar() {
+    use bf_html::parse_xml_document_with_error_report as display;
+    let name = |doc: &Document, n: NodeId| doc.element(n).unwrap().name.to_string();
+    let doc = display(
+        "<html xmlns='http://www.w3.org/1999/xhtml'><body><p>uno</p><p>dos</b></body></html>",
+    );
+    let html = root(&doc);
+    let body = child(&doc, html, 0);
+    let report = child(&doc, body, 0);
+    assert_eq!(ns(&doc, report), Namespace::Html);
+    assert_eq!(name(&doc, report), "parsererror");
+    let text = doc.text_content(report);
+    assert!(text.contains("error on line 1 at column"), "{text}");
+    assert!(text.contains("mismatched end tag"), "{text}");
+    // Lo parseado hasta el error sigue después del informe.
+    assert_eq!(doc.children(body).count(), 3);
+    // Sin errores no se toca nada.
+    let doc = display("<r><a/></r>");
+    assert_eq!(doc.children(root(&doc)).count(), 1);
+    // Sin elemento raíz: html/body nuevos con el informe.
+    let doc = display("<?xml version='1.0'?>");
+    let html = root(&doc);
+    assert_eq!(name(&doc, html), "html");
+    let body = child(&doc, html, 0);
+    assert_eq!(name(&doc, child(&doc, body, 0)), "parsererror");
+    // Raíz SVG: pasa dentro del body, después del informe.
+    let doc = display("<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>");
+    let html = root(&doc);
+    assert_eq!(doc.children(doc.root()).count(), 1);
+    let body = child(&doc, html, 0);
+    assert_eq!(doc.children(body).count(), 2);
+    assert_eq!(ns(&doc, child(&doc, body, 1)), Namespace::Svg);
+    // Otra raíz XML: el informe es su primer hijo.
+    let doc = display("<r><a></r>");
+    let r = root(&doc);
+    assert_eq!(name(&doc, child(&doc, r, 0)), "parsererror");
+}
