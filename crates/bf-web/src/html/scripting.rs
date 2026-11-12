@@ -145,8 +145,13 @@ fn lend_and_invoke(
     // El listener lo llama el DOM (E3), dueño de `addEventListener`.
     let threw = crate::dom::events::invoke_listener(agent, handle, event);
     let back = std::mem::replace(&mut ctx(agent, realm).documents[index as usize], saved);
-    if let DocumentOwner::Document(d) = back {
-        *doc = *d;
+    match back {
+        DocumentOwner::Document(d) => *doc = *d,
+        // E1: `document.write`/`open`/`close` en el listener envolvió el documento prestado en
+        // un parser (`take_parser`); el documento sigue siendo ese. Antes se perdía y lo que
+        // seguía (el dispatch, el parser) corría sobre el documento vacío: pánico de índice
+        // con el siguiente `NodeId` (`bf-dom` `Document::get`).
+        DocumentOwner::Parser(p) => *doc = p.into_document().0,
     }
     threw
 }

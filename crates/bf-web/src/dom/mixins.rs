@@ -137,9 +137,14 @@ pub fn nodes_arg(
                 let n = adopt_into(agent, n, doc)?;
                 out.push(NodeOrString::Node(n.node));
             }
-            // E1: un nodo de otra ventana no es un string.
+            // E1: un nodo de otra ventana no es un string: se adopta (si no se encuentra su
+            // ventana, `NotSupportedError`).
             None if crate::dom::is_foreign_node(agent, v) => {
-                return crate::dom::throw_foreign_node(agent);
+                let Some((realm, n)) = crate::dom::foreign_home(agent, v) else {
+                    return crate::dom::throw_foreign_node(agent);
+                };
+                let n = crate::dom::adopt::adopt_foreign(agent, realm, n, doc)?;
+                out.push(NodeOrString::Node(n.node));
             }
             None => out.push(NodeOrString::String(to_dom_string(agent, v)?)),
         }

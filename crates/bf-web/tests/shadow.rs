@@ -241,6 +241,28 @@ fn adopted_style_sheets() {
     assert_eq!(r, "NotAllowedError");
 }
 
+// E1: `Document.adoptedStyleSheets` lo instala solo el CSSOM de E2 (`document_sheets`); el de
+// `dom/shadow.rs` es solo de `ShadowRoot`. La hoja adoptada por el documento llega a la cascada
+// por un único camino: no se copia también al nodo documento (`adopted_style_texts`), y quitarla
+// del array quita sus estilos.
+#[test]
+fn document_adopted_sheet_applies_once() {
+    let mut p = Page::new("<p id=t>x</p><div id=host></div>");
+    let r = p.show(
+        "var s = new CSSStyleSheet(); s.replaceSync('p { color: rgb(0, 128, 0) }');          document.adoptedStyleSheets = [s];          var sr = host.attachShadow({mode: 'open'}); sr.innerHTML = '<p id=in>y</p>';          var s2 = new CSSStyleSheet(); s2.replaceSync('p { color: rgb(0, 0, 255) }');          sr.adoptedStyleSheets = [s2];          [document.adoptedStyleSheets.length, document.adoptedStyleSheets[0] === s,           getComputedStyle(t).color, getComputedStyle(sr.getElementById('in')).color].join()",
+    );
+    assert_eq!(r, "1,true,rgb(0, 128, 0),rgb(0, 0, 255)");
+    {
+        let ctx = p.ctx.get(&p.rt.agent);
+        let d = ctx.document();
+        assert!(d.adopted_style_texts(d.root()).is_empty());
+    }
+    let r = p.show(
+        "s.replaceSync('p { color: rgb(255, 0, 0) }'); var a = getComputedStyle(t).color;          document.adoptedStyleSheets = []; [a, getComputedStyle(t).color].join()",
+    );
+    assert_eq!(r, "rgb(255, 0, 0),rgb(0, 0, 0)");
+}
+
 #[test]
 fn delegates_focus_and_active_element() {
     let mut p = Page::new("<div id=host></div>");

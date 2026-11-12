@@ -236,6 +236,16 @@ pub fn set_layout_provider(agent: &mut Agent, realm: RealmId, provider: Box<dyn 
     s.layout = None;
 }
 
+/// E1: el documento de la ventana `realm` fue reemplazado por otro en el mismo realm (un marco
+/// que navegó): los estilos y la maqueta en caché son del anterior y sus `NodeId` no valen en
+/// el nuevo (ver `dom::adopt::retire_window_document`).
+pub fn document_replaced(agent: &mut Agent, realm: RealmId, to: crate::DocIndex) {
+    let s = state_of(agent, realm);
+    s.styles = None;
+    s.layout = None;
+    s.sheets.retire_window_document(to);
+}
+
 /// Cambia el viewport de `realm` cuando no hay snapshot (entornos sin interfaz).
 pub fn set_viewport(agent: &mut Agent, realm: RealmId, width: f32, height: f32, dpr: f32) {
     let s = state_of(agent, realm);

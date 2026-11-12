@@ -316,6 +316,11 @@ impl Document {
         self.nodes.len()
     }
 
+    /// E1: todos los nodos de la arena (también los desvinculados), en orden de creación.
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + use<> {
+        (0..self.nodes.len() as u32).map(NodeId)
+    }
+
     /// Crea un nodo desvinculado. Un `template` HTML recibe su template contents.
     pub fn create(&mut self, mut data: NodeData) -> NodeId {
         if let NodeData::Element(e) = &mut data

@@ -291,7 +291,7 @@ fn this_target(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(DocIndex, Event
 }
 
 /// El id de listener de un callback (siempre el mismo para el mismo objeto).
-fn listener_id(agent: &mut Agent, cb: Gc<Object>) -> u64 {
+pub(crate) fn listener_id(agent: &mut Agent, cb: Gc<Object>) -> u64 {
     if let Some(id) = state(agent).listener_ids.get(&cb) {
         return *id;
     }
@@ -506,6 +506,9 @@ pub fn dispatch_js_event(
 ) -> JsResult<Result<bool, bf_dom::DomException>> {
     let ev_value = Value::Object(event);
     let cell = event_data(agent, &ev_value).expect("evento").cell.clone();
+    // E1: el documento anterior, por si el dispatch se rechaza (el evento ya se está
+    // despachando en otro documento: su `target` sigue siendo un `NodeId` de ese).
+    let prev_doc = event_data(agent, &ev_value).map(|d| d.doc.get());
     if let Some(d) = event_data(agent, &ev_value) {
         d.doc.set(doc);
     }
@@ -518,6 +521,14 @@ pub fn dispatch_js_event(
         &mut *cell.borrow_mut(),
         Event::new("", EventInit::default()),
     );
+    // E1: un `relatedTarget` nodo de otro documento (el evento se construyó o se despachó en
+    // otro): su `NodeId` no vale en la arena de `doc`; sin él en vez de un pánico al retargetear.
+    if prev_doc.is_some_and(|p| p != doc)
+        && matches!(ev.related_target(), Some(EventTarget::Node(_)))
+        && !ev.is_dispatching()
+    {
+        ev.set_related_target(None);
+    }
     let main = event_key(&ev);
     let mut document = std::mem::take(ctx.get_mut(agent).doc_mut(doc));
     let r = {
@@ -536,6 +547,11 @@ pub fn dispatch_js_event(
     };
     *ctx.get_mut(agent).doc_mut(doc) = document;
     *cell.borrow_mut() = ev;
+    if r.is_err()
+        && let (Some(prev), Some(d)) = (prev_doc, event_data(agent, &ev_value))
+    {
+        d.doc.set(prev);
+    }
     crate::dom::after_dom_mutation(agent, doc);
     // E1: la activation behavior que el dispatch dejó en cola (HTML).
     crate::html::activation::run_activations(agent, doc);
@@ -876,13 +892,13 @@ pub(crate) fn dict_target(
     agent: &mut Agent,
     dict: &Value,
     name: &str,
-) -> JsResult<Option<EventTarget>> {
+) -> JsResult<Option<(DocIndex, EventTarget)>> {
     let v = dict_get(agent, dict, name)?;
     if v.is_nullish() {
         return Ok(None);
     }
     match event_target_of(agent, &v) {
-        Some((_, t)) => Ok(Some(t)),
+        Some((d, t)) => Ok(Some((d, t))),
         None => agent.type_error(&format!(
             "Failed to read the '{name}' property: The provided value is not of type \
              'EventTarget'"
@@ -895,10 +911,13 @@ fn focus_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let dict = a.arg(1);
     let init = event_init(agent, &dict)?;
     let (view, detail) = ui_init(agent, &dict)?;
-    let related_target = dict_target(agent, &dict, "relatedTarget")?;
+    let related = dict_target(agent, &dict, "relatedTarget")?;
+    let related_target = related.map(|(_, t)| t);
     let ev = Event::with_kind(type_, init, EventKind::Focus { related_target });
     let detail = Value::Number(f64::from(detail));
-    construct_event(agent, a, EventIface::Focus, ev, [view, detail])
+    let o = construct_event(agent, a, EventIface::Focus, ev, [view, detail])?;
+    bind_related_doc(agent, &o, related.map(|(d, _)| d));
+    Ok(o)
 }
 
 /// `EventModifierInit` (UI Events §3.6): las teclas modificadoras.
@@ -921,16 +940,29 @@ pub(crate) fn dict_double(agent: &mut Agent, dict: &Value, name: &str) -> JsResu
 
 fn mouse_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let type_ = ctor_type(agent, a, "MouseEvent")?;
-    let (init, view, data) = mouse_parts(agent, &a.arg(1))?;
+    let (init, view, data, related_doc) = mouse_parts(agent, &a.arg(1))?;
     let ev = Event::with_kind(type_, init, EventKind::Mouse(data));
-    construct_event(agent, a, EventIface::Mouse, ev, [view, Value::Undefined])
+    let o = construct_event(agent, a, EventIface::Mouse, ev, [view, Value::Undefined])?;
+    bind_related_doc(agent, &o, related_doc);
+    Ok(o)
+}
+
+/// E1: un evento construido con un `relatedTarget` nodo se interpreta en el documento de ese
+/// nodo hasta que se despache (el `relatedTarget` guarda solo el `NodeId`); al despacharlo en
+/// otro documento, `dispatch_js_event` lo quita en vez de resolverlo en la arena equivocada.
+pub(crate) fn bind_related_doc(agent: &mut Agent, ev: &Value, doc: Option<DocIndex>) {
+    if let Some(doc) = doc
+        && let Some(d) = event_data(agent, ev)
+    {
+        d.doc.set(doc);
+    }
 }
 
 /// `MouseEventInit` (UI Events §5.3.1): `EventInit`, `view` y los datos del ratón.
 pub(crate) fn mouse_parts(
     agent: &mut Agent,
     dict: &Value,
-) -> JsResult<(EventInit, Value, MouseEventData)> {
+) -> JsResult<(EventInit, Value, MouseEventData, Option<DocIndex>)> {
     let dict = dict.clone();
     let init = event_init(agent, &dict)?;
     let (view, detail) = ui_init(agent, &dict)?;
@@ -943,7 +975,8 @@ pub(crate) fn mouse_parts(
     let button = bf_js::host::webidl::to_long(agent, &button)? as i16;
     let buttons = dict_get(agent, &dict, "buttons")?;
     let buttons = bf_js::host::webidl::to_unsigned_short(agent, &buttons)?;
-    let related_target = dict_target(agent, &dict, "relatedTarget")?;
+    let related = dict_target(agent, &dict, "relatedTarget")?;
+    let related_target = related.map(|(_, t)| t);
     let data = MouseEventData {
         screen_x,
         screen_y,
@@ -958,7 +991,7 @@ pub(crate) fn mouse_parts(
         related_target,
         detail,
     };
-    Ok((init, view, data))
+    Ok((init, view, data, related.map(|(d, _)| d)))
 }
 
 fn keyboard_event_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -2257,7 +2290,8 @@ fn init_mouse_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         *v = bf_js::host::webidl::to_boolean(agent, &a.arg(9 + i));
     }
     let button = bf_js::host::webidl::to_long(agent, &a.arg(13))? as i16;
-    let related = event_target_of(agent, &a.arg(14)).map(|(_, t)| t);
+    let related_full = event_target_of(agent, &a.arg(14));
+    let related = related_full.map(|(_, t)| t);
     let dispatching = with_event(agent, a, Event::is_dispatching)?;
     if dispatching {
         return Ok(Value::Undefined);
@@ -2272,6 +2306,8 @@ fn init_mouse_event(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             d.related_target = related;
         }
     })?;
+    // E1: el documento del `relatedTarget` (ver `bind_related_doc`).
+    bind_related_doc(agent, &a.this, related_full.map(|(d, _)| d));
     set_view_slot(agent, a);
     Ok(Value::Undefined)
 }

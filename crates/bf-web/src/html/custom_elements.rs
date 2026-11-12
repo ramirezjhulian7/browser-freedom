@@ -1166,6 +1166,20 @@ pub fn cloned(agent: &mut Agent, root: NodeRef) {
     process_reactions(agent);
 }
 
+/// E1: `old` pasó al documento de otra ventana (adopción entre realms): este registro lo
+/// olvida, con sus reacciones pendientes. Su definición es de este realm y no se lleva (ver
+/// `docs/pendiente/mac/e1.md`).
+pub fn forget(agent: &mut Agent, old: NodeRef) {
+    let Some(reg) = agent.realm_data_mut::<Registry>(realm(agent)) else {
+        return;
+    };
+    reg.element_defs.remove(&old);
+    reg.internals.remove(&old);
+    reg.face.remove(&old);
+    reg.reactions.remove(&old);
+    reg.queue.retain(|n| *n != old);
+}
+
 /// Al adoptar `old` (que pasó a ser `new` en otro documento): la definición sigue al nodo y,
 /// si es custom, se encola `adoptedCallback`.
 pub fn adopted(agent: &mut Agent, old: NodeRef, new: NodeRef) {
