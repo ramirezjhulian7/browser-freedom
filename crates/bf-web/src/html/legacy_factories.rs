@@ -234,10 +234,10 @@ fn update_image_data(agent: &mut Agent, n: NodeRef) {
 }
 
 /// El tamaño natural de la imagen de la respuesta, o `None` si no es una imagen que el motor
-/// sepa decodificar. Un SVG cuenta como cargado (sin tamaño conocido): el motor todavía no lo
-/// pinta, pero los scripts que precargan íconos esperan su `load`. WebP y AVIF dan `error`,
-/// que es lo que las detecciones de formato (`new Image()` con un `data:` de prueba) deben
-/// ver para servir PNG o JPEG.
+/// sepa decodificar ([`bf_image::decode`]: PNG, JPEG, GIF, BMP, ICO y WebP). Un SVG cuenta
+/// como cargado (sin tamaño conocido; `bf-image` no lo rasteriza). AVIF da `error`: es lo que
+/// las detecciones de formato (`new Image()` con un `data:` de prueba) deben ver para servir
+/// un formato que el motor pinta.
 fn image_size(r: &crate::net::NetResponse) -> Option<(u32, u32)> {
     let mime = r.headers.get("content-type");
     match bf_image::decode(&r.body, mime.as_deref()) {

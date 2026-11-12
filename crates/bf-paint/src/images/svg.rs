@@ -57,6 +57,7 @@ pub fn rasterize_with(
         host_scale: (kx * ky).sqrt(),
         res,
         depth: 0,
+        context: Vec::new(),
     };
     r.group(&tree.root, &mut pixmap, base);
     Some(pixmap)
@@ -103,6 +104,8 @@ fn shader(paint: &Paint, opacity: f32) -> Option<Shader<'static>> {
         Paint::Gradient(g) => gradient(g, opacity),
         // Necesita su tesela: ver `Raster::paint_shader`.
         Paint::Pattern(_) => None,
+        // Necesita el contexto: ver `Raster::paint_shader`.
+        Paint::Context(_) => None,
     }
 }
 
@@ -181,6 +184,18 @@ struct Raster<'f> {
     res: &'f SvgResources,
     /// Niveles de `image` con SVG dentro de los que se está pintando.
     depth: u32,
+    /// Pinturas de los elementos de contexto en curso (SVG 2 §13.3), del exterior al interior,
+    /// cada una con la transformación de su sistema al dispositivo.
+    context: Vec<[Option<(Paint, Transform)>; 2]>,
+}
+
+/// La transformación propia de una pintura (de su sistema al espacio de usuario de la forma).
+fn paint_transform(paint: &mut Paint) -> Option<&mut bf_svg::Transform> {
+    match paint {
+        Paint::Gradient(g) => Some(&mut g.transform),
+        Paint::Pattern(p) => Some(&mut p.transform),
+        Paint::Color(_) | Paint::Context(_) => None,
+    }
 }
 
 impl Raster<'_> {
@@ -194,6 +209,23 @@ impl Raster<'_> {
                 ts = ts.pre_scale(k, k);
             }
         }
+        let Some(c) = &g.context else {
+            self.group_content(g, canvas, ts);
+            return;
+        };
+        let resolve = |p: &Option<Paint>, outer: Option<&[Option<(Paint, Transform)>; 2]>| match p {
+            Some(Paint::Context(k)) => outer.and_then(|o| o[*k as usize].clone()),
+            Some(p) => Some((p.clone(), ts)),
+            None => None,
+        };
+        let outer = self.context.last();
+        let entry = [resolve(&c.fill, outer), resolve(&c.stroke, outer)];
+        self.context.push(entry);
+        self.group_content(g, canvas, ts);
+        self.context.pop();
+    }
+
+    fn group_content(&mut self, g: &Group, canvas: &mut Pixmap, ts: Transform) {
         if g.opacity <= 0.0 {
             return;
         }
@@ -262,6 +294,7 @@ impl Raster<'_> {
 
     fn clip_mask(&mut self, clip: &ClipPath, canvas: &Pixmap, ts: Transform) -> Option<Mask> {
         let mut mask = Mask::new(canvas.width(), canvas.height())?;
+        let element = ts;
         let ts = ts.pre_concat(sk(&clip.transform));
         for (segs, r, t) in &clip.shapes {
             if let Some(p) = path(segs) {
@@ -277,6 +310,12 @@ impl Raster<'_> {
                     ts.pre_concat(sk(&text.transform)),
                 );
             }
+        }
+        if let Some(outer) = &clip.clip {
+            // Una referencia inválida en el `clipPath` anidado no recorta nada (CSS Masking 1
+            // §6.3): ya se descartó al construir.
+            let outer = self.clip_mask(outer, canvas, element)?;
+            multiply_masks(&mut mask, &outer);
         }
         Some(mask)
     }
@@ -325,6 +364,24 @@ impl Raster<'_> {
         slot: &'a mut Option<(Pixmap, Transform)>,
     ) -> Option<Shader<'a>> {
         match paint {
+            Paint::Context(k) => {
+                // La pintura está en el sistema del elemento de contexto: se lleva al de la
+                // forma (SVG 2 §13.3).
+                let (mut p, ctm) = self.context.last()?[*k as usize].clone()?;
+                let rel = ts.invert()?.pre_concat(ctm);
+                if let Some(t) = paint_transform(&mut p) {
+                    let rel = bf_svg::Transform {
+                        a: rel.sx,
+                        b: rel.ky,
+                        c: rel.kx,
+                        d: rel.sy,
+                        e: rel.tx,
+                        f: rel.ty,
+                    };
+                    *t = rel.then(t);
+                }
+                self.paint_shader(&p, opacity, ts, slot)
+            }
             Paint::Pattern(p) => {
                 *slot = self.pattern_tile(p, ts);
                 let (tile, t) = slot.as_ref()?;
@@ -448,8 +505,13 @@ impl Raster<'_> {
             SvgImage::Svg(s) => {
                 // Con `viewBox`, el viewport del SVG es el rectángulo del elemento y manda el
                 // `preserveAspectRatio` de aquí; sin él, se coloca a su tamaño natural.
+                let natural = s.intrinsic();
                 let (doc, size, place) = if s.has_view_box() {
                     (s.with_aspect(&im.par), (w, h), bf_svg::Transform::IDENTITY)
+                } else if natural.width.is_none() && natural.height.is_none() {
+                    // Sin tamaño natural ni proporción, el SVG se maqueta al tamaño concreto (el
+                    // rectángulo del elemento; CSS Images 3 §5.3.2): ese es su viewport inicial.
+                    (s.as_ref().clone(), (w, h), bf_svg::Transform::IDENTITY)
                 } else {
                     let place = bf_svg::aspect_transform((0.0, 0.0, nw, nh), &im.par, (w, h));
                     (s.as_ref().clone(), (nw, nh), place)
@@ -458,6 +520,7 @@ impl Raster<'_> {
                 let inner = bf_svg::Transform::translate(im.x, im.y).then(&place);
                 let group = Group {
                     host_units: false,
+                    context: None,
                     transform: bf_svg::Transform::IDENTITY,
                     opacity: 1.0,
                     clip: Some(bf_svg::ClipPath {
@@ -468,11 +531,13 @@ impl Raster<'_> {
                             bf_svg::Transform::IDENTITY,
                         )],
                         texts: Vec::new(),
+                        clip: None,
                     }),
                     mask: None,
                     filter: None,
                     children: vec![Node::Group(Group {
                         host_units: false,
+                        context: None,
                         transform: inner,
                         opacity: 1.0,
                         clip: None,
@@ -485,7 +550,10 @@ impl Raster<'_> {
                 let (sx, sy) = axis_scales(&ts.pre_concat(sk(&inner)));
                 let host = std::mem::replace(&mut self.host_scale, (sx * sy).sqrt());
                 self.depth += 1;
+                // El documento referenciado no ve los elementos de contexto de este.
+                let context = std::mem::take(&mut self.context);
                 self.group(&group, canvas, ts);
+                self.context = context;
                 self.depth -= 1;
                 self.host_scale = host;
             }

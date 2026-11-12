@@ -101,7 +101,7 @@ fn truncate(children: &mut Vec<Fragment>, path: &[usize]) -> (f32, bool) {
         let end = inner + f.padding.bottom + f.border.bottom;
         f.rect.height = (end - f.rect.y).max(0.0);
         if f.clip.is_some() {
-            f.clip = Some(f.padding_rect());
+            f.clip = crate::scroll::overflow_clip(f, true);
         }
     }
     (f.rect.bottom() + f.margin.bottom, removed || more)
@@ -118,7 +118,7 @@ fn line_mut<'f>(children: &'f mut [Fragment], path: &[usize]) -> &'f mut Fragmen
 }
 
 /// El camino hasta la última hoja de contenido de una línea (texto o caja atómica).
-fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
+pub(crate) fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
     for (i, c) in f.children.iter().enumerate().rev() {
         match c.kind {
             FragmentKind::Text | FragmentKind::InlineBlock | FragmentKind::Replaced => {
@@ -140,7 +140,7 @@ fn last_leaf(f: &Fragment, path: &mut Vec<usize>) -> bool {
 
 /// El extremo derecho del contenido de la línea: la última hoja o, si las cajas inline que la
 /// contienen terminan en esta línea, su borde del final (con su padding y borde).
-fn content_end(line: &Fragment) -> Option<f32> {
+pub(crate) fn content_end(line: &Fragment) -> Option<f32> {
     let mut path = Vec::new();
     if !last_leaf(line, &mut path) {
         return None;

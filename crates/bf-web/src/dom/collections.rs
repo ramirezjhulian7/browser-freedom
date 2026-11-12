@@ -221,11 +221,11 @@ fn nl_get(
     Some((children.0, list.len(), i.and_then(|i| list.get(i).copied())))
 }
 
-fn nl_len(agent: &mut Agent, o: Gc<Object>) -> usize {
+pub(crate) fn nl_len(agent: &mut Agent, o: Gc<Object>) -> usize {
     nl_get(agent, &Value::Object(o), None).map_or(0, |r| r.1)
 }
 
-fn nl_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
+pub(crate) fn nl_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
     let (doc, _, n) = nl_get(agent, &Value::Object(o), Some(i as usize))?;
     Some(wrap_node(agent, NodeRef::new(doc, n?)))
 }
@@ -254,16 +254,16 @@ pub fn html_collection(agent: &mut Agent, doc: DocIndex, coll: HtmlCollection) -
     Value::Object(agent.host_create(class, Box::new(HtmlCollectionData { doc, coll })))
 }
 
-fn hc_items(agent: &Agent, d: &HtmlCollectionData) -> Vec<NodeId> {
+pub(crate) fn hc_items(agent: &Agent, d: &HtmlCollectionData) -> Vec<NodeId> {
     let ctx = WebContextHandle::current(agent).get(agent);
     d.coll.items(ctx.doc(d.doc))
 }
 
-fn hc_len(agent: &mut Agent, o: Gc<Object>) -> usize {
+pub(crate) fn hc_len(agent: &mut Agent, o: Gc<Object>) -> usize {
     payload_of::<HtmlCollectionData>(agent, o).map_or(0, |d| hc_items(agent, &d).len())
 }
 
-fn hc_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
+pub(crate) fn hc_at(agent: &mut Agent, o: Gc<Object>, i: u32) -> Option<Value> {
     let d = payload_of::<HtmlCollectionData>(agent, o)?;
     let n = *hc_items(agent, &d).get(i as usize)?;
     Some(wrap_node(agent, NodeRef::new(d.doc, n)))
@@ -277,7 +277,7 @@ fn hc_named(agent: &mut Agent, o: Gc<Object>, name: &JsString) -> Option<Value> 
 }
 
 /// Los nombres soportados (DOM §4.2.10.2): los `id` y, de los elementos HTML, los `name`.
-fn hc_names(agent: &mut Agent, o: Gc<Object>) -> Vec<JsString> {
+pub(crate) fn hc_names(agent: &mut Agent, o: Gc<Object>) -> Vec<JsString> {
     let Some(d) = payload_of::<HtmlCollectionData>(agent, o) else {
         return Vec::new();
     };

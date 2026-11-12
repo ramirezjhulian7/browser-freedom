@@ -19,6 +19,8 @@ pub mod node;
 pub mod observer;
 pub mod parser;
 pub mod range;
+pub mod serializer; // E1
+pub mod shadow; // E1
 pub mod state;
 pub mod traversal;
 pub mod window;
@@ -280,6 +282,10 @@ fn class_for(agent: &Agent, n: NodeRef) -> HostClassId {
                 c.xml_document
             }
         }
+        // E1: los shadow roots.
+        NodeData::DocumentFragment if ctx.doc(n.doc).is_shadow_root(n.node) => {
+            shadow::shadow_root_class_id(agent).unwrap_or(c.document_fragment)
+        }
         NodeData::DocumentFragment => c.document_fragment,
         NodeData::Doctype { .. } => c.document_type,
         NodeData::Element(e) => match c.element_classes.get(&(e.ns, e.name.clone())) {
@@ -313,9 +319,43 @@ pub fn wrap_opt(agent: &mut Agent, doc: DocIndex, n: Option<bf_dom::NodeId>) -> 
     }
 }
 
-/// El nodo de un wrapper.
+/// El nodo de un wrapper de este realm (`None` si `v` no es un nodo o si es de otra ventana,
+/// ver [`is_foreign_node`]).
 pub fn unwrap_node(agent: &Agent, v: &Value) -> Option<NodeRef> {
-    agent.host_unwrap::<NodeRef>(v).copied()
+    let n = agent.host_unwrap::<NodeRef>(v).copied()?;
+    (!foreign(agent, v, n)).then_some(n)
+}
+
+/// E1: ¿`v` es el wrapper de un nodo de otra ventana (un `<iframe>`, el padre)? Un
+/// [`NodeRef`] solo tiene sentido en el [`crate::WebContext`] de su realm: el mismo índice de
+/// documento y de nodo en otro realm es otro nodo (o ninguno, y resolverlo es un pánico de
+/// índice fuera de rango en `bf-dom`). Cada wrapper de nodo está registrado en el realm de su
+/// ventana (`wrap_node`), así que el de otro realm no es el que este realm tiene para la clave.
+pub fn is_foreign_node(agent: &Agent, v: &Value) -> bool {
+    match agent.host_unwrap::<NodeRef>(v) {
+        Some(&n) => foreign(agent, v, n),
+        None => false,
+    }
+}
+
+fn foreign(agent: &Agent, v: &Value, n: NodeRef) -> bool {
+    let Value::Object(o) = v else {
+        return false;
+    };
+    agent.host_lookup(agent.current_realm, n.key()) != Some(*o)
+}
+
+/// E1: el error para un nodo de otra ventana donde el DOM lo admitiría (adoptarlo, insertarlo,
+/// usarlo de boundary point): mover nodos entre las arenas de dos `WebContext` no está hecho,
+/// y es mejor un `NotSupportedError` que resolverlo contra la arena equivocada.
+pub fn throw_foreign_node<T>(agent: &mut Agent) -> JsResult<T> {
+    let e = exception::create(
+        agent,
+        DomException::NotSupportedError.name(),
+        "The node belongs to the document of another window; moving nodes between \
+         browsing contexts is not supported",
+    );
+    Err(bf_js::vm::Throw::Value(e))
 }
 
 /// El nodo de `this` (el trampolín ya hizo el brand check).
@@ -330,6 +370,7 @@ pub fn this_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<NodeRef> {
 pub fn arg_node(agent: &mut Agent, v: &Value, what: &str) -> JsResult<NodeRef> {
     match unwrap_node(agent, v) {
         Some(n) => Ok(n),
+        None if is_foreign_node(agent, v) => throw_foreign_node(agent),
         None => agent.type_error(&format!("{what} is not of type 'Node'.")),
     }
 }
@@ -392,6 +433,8 @@ pub fn mutated(agent: &mut Agent) {
         // E1: el `toggle` de los `details` cuyo `open` cambió.
         crate::html::activation::queue_details_toggles(agent, doc);
     }
+    crate::dom::shadow::sync_adopted(agent); // E1
+    crate::html::custom_elements::process_reactions(agent); // E1
 }
 
 /// Después de que un algoritmo de `bf-dom` corrió con script (dispatch, abort): agenda la
@@ -399,4 +442,5 @@ pub fn mutated(agent: &mut Agent) {
 pub fn after_dom_mutation(agent: &mut Agent, doc: DocIndex) {
     observer::schedule_delivery(agent, doc);
     crate::html::activation::queue_details_toggles(agent, doc); // E1
+    crate::html::custom_elements::process_reactions(agent); // E1
 }

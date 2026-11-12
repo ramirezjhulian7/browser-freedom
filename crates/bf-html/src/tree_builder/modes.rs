@@ -183,7 +183,10 @@ impl TreeBuilder {
                 let template = self.create_element_for_token(t, bf_infra::Namespace::Html);
                 let location = self.appropriate_place(None);
                 self.open.push(template);
-                self.insert_element_at(template, Some(location));
+                // E1: pasos 8-9, un declarative shadow root.
+                if !self.attach_declarative_shadow(t, template) {
+                    self.insert_element_at(template, Some(location));
+                }
             }
             Tok::End(ref t) if t.name == "template" => {
                 if !self.stack_has_template() {

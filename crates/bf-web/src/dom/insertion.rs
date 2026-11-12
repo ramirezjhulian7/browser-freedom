@@ -29,6 +29,11 @@ pub fn inserted(agent: &mut Agent, doc: DocIndex, roots: &[NodeId]) {
 /// Después de insertar markup parseado (`innerHTML`…): sus `script` no se ejecutan (el
 /// parser de fragmentos los marca *already started*), solo se piden los recursos.
 pub fn inserted_markup(agent: &mut Agent, doc: DocIndex, roots: &[NodeId]) {
+    // E1: el fragment parser encola el upgrade de los custom elements que crea aunque no
+    // queden conectados (HTML §13.2.6.1 "create an element for a token", paso 7).
+    for &r in roots {
+        crate::html::custom_elements::cloned(agent, crate::NodeRef::new(doc, r));
+    }
     process(agent, doc, roots, false);
 }
 

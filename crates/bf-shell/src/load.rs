@@ -12,7 +12,8 @@ use bf_infra::encoding::{self, Encoding};
 use bf_infra::{Resource, ResourceLoader, Url, url_from_arg};
 use bf_layout::Size;
 use bf_net::{
-    EncodingSource, FetchError, FetchOptions, MimeType, NetLoader, html_encoding_with_source,
+    EncodingSource, FetchError, FetchOptions, MimeType, NetLoader, ReferrerPolicy,
+    html_encoding_with_source,
 };
 
 use crate::internal;
@@ -25,6 +26,10 @@ use crate::theme::Theme;
 pub struct CachedLoader {
     pub net: Arc<NetLoader>,
     entries: Mutex<HashMap<String, Option<Resource>>>,
+    /// E6: el cliente de los subrecursos (Fetch §2.2.5: el referente `"client"` es la URL del
+    /// documento, Referrer Policy §8.3 paso 2) y la política de su *policy container* (HTML
+    /// §7.1.2: la de la cabecera `Referrer-Policy`, cambiada luego por `<meta name=referrer>`).
+    client: Mutex<Option<(Url, ReferrerPolicy)>>,
 }
 
 impl CachedLoader {
@@ -32,8 +37,53 @@ impl CachedLoader {
         CachedLoader {
             net,
             entries: Mutex::new(HashMap::new()),
+            client: Mutex::new(None),
         }
     }
+
+    /// El documento que pide los subrecursos: su URL (el referente) y su política.
+    pub fn set_client(&self, url: Url, policy: ReferrerPolicy) {
+        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some((url, policy));
+    }
+
+    /// Cambia la política del documento (HTML §4.2.5.3, `<meta name=referrer>`).
+    pub fn set_referrer_policy(&self, policy: ReferrerPolicy) {
+        if let Some((_, p)) = self
+            .client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            *p = policy;
+        }
+    }
+}
+
+/// HTML §4.2.5.3 (`<meta name=referrer>`): la política del último `<meta name=referrer>` con un
+/// `content` válido (los tokens viejos `never`, `default`, `always` y `origin-when-crossorigin` se
+/// traducen); `None` si no hay ninguno.
+pub fn meta_referrer_policy(doc: &Document) -> Option<ReferrerPolicy> {
+    doc.inclusive_descendants(doc.root())
+        .into_iter()
+        .filter_map(|n| doc.element(n))
+        .filter(|e| {
+            e.is_html("meta")
+                && e.attr("name")
+                    .is_some_and(|n| n.eq_ignore_ascii_case("referrer"))
+        })
+        .filter_map(|e| {
+            let value = e.attr("content")?.to_ascii_lowercase();
+            let value = match value.as_str() {
+                "" => return None,
+                "never" => "no-referrer",
+                "default" => "strict-origin-when-cross-origin",
+                "always" => "unsafe-url",
+                "origin-when-crossorigin" => "origin-when-cross-origin",
+                v => v,
+            };
+            ReferrerPolicy::parse(value)
+        })
+        .last()
 }
 
 impl ResourceLoader for CachedLoader {
@@ -47,7 +97,18 @@ impl ResourceLoader for CachedLoader {
         {
             return hit.clone();
         }
-        let result = self.net.load(url);
+        let (referrer, referrer_policy) = self
+            .client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map_or((None, ReferrerPolicy::Default), |(u, p)| (Some(u), p));
+        let options = FetchOptions {
+            referrer,
+            referrer_policy,
+            ..FetchOptions::default()
+        };
+        let result = self.net.load_with(url, &options);
         self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -304,6 +365,17 @@ pub fn fetch_document_with(
     let fetch = start.elapsed();
     let start = Instant::now();
     let loader = Arc::new(CachedLoader::new(net));
+    // E6: la política de referente del documento (HTML §7.1.2, *create a policy container from a
+    // fetch response*: Referrer Policy §8.1, la cabecera con todas sus líneas).
+    let header_policy = response
+        .headers
+        .get_all("referrer-policy")
+        .collect::<Vec<_>>()
+        .join(",");
+    loader.set_client(
+        response.url.clone(),
+        ReferrerPolicy::from_header(&header_policy).unwrap_or_default(),
+    );
     let content_type = response.content_type();
     let path = response.url.path_string().to_ascii_lowercase();
     let xml = match &content_type {
@@ -331,12 +403,24 @@ pub fn fetch_document_with(
             Some((engine, env)) => {
                 parse_with_scripts(&text, &response.url, engine, loader.clone(), env)
             }
-            None => bf_html::parse_document(&text, &bf_html::ParseOptions::default()).0,
+            // E1: un documento de navegación permite declarative shadow roots.
+            None => {
+                let opts = bf_html::ParseOptions {
+                    allow_declarative_shadow_roots: true,
+                    ..bf_html::ParseOptions::default()
+                };
+                bf_html::parse_document(&text, &opts).0
+            }
         };
         (doc, enc, source)
     };
     // E10: `document.characterSet` (y el encoding de las URLs del documento).
     doc.character_set = encoding.name().into();
+    // E6: `<meta name=referrer>` cambia la política (HTML §4.2.5.3). Se aplica al terminar el
+    // parseo: los scripts que se piden durante el parseo van con la de la cabecera.
+    if let Some(policy) = meta_referrer_policy(&doc) {
+        loader.set_referrer_policy(policy);
+    }
     let base = document_base_url(&doc, &response.url);
     let http = matches!(response.url.scheme.as_str(), "http" | "https");
     let meta = Meta {
@@ -376,4 +460,122 @@ pub fn indicated_element(doc: &Document, fragment: &str) -> Option<NodeId> {
         .or_else(|| by("name", fragment))
         .or_else(|| by("id", &decoded))
         .or_else(|| by("name", &decoded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    type Log = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Un servidor HTTP/1.1 mínimo: `/doc-<n>` responde `pages[n]` (cabeceras de más y cuerpo);
+    /// cualquier otra ruta, un cuerpo vacío. Anota la ruta y el `Referer` de cada petición.
+    fn serve(pages: Vec<(&'static str, &'static str)>) -> (Url, Log) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Log = Arc::default();
+        let seen = log.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let path = line.split(' ').nth(1).unwrap_or("").to_owned();
+                let mut referer = None;
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                    if let Some((n, v)) = h.split_once(':')
+                        && n.eq_ignore_ascii_case("referer")
+                    {
+                        referer = Some(v.trim().to_owned());
+                    }
+                }
+                seen.lock().unwrap().push((path.clone(), referer));
+                let (extra, body) = path
+                    .strip_prefix("/doc-")
+                    .and_then(|n| n.split('?').next()?.parse::<usize>().ok())
+                    .and_then(|n| pages.get(n).copied())
+                    .unwrap_or(("", ""));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\n\
+                     Connection: close\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let base = Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+        (base, log)
+    }
+
+    /// La política del documento (cabecera `Referrer-Policy`, o `<meta name=referrer>`, que la
+    /// cambia) llega a sus subrecursos; sin ninguna, `strict-origin-when-cross-origin`.
+    #[test]
+    fn subresources_use_the_document_referrer_policy() {
+        let (base, log) = serve(vec![
+            ("", "<p>sin política"),
+            ("Referrer-Policy: no-referrer\r\n", "<p>cabecera"),
+            (
+                "Referrer-Policy: unsafe-url, no-referrer\r\n",
+                "<meta name=Referrer content=ORIGIN>",
+            ),
+            (
+                "",
+                "<meta name=referrer content=never><meta name=referrer content=bogus>",
+            ),
+        ]);
+        let net = Arc::new(NetLoader::new());
+        let mut referers = Vec::new();
+        for n in 0..4 {
+            let doc = Url::parse(&format!("doc-{n}?q#f"), Some(&base)).unwrap();
+            let loaded = fetch_document(&doc, net.clone()).unwrap();
+            let sub = Url::parse(&format!("img-{n}.png"), Some(&base)).unwrap();
+            loaded.loader.load(&sub);
+            let (path, referer) = log.lock().unwrap().last().unwrap().clone();
+            assert_eq!(path, format!("/img-{n}.png"));
+            referers.push(referer);
+        }
+        let origin = base.href();
+        assert_eq!(
+            referers,
+            [
+                Some(format!("{origin}doc-0?q")),
+                None,
+                Some(origin.clone()),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn meta_referrer_tokens() {
+        let policy = |html: &str| {
+            let (doc, _) = bf_html::parse_document(html, &bf_html::ParseOptions::default());
+            meta_referrer_policy(&doc)
+        };
+        assert_eq!(
+            policy("<meta name=referrer content=always>"),
+            Some(ReferrerPolicy::UnsafeUrl)
+        );
+        assert_eq!(
+            policy("<meta name=referrer content=origin-when-crossorigin>"),
+            Some(ReferrerPolicy::OriginWhenCrossOrigin)
+        );
+        assert_eq!(
+            policy("<meta name=referrer content=default>"),
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin)
+        );
+        assert_eq!(
+            policy("<meta name=referrer content=''><meta name=description content=origin>"),
+            None
+        );
+    }
 }

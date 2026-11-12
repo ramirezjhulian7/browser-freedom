@@ -37,6 +37,40 @@ pub(crate) enum Microtask {
 }
 
 impl Document {
+    /// E1: asocia `el` con `form` desde el parser y pone su *parser inserted flag*
+    /// (HTML §13.2.6.1 "create an element for a token").
+    pub fn set_parser_form_owner(&mut self, el: NodeId, form: NodeId) {
+        self.parser_form_owners.insert(el, form);
+    }
+
+    /// E1: el form owner que asoció el parser, mientras siga vigente: sin atributo `form` y en
+    /// el mismo árbol que el form (HTML §4.10.17.3).
+    pub fn parser_form_owner(&self, el: NodeId) -> Option<NodeId> {
+        let form = *self.parser_form_owners.get(&el)?;
+        if self.element(el).is_some_and(|e| e.attr("form").is_some()) {
+            return None;
+        }
+        (self.tree_root(el) == self.tree_root(form)).then_some(form)
+    }
+
+    /// E1: al quitar `node` (§4.10.17.3, "when a form-associated element or one of its
+    /// ancestors is removed"): "reset the form owner", que borra el *parser inserted flag*,
+    /// de los asociados por el parser que ya no están en el mismo árbol que su form.
+    pub(crate) fn parser_form_owners_removed(&mut self, node: NodeId) {
+        if self.parser_form_owners.is_empty() {
+            return;
+        }
+        let stale: Vec<NodeId> = self
+            .parser_form_owners
+            .iter()
+            .filter(|&(&el, &form)| self.tree_root(el) == node && self.tree_root(form) != node)
+            .map(|(&el, _)| el)
+            .collect();
+        for el in stale {
+            self.parser_form_owners.remove(&el);
+        }
+    }
+
     fn is_html_element(&self, id: NodeId, name: &str) -> bool {
         self.element(id).is_some_and(|e| e.is_html(name))
     }

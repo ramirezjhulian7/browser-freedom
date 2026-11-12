@@ -11,7 +11,7 @@ use bf_dom::{Document, DomException, NodeData, NodeId};
 use bf_js::host::{HostClass, HostClassId, HostKey};
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
-use bf_js::vm::{Agent, JsResult};
+use bf_js::vm::{Agent, JsResult, RealmId};
 
 use crate::dom::adopt::adopt_into;
 use crate::dom::insertion::{inserted, roots_of};
@@ -28,6 +28,8 @@ use crate::{DocIndex, NodeRef, with_doc, with_doc_mut};
 pub struct RangeData {
     pub doc: Cell<DocIndex>,
     pub id: Cell<RangeId>,
+    /// E1: el realm de la ventana del rango; `doc` e `id` solo valen en su `WebContext`.
+    pub realm: RealmId,
 }
 
 /// El payload de un `StaticRange`.
@@ -35,6 +37,8 @@ pub struct RangeData {
 pub struct StaticRangeData {
     pub doc: DocIndex,
     pub bounds: RangeBounds,
+    /// E1: el realm de la ventana del rango (ver [`RangeData::realm`]).
+    pub realm: RealmId,
 }
 
 pub fn abstract_range_class() -> HostClass {
@@ -171,13 +175,31 @@ fn common_ancestor(d: &Document, r: RangeBounds) -> NodeId {
 
 fn this_range(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<(DocIndex, RangeId)> {
     match agent.host_unwrap::<RangeData>(&a.this) {
+        Some(r) if r.realm != agent.current_realm => crate::dom::throw_foreign_node(agent),
         Some(r) => Ok((r.doc.get(), r.id.get())),
         None => agent.type_error("Illegal invocation"),
     }
 }
 
+/// E1: ¿`v` es un `Range` o `StaticRange` de otra ventana? Su documento y su rango vivo son
+/// índices del `WebContext` de esa ventana; resolverlos en este es el pánico de
+/// `Document::live_range` (o de la arena de nodos).
+fn is_foreign_range(agent: &Agent, v: &Value) -> bool {
+    let realm = match agent.host_unwrap::<RangeData>(v) {
+        Some(r) => r.realm,
+        None => match agent.host_unwrap::<StaticRangeData>(v) {
+            Some(s) => s.realm,
+            None => return false,
+        },
+    };
+    realm != agent.current_realm
+}
+
 /// Los boundary points de un `AbstractRange` (vivo o estático).
 fn abstract_bounds(agent: &mut Agent, v: &Value) -> JsResult<(DocIndex, RangeBounds)> {
+    if is_foreign_range(agent, v) {
+        return crate::dom::throw_foreign_node(agent);
+    }
     if let Some(r) = agent.host_unwrap::<RangeData>(v) {
         let (doc, id) = (r.doc.get(), r.id.get());
         return Ok((doc, with_doc(agent, doc, |d| d.live_range(id))));
@@ -219,6 +241,7 @@ pub fn new_range(agent: &mut Agent, doc: DocIndex, bounds: RangeBounds) -> Value
         Box::new(RangeData {
             doc: Cell::new(doc),
             id: Cell::new(id),
+            realm: agent.current_realm,
         }),
     ))
 }
@@ -252,6 +275,7 @@ fn range_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Box::new(RangeData {
             doc: Cell::new(0),
             id: Cell::new(id),
+            realm: agent.current_realm,
         }),
     )?;
     Ok(Value::Object(o))
@@ -294,6 +318,7 @@ fn static_range_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             start: bp(start_c.node, start_o),
             end: bp(end_c.node, end_o),
         },
+        realm: agent.current_realm,
     };
     let o = agent.host_create_from_new_target(nt, class, None, Box::new(data))?;
     if end_c.doc != start_c.doc
@@ -540,6 +565,10 @@ fn compare_boundary_points(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     let (sdoc, sid) = (src.doc.get(), src.id.get());
     if how > 3 {
         return throw_dom(agent, DomException::NotSupportedError);
+    }
+    // E1: un rango de otra ventana tiene otra raíz (§5.5 compareBoundaryPoints paso 3).
+    if is_foreign_range(agent, &a.arg(1)) {
+        return throw_dom(agent, DomException::WrongDocumentError);
     }
     let r = range_bounds(agent, doc, id);
     let s = range_bounds(agent, sdoc, sid);
@@ -990,6 +1019,11 @@ fn point_checks(
     a: &CallArgs<'_>,
 ) -> JsResult<(DocIndex, RangeBounds, Option<BoundaryPoint>)> {
     let (doc, id) = this_range(agent, a)?;
+    // E1: un nodo de otra ventana tiene otra raíz (§5.5 isPointInRange/comparePoint paso 1).
+    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+        bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
+        return Ok((doc, range_bounds(agent, doc, id), None));
+    }
     let n = arg_node(agent, &a.arg(0), "parameter 1")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
     let r = range_bounds(agent, doc, id);
@@ -1038,11 +1072,11 @@ fn compare_point(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn intersects_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, id) = this_range(agent, a)?;
-    let n = arg_node(
-        agent,
-        &a.arg(0),
-        "Failed to execute 'intersectsNode' on 'Range': parameter 1",
-    )?;
+    // E1: un nodo de otra ventana tiene otra raíz (§5.5 intersectsNode paso 1).
+    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+        return Ok(Value::Boolean(false));
+    }
+    let n = arg_node(agent, &a.arg(0), "Failed to execute 'intersectsNode' on 'Range': parameter 1")?;
     let r = range_bounds(agent, doc, id);
     if n.doc != doc {
         return Ok(Value::Boolean(false));
@@ -1172,6 +1206,9 @@ fn create_contextual_fragment(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<V
         };
         bf_html::dom::parse_fragment_into(d, context, &markup)
     });
+    // E1: los custom elements del fragmento se actualizan (el fragment parser encola su
+    // upgrade).
+    crate::html::custom_elements::cloned(agent, NodeRef::new(doc, fragment));
     Ok(wrap_node(agent, NodeRef::new(doc, fragment)))
 }
 
@@ -1391,6 +1428,11 @@ fn add_range(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return agent.type_error("parameter 1 is not of type 'Range'.");
     };
     let (rdoc, id) = (rd.doc.get(), rd.id.get());
+    // E1: un rango de otra ventana no tiene por raíz este documento (Selection API §3 addRange
+    // paso 1).
+    if is_foreign_range(agent, &range) {
+        return Ok(Value::Undefined);
+    }
     // 1. El rango debe estar en el documento de la selección (su raíz es el documento).
     let b = range_bounds(agent, rdoc, id);
     let in_doc = rdoc == doc && with_doc(agent, doc, |d| d.get_root_node(b.start.node) == d.root());
