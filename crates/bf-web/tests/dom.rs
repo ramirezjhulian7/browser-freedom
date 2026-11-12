@@ -1281,6 +1281,21 @@ fn document_interfaces_and_dom_parser() {
     );
 }
 
+/// E10: `Document.rootElement` (SVG 2): el `svg` raíz o `null`.
+#[test]
+fn document_root_element() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var s = new DOMParser().parseFromString('<svg xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); \
+             var g = new DOMParser().parseFromString('<g xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); \
+             [s.rootElement === s.documentElement, g.rootElement, document.rootElement, \
+              'rootElement' in Document.prototype].join()"
+        ),
+        "true,,,true"
+    );
+}
+
 #[test]
 fn window_members_are_own_properties() {
     let mut p = Page::new(SIMPLE);
