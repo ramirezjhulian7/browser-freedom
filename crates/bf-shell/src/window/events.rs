@@ -35,6 +35,18 @@ pub struct Mods {
     pub meta: bool,
 }
 
+impl Mods {
+    /// El modificador primario de los atajos: `Cmd` en macOS, `Ctrl` en el resto
+    /// ([`super::keys`]). Con él, un clic abre el enlace en otra pestaña.
+    pub fn primary(&self) -> bool {
+        if super::keys::MAC {
+            self.meta
+        } else {
+            self.ctrl
+        }
+    }
+}
+
 /// Qué hizo el puntero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseKind {
@@ -580,10 +592,10 @@ fn activations(t: &mut Target<'_>, mods: Mods, out: &mut Vec<PageRequest>) {
                     .and_then(|e| e.attr("target"))
                     .map(str::to_ascii_lowercase)
                     .unwrap_or_default();
-                if mods.shift && !mods.ctrl {
+                if mods.shift && !mods.primary() {
                     // E11: Mayús+clic abre el enlace en una ventana nueva.
                     out.push(PageRequest::OpenWindow(url.href()));
-                } else if mods.ctrl || target == "_blank" {
+                } else if mods.primary() || target == "_blank" {
                     out.push(PageRequest::Open(url.href()));
                 } else if let Some(r) = t.realm.filter(|_| target != "_top" && target != "_parent")
                     && let Some(e) = &mut t.engine
@@ -746,11 +758,13 @@ mod tests {
         let r = p.mouse(MouseKind::Click, "b", Mods::default());
         assert!(navigations(&r).is_empty());
         assert_eq!(p.console(), ["cancelado true 10 1"]);
-        let ctrl = Mods {
-            ctrl: true,
+        // Con el modificador primario (`Cmd` en macOS, `Ctrl` en el resto), otra pestaña.
+        let primary = Mods {
+            ctrl: !super::super::keys::MAC,
+            meta: super::super::keys::MAC,
             ..Mods::default()
         };
-        let r = p.mouse(MouseKind::Click, "a", ctrl);
+        let r = p.mouse(MouseKind::Click, "a", primary);
         assert_eq!(navigations(&r), ["open https://example.test/dir/otra.html"]);
     }
 

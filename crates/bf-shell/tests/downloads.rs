@@ -402,3 +402,29 @@ fn cancel_stops_and_removes_part() {
     assert!(!dir.join("grande.iso").exists());
     assert!(!dir.join("grande.iso.part").exists());
 }
+
+/// "Ver en carpeta": selecciona el archivo en el Finder (`open -R`) o en el Explorador de
+/// Windows; si ya no existe, abre su carpeta.
+#[test]
+fn reveal_selects_the_file() {
+    let dir = std::env::temp_dir().join(format!("bf-reveal-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a b.txt");
+    std::fs::write(&file, "x").unwrap();
+    let (program, args) = downloads::reveal_command(&file);
+    if cfg!(target_os = "macos") {
+        assert_eq!(program, "open");
+        assert_eq!(args, ["-R".into(), file.clone().into_os_string()]);
+        let gone = dir.join("borrado.txt");
+        let (_, args) = downloads::reveal_command(&gone);
+        assert_eq!(args, [dir.clone().into_os_string()]);
+    } else if cfg!(windows) {
+        assert_eq!(program, "explorer");
+        assert_eq!(args.len(), 1);
+        assert!(args[0].to_string_lossy().starts_with("/select,"));
+    } else {
+        assert_eq!(program, "xdg-open");
+        assert_eq!(args, [dir.clone().into_os_string()]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

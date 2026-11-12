@@ -194,27 +194,34 @@ pub fn looks_like_download(url: &Url) -> bool {
         .is_some_and(|(stem, ext)| !stem.is_empty() && DOWNLOAD_EXTENSIONS.contains(&ext))
 }
 
-/// Muestra `path` en el explorador de archivos del sistema (seleccionado, en Windows).
+/// Muestra `path` en el explorador de archivos del sistema: seleccionado en Windows
+/// (`explorer /select,`) y en macOS (`open -R`, en el Finder); en Linux se abre su carpeta.
 pub fn reveal(path: &Path) {
-    let result = if cfg!(windows) {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
-            .spawn()
-    } else {
-        let dir = path.parent().unwrap_or(path);
-        std::process::Command::new(if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        })
-        .arg(dir)
-        .spawn()
-    };
-    if let Err(e) = result {
+    let (program, args) = reveal_command(path);
+    if let Err(e) = std::process::Command::new(program).args(&args).spawn() {
         eprintln!(
             "aviso: no se pudo abrir la carpeta de {}: {e}",
             path.display()
         );
+    }
+}
+
+/// El programa y los argumentos de [`reveal`] en esta plataforma. Si el archivo ya no existe
+/// (se movió o se borró), se abre su carpeta.
+pub fn reveal_command(path: &Path) -> (&'static str, Vec<std::ffi::OsString>) {
+    let dir = path.parent().unwrap_or(path);
+    if cfg!(windows) {
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(path);
+        ("explorer", vec![arg])
+    } else if cfg!(target_os = "macos") {
+        if path.exists() {
+            ("open", vec!["-R".into(), path.into()])
+        } else {
+            ("open", vec![dir.into()])
+        }
+    } else {
+        ("xdg-open", vec![dir.into()])
     }
 }
 
