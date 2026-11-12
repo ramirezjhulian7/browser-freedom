@@ -3,9 +3,11 @@
 
 pub mod activation;
 pub mod canvas;
+pub mod custom_elements;
 pub mod elements;
 pub mod forms;
 pub mod misc;
+pub mod named;
 pub mod reflect;
 pub mod scripting;
 pub mod submission;
@@ -20,6 +22,10 @@ use crate::WebContextHandle;
 /// Registra las clases de esta área (lo llama [`crate::register_all`]).
 pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     canvas::register(agent);
+    crate::dom::shadow::register(agent);
+    crate::dom::serializer::register(agent); // E1
+    custom_elements::register(agent);
     submission::register(agent);
+    forms::register_collections(agent); // E1
     elements::register(agent, realm, ctx);
 }
