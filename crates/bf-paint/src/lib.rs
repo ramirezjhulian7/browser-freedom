@@ -227,6 +227,8 @@ pub fn prepare_page_with_frames(
     let style = start.elapsed();
     let start = Instant::now();
     let mut images = load_images(doc, &styles, base, &*loader);
+    // E7: contenido HTML de los `foreignObject` de los SVG en línea.
+    images::foreign_objects(doc, ctx, &mut images.svg_resources);
     for (node, pixmap) in canvases {
         images.insert_canvas(*node, pixmap.clone());
     }

@@ -174,16 +174,21 @@ struct Meta {
     has_script: bool,
 }
 
-/// `.xht` y `.xhtml` son XML (`application/xhtml+xml`); el resto, HTML.
+/// `.xht`, `.xhtml` y `.svg` son XML (`application/xhtml+xml`, `image/svg+xml`); el resto,
+/// HTML.
 pub fn parse_text(path: &Path, text: &str) -> Document {
-    let xml = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("xht") || e.eq_ignore_ascii_case("xhtml"));
+    let xml = path.extension().is_some_and(|e| {
+        e.eq_ignore_ascii_case("xht") || e.eq_ignore_ascii_case("xhtml") || is_svg_ext(e)
+    });
     if xml {
         bf_html::parse_xml_document(text)
     } else {
         bf_html::parse_document(text, &bf_html::ParseOptions::default()).0
     }
+}
+
+fn is_svg_ext(e: &std::ffi::OsStr) -> bool {
+    e.eq_ignore_ascii_case("svg")
 }
 
 fn parse_file(path: &Path) -> Option<(Document, String)> {
@@ -248,7 +253,7 @@ pub fn is_test_file(path: &Path) -> bool {
     else {
         return false;
     };
-    let ext_ok = [".html", ".htm", ".xht", ".xhtml"]
+    let ext_ok = [".html", ".htm", ".xht", ".xhtml", ".svg"]
         .iter()
         .any(|e| name.ends_with(e));
     let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
@@ -360,6 +365,9 @@ impl Harness {
     }
 
     fn render_doc(&self, doc: &Document, path: &Path) -> Pixmap {
+        if path.extension().is_some_and(is_svg_ext) {
+            return self.render_svg(doc, path);
+        }
         let base = self.base(path);
         let ctx = crate::PageContext {
             base: &base,
@@ -370,6 +378,51 @@ impl Harness {
             text_zoom: 1.0,
         };
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
+    }
+
+    /// Un documento SVG suelto (E7): su raíz es el viewport, del tamaño de sus `width` y
+    /// `height` absolutos o del viewport de la ventana, sobre fondo blanco.
+    fn render_svg(&self, doc: &Document, path: &Path) -> Pixmap {
+        let (w, h) = (VIEWPORT.width as u32, VIEWPORT.height as u32);
+        let mut out = Pixmap::new(w, h).expect("tamaño válido");
+        out.fill(tiny_skia::Color::WHITE);
+        let Some(root) = doc.children(doc.root()).find(|&n| doc.element(n).is_some()) else {
+            return out;
+        };
+        let Ok(mut svg) = bf_svg::Svg::from_element(doc, root, &[], bf_svg::Inherited::default())
+        else {
+            return out;
+        };
+        // Documento de primer nivel: sus referencias a otros documentos se cargan.
+        crate::images::load_svg_externals(
+            &mut svg,
+            Some(&self.base(path)),
+            Some(self.loader.as_ref()),
+        );
+        let i = svg.intrinsic();
+        let sw = i.width.unwrap_or(VIEWPORT.width);
+        let sh = i.height.unwrap_or(VIEWPORT.height);
+        let fonts = bf_font::Fonts::new(self.db.clone());
+        // Documento de primer nivel: sus `image` se cargan con el loader del harness.
+        let mut res = crate::images::SvgResources::default();
+        res.load(&svg, Some(&self.base(path)), Some(self.loader.as_ref()));
+        if let Some(p) = crate::images::rasterize_svg_with(
+            &svg.tree(sw, sh),
+            sw.ceil() as u32,
+            sh.ceil() as u32,
+            Some(&fonts),
+            &res,
+        ) {
+            out.draw_pixmap(
+                0,
+                0,
+                p.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+        out
     }
 
     /// Pinta una referencia (cacheada si la usan varios tests). `Err` si no existe o usa JS.
@@ -470,15 +523,23 @@ impl Harness {
                 .map(|h| (h, true))
                 .chain(m.mismatches.iter().map(|h| (h, false)));
             for (href, expect_match) in refs {
-                let ref_path = self
-                    .resolve(href, path)
-                    .ok_or_else(|| format!("referencia no resoluble {href}"))?;
-                let expected = match self.reference(&ref_path) {
-                    Ok(p) => p,
-                    Err(e) if e == "js" => {
-                        return Ok((Status::NeedsJs, "referencia con <script>".into()));
+                // E7: `about:blank` es una página en blanco.
+                let expected = if href.trim().eq_ignore_ascii_case("about:blank") {
+                    let mut blank = Pixmap::new(VIEWPORT.width as u32, VIEWPORT.height as u32)
+                        .expect("tamaño válido");
+                    blank.fill(tiny_skia::Color::WHITE);
+                    Arc::new(blank)
+                } else {
+                    let ref_path = self
+                        .resolve(href, path)
+                        .ok_or_else(|| format!("referencia no resoluble {href}"))?;
+                    match self.reference(&ref_path) {
+                        Ok(p) => p,
+                        Err(e) if e == "js" => {
+                            return Ok((Status::NeedsJs, "referencia con <script>".into()));
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => return Err(e),
                 };
                 let file = href.rsplit('/').next().unwrap_or(href);
                 let fuzzy = m
@@ -605,6 +666,12 @@ pub const GROUPS: &[&str] = &[
     "css/css-tables",
     "css/css-grid",
     "css/css-ui",
+    // E7: SVG (documentos `.svg` sueltos y SVG en línea en HTML).
+    "svg",
+    // E9: escritura vertical, bidi y texto.
+    "css/css-writing-modes",
+    "css/CSS2/bidi-text",
+    "css/css-text",
     // E12: scroll, sticky y object-fit.
     "css/css-overflow",
     "css/css-position",
