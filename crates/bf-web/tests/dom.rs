@@ -1462,3 +1462,52 @@ fn document_write_after_load_opens() {
         "nuevo,"
     );
 }
+
+// E1: rutas que mezclaban `NodeId` de dos documentos del mismo contexto (antes: pánico de índice
+// en `bf-dom` `Document::get`, o el nodo equivocado). Los documentos creados son más chicos que
+// el de la ventana, así que un `NodeId` de esta en su arena se sale de rango.
+#[test]
+fn nodes_of_two_documents_are_not_mixed() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           var d = document.implementation.createHTMLDocument(''); \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           /* table.caption con un elemento de otro documento: se adopta (DOM §4.2.3). */ \
+           var t = d.createElement('table'); d.body.appendChild(t); \
+           var c = document.createElement('caption'); \
+           out.push(err(function () { t.caption = c; })); \
+           out.push(t.caption === c, c.ownerDocument === d); \
+           var big = document.createElement('caption'); \
+           for (var i = 0; i < 50; i++) document.body.appendChild(document.createElement('i')); \
+           var t2 = document.createElement('table'); document.body.appendChild(t2); \
+           t2.tHead = d.createElement('thead'); out.push(t2.tHead.ownerDocument === document); \
+           /* relatedTarget de otro documento: no se resuelve en la arena equivocada. */ \
+           var m = new MouseEvent('mouseover', {relatedTarget: d.body}); \
+           out.push(m.relatedTarget === d.body); \
+           var seen = 'none'; \
+           document.body.addEventListener('mouseover', function (e) { seen = String(e.relatedTarget); }); \
+           out.push(err(function () { document.body.dispatchEvent(m); }), seen); \
+           var m2 = new MouseEvent('mouseout', {relatedTarget: document.getElementById('a')}); \
+           d.body.addEventListener('mouseout', function (e) { seen = String(e.relatedTarget); }); \
+           out.push(err(function () { d.body.dispatchEvent(m2); }), seen); \
+           /* Re-despachar en otro documento un evento en curso: InvalidStateError y el \
+              target sigue siendo el del primero. */ \
+           var inner = 'none', tgt = false; \
+           document.body.addEventListener('ping', function (e) { \
+             inner = err(function () { d.body.dispatchEvent(e); }); tgt = e.target === document.body; }); \
+           document.body.dispatchEvent(new Event('ping')); \
+           out.push(inner, tgt); \
+           /* FormData con un submitter de otro documento: NotFoundError. */ \
+           var f = document.createElement('form'); document.body.appendChild(f); \
+           var b = d.createElement('button'); d.body.appendChild(b); \
+           out.push(err(function () { new FormData(f, b); })); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "ok,true,true,true,true,ok,null,ok,null,InvalidStateError,true,NotFoundError"
+    );
+}

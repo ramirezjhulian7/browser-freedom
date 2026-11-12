@@ -333,7 +333,8 @@ impl Event {
         }
     }
 
-    fn set_related_target(&mut self, t: Option<EventTarget>) {
+    /// (E1: público para que `bf-web` quite un `relatedTarget` de otro documento.)
+    pub fn set_related_target(&mut self, t: Option<EventTarget>) {
         match &mut self.kind {
             EventKind::Mouse(m) => m.related_target = t,
             EventKind::Focus { related_target } => *related_target = t,

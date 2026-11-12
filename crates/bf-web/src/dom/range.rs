@@ -202,7 +202,7 @@ fn abstract_bounds(agent: &mut Agent, v: &Value) -> JsResult<(DocIndex, RangeBou
     }
     if let Some(r) = agent.host_unwrap::<RangeData>(v) {
         let (doc, id) = (r.doc.get(), r.id.get());
-        return Ok((doc, with_doc(agent, doc, |d| d.live_range(id))));
+        return Ok((doc, range_bounds(agent, doc, id)));
     }
     if let Some(s) = agent.host_unwrap::<StaticRangeData>(v) {
         return Ok((s.doc, s.bounds));
@@ -211,7 +211,14 @@ fn abstract_bounds(agent: &mut Agent, v: &Value) -> JsResult<(DocIndex, RangeBou
 }
 
 fn range_bounds(agent: &Agent, doc: DocIndex, id: RangeId) -> RangeBounds {
-    with_doc(agent, doc, |d| d.live_range(id))
+    // E1: un rango cuyo documento fue reemplazado (un marco que navegó en el mismo realm) ya no
+    // tiene rango vivo en `doc`: queda colapsado al inicio del documento en vez de un pánico.
+    with_doc(agent, doc, |d| {
+        d.try_live_range(id).unwrap_or(RangeBounds {
+            start: bp(d.root(), 0),
+            end: bp(d.root(), 0),
+        })
+    })
 }
 
 /// Pone los boundary points del rango `v` (en el documento `doc`, que puede ser otro).
@@ -1499,7 +1506,7 @@ fn extend(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_sel(agent, a)?;
     let n = arg_node(agent, &a.arg(0), "parameter 1")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))?;
-    let Some((_, _, b)) = sel_range(agent, doc) else {
+    let Some((_, rdoc, b)) = sel_range(agent, doc) else {
         return throw_dom(agent, DomException::InvalidStateError);
     };
     let dir = sel_state(agent, doc).direction;
@@ -1512,7 +1519,9 @@ fn extend(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         b.start
     };
     let (bounds, backwards) = with_doc(agent, doc, |d| {
-        if !same_root(d, new_focus.node, old_anchor.node) {
+        // E1: el rango de la selección pasó a otro documento (`rdoc`): su ancla tiene otra raíz
+        // y su `NodeId` no vale en la arena de `doc`.
+        if rdoc != doc || !same_root(d, new_focus.node, old_anchor.node) {
             (
                 RangeBounds {
                     start: new_focus,

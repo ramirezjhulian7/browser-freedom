@@ -1281,3 +1281,58 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
          dostrescuatro,uno"
     );
 }
+
+// E1: `document.open()`/`write()` dentro de un listener (aquí un `onclick`) envuelve el documento
+// prestado en un parser; antes ese documento se perdía y el resto del dispatch y del script
+// corría sobre un documento vacío (pánico de índice en `bf-dom` con el siguiente `NodeId`).
+#[test]
+fn document_write_in_a_listener_keeps_the_document() {
+    let mut p = Page::scripted(
+        "<body><p id=a>uno</p><button id=b onclick=\"document.open(); \
+         document.write('<p id=n>nuevo</p>'); document.close()\">b</button>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "var a = document.getElementById('a'); var b = document.getElementById('b'); \
+             b.click(); var n = document.getElementById('n'); \
+             [a.textContent, b.textContent, n !== null && n.textContent, \
+              document.body !== null].join()"
+        ),
+        "uno,b,nuevo,true"
+    );
+}
+
+// E1: un marco que navega reusa su realm; el documento viejo sale de `documents[0]` con sus
+// wrappers (antes un nodo viejo `(0, id)` se resolvía en la arena del documento nuevo, más
+// chico: pánico de índice) y un `Range` viejo queda colapsado en vez de un pánico.
+#[test]
+fn frame_navigation_retires_the_old_document() {
+    let big = format!(
+        "<div id=big>{}</div><p id=last>fin</p>",
+        "<span>x</span>".repeat(200)
+    );
+    let mut p = framed(
+        "<iframe id=f src=/uno.html></iframe>",
+        &[
+            ("https://example.test/uno.html", &big),
+            ("https://example.test/dos.html", "<p>dos</p>"),
+        ],
+    );
+    p.eval(
+        "var f = document.getElementById('f'); var old = f.contentDocument; \
+         var last = old.getElementById('last'); var r = old.createRange(); \
+         r.selectNodeContents(last); f.src = '/dos.html';",
+    );
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    assert_eq!(
+        p.show(
+            "var nd = f.contentDocument; \
+             [last.textContent, last.ownerDocument === old, nd !== old, nd.body.textContent, \
+              last.compareDocumentPosition(nd.body) & 1, old.getElementById('last') === last, \
+              String(r.startContainer === nd || r.startContainer === old)].join()"
+        ),
+        "fin,true,true,dos,1,true,true"
+    );
+}

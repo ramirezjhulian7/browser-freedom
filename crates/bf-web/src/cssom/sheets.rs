@@ -23,7 +23,7 @@ use super::style_decl::{DeclOwner, wrap as wrap_decl};
 use super::value::{number, write_string};
 use super::{KeyKind, classes, key, set_indexed, sheets_changed, state};
 use crate::dom::{this_node, throw_dom, wrap_node};
-use crate::{NodeRef, WebContextHandle, with_doc};
+use crate::{DocIndex, NodeRef, WebContextHandle, with_doc};
 
 pub type SheetId = u32;
 pub type RuleId = u32;
@@ -174,6 +174,29 @@ pub struct SheetStore {
 }
 
 impl SheetStore {
+    /// E1: el documento de la ventana pasó al índice `to` (ver
+    /// `dom::adopt::retire_window_document`): sus hojas siguen siendo suyas, no del documento
+    /// nuevo (`ownerNode` no debe resolverse en la arena nueva).
+    pub fn retire_window_document(&mut self, to: DocIndex) {
+        let remap = |n: NodeRef| {
+            if n.doc == 0 {
+                NodeRef::new(to, n.node)
+            } else {
+                n
+            }
+        };
+        for s in self.sheets.values_mut() {
+            s.owner = s.owner.map(remap);
+        }
+        self.by_owner = self.by_owner.drain().map(|(k, v)| (remap(k), v)).collect();
+        self.explicitly_enabled = self.explicitly_enabled.drain().map(remap).collect();
+        self.link_loads = self
+            .link_loads
+            .drain()
+            .map(|(k, v)| (remap(k), v))
+            .collect();
+    }
+
     fn new_sheet(&mut self, sheet: Sheet) -> SheetId {
         self.next_sheet += 1;
         self.sheets.insert(self.next_sheet, sheet);
