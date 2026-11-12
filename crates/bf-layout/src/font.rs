@@ -103,6 +103,18 @@ pub trait FontProvider {
     fn metrics(&self, request: &FontRequest<'_>) -> FontMetrics;
     fn shape(&self, text: &str, request: &FontRequest<'_>) -> Vec<Glyph>;
 
+    /// E9: da forma a un run bidi de una sola dirección. Con `rtl` los glifos salen en orden
+    /// visual (de izquierda a derecha, los clústeres de mayor a menor), como los da un shaper
+    /// con dirección RTL (UAX #9 §3.4 L2: el run de nivel impar se invierte). La
+    /// implementación por defecto invierte el resultado de [`FontProvider::shape`].
+    fn shape_dir(&self, text: &str, request: &FontRequest<'_>, rtl: bool) -> Vec<Glyph> {
+        let mut glyphs = self.shape(text, request);
+        if rtl {
+            glyphs.reverse();
+        }
+        glyphs
+    }
+
     /// Contorno del glifo `glyph` de la cara `font` (`None` si no tiene, como el espacio).
     fn outline(&self, font: FontKey, glyph: u16) -> Option<Arc<Outline>> {
         let _ = (font, glyph);

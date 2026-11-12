@@ -397,6 +397,141 @@ keyword_enum!(UnicodeBidi {
 });
 keyword_prop!(UnicodeBidi);
 
+// E9: CSS Writing Modes 4 §3.1. Los valores SVG 1.1 (`lr`, `lr-tb`, `rl`, `rl-tb`, `tb`,
+// `tb-rl`) se aceptan y computan a su equivalente CSS (§3.1.1).
+keyword_enum!(WritingMode {
+    HorizontalTb = "horizontal-tb",
+    VerticalRl = "vertical-rl",
+    VerticalLr = "vertical-lr",
+    SidewaysRl = "sideways-rl",
+    SidewaysLr = "sideways-lr",
+});
+
+impl PropValue for WritingMode {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        WritingMode::from_ident(id).or_else(|| {
+            Some(match id.to_ascii_lowercase().as_str() {
+                "lr" | "lr-tb" | "rl" | "rl-tb" => WritingMode::HorizontalTb,
+                "tb" | "tb-rl" => WritingMode::VerticalRl,
+                _ => return None,
+            })
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+impl WritingMode {
+    /// ¿La dirección inline es vertical?
+    pub fn is_vertical(self) -> bool {
+        !matches!(self, WritingMode::HorizontalTb)
+    }
+    /// ¿Los bloques avanzan de derecha a izquierda (`vertical-rl`, `sideways-rl`)?
+    pub fn is_block_rtl(self) -> bool {
+        matches!(self, WritingMode::VerticalRl | WritingMode::SidewaysRl)
+    }
+}
+
+// E9: CSS Writing Modes 4 §5.1 (`sideways-right` es un alias de `sideways`).
+keyword_enum!(TextOrientation {
+    Mixed = "mixed",
+    Upright = "upright",
+    Sideways = "sideways",
+});
+
+impl PropValue for TextOrientation {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        TextOrientation::from_ident(id).or_else(|| {
+            id.eq_ignore_ascii_case("sideways-right")
+                .then_some(TextOrientation::Sideways)
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+// E9: CSS Text 3 §5.4.
+keyword_enum!(Hyphens {
+    None = "none",
+    Manual = "manual",
+    Auto = "auto",
+});
+keyword_prop!(Hyphens);
+
+// E9: CSS Text 3 §5.3 (`line-break`).
+keyword_enum!(TextLineBreak {
+    Auto = "auto",
+    Loose = "loose",
+    Normal = "normal",
+    Strict = "strict",
+    Anywhere = "anywhere",
+});
+keyword_prop!(TextLineBreak);
+
+// E9: CSS Text 3 §7.4 (`distribute` es un alias heredado de `inter-character`).
+keyword_enum!(TextJustify {
+    Auto = "auto",
+    None = "none",
+    InterWord = "inter-word",
+    InterCharacter = "inter-character",
+});
+
+impl PropValue for TextJustify {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        let id = single_ident(input)?;
+        TextJustify::from_ident(id).or_else(|| {
+            id.eq_ignore_ascii_case("distribute")
+                .then_some(TextJustify::InterCharacter)
+        })
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+// E9: CSS Text 3 §6.3. `auto`: la de `text-align`, salvo `justify`, que alinea al inicio.
+keyword_enum!(TextAlignLast {
+    Auto = "auto",
+    Start = "start",
+    End = "end",
+    Left = "left",
+    Right = "right",
+    Center = "center",
+    Justify = "justify",
+    MatchParent = "match-parent",
+});
+
+impl PropValue for TextAlignLast {
+    fn parse(input: &[ComponentValue]) -> Option<Self> {
+        single_ident(input).and_then(TextAlignLast::from_ident)
+    }
+    /// `match-parent`, como en `text-align`: el valor del padre con `start`/`end` resueltos
+    /// según su `direction`.
+    fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
+        if *self != TextAlignLast::MatchParent {
+            return *self;
+        }
+        let Some(parent) = ctx.parent else {
+            return TextAlignLast::Auto;
+        };
+        let rtl = parent.direction == Direction::Rtl;
+        match parent.text_align_last {
+            TextAlignLast::Start | TextAlignLast::MatchParent if rtl => TextAlignLast::Right,
+            TextAlignLast::Start | TextAlignLast::MatchParent => TextAlignLast::Left,
+            TextAlignLast::End if rtl => TextAlignLast::Left,
+            TextAlignLast::End => TextAlignLast::Right,
+            other => other,
+        }
+    }
+    fn to_css(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
 keyword_enum!(PointerEvents {
     Auto = "auto",
     None = "none",
