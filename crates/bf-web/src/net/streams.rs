@@ -3,7 +3,9 @@
 //! por realm, con los slots internos en WeakMaps de su clausura); aquí están los helpers que
 //! usa el body mixin.
 
+use bf_js::builtins::web::serialize::HostRecord;
 use bf_js::host::HostHandle;
+use bf_js::string::JsString;
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::{Agent, JsResult, RealmId};
 
@@ -133,4 +135,50 @@ pub fn read_all(agent: &mut Agent, s: &Value) -> JsResult<Value> {
 /// ReadableStreamCancel.
 pub fn cancel(agent: &mut Agent, s: &Value, reason: Value) -> JsResult<Value> {
     call(agent, "cancel", &[s.clone(), reason])
+}
+
+/// ¿Es `v` un `ReadableStream`, `WritableStream` o `TransformStream` (objetos transferibles,
+/// Streams §8)?
+pub fn is_transferable(agent: &mut Agent, v: &Value) -> bool {
+    matches!(v, Value::Object(_)) && truthy(agent, "isTransferable", v)
+}
+
+/// Un stream transferido (Streams §4.2.6, §5.2.6, §6.2.6): su tipo y los puertos por los que
+/// habla con el original (uno; dos para un `TransformStream`).
+pub struct StreamRecord {
+    kind: String,
+    ports: Vec<crate::workers::ports::PortRecord>,
+}
+
+impl HostRecord for StreamRecord {
+    fn deserialize(self: Box<Self>, agent: &mut Agent) -> JsResult<Value> {
+        let mut args = vec![Value::String(JsString::from(self.kind.as_str()))];
+        for p in self.ports {
+            args.push(crate::workers::ports::adopt_port(agent, p));
+        }
+        call(agent, "receiveStream", &args)
+    }
+}
+
+/// Los pasos de transferencia de un stream: lo une por un pipe a un `MessagePort` local
+/// entrelazado con el que viaja (`DataCloneError` si está bloqueado).
+pub fn transfer(agent: &mut Agent, v: &Value) -> JsResult<StreamRecord> {
+    let arr = call(agent, "transferStream", std::slice::from_ref(v))?;
+    let Value::Object(a) = arr else {
+        return agent.type_error("transferStream");
+    };
+    let kind = match agent.get(a, &PropertyKey::from(0u32), arr.clone())? {
+        Value::String(s) => s.to_string_lossy(),
+        _ => return agent.type_error("transferStream"),
+    };
+    let n = if kind == "transform" { 2 } else { 1 };
+    let mut ports = Vec::with_capacity(n);
+    for i in 1..=n as u32 {
+        let port = agent.get(a, &PropertyKey::from(i), arr.clone())?;
+        let Some(local) = crate::workers::ports::port_id(agent, &port) else {
+            return agent.type_error("transferStream");
+        };
+        ports.push(crate::workers::ports::transfer_port(agent, local)?);
+    }
+    Ok(StreamRecord { kind, ports })
 }

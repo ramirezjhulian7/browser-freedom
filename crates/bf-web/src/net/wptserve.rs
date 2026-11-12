@@ -7,7 +7,7 @@
 //! los archivos `*.sub.*`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bf_infra::{Resource, ResourceLoader, Url};
 
@@ -19,6 +19,8 @@ pub struct WptServe {
     pub files: LoaderBackend,
     /// El origen montado (`http://web-platform.test:8000`).
     pub origin: Url,
+    /// E6: la caché HTTP del documento y `http-cache.py` (solo en `fetch/http-cache/`).
+    pub session: Option<Arc<super::wpt_http_cache::Session>>,
 }
 
 /// La petición vista por un handler.
@@ -786,9 +788,31 @@ impl NetBackend for WptServe {
                 body: body.as_deref(),
                 get,
             };
-            let mut res = self
-                .hop(&r)
-                .ok_or_else(|| format!("wptserve: no se pudo servir {}", url.href()))?;
+            let mut res = match &self.session {
+                // E6: cada salto pasa por la caché HTTP; `http-cache.py` lo sirve la sesión.
+                Some(session) => {
+                    let mut res = session.hop(
+                        &method,
+                        &url,
+                        &r.headers.clone(),
+                        req.options.cache,
+                        req.options.credentials,
+                        |headers| {
+                            let r = Req { headers, ..r };
+                            if r.url.path_string().ends_with("/resources/http-cache.py") {
+                                Some(session.handle(r.method, r.url, &r.headers))
+                            } else {
+                                self.hop(&r)
+                            }
+                        },
+                    )?;
+                    res.url_list = list.clone();
+                    res
+                }
+                None => self
+                    .hop(&r)
+                    .ok_or_else(|| format!("wptserve: no se pudo servir {}", url.href()))?,
+            };
             if matches!(res.status, 301 | 302 | 303 | 307 | 308)
                 && let Some(loc) = res.headers.get("location")
             {

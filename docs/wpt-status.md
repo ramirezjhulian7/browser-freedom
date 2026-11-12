@@ -29,7 +29,13 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-tables | 102 | 36 | 164 | 0 | 302 | 73.9% |
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
-| **Total** | 5265 | 1865 | 5173 | 4 | 12307 | 73.8% |
+| svg (E7, 2026-11-07) | 286 | 168 | 968 | 0 | 1422 | 63.0% |
+| **Total** | 5551 | 2033 | 6141 | 4 | 13729 | 73.2% |
+
+La fila `svg` se midió aparte el 2026-11-07 en `army/e7` con el mismo commit de WPT
+(`cargo test --release -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
+filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo) y el resto es del
+2026-10-20.
 
 Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
 total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`
@@ -42,6 +48,42 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 | css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
+
+## E9: bidi, cortes de línea y shaping por script (2026-11-10)
+
+Medido con `REFTEST_GROUPS=css/CSS2/bidi-text,css/css-text,css/css-writing-modes,css/css-flexbox,css/CSS2/text,css/CSS2/linebox cargo test -p bf-paint --test wpt_reftests_groups -- --ignored --nocapture`
+sobre `army/e9` con `master` `f61201f` integrado (mismo WPT y condiciones que la tabla de
+arriba). La columna `master faeb997` es la línea base de E9 (2026-11-07). Los tres primeros
+grupos aún no están en `GROUPS` de `reftest.rs` (E7 los añade en su rama).
+
+| Directorio | master faeb997 | army/e9 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/CSS2/bidi-text | 56/105 (53.3 %) | 83/105 (79.0 %) | 3 | 0 |
+| css/css-text | 465/1372 (33.9 %) | 812/1372 (59.2 %) | 490 | 0 |
+| css/css-writing-modes | 136/1103 (12.3 %) | 196/1103 (17.8 %) | 201 | 0 |
+| css/css-flexbox | 608/949 (64.1 %) | 634/949 (66.8 %) | 478 | 0 |
+| css/CSS2/text | 350/381 (91.9 %) | 358/381 (94.0 %) | 182 | 0 |
+| css/CSS2/linebox | 176/190 (92.1 %) | 177/190 (92.7 %) | 53 | 1 |
+
+Las ganancias de `css-flexbox` vienen de E5 (integrado desde `master`), no de E9. Conformidad
+Unicode (`cargo test -p bf-layout --test unicode_conformance`, UCD 17.0.0): BidiTest
+770241/770241, BidiCharacterTest 91707/91707, LineBreakTest 19338/19338.
+
+## E5: flexbox rtl, propiedades lógicas inline y lanes con subgrid (2026-11-12)
+
+Medido con `REFTEST_GROUPS=css/css-flexbox,css/css-grid cargo test -p bf-paint --test wpt_reftests_groups -- --ignored --test-threads=4`
+sobre `army/e5` con `master` `caba13e` integrado (mismo WPT y condiciones que la tabla de
+arriba). La columna `master` es la medición de la rama sin los cambios de la ronda (2026-11-10,
+`master` `f61201f`).
+
+| Directorio | master | army/e5 | needs-js | error |
+|---|---:|---:|---:|---:|
+| css/css-flexbox | 633/949 (66.7 %) | 699/949 (73.7 %) | 478 | 0 |
+| css/css-grid | 959/1567 (61.2 %) | 1054/1567 (67.3 %) | 913 | 2 |
+| css/css-grid/grid-lanes | 425/851 (49.9 %) | 518/851 (60.9 %) | – | – |
+
+Pasa de "pass" a "fail" solo `css/css-flexbox/overflow-top-left.html`: su parte con
+`writing-mode` vertical pasaba por casualidad.
 
 ## Tests con expectativa dudosa
 

@@ -10,6 +10,7 @@ bf-dom = { path = "../bf-dom" }
 bf-font = { path = "../bf-font" }
 bf-html = { path = "../bf-html" }
 bf-image = { path = "../bf-image" }
+bf-svg = { path = "../bf-svg" }
 bf-infra = { path = "../bf-infra" }
 bf-url = { path = "../bf-url" }
 bf-layout = { path = "../bf-layout" }

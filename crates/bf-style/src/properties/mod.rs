@@ -177,6 +177,13 @@ longhands! {
     BackgroundSize "background-size" background_size: BackgroundSize = "auto", inherited: false, animatable: true;
     BackgroundOrigin "background-origin" background_origin: BackgroundOrigin = "padding-box", inherited: false, animatable: false;
     BackgroundAttachment "background-attachment" background_attachment: BackgroundAttachment = "scroll", inherited: false, animatable: false;
+    // E7: capas de `mask-image` (CSS Masking 1 §7), con la misma sintaxis que los fondos.
+    MaskImage "mask-image" mask_image: BackgroundImages = "none", inherited: false, animatable: false;
+    MaskRepeat "mask-repeat" mask_repeat: BackgroundRepeat = "repeat", inherited: false, animatable: false;
+    MaskPosition "mask-position" mask_position: BackgroundPosition = "0% 0%", inherited: false, animatable: true;
+    MaskSize "mask-size" mask_size: BackgroundSize = "auto", inherited: false, animatable: true;
+    MaskOrigin "mask-origin" mask_origin: BackgroundOrigin = "border-box", inherited: false, animatable: false;
+    MaskClip "mask-clip" mask_clip: BackgroundClip = "border-box", inherited: false, animatable: false;
     FontFamily "font-family" font_family: FontFamily = "serif", inherited: true, animatable: false;
     FontSize "font-size" font_size: FontSize = "medium", inherited: true, animatable: true;
     FontWeight "font-weight" font_weight: FontWeight = "normal", inherited: true, animatable: true;
@@ -204,6 +211,13 @@ longhands! {
     Appearance "appearance" appearance: Appearance = "none", inherited: false, animatable: false;
     Direction "direction" direction: Direction = "ltr", inherited: true, animatable: false;
     UnicodeBidi "unicode-bidi" unicode_bidi: UnicodeBidi = "normal", inherited: false, animatable: false;
+    // E9: CSS Writing Modes 4 §3.1 y §5.1, CSS Text 3 §5.4 y §7.4.
+    WritingMode "writing-mode" writing_mode: WritingMode = "horizontal-tb", inherited: true, animatable: false;
+    TextOrientation "text-orientation" text_orientation: TextOrientation = "mixed", inherited: true, animatable: false;
+    Hyphens "hyphens" hyphens: Hyphens = "manual", inherited: true, animatable: false;
+    TextJustify "text-justify" text_justify: TextJustify = "auto", inherited: true, animatable: false;
+    TextLineBreak "line-break" line_break: TextLineBreak = "auto", inherited: true, animatable: false;
+    TextAlignLast "text-align-last" text_align_last: TextAlignLast = "auto", inherited: true, animatable: false;
     FlexDirection "flex-direction" flex_direction: FlexDirection = "row", inherited: false, animatable: false;
     FlexWrap "flex-wrap" flex_wrap: FlexWrap = "nowrap", inherited: false, animatable: false;
     FlexGrow "flex-grow" flex_grow: NonNegativeNumber = "0", inherited: false, animatable: true;
