@@ -622,7 +622,11 @@ impl<'a> Layout<'a> {
                 self.subgrids
                     .insert(it.b as *const LayoutBox as usize, entry);
             }
+            let from = out.len();
             self.push_axis_item(it.clone(), true, None, basis, &mut out, 0);
+            if matches!(setup.items[i].1, Placement::Auto(_)) {
+                spread_empty_edges(&mut out, from, grid.cols.len(), true);
+            }
         }
         out
     }
@@ -696,7 +700,7 @@ impl<'a> Layout<'a> {
                 Space::Definite(cb.width),
                 (cb.width, cb.width),
                 matches!(
-                    cs.justify_content,
+                    cs.justify_content.value,
                     ContentAlign::Normal | ContentAlign::Stretch
                 ),
             );
@@ -806,15 +810,20 @@ impl<'a> Layout<'a> {
             }
             let range = run.range_end();
             // E5: alineación del último ítem de cada pista en el eje de apilado.
-            let frees = stacking_free_space(&spans, &stack, n, range);
+            // El último de cada pista llega hasta el final del content box.
+            let end = cb
+                .height
+                .unwrap_or_else(|| range.min(hmax).max(hmin))
+                .max(range);
+            let frees = stacking_free_space(&spans, &stack, n, (row_gap, end));
             for (i, free) in frees.into_iter().enumerate() {
                 if free <= 0.0 {
                     continue;
                 }
                 let b = setup.items[i].0;
                 let s = &b.style;
-                let a = match block_axis(s.align_self) {
-                    ItemAlign::Auto => block_axis(cs.align_items),
+                let a = match block_axis(s.align_self).value {
+                    ItemAlign::Auto => block_axis(cs.align_items).value,
                     a => a,
                 };
                 let (item_cb, x, w, margins, hole_dx) = relayout[i];
@@ -849,7 +858,7 @@ impl<'a> Layout<'a> {
                 }
             }
             content_h = cb.height.unwrap_or_else(|| range.min(hmax).max(hmin));
-            let off = stacking_offset(cs.align_content, content_h, range, fill_reverse);
+            let off = stacking_offset(cs.align_content.value, content_h, range, fill_reverse);
             for (f, (y, outer)) in out.iter_mut().zip(&stack) {
                 // `fill-reverse`: se refleja en el rango de apilado.
                 let dy = if fill_reverse {
@@ -904,6 +913,9 @@ impl<'a> Layout<'a> {
                     };
                     let mut expanded = Vec::new();
                     self.push_axis_item(it, false, None, cb.width, &mut expanded, 0);
+                    if matches!(setup.items[i].1, Placement::Auto(_)) {
+                        spread_empty_edges(&mut expanded, 0, tracks.len(), false);
+                    }
                     for e in &expanded {
                         let aw = e.area_w.unwrap_or(outer_w);
                         let (c, _) = self.row_contrib(e, cs, &tracks, row_gap, aw);
@@ -915,7 +927,7 @@ impl<'a> Layout<'a> {
                 contribs.push(c);
             }
             let stretch = matches!(
-                cs.align_content,
+                cs.align_content.value,
                 ContentAlign::Normal | ContentAlign::Stretch
             );
             let (space, limits) = match cb.height {
@@ -1077,15 +1089,15 @@ impl<'a> Layout<'a> {
             }
             let range = run.range_end();
             // E5: alineación del último ítem de cada pista en el eje de apilado (inline).
-            let frees = stacking_free_space(&spans, &stack, n, range);
+            let frees = stacking_free_space(&spans, &stack, n, (col_gap, cb.width.max(range)));
             for (i, free) in frees.into_iter().enumerate() {
                 if free <= 0.0 {
                     continue;
                 }
                 let b = setup.items[i].0;
                 let s = &b.style;
-                let a = match s.justify_self {
-                    ItemAlign::Auto => cs.justify_items,
+                let a = match s.justify_self.value {
+                    ItemAlign::Auto => cs.justify_items.value,
                     a => a,
                 };
                 // `left`/`right` son físicos: con el flujo de derecha a izquierda se invierten.
@@ -1120,7 +1132,7 @@ impl<'a> Layout<'a> {
                     stack[i].0 += shift;
                 }
             }
-            let off = stacking_offset(cs.justify_content, cb.width, range, fill_reverse);
+            let off = stacking_offset(cs.justify_content.value, cb.width, range, fill_reverse);
             for (f, (x, outer)) in out.iter_mut().zip(&stack) {
                 // En rtl el flujo va de derecha a izquierda; `fill-reverse` lo invierte.
                 let mirrored = rtl != fill_reverse;
@@ -1239,6 +1251,7 @@ impl<'a> Layout<'a> {
                 } else {
                     dx
                 };
+                let (dx, dy) = fill_reverse_static(s, cs, rows, content_box, &f, (dx, dy));
                 self.add_abs(c, content_box.x + dx, content_box.y + dy);
                 continue;
             }
@@ -1257,6 +1270,7 @@ impl<'a> Layout<'a> {
             } else {
                 dx
             };
+            let (dx, dy) = fill_reverse_static(s, cs, rows, a, &f, (dx, dy));
             f.translate(dx, dy);
             out.push(f);
         }
@@ -1325,38 +1339,89 @@ impl<'a> Layout<'a> {
     }
 }
 
+/// E5: con `fill-reverse` la posición estática de un absoluto en el eje de apilado se refleja
+/// como el contenido (CSS Grid 3, `grid-lanes-direction`; WPT `grid-lanes/abspos/
+/// *-oof-fill-reverse-*`). `(dx, dy)` es su desplazamiento en `area`, con `f` medido al inicio.
+fn fill_reverse_static(
+    s: &ComputedStyle,
+    cs: &ComputedStyle,
+    rows: bool,
+    area: Rect,
+    f: &Fragment,
+    (dx, dy): (f32, f32),
+) -> (f32, f32) {
+    if !cs.grid_lanes_direction.fill_reverse {
+        return (dx, dy);
+    }
+    use bf_style::properties::types::LengthPercentageAuto as L;
+    let auto = |v: &L| matches!(v, L::Auto);
+    let m = f.margin_rect();
+    if rows && auto(&s.left) && auto(&s.right) {
+        (area.width - m.width - dx, dy)
+    } else if !rows && auto(&s.top) && auto(&s.bottom) {
+        (dx, area.height - m.height - dy)
+    } else {
+        (dx, dy)
+    }
+}
+
+/// E5: los ítems de un subgrid auto-colocado (sus ítems, con el margen, borde, padding y medio
+/// gap de los subgrids que los contienen, y los ítems vacíos de sus bordes, Grid 2 §9) cuentan
+/// en todas las posiciones del eje de rejilla en que podría caer el subgrid, como cualquier
+/// auto-colocado (§3.4 y csswg-drafts#10926; WPT `grid-subgridded-to-grid-lanes/track-sizing/
+/// *-subgrid-extra-margin-*`). `items[from..]` son los del subgrid.
+fn spread_empty_edges(items: &mut Vec<GridItem<'_>>, from: usize, n: usize, columns: bool) {
+    let span = |e: &GridItem<'_>| if columns { e.col } else { e.row };
+    let placed: Vec<GridItem<'_>> = items[from..].to_vec();
+    for e in placed {
+        let (s0, s1) = span(&e);
+        let len = s1.saturating_sub(s0);
+        if len == 0 || len > n {
+            continue;
+        }
+        for t in (0..=n - len).filter(|&t| t != s0) {
+            let mut c = e.clone();
+            if columns {
+                c.col = (t, t + len);
+            } else {
+                c.row = (t, t + len);
+            }
+            items.push(c);
+        }
+    }
+}
+
 /// E5: alineación propia en el eje de apilado (CSS Grid 3, "alignment in the stacking axis"):
-/// el último ítem de cada pista se alinea en el espacio que queda hasta el final del rango de
-/// apilado. `spans` son las pistas de cada ítem y `stack` su posición de apilado y su tamaño
-/// exterior. Devuelve, por ítem, el espacio libre de su contenedor de alineación (0 si no es
-/// el último de todas sus pistas).
+/// el contenedor de alineación de un ítem va desde su posición hasta el inicio (menos el gap)
+/// del siguiente ítem en cualquiera de sus pistas, o hasta `end` (el final del content box)
+/// si es el último en todas. `spans` son las pistas de cada ítem y `stack` su posición de
+/// apilado y su tamaño exterior; `gap` es el del eje de apilado. Devuelve, por ítem, el espacio
+/// libre de su contenedor de alineación.
 fn stacking_free_space(
     spans: &[(usize, usize)],
     stack: &[(f32, f32)],
     n: usize,
-    range: f32,
+    (gap, end): (f32, f32),
 ) -> Vec<f32> {
-    let mut last: Vec<Option<(f32, usize)>> = vec![None; n];
-    for (i, (&(y, outer), &(t0, t1))) in stack.iter().zip(spans).enumerate() {
-        for l in last.iter_mut().take(t1.min(n)).skip(t0) {
-            if l.is_none_or(|(e, _)| y + outer >= e) {
-                *l = Some((y + outer, i));
-            }
-        }
-    }
     spans
         .iter()
         .enumerate()
         .map(|(i, &(t0, t1))| {
-            let is_last = t0 < t1.min(n)
-                && last[t0..t1.min(n)]
-                    .iter()
-                    .all(|l| l.is_some_and(|(_, j)| j == i));
-            if is_last {
-                (range - stack[i].0 - stack[i].1).max(0.0)
-            } else {
-                0.0
-            }
+            let (y, outer) = stack[i];
+            let limit = (t0..t1.min(n))
+                .map(|t| {
+                    stack
+                        .iter()
+                        .zip(spans)
+                        .enumerate()
+                        .filter(|&(j, (&(yj, _), &(u0, u1)))| {
+                            j != i && u0 <= t && t < u1 && (yj > y || (yj == y && j > i))
+                        })
+                        .map(|(_, (&(yj, _), _))| yj - gap)
+                        .fold(end, f32::min)
+                })
+                .fold(end, f32::min);
+            (limit - y - outer).max(0.0)
         })
         .collect()
 }
