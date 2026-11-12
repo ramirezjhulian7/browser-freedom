@@ -211,6 +211,13 @@ longhands! {
     Appearance "appearance" appearance: Appearance = "none", inherited: false, animatable: false;
     Direction "direction" direction: Direction = "ltr", inherited: true, animatable: false;
     UnicodeBidi "unicode-bidi" unicode_bidi: UnicodeBidi = "normal", inherited: false, animatable: false;
+    // E9: CSS Writing Modes 4 §3.1 y §5.1, CSS Text 3 §5.4 y §7.4.
+    WritingMode "writing-mode" writing_mode: WritingMode = "horizontal-tb", inherited: true, animatable: false;
+    TextOrientation "text-orientation" text_orientation: TextOrientation = "mixed", inherited: true, animatable: false;
+    Hyphens "hyphens" hyphens: Hyphens = "manual", inherited: true, animatable: false;
+    TextJustify "text-justify" text_justify: TextJustify = "auto", inherited: true, animatable: false;
+    TextLineBreak "line-break" line_break: TextLineBreak = "auto", inherited: true, animatable: false;
+    TextAlignLast "text-align-last" text_align_last: TextAlignLast = "auto", inherited: true, animatable: false;
     FlexDirection "flex-direction" flex_direction: FlexDirection = "row", inherited: false, animatable: false;
     FlexWrap "flex-wrap" flex_wrap: FlexWrap = "nowrap", inherited: false, animatable: false;
     FlexGrow "flex-grow" flex_grow: NonNegativeNumber = "0", inherited: false, animatable: true;

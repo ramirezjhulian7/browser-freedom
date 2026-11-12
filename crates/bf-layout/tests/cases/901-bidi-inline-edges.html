@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<style>body{margin:0} span{border-left:2px solid;border-right:6px solid}</style>
+<div dir=rtl>ab <span>cd</span></div>
+<div>ab <span dir=rtl style="unicode-bidi:normal;margin-left:10px">cd</span></div>
+<div>ab <span dir=rtl style="unicode-bidi:embed">cd ef</span></div>
+<!-- expect
+Block <html> 0,0 800×48
+  Block <body> 0,0 800×48
+    Block <div> 0,0 800×16
+      Line 0,0 800×16
+        Text "ab " 752,0 24×16
+        Inline <span> 776,0 24×16
+          Text "cd" 778,0 16×16
+    Block <div> 0,16 800×16
+      Line 0,16 800×16
+        Text "ab " 0,16 24×16
+        Inline <span> 34,16 24×16
+          Text "cd" 36,16 16×16
+    Block <div> 0,32 800×16
+      Line 0,32 800×16
+        Text "ab " 0,32 24×16
+        Inline <span> 24,32 48×16
+          Text "cd ef" 26,32 40×16
+-->
