@@ -43,9 +43,10 @@ total de arriba hasta la próxima corrida completa). Desde esta medición los at
 
 | Directorio | pass | fail | needs-js | error | total | % pass (de los ejecutables) |
 |---|---:|---:|---:|---:|---:|---:|
-| css/css-overflow | 312 | 193 | 402 | 0 | 907 | 61.8% |
+| css/css-overflow | 316 | 189 | 402 | 0 | 907 | 62.6% |
 | css/css-position | 40 | 79 | 228 | 0 | 347 | 33.6% |
 | css/css-position/sticky | 10 | 1 | 99 | 0 | 110 | 90.9% |
+| css/css-images (`object-fit*`, `object-position*`) | 179 | 4 | 26 | 0 | 209 | 97.8% |
 
 Los fallos se guardan en `target/reftests/<ruta>-{actual,expected,diff}.png` y el detalle por test en `target/reftests/results.tsv`.
 

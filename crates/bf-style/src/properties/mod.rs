@@ -5,6 +5,7 @@
 pub mod clamp; // E12
 pub mod gradient; // E4
 pub mod grid; // E4
+pub mod object; // E12
 pub mod overflow; // E12
 pub mod shorthands;
 pub mod types;
@@ -17,6 +18,7 @@ use bf_css::syntax::ComponentValue;
 
 use crate::values::{Color, LengthContext, LengthPercentage};
 use clamp::{BoxOrient, LineClamp, WebkitLineClamp};
+use object::{ObjectFit, ObjectPosition};
 use overflow::{OverflowClipMargin, TextOverflow};
 use types::*;
 
@@ -261,6 +263,9 @@ longhands! {
     // E12: CSS Overflow 3 §5 y §3.2 (`overflow-clip-margin` se anima de forma discreta).
     TextOverflowP "text-overflow" text_overflow: TextOverflow = "clip", inherited: false, animatable: false;
     OverflowClipMarginP "overflow-clip-margin" overflow_clip_margin: OverflowClipMargin = "0px", inherited: false, animatable: false;
+    // E12: CSS Images 3 §5.5 y §5.6.
+    ObjectFitP "object-fit" object_fit: ObjectFit = "fill", inherited: false, animatable: false;
+    ObjectPositionP "object-position" object_position: ObjectPosition = "50% 50%", inherited: false, animatable: false;
     // E5: tamaño intrínseco (CSS Sizing 4 §5 y §7) y contención de tamaño (CSS Containment 2).
     AspectRatio "aspect-ratio" aspect_ratio: AspectRatio = "auto", inherited: false, animatable: true;
     Contain "contain" contain: Contain = "none", inherited: false, animatable: false;
