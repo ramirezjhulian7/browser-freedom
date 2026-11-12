@@ -97,11 +97,17 @@ pub fn create(agent: &mut Agent, realm: RealmId, n: u64, local: bool) -> HostHan
         class,
         Box::new(Local(local)),
     );
+    // El wrapper queda fijado mientras se evalúa el envoltorio: el GC puede correr en
+    // `eval_script` y los wrappers no son raíces (E4: pánico "Gc liberado" al crear muchos
+    // marcos seguidos).
+    let pin = agent.host_pin(Value::Object(o));
     let wrapped = agent
         .eval_script(NAMED_PROPERTIES, "storage")
         .and_then(|f| agent.call(&f, Value::Undefined, &[Value::Object(o)]))
         .unwrap_or(Value::Object(o));
-    agent.host_pin(wrapped)
+    let handle = agent.host_pin(wrapped);
+    agent.host_unpin(pin);
+    handle
 }
 
 fn is_local(agent: &Agent, this: &Value) -> bool {

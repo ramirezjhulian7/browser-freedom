@@ -202,7 +202,6 @@ fn sticky_inside_scroll_container() {
 /// CSS Transforms 1 §3: un elemento transformado es el containing block (su padding box) de
 /// sus descendientes absolutos y fijos, aunque sea `static`.
 #[test]
-#[ignore = "E4: `transform` aún no es un longhand de ComputedStyle (ver positioned::transform_contains)"]
 fn transform_contains_absolute_and_fixed_descendants() {
     let (doc, tree) = layout(
         "<!doctype html><style>body{margin:0}\

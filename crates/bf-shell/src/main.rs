@@ -288,9 +288,23 @@ fn load_live(
         .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
     set_cookie_site(&loaded.url);
     let start = std::time::Instant::now();
+    // E4: los cuadros de `requestAnimationFrame` (HTML §8.1.7.3), uno cada 16 ms.
+    let frame = std::time::Duration::from_millis(16);
+    let mut last_frame = start;
     loop {
         engine.run_due_tasks();
-        let Some(next) = engine.next_wake() else {
+        if engine.wants_frame() && last_frame.elapsed() >= frame {
+            last_frame = std::time::Instant::now();
+            engine.run_animation_frames();
+        }
+        let to_frame = engine
+            .wants_frame()
+            .then(|| frame.saturating_sub(last_frame.elapsed()));
+        let next = match (engine.next_wake(), to_frame) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let Some(next) = next else {
             break;
         };
         if start.elapsed() + next > wait {

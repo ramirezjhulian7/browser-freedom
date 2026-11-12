@@ -58,6 +58,8 @@ pub struct Frame {
 #[derive(Debug, Default)]
 pub struct Frames {
     pub list: Vec<Frame>,
+    /// Navegaciones hechas (para saber si [`sync_frames`] hizo algo).
+    navigations: u64,
 }
 
 fn frames(agent: &Agent) -> Option<&Frames> {
@@ -281,9 +283,7 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
     if let Some(net) = super::script::net_of(agent, parent) {
         super::script::install_net(agent, realm, net);
     }
-    if let Some(loader) =
-        super::script::script_env(agent, parent).map(super::script::ScriptEnv::loader)
-    {
+    if let Some(loader) = window_loader(agent, parent) {
         super::script::install_frame_scripting(agent, realm, &blank, loader);
     }
     frames_mut(agent).list.push(Frame {
@@ -297,12 +297,97 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
     realm
 }
 
+/// El loader de los recursos de la ventana `realm`: el de sus scripts (el navegador) o, en el
+/// runner de WPT, que parsea con su propio parser, el de sus `PageResources`.
+fn window_loader(agent: &Agent, realm: RealmId) -> Option<Arc<dyn ResourceLoader>> {
+    super::script::script_env(agent, realm)
+        .map(super::script::ScriptEnv::loader)
+        .or_else(|| {
+            agent
+                .realm_data::<crate::html::scripting::PageResources>(realm)
+                .map(|r| r.loader.clone())
+        })
+}
+
+/// Un documento leído para un marco.
+struct Fetched {
+    text: String,
+    url: Url,
+    /// El tipo MIME XML con que se parsea (`None`: HTML).
+    xml: Option<&'static str>,
+    /// El encoding con que se decodificó.
+    encoding: Encoding,
+}
+
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
-fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<(String, Url)> {
-    let loader: Arc<dyn ResourceLoader> = super::script::script_env(agent, realm)?.loader();
+fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
+    let loader = window_loader(agent, realm)?;
     let res = loader.load(url)?;
-    let (text, _) = encoding::decode(&res.bytes, Encoding::Utf8);
-    Some((text, res.url))
+    let xml = xml_type(res.content_type.as_deref(), &res.url);
+    // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del
+    // `Content-Type`, prescan de `<meta>`; si no, el del documento que contiene al marco
+    // (paso 6: mismo origen y compatible con ASCII) o el de por omisión. XML: BOM o UTF-8.
+    let enc = if xml.is_some() {
+        Encoding::Utf8
+    } else {
+        let mime = res
+            .content_type
+            .as_deref()
+            .and_then(bf_net::MimeType::parse);
+        match bf_net::html_encoding_with_source(&res.bytes, mime.as_ref()) {
+            (e, bf_net::EncodingSource::Default) => {
+                parent_encoding(agent, realm, &res.url).unwrap_or(e)
+            }
+            (e, _) => e,
+        }
+    };
+    let (text, enc) = encoding::decode(&res.bytes, enc);
+    Some(Fetched {
+        text,
+        url: res.url,
+        xml,
+        encoding: enc,
+    })
+}
+
+/// El encoding del documento de la ventana `realm` si es del mismo origen que `url` (para un
+/// marco sin declaración de encoding).
+fn parent_encoding(agent: &Agent, realm: RealmId, url: &Url) -> Option<Encoding> {
+    let ctx = agent.realm_data::<WebContext>(realm)?;
+    if super::origin_of(&ctx.url) != super::origin_of(url) {
+        return None;
+    }
+    Encoding::for_label(&ctx.document().character_set.to_string())
+}
+
+/// ¿Es un documento XML (HTML §7.4.1 "navigate": `text/xml`, `application/xml`, `+xml`)? Sin
+/// `Content-Type` (archivos) decide la extensión, como en el navegador.
+fn xml_type(content_type: Option<&str>, url: &Url) -> Option<&'static str> {
+    if let Some(ct) = content_type {
+        let essence = ct
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        return match essence.as_str() {
+            "application/xhtml+xml" => Some("application/xhtml+xml"),
+            "image/svg+xml" => Some("image/svg+xml"),
+            "text/xml" => Some("text/xml"),
+            e if e == "application/xml" || e.ends_with("+xml") => Some("application/xml"),
+            _ => None,
+        };
+    }
+    let path = url.path_string().to_ascii_lowercase();
+    if path.ends_with(".xhtml") || path.ends_with(".xht") {
+        Some("application/xhtml+xml")
+    } else if path.ends_with(".svg") {
+        Some("image/svg+xml")
+    } else if path.ends_with(".xml") {
+        Some("application/xml")
+    } else {
+        None
+    }
 }
 
 /// Navega el marco `realm` a `target` y, al terminar, dispara `load` en su `<iframe>`.
@@ -321,7 +406,9 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     let opaque = parent_doc_sandbox
         .as_ref()
         .is_some_and(|t| !t.iter().any(|t| t == "allow-same-origin"));
-    if let Some(f) = frames_mut(agent).list.iter_mut().find(|f| f.realm == realm) {
+    let all = frames_mut(agent);
+    all.navigations += 1;
+    if let Some(f) = all.list.iter_mut().find(|f| f.realm == realm) {
         f.opaque = opaque;
     }
     let deep = depth_of(agent, realm) > MAX_DEPTH;
@@ -344,8 +431,20 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
             let _ = url;
         }
         Target::Url(url) => match fetch(agent, parent, &url) {
-            Some((text, final_url)) => {
+            Some(Fetched {
+                xml: Some(mime),
+                text,
+                url: final_url,
+                ..
+            }) => load_xml_document(agent, realm, &final_url, &text, mime),
+            Some(Fetched {
+                text,
+                url: final_url,
+                xml: None,
+                encoding,
+            }) => {
                 load_document(agent, realm, &final_url, None, &text, scripts);
+                set_character_set(agent, realm, encoding);
             }
             None => {
                 agent.host.hooks.console(
@@ -358,6 +457,26 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     // El `load` del `<iframe>` (HTML §4.8.5 "iframe load event steps").
     let mut ev = Event::new("load", EventInit::default());
     super::script::dispatch_trusted(agent, parent, EventTarget::Node(element), &mut ev);
+}
+
+/// Parsea `text` como el documento XML del marco `realm` en `url` (sin ejecutar sus scripts:
+/// el parser XML no los prepara todavía).
+fn load_xml_document(agent: &mut Agent, realm: RealmId, url: &Url, text: &str, mime: &str) {
+    let mut doc = bf_html::parse_xml_document(text);
+    doc.is_html = false;
+    doc.content_type = mime.into();
+    doc.url = url.clone();
+    let ctx = WebContextHandle { realm }.get_mut(agent);
+    ctx.url = url.clone();
+    ctx.base = url.clone();
+    ctx.documents[0] = DocumentOwner::Document(Box::new(doc));
+    super::script::set_base(agent, realm, url);
+}
+
+/// `document.characterSet` del documento del marco `realm`.
+fn set_character_set(agent: &mut Agent, realm: RealmId, encoding: Encoding) {
+    let ctx = WebContextHandle { realm }.get_mut(agent);
+    ctx.doc_mut(0).character_set = encoding.name().into();
 }
 
 /// Parsea `text` como el documento del marco `realm` en `url`.
@@ -380,8 +499,10 @@ fn load_document(
 
 /// Pone al día los marcos de la ventana `realm` y de sus marcos: crea los de los `<iframe>`
 /// nuevos, vuelve a navegar los que cambiaron `src`/`srcdoc`, atiende las navegaciones
-/// pedidas desde los marcos y olvida los de los elementos que ya no están.
-pub fn sync_frames(agent: &mut Agent, realm: RealmId) {
+/// pedidas desde los marcos y olvida los de los elementos que ya no están. Devuelve si navegó
+/// algún marco (y por tanto pudo haber disparado eventos o encolado tareas).
+pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
+    let before = frames(agent).map_or(0, |f| f.navigations);
     // Navegaciones pedidas desde dentro de los marcos.
     let requested: Vec<(RealmId, Url, bool)> =
         frame_requests(agent).borrow_mut().drain(..).collect();
@@ -391,6 +512,7 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) {
         }
     }
     sync_level(agent, realm, 0);
+    frames(agent).map_or(0, |f| f.navigations) != before
 }
 
 fn sync_level(agent: &mut Agent, realm: RealmId, depth: usize) {
@@ -441,6 +563,8 @@ fn sync_level(agent: &mut Agent, realm: RealmId, depth: usize) {
             None => {
                 let child = create_frame(agent, realm, el);
                 set_signature(agent, child, &sig);
+                // `window[i]` ya vale en el `load` del `<iframe>`.
+                index_children(agent, realm);
                 navigate(agent, child, target);
                 child
             }

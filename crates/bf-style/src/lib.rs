@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod animation; // E4
 pub mod cascade;
 pub mod hints;
 pub mod loader;

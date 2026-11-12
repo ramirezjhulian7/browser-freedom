@@ -8,6 +8,7 @@
 //! Los objetos de la ventana (`navigator`, `location`, …) se crean una vez y quedan fijados
 //! (`host_pin`): son siempre el mismo objeto.
 
+pub mod animation;
 pub mod document;
 pub mod frames;
 pub mod history;

@@ -3,6 +3,7 @@
 
 use bf_dom::{Document, NodeId};
 use bf_layout::fragment::{Fragment, FragmentKind, FragmentTree, Rect};
+use bf_style::properties::transform::{apply_affine, invert_affine};
 use bf_style::properties::types::{CursorKeyword, PointerEvents, Position, Visibility};
 use winit::window::CursorIcon;
 
@@ -40,14 +41,32 @@ impl<'a> Walk<'a> {
         positioned: bool,
         fixed: bool,
         clip: Option<Rect>,
+        local: Option<(f32, f32)>,
     ) {
         let is_box = !matches!(f.kind, FragmentKind::Line | FragmentKind::Text);
         let fixed = fixed || (is_box && f.style.position == Position::Fixed);
-        // Lo fijo está en coordenadas del viewport; el resto, en las de la página.
-        let point = if fixed {
+        // Lo fijo está en coordenadas del viewport; el resto, en las de la página. Dentro de
+        // una caja transformada, `local` es el punto llevado a sus coordenadas.
+        let point = local.unwrap_or(if fixed {
             self.point
         } else {
             (self.point.0 + self.scroll.0, self.point.1 + self.scroll.1)
+        });
+        // E4: `transform` (CSS Transforms 1 §6): el punto pasa por la inversa de la matriz; los
+        // recortes de afuera se comprueban antes, en sus coordenadas. Una matriz no invertible
+        // no pinta nada.
+        let (point, clip, local) = match bf_paint::builder::fragment_matrix(f) {
+            Some(m) => {
+                if clip.is_some_and(|c| !contains(&c, point)) {
+                    return;
+                }
+                let Some(inv) = invert_affine(m) else {
+                    return;
+                };
+                let p = apply_affine(inv, point);
+                (p, None, Some(p))
+            }
+            None => (point, clip, local),
         };
         let own_positioned = is_box && f.style.position != Position::Static;
         let positioned = positioned || own_positioned;
@@ -82,7 +101,7 @@ impl<'a> Walk<'a> {
             } else {
                 inner
             };
-            self.visit(c, z, positioned, fixed, child_clip);
+            self.visit(c, z, positioned, fixed, child_clip, local);
         }
     }
 }
@@ -97,7 +116,7 @@ pub fn hit_test(tree: &FragmentTree, x: f32, y: f32, scroll: (f32, f32)) -> Opti
         counter: 0,
         best: None,
     };
-    walk.visit(root, 0, false, false, None);
+    walk.visit(root, 0, false, false, None, None);
     walk.best.map(|(_, f)| f)
 }
 

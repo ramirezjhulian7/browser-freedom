@@ -186,6 +186,12 @@ case!(
     "2px solid"
 );
 case!(computed_shorthand, "getComputedStyle(box).padding", "5px");
+// E4: CSS Transforms 1 §9: el valor resuelto de `transform` es una matriz.
+case!(
+    computed_transform_matrix,
+    "getComputedStyle(box).transform + ' | ' + (box.style.transform = 'translate(30px, 10px) scale(2)', getComputedStyle(box).transform)",
+    "none | matrix(2, 0, 0, 2, 30, 10)"
+);
 case!(
     computed_readonly,
     "(function(){ try { getComputedStyle(box).color = 'red'; } catch (e) {} return getComputedStyle(box).color; })()",

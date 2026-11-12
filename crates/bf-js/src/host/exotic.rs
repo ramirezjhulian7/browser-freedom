@@ -9,7 +9,7 @@ use crate::heap::Gc;
 use crate::object::{Object, ObjectKind, PropertyDescriptor};
 use crate::string::JsString;
 use crate::value::{PropertyKey, Value};
-use crate::vm::{Agent, JsResult};
+use crate::vm::{Agent, JsResult, RealmId};
 
 /// El getter indexado de [`HostExotic`].
 pub type ItemGetter = fn(&mut Agent, Gc<Object>, u32) -> Option<Value>;
@@ -52,6 +52,40 @@ impl Agent {
         }
         None
     }
+
+    /// E4: el realm del objeto host `o` (el de su prototipo de clase), si hay varios realms.
+    pub(crate) fn host_object_realm(&self, o: Gc<Object>) -> Option<RealmId> {
+        if self.host.realm_classes.len() < 2 {
+            return None;
+        }
+        let ObjectKind::Host(h) = &self.heap[o].kind else {
+            return None;
+        };
+        let ci = h.class.0 as usize;
+        let proto = self.heap[o].proto?;
+        self.host.realm_classes.iter().position(|cs| {
+            cs.get(ci)
+                .copied()
+                .flatten()
+                .is_some_and(|c| c.prototype == proto)
+        })
+    }
+}
+
+/// E4: corre un getter de la interfaz en el realm del objeto (su "relevant realm", WebIDL
+/// §3.9), como corren los métodos en el de su función: una `NodeList` de un `<iframe>` leída
+/// desde la ventana que lo contiene busca sus nodos en el documento del marco.
+fn in_realm_of<R>(agent: &mut Agent, o: Gc<Object>, f: impl FnOnce(&mut Agent) -> R) -> R {
+    match agent.host_object_realm(o) {
+        Some(r) if r != agent.current_realm => {
+            let saved = agent.current_realm;
+            agent.current_realm = r;
+            let v = f(agent);
+            agent.current_realm = saved;
+            v
+        }
+        _ => f(agent),
+    }
 }
 
 fn key_name(key: &PropertyKey) -> Option<JsString> {
@@ -71,7 +105,7 @@ fn named_visible(
     if key.is_symbol() {
         return Ok(None);
     }
-    let Some(v) = named(agent, o, &name) else {
+    let Some(v) = in_realm_of(agent, o, |agent| named(agent, o, &name)) else {
         return Ok(None);
     };
     if agent.own_prop(o, key).is_some() {
@@ -99,7 +133,7 @@ pub(crate) fn get_own(
 ) -> JsResult<Option<PropertyDescriptor>> {
     let mut ignore_named = ignore_named;
     if let (Some(item), PropertyKey::Index(i)) = (ex.item, key) {
-        if let Some(v) = item(agent, o, *i) {
+        if let Some(v) = in_realm_of(agent, o, |agent| item(agent, o, *i)) {
             return Ok(Some(PropertyDescriptor::data(v, false, true, true)));
         }
         ignore_named = true;
@@ -149,7 +183,7 @@ pub(crate) fn define_own_property(
     if let (Some(named), Some(name)) = (ex.named, key_name(&key))
         && !key.is_symbol()
     {
-        let creating = named(agent, o, &name).is_none();
+        let creating = in_realm_of(agent, o, |agent| named(agent, o, &name)).is_none();
         if (ex.override_builtins || agent.own_prop(o, &key).is_none()) && !creating {
             return Ok(false);
         }
@@ -165,7 +199,9 @@ pub(crate) fn delete(
     ex: HostExotic,
 ) -> JsResult<Option<bool>> {
     if let (Some(item), PropertyKey::Index(i)) = (ex.item, key) {
-        return Ok(Some(item(agent, o, *i).is_none()));
+        return Ok(Some(
+            in_realm_of(agent, o, |agent| item(agent, o, *i)).is_none(),
+        ));
     }
     if named_visible(agent, o, key, &ex)?.is_some() {
         return Ok(Some(false));
@@ -181,11 +217,11 @@ pub(crate) fn own_keys(
 ) -> JsResult<Vec<PropertyKey>> {
     let mut out = Vec::new();
     if let (Some(length), Some(_)) = (ex.length, ex.item) {
-        let n = length(agent, o);
+        let n = in_realm_of(agent, o, |agent| length(agent, o));
         out.extend((0..n as u32).map(PropertyKey::Index));
     }
     if let Some(names) = ex.names {
-        for name in names(agent, o) {
+        for name in in_realm_of(agent, o, |agent| names(agent, o)) {
             let key = PropertyKey::from_js_string(name);
             if named_visible(agent, o, &key, &ex)?.is_some() && !out.contains(&key) {
                 out.push(key);

@@ -26,7 +26,7 @@ use bf_layout::fragment::{Edges, Fragment, FragmentKind, FragmentTree, Rect, Tab
 use bf_layout::{FontProvider, Widget, font_request};
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BackgroundBox, BgSize, BorderStyle, Float, Image, Position, RepeatStyle, Visibility,
+    BackgroundBox, BgSize, BorderStyle, Direction, Float, Image, Position, RepeatStyle, Visibility,
 };
 
 use crate::images::PageImages;
@@ -34,6 +34,7 @@ use bf_style::values::color::Rgba;
 
 use crate::display_list::{DisplayItem, DisplayList, GlyphInstance, Radii};
 use crate::effects::resolve_gradient; // E4
+use bf_style::properties::transform::{box_matrix, to_affine}; // E4
 
 #[derive(Debug, Clone, PartialEq)]
 struct Clip {
@@ -64,6 +65,9 @@ struct Builder<'a> {
     list: DisplayList,
     /// Cadena de recortes activa en la lista emitida hasta ahora.
     emitted: ClipChain,
+    /// E4: cuántas cajas transformadas hay alrededor de lo que se pinta (una caja transformada
+    /// es el bloque contenedor de sus descendientes `fixed`, CSS Transforms 1 §3).
+    in_transform: usize,
     /// Orden de árbol (preorden) de cada nodo.
     order: HashMap<NodeId, usize>,
     /// Fragmento cuyo fondo se propagó al canvas.
@@ -82,6 +86,8 @@ struct Builder<'a> {
     viewport_overflow: Option<&'a Fragment>,
     /// Las listas de los documentos de los `<iframe>` y su desplazamiento (E4).
     frames: &'a FrameLists<'a>,
+    /// Estado de scroll de la maqueta: cajas `sticky` del viewport (E4, `PushSticky`).
+    scroll: &'a bf_layout::scroll::ScrollState,
 }
 
 /// La lista de visualización (en coordenadas de su viewport) y el desplazamiento del
@@ -107,6 +113,10 @@ fn real_sc(f: &Fragment) -> bool {
         && ((positioned(f) && f.z_index.is_some())
             || f.style.opacity.0 < 1.0
             || f.style.position == Position::Fixed
+            // E4: también `sticky` (CSS Position 3 §3.4; así lo que contiene sigue a su
+            // `PushSticky`).
+            || f.style.position == Position::Sticky
+            || transformed(f)
             || masked(&f.style)
             || crate::filters::creates_stacking_context(&f.style)) // E7
 }
@@ -114,6 +124,29 @@ fn real_sc(f: &Fragment) -> bool {
 /// ¿Tiene `mask-image` (CSS Masking 1 §7.1)? Crea un stacking context (E7).
 fn masked(style: &ComputedStyle) -> bool {
     style.mask_image.0.iter().any(|i| !matches!(i, Image::None))
+}
+
+/// E4: ¿Es `f` una caja transformable (CSS Transforms 1 §3: no las cajas inline no
+/// reemplazadas) con alguna transformación? Un valor distinto de `none` crea un stacking
+/// context (CSS Transforms 1 §6).
+pub(crate) fn transformed(f: &Fragment) -> bool {
+    is_box(f)
+        && f.kind != FragmentKind::Inline
+        && (!f.style.transform.is_none()
+            || f.style.translate.0.is_some()
+            || f.style.rotate.0.is_some()
+            || f.style.scale.0.is_some())
+}
+
+/// E4: la matriz afín `[a, b, c, d, e, f]` de una caja transformada, en coordenadas de página
+/// (la caja de referencia es la border box, `transform-box: view-box` por defecto, CSS
+/// Transforms 1 §7). Las 3D se aplanan (CSS Transforms 2 §4, sin perspectiva real).
+pub fn fragment_matrix(f: &Fragment) -> Option<[f32; 6]> {
+    if !transformed(f) {
+        return None;
+    }
+    let r = &f.rect;
+    box_matrix(&f.style, (r.x, r.y, r.width, r.height)).map(|m| to_affine(&m))
 }
 
 fn is_float(f: &Fragment) -> bool {
@@ -329,6 +362,21 @@ impl<'a> Builder<'a> {
             self.set_clip(clip);
             self.list.push(DisplayItem::PushOpacity(opacity.max(0.0)));
         }
+        // E4: `transform`. Los recortes de los ancestros quedan aplicados antes de la matriz
+        // (en coordenadas de afuera); adentro, la cadena de recortes empieza vacía y lo que se
+        // recorte está en las coordenadas locales de la caja.
+        let matrix = fragment_matrix(f);
+        let local = Vec::new();
+        let outer_emitted = if let Some(m) = matrix {
+            self.set_clip(clip);
+            self.list.push(DisplayItem::PushMatrix(m));
+            self.in_transform += 1;
+            Some(std::mem::take(&mut self.emitted))
+        } else {
+            None
+        };
+        let outer_clip = clip;
+        let clip = if matrix.is_some() { &local } else { clip };
         let mask = masked(&f.style); // E7
         if mask {
             self.set_clip(clip);
@@ -368,20 +416,34 @@ impl<'a> Builder<'a> {
             self.set_clip(clip);
             self.list.push(DisplayItem::PopMask { layers });
         }
+        if let Some(outer) = outer_emitted {
+            self.set_clip(&local);
+            self.list.push(DisplayItem::PopTransform);
+            self.emitted = outer;
+            self.in_transform -= 1;
+        }
         if opacity < 1.0 {
-            self.set_clip(clip);
+            self.set_clip(outer_clip);
             self.list.push(DisplayItem::PopOpacity);
         }
         if let Some(fx) = effect {
-            self.emit(clip, DisplayItem::PopEffect(Box::new(fx))); // E7
+            // E7; con `transform` (E4) la capa se cierra con el recorte de afuera, el mismo
+            // con que se abrió.
+            self.emit(outer_clip, DisplayItem::PopEffect(Box::new(fx)));
         }
     }
 
     /// Un stacking context hijo. Los de `position: fixed` no se desplazan con el scroll ni los
     /// recortan los `overflow` de sus ancestros (su containing block es el viewport).
     fn child_context(&mut self, e: &Entry<'a>) {
-        if e.f.style.position != Position::Fixed {
+        // Dentro de una caja transformada, lo `fixed` se mueve con ella (E4).
+        if e.f.style.position != Position::Fixed || self.in_transform > 0 {
+            let sticky = self.push_sticky(e.f, &e.clip);
             self.stacking_context(e.f, &e.clip);
+            if sticky {
+                self.set_clip(&e.clip);
+                self.list.push(DisplayItem::PopSticky);
+            }
             return;
         }
         let none = Vec::new();
@@ -390,6 +452,30 @@ impl<'a> Builder<'a> {
         self.stacking_context(e.f, &none);
         self.set_clip(&none);
         self.list.push(DisplayItem::PopFixed);
+    }
+
+    /// E4: abre un `PushSticky` si `f` es una caja `sticky` cuyo scrollport es el viewport
+    /// (las de otros scroll containers ya están desplazadas en la maqueta). Los recortes de
+    /// afuera quedan aplicados antes, sin desplazar.
+    fn push_sticky(&mut self, f: &Fragment, clip: &ClipChain) -> bool {
+        let Some((node, constraints)) = f
+            .node
+            .filter(|_| f.style.position == Position::Sticky && f.pseudo.is_none())
+            .and_then(|n| Some((n, *self.scroll.viewport_constraints.get(&n)?)))
+        else {
+            return false;
+        };
+        let applied = self.scroll.sticky.get(&node).copied().unwrap_or((0.0, 0.0));
+        self.set_clip(clip);
+        self.list.push(DisplayItem::PushSticky {
+            constraints,
+            applied,
+            viewport: bf_layout::fragment::Size {
+                width: self.viewport.width,
+                height: self.viewport.height,
+            },
+        });
+        true
     }
 
     /// Floats, atómicos inline y posicionados con `z-index: auto`: como un stacking context,
@@ -982,6 +1068,10 @@ impl<'a> Builder<'a> {
                     dy: scroll.1,
                 },
                 DisplayItem::PopFixed => DisplayItem::PopTransform,
+                // E4: el raster desplaza lo `sticky` con el scroll de la página, no con el del
+                // marco: dentro de un marco queda como lo dejó su maqueta.
+                DisplayItem::PushSticky { .. } => DisplayItem::PushTransform { dx: 0.0, dy: 0.0 },
+                DisplayItem::PopSticky => DisplayItem::PopTransform,
                 other => other.clone(),
             });
         }
@@ -1575,18 +1665,25 @@ impl Builder<'_> {
         };
         let before: f32 = parts[..i].iter().map(|r| r.width).sum();
         let after: f32 = parts[i + 1..].iter().map(|r| r.width).sum();
+        // E4: los fragmentos van en orden lógico; con `direction: rtl` el primero queda a la
+        // derecha (CSS Fragmentation 3 §5.4, `box-decoration-break: slice`: la caja entera
+        // partida en el sentido de la línea).
+        let rtl = f.style.direction == Direction::Rtl;
+        let left_of = if rtl { after } else { before };
         let full = Rect::new(
-            f.rect.x - before,
+            f.rect.x - left_of,
             f.rect.y,
             f.rect.width + before + after,
             f.rect.height,
         );
-        let l = if i > 0 { f.rect.x } else { -1e6 };
-        let r = if i + 1 < parts.len() {
-            f.rect.right()
+        let (first, last) = (i == 0, i + 1 == parts.len());
+        let (cut_left, cut_right) = if rtl {
+            (!last, !first)
         } else {
-            1e6
+            (!first, !last)
         };
+        let l = if cut_left { f.rect.x } else { -1e6 };
+        let r = if cut_right { f.rect.right() } else { 1e6 };
         (full, Some((l, r)))
     }
 
@@ -1843,6 +1940,7 @@ pub fn build_display_list_with_frames(
         images,
         list: DisplayList::default(),
         emitted: Vec::new(),
+        in_transform: 0,
         order: doc
             .inclusive_descendants(doc.root())
             .into_iter()
@@ -1856,6 +1954,7 @@ pub fn build_display_list_with_frames(
         root: tree.root.as_ref(),
         viewport_overflow: None,
         frames,
+        scroll: &tree.scroll,
     };
     // Raíz sin caja (`display: none`): el canvas queda sin fondo (CSS Backgrounds 3 §2.11.2;
     // CSS2/box-display/root-box-003 espera lo contrario, según CSS 2.1).
