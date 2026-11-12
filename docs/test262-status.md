@@ -352,6 +352,10 @@ El runner reescribe solo la sección "Ejecución"; esta se queda.
 | intl402/Temporal | 72 | 1 497 | 1 957 | 532 |
 | built-ins/decodeURIComponent | 56 | 55 | 0 | 0 (1 timeout) |
 
+- Después de la corrida completa, los rangos de fecha y hora del mismo día (`formatRange` ya no
+  repite la fecha) suben `intl402/DateTimeFormat` de 212 a 214 (los dos
+  `temporal-objects-resolved-time-zone.js`), medido con `--filter intl402/` y comparado test
+  por test, sin regresiones; la tabla de arriba es de antes de ese cambio.
 - Lo que queda (625): sobre todo `intl402/Temporal` (532: calendarios `chinese`, `dangi` e
   `islamic-umalqura`, que necesitan tablas astronómicas, y zonas IANA, que no hay en el árbol),
   `intl402/DateTimeFormat` (33) e `intl402/NumberFormat` (30). Ver "Los 30 errores más
