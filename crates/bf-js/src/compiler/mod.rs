@@ -519,6 +519,7 @@ impl<'t> Codegen<'t> {
                 CodeKind::Method => info.is_generator,
                 _ => false,
             } && !(st.kind == CodeKind::Normal && info.is_async && !info.is_generator);
+        let direct_args = bytecode::direct_args(&st.ops);
         FunctionCode {
             name,
             kind: st.kind,
@@ -535,7 +536,7 @@ impl<'t> Codegen<'t> {
             has_prototype,
             decls: None,
             dynamic: info.has_eval || info.has_with,
-
+            direct_args,
             ics: Default::default(),
         }
     }

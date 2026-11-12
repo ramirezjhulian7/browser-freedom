@@ -11,7 +11,7 @@ use bf_dom::{Document, NodeId};
 use crate::media::{MediaContext, MediaQueryList, parse_media_query_list_from};
 use crate::selectors::{
     MatchContext, NamespaceMap, PseudoClass, PseudoElement, SelectorList, Simple, Specificity,
-    matching_specificity, parse_relative_selector_list_from, parse_selector_list_from,
+    matching_specificity_in, parse_relative_selector_list_from, parse_selector_list_from,
 };
 use crate::syntax::{
     self, AtRule, Block, BlockKind, ComponentValue, Declaration, NestedItem, TokenKind,
@@ -840,6 +840,22 @@ pub fn matching_declarations<'a>(
     supports: SupportsFn<'_>,
     ctx: &MatchContext,
 ) -> Vec<MatchedDeclaration<'a>> {
+    matching_declarations_in(doc, node, pseudo, sheets, media, supports, ctx, ctx.shadow)
+}
+
+/// E1: como [`matching_declarations`], con las hojas de un árbol de shadow (`shadow`, CSS
+/// Scoping §3).
+#[allow(clippy::too_many_arguments)]
+pub fn matching_declarations_in<'a>(
+    doc: &Document,
+    node: NodeId,
+    pseudo: Option<PseudoElement>,
+    sheets: &[&'a Stylesheet],
+    media: &MediaContext,
+    supports: SupportsFn<'_>,
+    ctx: &MatchContext,
+    shadow: crate::selectors::ShadowMatch,
+) -> Vec<MatchedDeclaration<'a>> {
     let layer_indexes = layer_indexes(sheets);
     let mut collector = Collector {
         doc,
@@ -848,6 +864,7 @@ pub fn matching_declarations<'a>(
         media,
         supports,
         ctx,
+        shadow,
         out: Vec::new(),
         source_order: 0,
     };
@@ -899,6 +916,7 @@ struct Collector<'a, 'd> {
     media: &'d MediaContext,
     supports: SupportsFn<'d>,
     ctx: &'d MatchContext,
+    shadow: crate::selectors::ShadowMatch,
     out: Vec<MatchedDeclaration<'a>>,
     source_order: usize,
 }
@@ -914,12 +932,13 @@ impl<'a> Collector<'a, '_> {
         for rule in rules {
             match rule {
                 Rule::Style(style) => {
-                    if let Some(specificity) = matching_specificity(
+                    if let Some(specificity) = matching_specificity_in(
                         &style.selectors,
                         self.doc,
                         self.node,
                         self.pseudo,
                         self.ctx,
+                        self.shadow,
                     ) {
                         let layer_index = indexes.get(layer).copied().unwrap_or(usize::MAX);
                         for declaration in &style.declarations {

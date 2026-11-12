@@ -98,6 +98,72 @@ pub fn used_overflow(style: &ComputedStyle) -> (Overflow, Overflow) {
     (fix(x, y), fix(y, x))
 }
 
+/// Mitad del tamaño del rectángulo de recorte en un eje que no recorta (`overflow-x: clip`
+/// con `overflow-y: visible`): "sin límite" sin infinitos, que no sobreviven a las
+/// traslaciones ni a la pintura.
+pub const UNCLIPPED_HALF: f32 = 4.0e6;
+
+/// El borde de recorte por `overflow` de una caja (CSS Overflow 3 §3.2, "overflow clip
+/// edge"), o `None` si no recorta. `forced`: la caja recorta aunque su `overflow` sea
+/// `visible` (controles de formulario con scroll interno).
+///
+/// - Con `overflow: clip` (o `contain: paint`, CSS Containment 2 §3.4), la caja de
+///   `overflow-clip-margin` (por omisión la padding box) agrandada en su longitud (negativa:
+///   encoge, como en `overflow-clip-margin-016`/`017`).
+/// - En un scroll container, el borde es la padding box: `overflow-clip-margin` solo puede
+///   encogerlo (`overflow-clip-margin-018`..`020`) y `border-box` se ignora (`021`/`022`).
+/// - Un eje `visible` no recorta (`overflow-x: clip` solo recorta en horizontal, `clip-002`):
+///   en ese eje el rectángulo se extiende [`UNCLIPPED_HALF`] a cada lado.
+pub fn overflow_clip(f: &Fragment, forced: bool) -> Option<Rect> {
+    use bf_style::properties::overflow::VisualBox;
+    let style = &f.style;
+    let (mut x, mut y) = used_overflow(style);
+    if style.contain.paint {
+        for o in [&mut x, &mut y] {
+            if *o == Overflow::Visible {
+                *o = Overflow::Clip;
+            }
+        }
+    }
+    let padding = f.padding_rect();
+    if x == Overflow::Visible && y == Overflow::Visible {
+        return forced.then_some(padding);
+    }
+    let margin = &style.overflow_clip_margin;
+    let scroller = x.is_scrollable() || y.is_scrollable();
+    let (visual, length) = match margin.visual_box {
+        VisualBox::BorderBox if scroller => (padding, 0.0),
+        VisualBox::BorderBox => (f.rect, margin.px()),
+        VisualBox::PaddingBox => (padding, margin.px()),
+        VisualBox::ContentBox => (f.content_rect(), margin.px()),
+    };
+    let length = if scroller { length.min(0.0) } else { length };
+    let mut edge = Rect::new(
+        visual.x - length,
+        visual.y - length,
+        (visual.width + 2.0 * length).max(0.0),
+        (visual.height + 2.0 * length).max(0.0),
+    );
+    if scroller {
+        // Nunca fuera de la padding box (`content-box` con una longitud positiva).
+        let right = edge.right().min(padding.right());
+        let bottom = edge.bottom().min(padding.bottom());
+        edge.x = edge.x.max(padding.x);
+        edge.y = edge.y.max(padding.y);
+        edge.width = (right - edge.x).max(0.0);
+        edge.height = (bottom - edge.y).max(0.0);
+    }
+    if x == Overflow::Visible {
+        edge.x = f.rect.x - UNCLIPPED_HALF;
+        edge.width = 2.0 * UNCLIPPED_HALF;
+    }
+    if y == Overflow::Visible {
+        edge.y = f.rect.y - UNCLIPPED_HALF;
+        edge.height = 2.0 * UNCLIPPED_HALF;
+    }
+    Some(edge)
+}
+
 /// ¿El elemento propaga su `overflow` al viewport (CSS Overflow 3 §3.3)? El raíz siempre; el
 /// `body` si el raíz tiene `overflow: visible` en los dos ejes.
 fn propagates_to_viewport(doc: &Document, root: &Fragment, f: &Fragment) -> bool {
@@ -164,8 +230,16 @@ fn scrollable_extent(f: &Fragment) -> (f32, f32) {
             }
             r.0 = r.0.max(c.rect.right());
             r.1 = r.1.max(c.rect.bottom());
-            if c.clip.is_none() {
-                walk(c, r);
+            match c.clip {
+                None => walk(c, r),
+                // Lo de dentro cuenta hasta el borde de recorte (en un eje que no recorta,
+                // entero: `overflow-x: clip` deja desbordar en vertical).
+                Some(clip) => {
+                    let mut inner = *r;
+                    walk(c, &mut inner);
+                    r.0 = r.0.max(inner.0.min(clip.right()));
+                    r.1 = r.1.max(inner.1.min(clip.bottom()));
+                }
             }
         }
     }
