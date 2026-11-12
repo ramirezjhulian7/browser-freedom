@@ -224,6 +224,12 @@ pub struct HostState {
     pub(crate) realm_classes: Vec<Vec<Option<ClassObjects>>>,
     /// Las funciones del host detrás del trampolín.
     pub(crate) fns: Vec<NativeFn>,
+    /// E8: el nombre de cada función de `fns` (`appendChild`, `get title`, `set title`).
+    pub(crate) fn_names: Vec<Box<str>>,
+    /// E8: la operación WebIDL que está corriendo (para el prefijo de los errores de
+    /// conversión, "Failed to execute 'x' on 'Y': …"). Cada llamada a una función nativa la
+    /// guarda y la limpia; el trampolín la fija.
+    pub(crate) current_op: Option<HostOp>,
     /// Identidad de wrappers (referencias débiles: se purgan tras cada recolección).
     wrappers: HashMap<(RealmId, HostKey), Gc<Object>>,
     /// Valores fijados por el host.
@@ -257,6 +263,8 @@ impl Default for HostState {
             classes: Vec::new(),
             realm_classes: Vec::new(),
             fns: Vec::new(),
+            fn_names: Vec::new(),
+            current_op: None,
             wrappers: HashMap::new(),
             pins: HashMap::new(),
             next_pin: 1,
@@ -304,6 +312,47 @@ pub(crate) fn on_realm_created(agent: &mut Agent, realm: RealmId) {
 
 // --- Trampolines ---
 
+/// E8: una operación WebIDL en curso.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HostOp {
+    /// Operación, getter o setter: índice en `fns` y su interfaz.
+    Member(usize, HostClassId),
+    /// El constructor de la interfaz.
+    Construct(HostClassId),
+}
+
+impl Agent {
+    /// El prefijo de los errores de la operación WebIDL en curso, con el formato de los
+    /// navegadores: "Failed to execute 'appendChild' on 'Node': ", "Failed to set the
+    /// 'title' property on 'Document': ", "Failed to construct 'URL': ". Vacío fuera de una
+    /// operación del host.
+    pub fn host_op_prefix(&self) -> String {
+        let class_name =
+            |c: HostClassId| self.host.classes.get(c.0 as usize).map_or("", |c| c.name);
+        match self.host.current_op {
+            None => String::new(),
+            Some(HostOp::Construct(c)) => format!("Failed to construct '{}': ", class_name(c)),
+            Some(HostOp::Member(i, c)) => {
+                let iface = class_name(c);
+                let name = self.host.fn_names.get(i).map_or("", |n| n);
+                if let Some(attr) = name.strip_prefix("get ") {
+                    format!("Failed to read the '{attr}' property from '{iface}': ")
+                } else if let Some(attr) = name.strip_prefix("set ") {
+                    format!("Failed to set the '{attr}' property on '{iface}': ")
+                } else {
+                    format!("Failed to execute '{name}' on '{iface}': ")
+                }
+            }
+        }
+    }
+
+    /// Un TypeError de una conversión WebIDL con el prefijo de [`Agent::host_op_prefix`].
+    pub fn webidl_type_error<T>(&mut self, msg: &str) -> JsResult<T> {
+        let p = self.host_op_prefix();
+        self.type_error(&format!("{p}{msg}"))
+    }
+}
+
 /// Cómo se invoca una función del host.
 const CALL_METHOD: f64 = 0.0;
 const CALL_STATIC: f64 = 1.0;
@@ -314,6 +363,8 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);
     let f = agent.host.fns[idx];
+    // La llamada nativa que nos invocó restaura la operación anterior al volver.
+    agent.host.current_op = Some(HostOp::Member(idx, class));
     // E2: WebIDL §3.7.7 ("create an operation function"): con `this` null o undefined se usa
     // el objeto global del realm de la función (p. ej. `getComputedStyle(el)` sin `window.`).
     if s[2].as_number() == Some(CALL_METHOD) && a.this.is_nullish() {
@@ -352,6 +403,7 @@ fn interface_trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
             "Failed to construct '{name}': Please use the 'new' operator"
         ));
     }
+    agent.host.current_op = Some(HostOp::Construct(HostClassId(class as u32)));
     match ctor {
         Some((f, _)) => f(agent, a),
         None => agent.type_error("Illegal constructor"),
@@ -368,6 +420,7 @@ fn host_function(
 ) -> Gc<Object> {
     let idx = agent.host.fns.len();
     agent.host.fns.push(f);
+    agent.host.fn_names.push(name.into());
     agent.create_builtin_with_slots(
         trampoline,
         length,

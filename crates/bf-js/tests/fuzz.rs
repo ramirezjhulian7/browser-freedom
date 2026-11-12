@@ -2,12 +2,19 @@
 //! `test262-parser-tests/pass`; el parser debe terminar sin pánico con cualquier entrada
 //! (aceptándola o con un SyntaxError).
 //!
+//! `fuzz_run` (E8) además **ejecuta**: muta los tests de la muestra de test262
+//! (`tests/data/test262-sample.txt`, con el harness delante) y los corre con presupuesto de
+//! instrucciones; ningún programa de página puede hacer entrar en pánico al motor (un
+//! `unreachable!` alcanzable tiene que ser un error de JavaScript).
+//!
 //! `cargo test -p bf-js --release --test fuzz -- --ignored --nocapture`
 //! (`BF_FUZZ_N` cambia la cantidad de mutaciones y `BF_FUZZ_SEED`, la semilla).
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
+use bf_js::vm::{Agent, AgentOptions};
 use bf_js::{ParseOptions, parse_module, parse_script};
 
 /// xorshift64*.
@@ -116,4 +123,116 @@ fn fuzz_mutations() {
         })
         .expect("hilo");
     handle.join().expect("sin pánicos");
+}
+
+/// Los `includes: [a.js, b.js]` del frontmatter (solo la forma en línea).
+fn includes(src: &str) -> Vec<String> {
+    src.lines()
+        .find_map(|l| l.trim().strip_prefix("includes:"))
+        .map(|rest| {
+            rest.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Corre un programa en un agente nuevo con los límites del runner de test262 (más chicos).
+fn run_program(src: &str) {
+    let mut agent = Agent::new(AgentOptions {
+        max_stack: 32 << 20,
+        max_frames: 5_000,
+        instruction_budget: Some(2_000_000),
+        deadline: Some(Instant::now() + Duration::from_secs(2)),
+    });
+    agent.reset_stack_base();
+    agent.printer = Box::new(|_| {});
+    let realm = agent.current_realm;
+    bf_js::builtins::host::install_test262(&mut agent, realm);
+    let _ = agent.eval_script(src, "fuzz.js");
+    let _ = agent.run_jobs();
+}
+
+#[test]
+#[ignore]
+fn fuzz_run() {
+    let n: usize = std::env::var("BF_FUZZ_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let seed: u64 = std::env::var("BF_FUZZ_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x5EED_1234_ABCD_0002);
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../../tests/test262");
+    let index = fs::read_to_string(manifest.join("tests/data/test262-sample.txt"))
+        .expect("tests/data/test262-sample.txt");
+    let harness = |f: &str| fs::read_to_string(root.join("harness").join(f)).unwrap_or_default();
+    let base = format!("{}\n{}\n", harness("assert.js"), harness("sta.js"));
+    let mut programs: Vec<(String, String)> = Vec::new();
+    for rel in index
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let Ok(src) = fs::read_to_string(root.join("test").join(rel)) else {
+            continue;
+        };
+        // Los módulos, los `raw` y los asíncronos necesitan otro arnés.
+        if src.contains("flags: [module")
+            || src.contains("raw]")
+            || src.contains("async]")
+            || src.contains("CanBlockIsFalse")
+        {
+            continue;
+        }
+        let mut prelude = base.clone();
+        for inc in includes(&src) {
+            prelude.push_str(&harness(&inc));
+            prelude.push('\n');
+        }
+        programs.push((prelude, src));
+    }
+    assert!(!programs.is_empty(), "falta tests/test262");
+    let handle = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            let mut rng = Rng(seed);
+            let mut panics: Vec<(usize, String, String)> = Vec::new();
+            for i in 0..n {
+                let (prelude, src) = &programs[rng.below(programs.len())];
+                // Una de cada cuatro sin mutar: el programa válido llega más lejos.
+                let body = if rng.below(4) == 0 {
+                    src.clone()
+                } else {
+                    mutate(src, &mut rng)
+                };
+                let input = format!("{prelude}{body}");
+                let r =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_program(&input)));
+                if let Err(p) = r {
+                    let msg = p
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| p.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                        .unwrap_or_default();
+                    panics.push((i, msg, body));
+                }
+            }
+            for (i, msg, body) in &panics {
+                println!("== pánico con la ejecución {i}: {msg}\n{body}\n");
+            }
+            println!("{n} ejecuciones, {} pánicos", panics.len());
+            panics.len()
+        })
+        .expect("hilo");
+    assert_eq!(
+        handle.join().expect("hilo del fuzz"),
+        0,
+        "pánicos al ejecutar"
+    );
 }

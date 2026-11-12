@@ -203,6 +203,9 @@ impl Agent {
                 let saved = self.current_realm;
                 self.current_realm = realm;
                 self.call_depth += 1;
+                // E8: la operación WebIDL en curso es la de esta función (si es del host, la
+                // fija el trampolín); la del llamador vuelve al terminar.
+                let op = self.host.current_op.take();
                 let r = func(
                     self,
                     &CallArgs {
@@ -212,6 +215,7 @@ impl Agent {
                         callee: fo,
                     },
                 );
+                self.host.current_op = op;
                 self.call_depth -= 1;
                 self.current_realm = saved;
                 r
@@ -249,6 +253,7 @@ impl Agent {
                 let saved = self.current_realm;
                 self.current_realm = realm;
                 self.call_depth += 1;
+                let op = self.host.current_op.take();
                 let r = func(
                     self,
                     &CallArgs {
@@ -258,6 +263,7 @@ impl Agent {
                         callee: f,
                     },
                 );
+                self.host.current_op = op;
                 self.call_depth -= 1;
                 self.current_realm = saved;
                 r
@@ -287,20 +293,74 @@ impl Agent {
         }
     }
 
-    /// Una descripción corta de un valor para los mensajes de error.
+    /// Una descripción corta de un valor para los mensajes de error (sin efectos: no llama
+    /// a getters ni a `toString`).
     pub fn describe(&self, v: &Value) -> String {
         match v {
+            Value::Undefined => "undefined".to_owned(),
+            Value::Null => "null".to_owned(),
+            Value::Boolean(b) => b.to_string(),
             Value::String(s) => format!("\"{}\"", s.to_string_lossy()),
             Value::Object(o) => {
                 if self.heap[*o].is_callable() {
-                    "function".to_owned()
+                    match self.own_data_string(*o, "name") {
+                        Some(n) if !n.is_empty() => format!("function {n}"),
+                        _ => "function".to_owned(),
+                    }
                 } else {
-                    "object".to_owned()
+                    format!("#<{}>", self.object_class_name(*o))
                 }
             }
             Value::Number(n) => crate::abstract_ops::number::number_to_string(*n).to_string(),
-            Value::Symbol(_) => "Symbol()".to_owned(),
-            other => format!("{other:?}"),
+            Value::Symbol(s) => match &self.heap[*s].description {
+                Some(d) => format!("Symbol({})", d.to_string_lossy()),
+                None => "Symbol()".to_owned(),
+            },
+            Value::BigInt(b) => format!("{}n", self.heap[*b].to_string_radix(10)),
+        }
+    }
+
+    /// El nombre de la "clase" de un objeto para los mensajes (`#<Foo>` como V8): el
+    /// `constructor.name` encontrado por la cadena de prototipos mirando solo propiedades de
+    /// datos; `Object` si no hay.
+    pub fn object_class_name(&self, o: Gc<Object>) -> String {
+        let key = PropertyKey::from("constructor");
+        let mut cur = Some(o);
+        for _ in 0..32 {
+            let Some(c) = cur else { break };
+            if let Some(Prop {
+                value:
+                    PropValue::Data {
+                        value: Value::Object(ctor),
+                        ..
+                    },
+                ..
+            }) = self.heap[c].props.get(&key)
+            {
+                if let Some(n) = self.own_data_string(*ctor, "name")
+                    && !n.is_empty()
+                {
+                    return n;
+                }
+                break;
+            }
+            cur = self.heap[c].proto;
+        }
+        "Object".to_owned()
+    }
+
+    /// Una propiedad propia de datos con valor string, sin efectos.
+    fn own_data_string(&self, o: Gc<Object>, name: &str) -> Option<String> {
+        match self.heap[o].props.get(&PropertyKey::from(name)) {
+            Some(Prop {
+                value:
+                    PropValue::Data {
+                        value: Value::String(s),
+                        ..
+                    },
+                ..
+            }) => Some(s.to_string_lossy()),
+            _ => None,
         }
     }
 
