@@ -2687,4 +2687,46 @@ mod tests {
         assert_eq!(clip.shapes.len(), 1);
         assert_eq!(clip.clip.as_ref().map(|c| c.shapes.len()), Some(1));
     }
+
+    #[test]
+    fn markers_on_polyline_vertices() {
+        // SVG 2 §13.7: un marcador por vértice, con su (`refX`, `refY`) sobre el vértice; con
+        // `orient='auto'` el del medio va girado por la bisectriz, pero el punto de referencia
+        // sigue cayendo en el vértice.
+        let g = tree(
+            "<marker id='m' markerWidth='4' markerHeight='4' refX='2' refY='2' orient='auto' \
+             markerUnits='userSpaceOnUse'><rect width='4' height='4' fill='red'/></marker>\
+             <polyline points='5,5 35,5 35,35' fill='none' stroke='blue' stroke-width='0.5' \
+             marker-start='url(#m)' marker-mid='url(#m)' marker-end='url(#m)'/>",
+            40.0,
+            40.0,
+        );
+        let mut gs = Vec::new();
+        groups(&g, &mut gs);
+        // Cada marcador recorta a su caja (`overflow: hidden` por defecto).
+        let markers: Vec<_> = gs.iter().filter(|g| g.clip.is_some()).collect();
+        assert_eq!(markers.len(), 3);
+        for (m, (vx, vy)) in markers.iter().zip([(5.0, 5.0), (35.0, 5.0), (35.0, 35.0)]) {
+            let (x, y) = m.transform.apply(2.0, 2.0);
+            assert!((x - vx).abs() < 1e-3 && (y - vy).abs() < 1e-3, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn malformed_start_tag_stops_the_tree() {
+        // XML 1.0 §3.1: entre atributos el espacio es obligatorio (`STag ::= '<' Name (S
+        // Attribute)* S? '>'`); sin él es un error fatal y el documento queda en lo parseado
+        // hasta ahí: la forma con la etiqueta mal formada no se pinta, ni sus marcadores.
+        let g = tree(
+            "<rect width='10' height='10' fill='red'/>\
+             <polyline points='5,5 35,5' stroke='blue'marker-start='url(#m)'/>\
+             <rect y='20' width='10' height='10'/>",
+            40.0,
+            40.0,
+        );
+        let mut ps = Vec::new();
+        paths(&g, &mut ps);
+        assert_eq!(ps.len(), 1);
+        assert_eq!(color(&ps[0].fill), Some(Rgba::rgb(255, 0, 0)));
+    }
 }
