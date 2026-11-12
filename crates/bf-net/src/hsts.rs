@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bf_url::{Host, Url};
@@ -106,10 +106,11 @@ struct Entry {
     include_subdomains: bool,
 }
 
-/// La lista de *Known HSTS Hosts* de un agente (§5.4).
-#[derive(Default)]
+/// La lista de *Known HSTS Hosts* de un agente (§5.4). Clonarla da otra referencia a la misma
+/// lista.
+#[derive(Default, Clone)]
 pub struct HstsStore {
-    hosts: Mutex<HashMap<String, Entry>>,
+    hosts: Arc<Mutex<HashMap<String, Entry>>>,
     file: Option<PathBuf>,
 }
 
@@ -163,7 +164,7 @@ impl HstsStore {
             }
         }
         HstsStore {
-            hosts: Mutex::new(hosts),
+            hosts: Arc::new(Mutex::new(hosts)),
             file: Some(file),
         }
     }
