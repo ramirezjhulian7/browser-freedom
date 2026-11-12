@@ -104,7 +104,7 @@
 
   // --- La persistencia (bf-web/src/storage/backend.rs) ---
   function newDb(name) {
-    return { name, version: 0, stores: new Map(), connections: new Set(), queue: [], busy: false, txns: [], logLines: 0, waiting: null };
+    return { name, version: 0, stores: new Map(), connections: new Set(), queue: [], busy: false, txns: [], logLines: 0, waiting: null, gen: native.shareGeneration(name) };
   }
   // Aplica una operación del log.
   function applyOp(db, op) {
@@ -166,9 +166,17 @@
   // Carga una base de datos del log (`null` si no existe).
   function loadDb(name) {
     if (DBS.has(name)) return DBS.get(name);
+    const db = readDb(name);
+    if (db) DBS.set(name, db);
+    return db;
+  }
+  // Lee una base de datos del log, sin mirar la caché (`null` si no existe).
+  function readDb(name) {
+    const gen = native.shareGeneration(name);
     const text = native.load(name);
     if (text === null) return null;
     const db = newDb(name);
+    db.gen = gen;
     let batch = [];
     let lines = 0;
     for (const line of text.split("\n")) {
@@ -187,8 +195,17 @@
     }
     db.logLines = lines;
     if (db.version === 0) return null;
-    DBS.set(name, db);
     return db;
+  }
+  // Si otro agente (otra pestaña, otro iframe del mismo origen) escribió en el log desde que
+  // se leyó, se vuelve a leer en el mismo objeto (las conexiones de aquí lo comparten).
+  function refreshDb(db) {
+    if (db.gen === native.shareGeneration(db.name)) return;
+    const fresh = readDb(db.name) || newDb(db.name);
+    db.version = fresh.version;
+    db.stores = fresh.stores;
+    db.logLines = fresh.logLines;
+    db.gen = fresh.gen;
   }
   function liveCount(db) {
     let n = 2;
@@ -216,6 +233,7 @@
       if (native.compact(db.name, snap.map((o) => JSON.stringify(o)).join("\n") + '\n["commit"]\n'))
         db.logLines = snap.length + 1;
     }
+    db.gen = native.shareGeneration(db.name);
     return true;
   }
 
@@ -320,6 +338,47 @@
     return native.fire(target, new IDBVersionChangeEvent(type, { oldVersion, newVersion }));
   }
 
+  // --- Las conexiones de otros agentes (bf-web/src/storage/shared.rs) ---
+  // Las conexiones abiertas de este realm se registran en el proceso para que un `open` con
+  // versión mayor o un `deleteDatabase` de otra pestaña les mande `versionchange` (§5.1 paso
+  // 10, §5.3 paso 5) y espere a que se cierren.
+  const SHARED = new Map();
+  let nextShareId = 0;
+  function shareRegister(connection) {
+    const c = D.get(connection);
+    if (c.shareId) return;
+    c.shareId = ++nextShareId;
+    SHARED.set(c.shareId, connection);
+    native.shareOpen(c.db.name, c.shareId);
+  }
+  function shareUnregister(connection) {
+    const c = D.get(connection);
+    if (!c.shareId) return;
+    SHARED.delete(c.shareId);
+    native.shareClose(c.db.name, c.shareId);
+    c.shareId = 0;
+  }
+  // Los que esperan a conexiones de otros agentes, por token.
+  const REMOTE_WAITS = new Map();
+  let nextWaitToken = 0;
+  native.setHook((kind, a, oldVersion, newVersion) => {
+    if (kind === "versionchange") {
+      const connection = SHARED.get(a);
+      if (!connection) return;
+      const c = D.get(connection);
+      if (!c.closePending && !c.closed) fireVersionChange(connection, "versionchange", oldVersion, newVersion < 0 ? null : newVersion);
+      return;
+    }
+    const w = REMOTE_WAITS.get(a);
+    if (!w) return;
+    if (kind === "blocked") fireBlocked(w);
+    else if (kind === "resume") {
+      REMOTE_WAITS.delete(a);
+      w.remoteDone = true;
+      checkWaiting(w.db);
+    }
+  });
+
   // --- IDBDatabase (§4.4) ---
   const D = new WeakMap();
   class IDBDatabase extends EventTarget {
@@ -417,6 +476,7 @@
     c.closed = true;
     c.names = Array.from(c.db.stores.keys());
     c.db.connections.delete(connection);
+    shareUnregister(connection);
     checkWaiting(c.db);
   }
 
@@ -1415,6 +1475,11 @@
   // --- IDBFactory (§4.3) ---
   function connectionQueue(name) {
     let db = DBS.get(name);
+    // Sin conexiones de aquí, la copia en memoria se descarta si otro agente escribió.
+    if (db && !db.connections.size && db.gen !== native.shareGeneration(name)) {
+      DBS.delete(name);
+      db = null;
+    }
     if (!db) {
       db = loadDb(name);
     }
@@ -1447,23 +1512,31 @@
     const w = db.waiting;
     if (!w) return;
     for (const c of db.connections) if (c !== w.except && !D.get(c).closed) return;
+    if (!w.remoteDone) return;
     db.waiting = null;
     w.resume();
   }
-  // Manda `versionchange` a las demás conexiones y espera a que cierren (§5.1 paso 10).
+  function fireBlocked(w) {
+    if (w.blockedFired) return;
+    w.blockedFired = true;
+    fireVersionChange(w.request, "blocked", w.oldVersion, w.newVersion);
+  }
+  // Manda `versionchange` a las demás conexiones, de aquí y de otros agentes, y espera a que
+  // cierren (§5.1 paso 10, §5.3 paso 5). `blocked` va una vez: enseguida si una de aquí no
+  // se cerró con el evento, o cuando los otros agentes avisan que una suya sigue abierta.
   function waitForOthers(db, except, request, oldVersion, newVersion, resume) {
     const others = Array.from(db.connections).filter((c) => c !== except && !D.get(c).closed);
     for (const c of others) {
       if (!D.get(c).closePending) fireVersionChange(c, "versionchange", oldVersion, newVersion);
     }
-    const open = others.filter((c) => !D.get(c).closed);
-    if (open.length) {
-      fireVersionChange(request, "blocked", oldVersion, newVersion);
-      db.waiting = { except, resume };
-      checkWaiting(db);
-      return;
-    }
-    resume();
+    const w = { db, except, request, oldVersion, newVersion, resume, remoteDone: true, blockedFired: false };
+    const token = ++nextWaitToken;
+    REMOTE_WAITS.set(token, w);
+    if (native.shareNotify(db.name, oldVersion, newVersion === null ? -1 : newVersion, token)) w.remoteDone = false;
+    else REMOTE_WAITS.delete(token);
+    if (others.some((c) => !D.get(c).closed)) fireBlocked(w);
+    db.waiting = w;
+    checkWaiting(db);
   }
 
   function finishRequest(request, result, error) {
@@ -1497,10 +1570,28 @@
           done();
           return;
         }
-        upgrade(request, connection, db, oldVersion, ver, done);
+        // Mientras se esperaba, otra pestaña pudo escribir (o subir la versión).
+        refreshDb(db);
+        D.get(connection).version = db.version;
+        if (db.version > ver) {
+          db.connections.delete(connection);
+          finishRequest(request, undefined, err("VersionError", "The requested version (" + ver + ") is less than the existing version (" + db.version + ")."));
+          native.fire(request, new Event("error", { bubbles: true, cancelable: true }));
+          done();
+          return;
+        }
+        if (db.version === ver) {
+          shareRegister(connection);
+          finishRequest(request, connection, null);
+          native.fire(request, new Event("success", { bubbles: false, cancelable: false }));
+          done();
+          return;
+        }
+        upgrade(request, connection, db, db.version, ver, done);
       });
       return;
     }
+    shareRegister(connection);
     finishRequest(request, connection, null);
     native.fire(request, new Event("success", { bubbles: false, cancelable: false }));
     done();
@@ -1516,6 +1607,7 @@
     db.version = version;
     c.version = version;
     t.log.push(["ver", version]);
+    shareRegister(connection);
     native.setParent(request, null);
     const r = R.get(request);
     r.result = connection;
@@ -1541,6 +1633,7 @@
       c.closed = true;
       c.names = Array.from(c.db.stores.keys());
       c.db.connections.delete(connection);
+      shareUnregister(connection);
       queueTask(() => {
         finishRequest(request, undefined, err("AbortError", "The version change transaction was aborted."));
         native.fire(request, new Event("error", { bubbles: true, cancelable: true }));

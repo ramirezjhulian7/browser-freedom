@@ -172,6 +172,9 @@ fn connect(agent: &mut Agent, id: u64, sink: EventSink) {
             redirect: bf_net::RedirectMode::Follow,
             credentials,
             referrer: Some(super::base_url(agent)),
+            // HTML §9.2.2 ("establish the connection"): cache mode `no-store`.
+            cache: bf_net::CacheMode::NoStore,
+            ..Default::default() // E6: `referrer_policy` por defecto.
         },
     };
     if super::is_bad_port(&url) {
