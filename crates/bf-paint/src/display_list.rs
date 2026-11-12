@@ -169,6 +169,13 @@ pub enum DisplayItem {
     },
     PushOpacity(f32),
     PopOpacity,
+    /// Abre una capa enmascarada (`mask-image`, CSS Masking 1 §7) (E7).
+    PushMask,
+    /// Cierra la capa de [`DisplayItem::PushMask`]: `layers` (capas de imagen o gradiente, con
+    /// sus recortes) se pintan aparte y su alfa recorta la capa al componerla.
+    PopMask {
+        layers: Vec<DisplayItem>,
+    },
     PushTransform {
         dx: f32,
         dy: f32,

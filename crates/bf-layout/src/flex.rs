@@ -1,7 +1,11 @@
 //! CSS Flexible Box Layout Module Level 1, §9 (algoritmo de layout).
 //!
-//! Solo `writing-mode: horizontal-tb` y `direction: ltr`: el eje principal es horizontal para
-//! `row`/`row-reverse` y vertical para `column`/`column-reverse`.
+//! Solo `writing-mode: horizontal-tb`: el eje principal es horizontal para `row`/`row-reverse`
+//! y vertical para `column`/`column-reverse`. E5: `direction: rtl` (§5.1): en filas el
+//! main-start es el borde derecho (`row-reverse` lo devuelve a la izquierda); en columnas el
+//! cross-start es el borde derecho. `justify-content: start/end/left/right` y
+//! `align-self: start/end/self-start/self-end` siguen el modo de escritura (CSS Box Alignment 3
+//! §5.1 y §6.1), no la dirección flex.
 //!
 //! Interpretaciones:
 //! - `min-width`/`min-height: auto` (§4.5): para ítems que no son contenedores de scroll, el
@@ -16,7 +20,7 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    ContentAlign, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
+    ContentAlign, Direction, Display, FlexBasis, FlexDirection, FlexWrap, Gap, ItemAlign,
     LengthPercentageAuto, Overflow, Size,
 };
 
@@ -37,7 +41,8 @@ pub(crate) fn is_flex_container(b: &LayoutBox) -> bool {
 /// diga otra cosa.
 struct Item<'a> {
     b: &'a LayoutBox,
-    /// Márgenes (`None` = `auto`) en orden: main-start, main-end, cross-start, cross-end.
+    /// Márgenes (`None` = `auto`) en orden: main-start, main-end y, en el eje cruzado, el del
+    /// lado físico bajo (arriba/izquierda) y el del alto (abajo/derecha).
     margins: [Option<f32>; 4],
     /// Borde + padding en el eje principal y en el cruzado.
     bp_main: f32,
@@ -71,6 +76,8 @@ impl Item<'_> {
 
 struct Line {
     items: Vec<usize>,
+    /// E5: ítems con `visibility: collapse` de la línea (segunda pasada de §4.4).
+    collapsed: Vec<usize>,
     cross: f32,
     /// Máximo de la distancia a la baseline de los ítems alineados por baseline.
     baseline: f32,
@@ -98,7 +105,8 @@ fn resolved_align(item: &ComputedStyle, container: &ComputedStyle) -> ItemAlign 
     };
     match a {
         ItemAlign::Auto | ItemAlign::Normal => ItemAlign::Stretch,
-        ItemAlign::LastBaseline => ItemAlign::FlexEnd,
+        ItemAlign::LastBaseline | ItemAlign::FlowEnd => ItemAlign::FlexEnd,
+        ItemAlign::FlowStart => ItemAlign::FlexStart,
         a => a,
     }
 }
@@ -185,10 +193,14 @@ impl<'a> Layout<'a> {
         min.max(available).min(max)
     }
 
-    /// Altura de contenido de un ítem maquetado con ancho de contenido `w`.
+    /// Altura de contenido de un ítem maquetado con ancho de contenido `w`. E5: sin su propio
+    /// `height` ni sus límites (el tamaño de contenido, §4.5 y §9.2.3 E).
     fn item_content_height(&mut self, b: &'a LayoutBox, cb: Cb, w: f32, bp_v: f32) -> f32 {
         self.measuring(|this| {
+            // Con `aspect-ratio` el alto de contenido sale de la relación (CSS Sizing 4 §5.2).
+            this.content_probe = b.style.aspect_ratio.preferred().is_none();
             let f = this.layout_item(b, cb, (0.0, 0.0), w, None, Edges::default());
+            this.content_probe = false;
             f.rect.height - bp_v
         })
     }
@@ -196,6 +208,22 @@ impl<'a> Layout<'a> {
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+        self.flex_layout_pass(container, cb, None)
+    }
+
+    /// E5: una pasada del algoritmo. Con ítems `visibility: collapse` (§4.4), la primera
+    /// anota el tamaño cruzado de la línea de cada uno ("strut") y repite el layout; en la
+    /// segunda (`struts`), esos ítems miden 0 en el eje principal al formar las líneas, se
+    /// ignoran después y cada línea mide al menos el mayor strut de sus ítems colapsados.
+    fn flex_layout_pass(
+        &mut self,
+        container: &'a LayoutBox,
+        cb: Cb,
+        struts: Option<&[f32]>,
+    ) -> (Vec<Fragment>, f32) {
+        let abs_mark = (self.abs_frames.last().map_or(0, Vec::len), self.fixed.len());
+        let is_collapsed =
+            |b: &LayoutBox| b.style.visibility == bf_style::properties::types::Visibility::Collapse;
         let cs = &container.style;
         let row = matches!(
             cs.flex_direction,
@@ -207,6 +235,12 @@ impl<'a> Layout<'a> {
         );
         let wrap = cs.flex_wrap != FlexWrap::Nowrap;
         let wrap_reverse = cs.flex_wrap == FlexWrap::WrapReverse;
+        // E5: CSS Flexbox 1 §5.1 con `direction: rtl`. `main_rev`: el main-start está en el
+        // borde físico alto (derecha en filas, abajo en columnas). `cross_flip`: el cross-start
+        // está en el borde físico alto (abajo en filas, derecha en columnas).
+        let rtl = cs.direction == Direction::Rtl;
+        let main_rev = if row { reverse != rtl } else { reverse };
+        let cross_flip = wrap_reverse != (!row && rtl);
         // Espacio disponible: el ancho siempre es definido; el alto, si se especificó.
         let avail_main = if row { Some(cb.width) } else { cb.height };
         let main_gap = if row {
@@ -247,20 +281,17 @@ impl<'a> Layout<'a> {
                 border.vertical() + padding.vertical(),
             );
             let m = |v: &LengthPercentageAuto| margin_value(v, cb.width);
-            let margins = if row {
-                [
-                    m(&s.margin_left),
-                    m(&s.margin_right),
-                    m(&s.margin_top),
-                    m(&s.margin_bottom),
-                ]
-            } else {
-                [
-                    m(&s.margin_top),
-                    m(&s.margin_bottom),
-                    m(&s.margin_left),
-                    m(&s.margin_right),
-                ]
+            let (l, r, t, bm) = (
+                m(&s.margin_left),
+                m(&s.margin_right),
+                m(&s.margin_top),
+                m(&s.margin_bottom),
+            );
+            let margins = match (row, main_rev) {
+                (true, false) => [l, r, t, bm],
+                (true, true) => [r, l, t, bm],
+                (false, false) => [t, bm, l, r],
+                (false, true) => [bm, t, l, r],
             };
             let (bp_main, bp_cross) = if row { (bp_h, bp_v) } else { (bp_v, bp_h) };
             let align = resolved_align(s, cs);
@@ -279,7 +310,8 @@ impl<'a> Layout<'a> {
                     None if kw != Size::Auto => self
                         .width_for_keyword(b, &kw, available, cb.width)
                         .unwrap_or(available),
-                    None if align == ItemAlign::Stretch && !auto_cross_margin => available,
+                    // E5: con wrap, fit-content (§9.4 paso 7); se estira con la línea.
+                    None if align == ItemAlign::Stretch && !auto_cross_margin && !wrap => available,
                     None => self.item_fit_width(b, available),
                 }
                 .min(wmax)
@@ -413,6 +445,11 @@ impl<'a> Layout<'a> {
             }
             let max_main = max_main.max(min_main);
             let hyp = base.min(max_main).max(min_main);
+            let (base, hyp, min_main, max_main) = if struts.is_some() && is_collapsed(b) {
+                (0.0, 0.0, 0.0, 0.0)
+            } else {
+                (base, hyp, min_main, max_main)
+            };
             items.push(Item {
                 b,
                 margins,
@@ -436,8 +473,13 @@ impl<'a> Layout<'a> {
         let mut lines: Vec<Line> = Vec::new();
         {
             let mut current: Vec<usize> = Vec::new();
+            let mut current_collapsed: Vec<usize> = Vec::new();
             let mut used = 0.0;
             for (i, item) in items.iter().enumerate() {
+                if struts.is_some() && is_collapsed(item.b) {
+                    current_collapsed.push(i);
+                    continue;
+                }
                 let outer = item.outer_main(item.hyp);
                 let extra = if current.is_empty() {
                     outer
@@ -450,6 +492,7 @@ impl<'a> Layout<'a> {
                 {
                     lines.push(Line {
                         items: std::mem::take(&mut current),
+                        collapsed: std::mem::take(&mut current_collapsed),
                         cross: 0.0,
                         baseline: 0.0,
                         offset: 0.0,
@@ -464,6 +507,7 @@ impl<'a> Layout<'a> {
             }
             lines.push(Line {
                 items: current,
+                collapsed: current_collapsed,
                 cross: 0.0,
                 baseline: 0.0,
                 offset: 0.0,
@@ -630,12 +674,48 @@ impl<'a> Layout<'a> {
         if !wrap && let (Some(def), Some(line)) = (single_definite_cross, lines.first_mut()) {
             line.cross = def;
         }
+        // E5: sin tamaño cruzado definido (filas con alto auto), una sola línea y el
+        // contenedor quedan dentro de `min-height`/`max-height` (§9.4 pasos 8 y 15).
+        let cross_limits = if row && single_definite_cross.is_none() {
+            let bp_v = border_edges(cs).vertical() + padding_edges(cs, cb.width).vertical();
+            Some(height_limits(cs, None, bp_v))
+        } else {
+            None
+        };
+        if !wrap && let (Some((lo, hi)), Some(line)) = (cross_limits, lines.first_mut()) {
+            line.cross = line.cross.min(hi).max(lo);
+        }
+        // E5: `visibility: collapse` (§4.4 y §9.4 paso 9).
+        match struts {
+            None if items.iter().any(|it| is_collapsed(it.b)) => {
+                let mut s = vec![0.0f32; items.len()];
+                for line in &lines {
+                    for &i in &line.items {
+                        s[i] = line.cross;
+                    }
+                }
+                if let Some(frame) = self.abs_frames.last_mut() {
+                    frame.truncate(abs_mark.0);
+                }
+                self.fixed.truncate(abs_mark.1);
+                return self.flex_layout_pass(container, cb, Some(&s));
+            }
+            Some(s) => {
+                for line in &mut lines {
+                    for &i in &line.collapsed {
+                        line.cross = line.cross.max(s[i]);
+                    }
+                }
+            }
+            None => {}
+        }
         // Tamaño cruzado del contenedor y align-content (§9.4 paso 15 y §9.6).
         let lines_cross: f32 = lines.iter().map(|l| l.cross).sum::<f32>()
             + lines.len().saturating_sub(1) as f32 * cross_gap;
-        let container_cross = match single_definite_cross {
-            Some(c) => c,
-            None => lines_cross,
+        let container_cross = match (single_definite_cross, cross_limits) {
+            (Some(c), _) => c,
+            (None, Some((lo, hi))) => lines_cross.min(hi).max(lo),
+            (None, None) => lines_cross,
         };
         {
             let free = container_cross - lines_cross;
@@ -658,12 +738,13 @@ impl<'a> Layout<'a> {
                         between = free / n;
                         start = between / 2.0;
                     }
-                    ContentAlign::SpaceAround => start = free / 2.0,
+                    // E5: con espacio negativo, `safe center` (§8.4): al inicio.
+                    ContentAlign::SpaceAround => {}
                     ContentAlign::SpaceEvenly if free > 0.0 => {
                         between = free / (n + 1.0);
                         start = between;
                     }
-                    ContentAlign::SpaceEvenly => start = free / 2.0,
+                    ContentAlign::SpaceEvenly => {}
                     _ => {}
                 }
             }
@@ -672,7 +753,7 @@ impl<'a> Layout<'a> {
                 l.offset = offset;
                 offset += l.cross + cross_gap + between;
             }
-            if wrap_reverse {
+            if cross_flip {
                 for l in &mut lines {
                     l.offset = container_cross - l.offset - l.cross;
                 }
@@ -745,23 +826,41 @@ impl<'a> Layout<'a> {
                 free = 0.0;
             }
             let (mut start, mut between) = (0.0, 0.0);
+            // E5: `start`/`end` según el modo de escritura (en filas, el inline-start coincide
+            // con el main-start salvo en `row-reverse`; en columnas, el block-start salvo en
+            // `column-reverse`); `left`/`right` son físicos en filas y `start` en columnas
+            // (CSS Box Alignment 3 §5.1).
+            let at_end = match cs.justify_content {
+                ContentAlign::FlexEnd => Some(true),
+                ContentAlign::Start => Some(reverse),
+                ContentAlign::End => Some(!reverse),
+                ContentAlign::Left if row => Some(main_rev),
+                ContentAlign::Right if row => Some(!main_rev),
+                ContentAlign::Left | ContentAlign::Right => Some(reverse),
+                _ => None,
+            };
             match cs.justify_content {
-                ContentAlign::FlexEnd | ContentAlign::End | ContentAlign::Right => start = free,
+                _ if at_end.is_some() => {
+                    if at_end == Some(true) {
+                        start = free;
+                    }
+                }
                 ContentAlign::Center => start = free / 2.0,
                 ContentAlign::SpaceBetween if n > 1.0 && free > 0.0 => between = free / (n - 1.0),
                 ContentAlign::SpaceAround if free > 0.0 => {
                     between = free / n;
                     start = between / 2.0;
                 }
-                ContentAlign::SpaceAround => start = free / 2.0,
+                // E5: con espacio negativo, `safe center` (§8.2): al inicio.
+                ContentAlign::SpaceAround => {}
                 ContentAlign::SpaceEvenly if free > 0.0 => {
                     between = free / (n + 1.0);
                     start = between;
                 }
-                ContentAlign::SpaceEvenly => start = free / 2.0,
+                ContentAlign::SpaceEvenly => {}
                 _ => {}
             }
-            // `flex-end`/`end` en direcciones invertidas: el "start" está al final.
+            // `pos` se mide desde el main-start; con `main_rev`, desde el borde físico alto.
             let mut pos = start;
             for &i in &line.items {
                 let (m0, m1, size, bp_main) = {
@@ -774,7 +873,7 @@ impl<'a> Layout<'a> {
                     )
                 };
                 let border_box = size + bp_main;
-                let main_start = if reverse {
+                let main_start = if main_rev {
                     main_len - pos - m0 - border_box
                 } else {
                     pos + m0
@@ -787,32 +886,38 @@ impl<'a> Layout<'a> {
                 let cross_margin_start = match (it.margins[2], it.margins[3]) {
                     (None, None) => line_free.max(0.0) / 2.0,
                     (None, Some(_)) => line_free.max(0.0),
+                    // E5: el margen `auto` del lado alto absorbe el espacio positivo (§8.1).
+                    (Some(m), None) if line_free >= 0.0 => m,
                     (Some(m), _) => {
-                        let flip = wrap_reverse;
-                        let start_offset =
-                            match it.align {
-                                ItemAlign::FlexEnd | ItemAlign::End | ItemAlign::SelfEnd => {
-                                    if flip { 0.0 } else { line_free }
+                        // E5: `flex-start`/`flex-end` siguen el cross-start de la línea;
+                        // `start`/`end`, el modo de escritura del contenedor, y
+                        // `self-start`/`self-end`, el del ítem (CSS Box Alignment 3 §6.1).
+                        let item_rtl = !row && it.b.style.direction == Direction::Rtl;
+                        let container_rtl = !row && rtl;
+                        let at_high = match it.align {
+                            ItemAlign::FlexEnd => Some(!cross_flip),
+                            ItemAlign::End => Some(!container_rtl),
+                            ItemAlign::SelfEnd => Some(!item_rtl),
+                            ItemAlign::Start => Some(container_rtl),
+                            ItemAlign::SelfStart => Some(item_rtl),
+                            ItemAlign::Center | ItemAlign::Baseline => None,
+                            _ => Some(cross_flip),
+                        };
+                        let start_offset = match (at_high, it.align) {
+                            (Some(true), _) => line_free,
+                            (Some(false), _) => 0.0,
+                            (None, ItemAlign::Baseline) if row => {
+                                line.baseline - it.baseline.unwrap_or(line.baseline)
+                            }
+                            (None, ItemAlign::Baseline) => {
+                                if cross_flip {
+                                    line_free
+                                } else {
+                                    0.0
                                 }
-                                ItemAlign::FlexStart | ItemAlign::Start | ItemAlign::SelfStart => {
-                                    if flip {
-                                        line_free
-                                    } else {
-                                        0.0
-                                    }
-                                }
-                                ItemAlign::Center => line_free / 2.0,
-                                ItemAlign::Baseline if row => {
-                                    line.baseline - it.baseline.unwrap_or(line.baseline)
-                                }
-                                _ => {
-                                    if flip {
-                                        line_free
-                                    } else {
-                                        0.0
-                                    }
-                                }
-                            };
+                            }
+                            _ => line_free / 2.0,
+                        };
                         start_offset + m
                     }
                 };
@@ -829,23 +934,35 @@ impl<'a> Layout<'a> {
                 };
                 // Un alto forzado solo si el ítem se estiró o flexionó; si no, su alto natural
                 // (para no alterar el `auto` de los porcentajes internos).
+                let (lo, hi) = if main_rev { (m1, m0) } else { (m0, m1) };
                 let margins = if row {
                     Edges {
-                        left: m0,
-                        right: m1,
+                        left: lo,
+                        right: hi,
                         top: it.margin(2),
                         bottom: it.margin(3),
                     }
                 } else {
                     Edges {
-                        top: m0,
-                        bottom: m1,
+                        top: lo,
+                        bottom: hi,
                         left: it.margin(2),
                         right: it.margin(3),
                     }
                 };
                 let b = it.b;
                 let f = self.layout_item(b, cb, (x, y), content_w, height, margins);
+                out.push(f);
+            }
+            // Los ítems colapsados quedan sin tamaño al inicio de su línea.
+            for &i in &line.collapsed {
+                let it = &items[i];
+                let (x, y) = if row {
+                    (cb.x, cb.y + line.offset)
+                } else {
+                    (cb.x + line.offset, cb.y)
+                };
+                let f = self.layout_item(it.b, cb, (x, y), 0.0, Some(0.0), Edges::default());
                 out.push(f);
             }
         }
@@ -955,7 +1072,64 @@ impl<'a> Layout<'a> {
         let (mut min, mut max) = (0.0f32, 0.0f32);
         let mut n = 0;
         for c in b.children.iter().filter(|c| !c.is_absolutely_positioned()) {
-            let (cmin, cmax) = self.outer_intrinsic_widths(c);
+            let (mut cmin, mut cmax) = self.outer_intrinsic_widths(c);
+            let content_min = cmin;
+            // E5: en filas, la aportación de un ítem que no puede crecer (encoger) no pasa de
+            // (no baja de) su flex base size, y luego queda entre su min/max-width (§9.9.1).
+            if row {
+                let s = &c.style;
+                let bp = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
+                let mh = crate::block::margin_edges(s, 0.0).horizontal();
+                let fixed = |lp: &bf_style::values::LengthPercentage| {
+                    (!lp.has_percentage()).then(|| {
+                        let v = lp.resolve(0.0);
+                        if s.box_sizing == bf_style::properties::types::BoxSizing::BorderBox {
+                            (v - bp).max(0.0)
+                        } else {
+                            v
+                        }
+                    })
+                };
+                let outer_base = match (&s.flex_basis, &s.width) {
+                    (FlexBasis::Size(Size::LengthPercentage(lp)), _) => {
+                        fixed(lp).map(|v| v + bp + mh)
+                    }
+                    (FlexBasis::Size(Size::Auto), Size::LengthPercentage(lp)) => {
+                        fixed(lp).map(|v| v + bp + mh)
+                    }
+                    (FlexBasis::Size(Size::Auto), Size::Auto) | (FlexBasis::Content, _) => {
+                        Some(cmax)
+                    }
+                    _ => None,
+                };
+                if let Some(ob) = outer_base {
+                    if s.flex_shrink.0 == 0.0 {
+                        cmin = cmin.max(ob);
+                        cmax = cmax.max(ob);
+                    }
+                    if s.flex_grow.0 == 0.0 {
+                        cmin = cmin.min(ob);
+                        cmax = cmax.min(ob);
+                    }
+                    let (lo, hi) = width_limits(s, 0.0, bp);
+                    let pct_min =
+                        matches!(&s.min_width, Size::LengthPercentage(lp) if lp.has_percentage());
+                    let pct_max = matches!(&s.max_width,
+                        bf_style::properties::types::MaxSize::LengthPercentage(lp) if lp.has_percentage());
+                    let lo = if pct_min { 0.0 } else { lo + bp + mh };
+                    // El mínimo automático (§4.5): la aportación min-content.
+                    let lo = if matches!(s.min_width, Size::Auto)
+                        && matches!(s.overflow_x, Overflow::Visible | Overflow::Clip)
+                    {
+                        lo.max(content_min)
+                    } else {
+                        lo
+                    };
+                    let hi = if pct_max { f32::INFINITY } else { hi + bp + mh };
+                    cmin = cmin.min(hi).max(lo);
+                    cmax = cmax.min(hi).max(lo);
+                }
+            }
             n += 1;
             if row {
                 max += cmax;
