@@ -323,7 +323,17 @@ pub fn wrap_opt(agent: &mut Agent, doc: DocIndex, n: Option<bf_dom::NodeId>) -> 
 /// ver [`is_foreign_node`]).
 pub fn unwrap_node(agent: &Agent, v: &Value) -> Option<NodeRef> {
     let n = agent.host_unwrap::<NodeRef>(v).copied()?;
-    (!foreign(agent, v, n)).then_some(n)
+    (!foreign(agent, v, n) && in_arena(agent, n)).then_some(n)
+}
+
+/// E1: ¿`n` cabe en la arena de su documento? Un wrapper que sobrevivió a su documento (un
+/// marco que navegó en el mismo realm, un documento perdido) no debe llegar a `bf-dom`, donde
+/// un `NodeId` fuera de rango es un pánico (`Document::get`).
+fn in_arena(agent: &Agent, n: NodeRef) -> bool {
+    agent
+        .realm_data::<crate::WebContext>(agent.current_realm)
+        .and_then(|ctx| ctx.documents.get(n.doc as usize))
+        .is_some_and(|d| n.node.index() < d.doc().node_count())
 }
 
 /// E1: ¿`v` es el wrapper de un nodo de otra ventana (un `<iframe>`, el padre)? Un

@@ -237,6 +237,8 @@ pub fn begin_parse(agent: &mut Agent, realm: RealmId, url: &Url) {
 /// Como [`begin_parse`]; sin `scripting` (un marco con `sandbox` sin `allow-scripts`) los
 /// scripts no se ejecutan.
 pub fn begin_parse_with(agent: &mut Agent, realm: RealmId, url: &Url, scripting: bool) {
+    // E1: el documento anterior (un marco que navega) sale de `documents[0]` con sus wrappers.
+    crate::dom::adopt::retire_window_document(agent, realm);
     let mut parser = Parser::new(&ParseOptions {
         scripting,
         iframe_srcdoc: url.href() == "about:srcdoc",
@@ -473,8 +475,13 @@ fn lend_and_invoke(
         &mut WebContextHandle { realm }.get_mut(agent).documents[0],
         saved,
     );
-    if let DocumentOwner::Document(d) = back {
-        *doc = *d;
+    match back {
+        DocumentOwner::Document(d) => *doc = *d,
+        // E1: `document.write`/`open`/`close` en el listener envolvió el documento prestado en
+        // un parser (`take_parser`); el documento sigue siendo ese. Antes se perdía y lo que
+        // seguía (el dispatch, el parser) corría sobre el documento vacío: pánico de índice
+        // con el siguiente `NodeId` (`bf-dom` `Document::get`).
+        DocumentOwner::Parser(p) => *doc = p.into_document().0,
     }
     threw
 }

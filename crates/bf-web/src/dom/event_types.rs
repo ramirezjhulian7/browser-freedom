@@ -285,12 +285,15 @@ fn composition_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn wheel_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let type_ = ctor_type(agent, a, "WheelEvent")?;
     let dict = a.arg(1);
-    let (init, view, data) = mouse_parts(agent, &dict)?;
+    let (init, view, data, related_doc) = mouse_parts(agent, &dict)?;
     let mut slots = vec![view, Value::Undefined];
     slots.extend(read_members(agent, &dict, WHEEL)?);
     let ev = Event::with_kind(type_, init, EventKind::Mouse(data));
     let c = classes(agent).wheel_event;
-    construct_event_vec(agent, a, EventIface::Class(c), ev, slots)
+    let o = construct_event_vec(agent, a, EventIface::Class(c), ev, slots)?;
+    // E1: el documento del `relatedTarget` (ver `events::bind_related_doc`).
+    crate::dom::events::bind_related_doc(agent, &o, related_doc);
+    Ok(o)
 }
 
 /// Reinicia el evento (los `init*Event` heredados) y pone los slots desde el 2; no hace nada

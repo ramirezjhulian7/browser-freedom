@@ -144,6 +144,12 @@ fn replace_part(
     {
         return throw_dom(agent, DomException::HierarchyRequestError);
     }
+    // E1: un elemento de otro documento se adopta antes de insertarlo (DOM §4.2.3 "pre-insert"
+    // → "insert" paso 7.1); su `NodeId` no vale en la arena de la tabla.
+    let new = match new {
+        Some(n) if n.doc != t.doc => Some(crate::dom::adopt::adopt_into(agent, n, t.doc)?),
+        n => n,
+    };
     let r = with_doc_mut(agent, t.doc, |d| {
         if let Some(old) = children_named(d, t.node, name).first().copied() {
             d.remove(old);

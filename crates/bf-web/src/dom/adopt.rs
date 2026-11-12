@@ -155,3 +155,82 @@ pub fn prepare_insert(
     }
     adopt_into(agent, node, parent.doc)
 }
+
+/// E1: el documento de la ventana `realm` está por ser reemplazado sin cambiar de realm (un marco
+/// que navega: HTML §7.4.2.3 reusa la `Window` del `about:blank` inicial, y aquí el realm se
+/// reusa siempre). El documento viejo pasa a otro `DocIndex` y sus wrappers, event handlers,
+/// caches, selección y foco van con él: si no, un `NodeRef` viejo `(0, id)` se resolvería en la
+/// arena del documento nuevo (otro nodo, o un pánico de índice en `bf-dom` si es más chica), y un
+/// `Range` viejo buscaría su rango vivo en el documento nuevo.
+pub fn retire_window_document(agent: &mut Agent, realm: bf_js::vm::RealmId) {
+    let Some(ctx) = agent.realm_data_mut::<crate::WebContext>(realm) else {
+        return;
+    };
+    // El documento vacío de antes del primer parse no tiene nada que conservar.
+    if ctx.documents[0].doc().node_count() <= 1 {
+        return;
+    }
+    let old = std::mem::replace(
+        &mut ctx.documents[0],
+        crate::DocumentOwner::Document(Box::default()),
+    );
+    let ids: Vec<NodeId> = old.doc().node_ids().collect();
+    ctx.documents.push(old);
+    let to = (ctx.documents.len() - 1) as DocIndex;
+    for id in ids {
+        let (o, n) = (NodeRef::new(0, id), NodeRef::new(to, id));
+        if let Some(obj) = agent.host_rekey(realm, o.key(), n.key())
+            && let Some(p) = agent.host_unwrap_mut::<NodeRef>(&bf_js::value::Value::Object(obj))
+        {
+            *p = n;
+        }
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let st = state(agent);
+    let keys: Vec<_> = st
+        .handlers
+        .keys()
+        .filter(|(d, t, _)| *d == 0 && matches!(t, EventTarget::Node(_)))
+        .cloned()
+        .collect();
+    for k in keys {
+        if let Some(h) = st.handlers.remove(&k) {
+            st.handlers.insert((to, k.1, k.2.clone()), h);
+        }
+        if st.handler_listeners.remove(&k) {
+            st.handler_listeners.insert((to, k.1, k.2.clone()));
+        }
+    }
+    for rec in st.listeners.values_mut() {
+        if let ListenerRec::Handler { doc, target, .. } = rec
+            && *doc == 0
+            && matches!(target, EventTarget::Node(_))
+        {
+            *doc = to;
+        }
+    }
+    let cached: Vec<_> = st
+        .child_cache
+        .keys()
+        .filter(|(d, _)| *d == 0)
+        .copied()
+        .collect();
+    for k in cached {
+        if let Some(v) = st.child_cache.remove(&k) {
+            st.child_cache.insert((to, k.1), v);
+        }
+    }
+    if let Some(s) = st.selections.remove(&0) {
+        st.selections.insert(to, s);
+    }
+    st.window_handler_source.clear();
+    if let Some(f) = agent.realm_data_mut::<crate::html::misc::Focus>(realm)
+        && let Some(n) = f.0
+        && n.doc == 0
+    {
+        f.0 = Some(NodeRef::new(to, n.node));
+    }
+    crate::cssom::document_replaced(agent, realm, to);
+    agent.current_realm = saved;
+}

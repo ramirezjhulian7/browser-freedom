@@ -311,17 +311,23 @@ fn constructor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             Value::Undefined | Value::Null => None,
             v => {
                 let s = unwrap_node(agent, &v);
+                // E1: el submitter debe ser del documento del formulario (si no, el
+                // `ancestors` de abajo compararía `NodeId` de dos arenas).
                 let ok = s.is_some_and(|s| {
-                    with_doc(agent, s.doc, |d| {
-                        d.element(s.node).is_some_and(|e| {
-                            e.is_html("button")
-                                || (e.is_html("input")
-                                    && matches!(
-                                        e.attr("type").unwrap_or("").to_ascii_lowercase().as_str(),
-                                        "submit" | "image"
-                                    ))
-                        }) && d.inclusive_ancestors(s.node).contains(&n.node)
-                    })
+                    s.doc == n.doc
+                        && with_doc(agent, s.doc, |d| {
+                            d.element(s.node).is_some_and(|e| {
+                                e.is_html("button")
+                                    || (e.is_html("input")
+                                        && matches!(
+                                            e.attr("type")
+                                                .unwrap_or("")
+                                                .to_ascii_lowercase()
+                                                .as_str(),
+                                            "submit" | "image"
+                                        ))
+                            }) && d.inclusive_ancestors(s.node).contains(&n.node)
+                        })
                 });
                 if !ok {
                     return crate::net::dom_error(

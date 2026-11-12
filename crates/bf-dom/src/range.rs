@@ -56,8 +56,17 @@ impl Document {
         self.live_ranges.slots[id.0 as usize].expect("rango vivo liberado")
     }
 
+    /// E1: como [`Document::live_range`], pero `None` si `id` no es un rango vivo de este
+    /// documento (un `Range` que quedó apuntando a un documento reemplazado).
+    pub fn try_live_range(&self, id: RangeId) -> Option<RangeBounds> {
+        self.live_ranges.slots.get(id.0 as usize).copied().flatten()
+    }
+
     pub fn set_live_range(&mut self, id: RangeId, bounds: RangeBounds) {
-        self.live_ranges.slots[id.0 as usize] = Some(bounds);
+        // E1: sin pánico si `id` no es de este documento (ver `try_live_range`).
+        if let Some(slot) = self.live_ranges.slots.get_mut(id.0 as usize) {
+            *slot = Some(bounds);
+        }
     }
 
     /// Libera un rango (su objeto ya no existe o pasó a otro documento).

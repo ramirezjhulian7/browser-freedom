@@ -1232,12 +1232,8 @@ pub fn style_document_with_sheets(
     if doc.mode == QuirksMode::Quirks {
         ua_list.push(&ua.quirks);
     }
-    // E1: las `adoptedStyleSheets` del documento y las hojas de cada shadow root.
-    let adopted: Vec<Stylesheet> = doc
-        .adopted_style_texts(doc.root())
-        .iter()
-        .map(|t| Stylesheet::parse(t, Origin::Author))
-        .collect();
+    // E1: las hojas de cada shadow root (las `adoptedStyleSheets` del documento llegan en
+    // `document_sheets`, desde el CSSOM de E2).
     let shadow_owned: Vec<(NodeId, Vec<Stylesheet>)> = doc
         .shadow_roots()
         .into_iter()
@@ -1248,7 +1244,6 @@ pub fn style_document_with_sheets(
         .map(|(r, s)| (*r, s.iter().collect()))
         .collect();
     let mut author: Vec<&Stylesheet> = document_sheets.iter().collect();
-    author.extend(adopted.iter());
     let mut user = Vec::new();
     for s in sheets {
         match s.origin {
