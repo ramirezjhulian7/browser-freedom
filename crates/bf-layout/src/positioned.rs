@@ -74,11 +74,12 @@ impl<'a> Layout<'a> {
     }
 
     /// Registra una caja absoluta con su posición estática.
-    pub(crate) fn add_abs(&mut self, b: &'a LayoutBox, static_x: f32, static_y: f32) {
+    pub(crate) fn add_abs(&mut self, b: &'a LayoutBox, static_x: f32, static_y: f32, rtl: bool) {
         let pending = PendingAbs {
             b,
             static_x,
             static_y,
+            static_rtl: rtl,
         };
         if b.style.position == Position::Fixed {
             self.fixed.push(pending);
@@ -116,6 +117,28 @@ impl<'a> Layout<'a> {
             width: cb_rect.width,
             height: Some(cb_rect.height),
         };
+        // E9: una absoluta de otro modo de escritura es la raíz de un flujo ortogonal: se
+        // maqueta en su marco y se coloca con sus insets (o en su posición estática).
+        if self.is_orthogonal(b) {
+            let mut f = self.orthogonal_fragment(b, cb);
+            let outer = f.margin_rect();
+            let x = match (
+                inset(&s.left, Some(cb.width)),
+                inset(&s.right, Some(cb.width)),
+            ) {
+                (Some(l), _) => l,
+                (None, Some(r)) => cb.width - r - outer.width,
+                (None, None) if p.static_rtl => p.static_x - cb.x - outer.width,
+                (None, None) => p.static_x - cb.x,
+            };
+            let y = match (inset(&s.top, cb.height), inset(&s.bottom, cb.height)) {
+                (Some(t), _) => t,
+                (None, Some(bm)) => cb_rect.height - bm - outer.height,
+                (None, None) => p.static_y - cb.y,
+            };
+            f.translate(cb.x + x - outer.x, cb.y + y - outer.y);
+            return f;
+        }
         let border = border_edges(s);
         let padding = padding_edges(s, cb.width);
         let edges_h = border.horizontal() + padding.horizontal();
@@ -127,6 +150,7 @@ impl<'a> Layout<'a> {
         let ml = margin_value(&s.margin_left, cb.width);
         let mr = margin_value(&s.margin_right, cb.width);
         let static_left = p.static_x - cb.x;
+        let static_right = cb.x + cb.width - p.static_x;
         let replaced = matches!(b.kind, BoxKind::Replaced { .. });
         let margins_h = ml.unwrap_or(0.0) + mr.unwrap_or(0.0);
         let width = if replaced {
@@ -151,6 +175,8 @@ impl<'a> Layout<'a> {
             mr,
             edges_h,
             static_left,
+            static_right,
+            rtl: p.static_rtl,
         };
         // Ancho tentativo y, si viola max-width o min-width, de nuevo con ese valor como
         // `width` especificado (§10.3.7).
@@ -229,9 +255,13 @@ impl<'a> Layout<'a> {
         width: Option<f32>,
     ) -> (f32, f32, f32, f32) {
         let (mut ml, mut mr) = (h.ml.unwrap_or(0.0), h.mr.unwrap_or(0.0));
-        let (mut left, right, mut width) = (h.left, h.right, width);
+        let (mut left, mut right, mut width) = (h.left, h.right, width);
         if left.is_none() && right.is_none() {
-            left = Some(h.static_left);
+            if h.rtl {
+                right = Some(h.static_right);
+            } else {
+                left = Some(h.static_left);
+            }
         }
         let cw = h.cb_width;
         let e = h.edges_h;
@@ -244,13 +274,20 @@ impl<'a> Layout<'a> {
                         ml = rest / 2.0;
                         mr = rest / 2.0;
                     }
+                    (None, None) if h.rtl => {
+                        ml = rest;
+                        mr = 0.0;
+                    }
                     (None, None) => {
                         ml = 0.0;
                         mr = rest;
                     }
                     (None, Some(_)) => ml = rest - mr,
                     (Some(_), None) => mr = rest - ml,
-                    // Sobre-restringido: se ignora `right` (ltr).
+                    // Sobre-restringido: se ignora `left` (rtl) o `right` (ltr).
+                    (Some(_), Some(_)) if h.rtl => {
+                        left = Some(cw - r - w - e - ml - mr);
+                    }
                     (Some(_), Some(_)) => {}
                 }
             }
@@ -290,4 +327,9 @@ struct Horizontal {
     mr: Option<f32>,
     edges_h: f32,
     static_left: f32,
+    /// E9: distancia del borde derecho del containing block a la posición estática `rtl`.
+    static_right: f32,
+    /// E9: `direction: rtl` (CSS 2.2 §10.3.7: la posición estática fija `right` y, si sobra
+    /// una restricción, se ignora `left`).
+    rtl: bool,
 }

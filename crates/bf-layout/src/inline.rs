@@ -880,19 +880,32 @@ impl<'a> Layout<'a> {
         let margins = margin_edges(&b.style, cb.width);
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
-        let (fragment, _) = self.box_contents(
-            b,
-            cb,
-            margins.left,
-            margins.top,
-            content_w,
-            margins,
-            &mut scratch,
-            false,
-        );
+        // E9: una inline-block de otro modo de escritura es la raíz de un flujo ortogonal.
+        let fragment = if self.is_orthogonal(b) {
+            self.orthogonal_fragment(b, cb)
+        } else {
+            self.box_contents(
+                b,
+                cb,
+                margins.left,
+                margins.top,
+                content_w,
+                margins,
+                &mut scratch,
+                false,
+            )
+            .0
+        };
         let outer = fragment.margin_rect();
         let visible =
             b.style.overflow_x == Overflow::Visible && b.style.overflow_y == Overflow::Visible;
+        // E9: en un flujo vertical con baseline central, la baseline sintetizada de una caja
+        // sin baseline propia es la central: la mitad de su margin box (CSS Inline 3 §4.1).
+        let synth = if self.frame.is_vertical() && crate::writing_mode::central_baseline(&b.style) {
+            outer.height / 2.0
+        } else {
+            outer.height
+        };
         // La baseline de un inline-block es la de su última line box; si no tiene o su
         // overflow no es visible, el borde inferior del margin box (§10.8.1).
         let baseline = match (&b.kind, visible) {
@@ -902,27 +915,25 @@ impl<'a> Layout<'a> {
                 .as_ref()
                 .is_some_and(crate::controls::Control::single_line) =>
             {
-                fragment.baseline.map_or(outer.height, |y| y - outer.y)
+                fragment.baseline.map_or(synth, |y| y - outer.y)
             }
             // El resto de los controles (casillas, barras, list box, textarea): el borde inferior
             // del margin box, como un contenedor de scroll.
-            _ if b.control.is_some() => outer.height,
+            _ if b.control.is_some() => synth,
             // inline-flex: la baseline del contenedor es la de su primer ítem (Flexbox §8.5).
             (BoxKind::InlineBlock, _) if crate::flex::is_flex_container(b) => {
-                crate::flex::container_baseline(&fragment).map_or(outer.height, |y| y - outer.y)
+                crate::flex::container_baseline(&fragment).map_or(synth, |y| y - outer.y)
             }
             // E4: inline-grid (CSS Grid 2 §9.1) e inline-table (CSS 2.2 §17.5.3: la baseline de
             // la primera fila).
             (BoxKind::InlineBlock, _) if crate::grid::is_grid_container(b) => {
-                crate::grid::container_baseline(&fragment).map_or(outer.height, |y| y - outer.y)
+                crate::grid::container_baseline(&fragment).map_or(synth, |y| y - outer.y)
             }
             (BoxKind::InlineBlock, _) if crate::table::is_table_wrapper(b) => {
-                fragment.baseline.map_or(outer.height, |y| y - outer.y)
+                fragment.baseline.map_or(synth, |y| y - outer.y)
             }
-            (BoxKind::InlineBlock, true) => {
-                last_line_baseline(&fragment.children).unwrap_or(outer.height)
-            }
-            _ => outer.height,
+            (BoxKind::InlineBlock, true) => last_line_baseline(&fragment.children).unwrap_or(synth),
+            _ => synth,
         };
         Atomic {
             fragment,
@@ -954,6 +965,7 @@ impl<'a> Layout<'a> {
             para_levels: Vec::new(),
         };
         let root = &b.style;
+        let root_rtl = root.direction == Direction::Rtl;
         self.collect(&mut ifc, &b.children, None, cb);
         self.bidi_levels(&mut ifc, root);
         self.shape_texts(&mut ifc);
@@ -1035,7 +1047,9 @@ impl<'a> Layout<'a> {
                             continue;
                         }
                         SegKind::Abs(idx) => {
-                            abs_here.push((idx, l + width, has_content));
+                            // E9: la pluma en un contenedor `rtl` avanza desde la derecha.
+                            let x = if root_rtl { r - width } else { l + width };
+                            abs_here.push((idx, x, has_content));
                             i += 1;
                             continue;
                         }
@@ -1194,7 +1208,7 @@ impl<'a> Layout<'a> {
                         _ => false,
                     });
                 if empty {
-                    self.place_line_abs(&ifc, &abs_here, cb, y, 0.0);
+                    self.place_line_abs(&ifc, &abs_here, cb, y, 0.0, root_rtl);
                     if line.is_empty() && i < ifc.segs.len() {
                         // Nada cupo: forzar avance para no ciclar.
                         i += 1;
@@ -1226,7 +1240,7 @@ impl<'a> Layout<'a> {
                     paragraph += 1;
                 }
                 self.offset_relative_inlines(&mut fragment, cb);
-                self.place_line_abs(&ifc, &abs_here, cb, y, height);
+                self.place_line_abs(&ifc, &abs_here, cb, y, height, root_rtl);
                 out.push(fragment);
                 y += height;
                 first = false;
@@ -1246,13 +1260,15 @@ impl<'a> Layout<'a> {
         cb: Cb,
         y: f32,
         height: f32,
+        rtl: bool,
     ) {
         for &(idx, x, had_content) in abs {
             let b = ifc.oof[idx];
             if b.style.original_display.is_inline_level() {
-                self.add_abs(b, x, y);
+                self.add_abs(b, x, y, rtl);
             } else {
-                self.add_abs(b, cb.x, if had_content { y + height } else { y });
+                let x = if rtl { cb.x + cb.width } else { cb.x };
+                self.add_abs(b, x, if had_content { y + height } else { y }, rtl);
             }
         }
     }

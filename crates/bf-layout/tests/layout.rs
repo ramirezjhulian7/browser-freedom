@@ -13,6 +13,11 @@ use bf_layout::{Size, TestFont, dump, layout_document};
 use bf_style::style_document;
 
 fn layout(html: &str) -> String {
+    let (doc, tree) = layout_tree(html);
+    dump(&doc, &tree)
+}
+
+fn layout_tree(html: &str) -> (bf_dom::Document, bf_layout::FragmentTree) {
     let (doc, _) = parse_document(html, &ParseOptions::default());
     let ctx = MatchContext::for_document(&doc);
     let media = MediaContext {
@@ -30,7 +35,7 @@ fn layout(html: &str) -> String {
         },
         &TestFont,
     );
-    dump(&doc, &tree)
+    (doc, tree)
 }
 
 #[test]
@@ -77,4 +82,30 @@ fn layout_cases() {
         failures.join("\n\n")
     );
     assert!(count >= 40, "solo hay {count} casos");
+}
+
+/// Aviso de E11: un enlace partido en dos líneas se pintaba con dos colores ("Histor" con el
+/// del enlace, "ial" con el del bloque). Todos los textos del enlace llevan su estilo.
+#[test]
+fn split_link_keeps_its_color() {
+    let html = "<!DOCTYPE html><style>body{margin:0;color:black} div{width:48px;word-break:break-all}                 a{color:rgb(0,0,255)}</style><div><a href=x>Historial</a></div>";
+    let (_, tree) = layout_tree(html);
+    fn texts(f: &bf_layout::Fragment, out: &mut Vec<(String, String)>) {
+        if f.kind == bf_layout::FragmentKind::Text
+            && let Some((t, _)) = &f.text
+        {
+            out.push((t.clone(), format!("{:?}", f.style.color)));
+        }
+        for c in &f.children {
+            texts(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    texts(tree.root.as_ref().expect("raíz"), &mut out);
+    assert!(out.len() >= 2, "el enlace debería partirse: {out:?}");
+    assert!(
+        out.iter().all(|(_, c)| *c == out[0].1),
+        "colores distintos en el enlace partido: {out:?}"
+    );
+    assert!(out[0].1.contains("255"), "color del enlace: {out:?}");
 }

@@ -2202,6 +2202,16 @@ impl<'a> Layout<'a> {
     ) -> Fragment {
         // Un ítem establece un formato independiente (§6.1): sus márgenes no colapsan con los
         // de su contenido y contiene sus floats.
+        // E5: un ítem de otro modo de escritura es la raíz de un flujo ortogonal (CSS Writing
+        // Modes 4 §7.3): su espacio inline es el alto del área si es definido. Se maqueta en su
+        // marco con el ancho y el alto (si se estira) que le da la rejilla, y su border box queda
+        // en `(x, y)`. Un subgrid ortogonal sigue en la rejilla del padre (§9).
+        if self.is_orthogonal(b) && subgrid_axes(b) == (false, false) {
+            let mut f = self.orthogonal_item_fragment(b, cb, content_w, height);
+            let (dx, dy) = (x - f.rect.x, y - f.rect.y);
+            f.translate(dx, dy);
+            return f;
+        }
         self.bfc_items.push(b as *const LayoutBox as usize);
         self.forced_height = height;
         let mut scratch = FloatContext::default();
@@ -2610,6 +2620,7 @@ impl<'a> Layout<'a> {
                         b: c,
                         static_x: content_box.x,
                         static_y: content_box.y,
+                        static_rtl: false,
                     };
                     this.absolute(p, content_box)
                 });
@@ -2619,7 +2630,7 @@ impl<'a> Layout<'a> {
                 } else {
                     dx
                 };
-                self.add_abs(c, content_box.x + dx, content_box.y + dy);
+                self.add_abs(c, content_box.x + dx, content_box.y + dy, false);
                 continue;
             }
             let area = abs_area(s);
@@ -2628,6 +2639,7 @@ impl<'a> Layout<'a> {
                     b: c,
                     static_x: area.x,
                     static_y: area.y,
+                    static_rtl: false,
                 },
                 area,
             );
