@@ -51,9 +51,15 @@ fn source(
             let (pw, ph) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
             let mut pixmap = Pixmap::new(pw, ph)?;
             let sampler = GradientSampler::new(&resolved);
-            for (k, px) in pixmap.data_mut().chunks_exact_mut(4).enumerate() {
+            for (k, px) in pixmap
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 let (x, y) = ((k as u32 % pw) as f32 + 0.5, (k as u32 / pw) as f32 + 0.5);
-                px.copy_from_slice(&to_u8(&sampler.at(x, y)));
+                *px = to_u8(&sampler.at(x, y));
             }
             Some((Arc::new(pixmap), w, h))
         }

@@ -22,7 +22,7 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/CSS2/text | 350 | 31 | 182 | 0 | 563 | 91.9% |
 | css/CSS2/colors | 19 | 0 | 3 | 0 | 22 | 100.0% |
 | css/CSS2/borders | 498 | 6 | 258 | 0 | 762 | 98.8% |
-| css/css-backgrounds | 321 | 295 | 334 | 1 | 951 | 52.0% |
+| css/css-backgrounds | 532 | 82 | 336 | 1 | 951 | 86.5% |
 | css/css-flexbox | 633 | 316 | 478 | 0 | 1427 | 66.7% |
 | css/selectors | 107 | 13 | 404 | 0 | 524 | 89.2% |
 | css/CSS2/tables | 246 | 4 | 889 | 0 | 1139 | 98.4% |
@@ -30,12 +30,13 @@ Generado por `cargo test -p bf-paint --test wpt_reftests -- --ignored --nocaptur
 | css/css-grid | 635 | 930 | 913 | 2 | 2480 | 40.5% |
 | css/css-ui | 75 | 37 | 1097 | 0 | 1209 | 67.0% |
 | svg (E7, 2026-11-12) | 318 | 133 | 971 | 0 | 1422 | 70.5% |
-| **Total** | 5583 | 1998 | 6144 | 4 | 13729 | 73.6% |
+| **Total** | 5794 | 1785 | 6146 | 4 | 13729 | 76.4% |
 
 La fila `svg` se midió aparte el 2026-11-12 en `army/e7` con el mismo commit de WPT
 (`cargo test -p bf-paint --test wpt_reftests -- --ignored wpt_svg --nocapture`); las
-filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo) y el resto es del
-2026-10-20.
+filas `css/css-grid` y `css/css-flexbox` son de E5 (2026-11-06, ver abajo); la de
+`css/css-backgrounds` es de E7 (2026-11-12, `border-image`; `REFTEST_GROUPS=css/css-backgrounds cargo
+test -p bf-paint --test wpt_reftests_groups -- --ignored`) y el resto es del 2026-10-20.
 
 Medidos aparte con filtro (`wpt-reftests <dir>`, 2026-11-07, rama `army/e12`; no entran en el
 total de arriba hasta la próxima corrida completa). Desde esta medición los atributos `on*`

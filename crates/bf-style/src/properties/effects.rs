@@ -73,8 +73,8 @@ impl SliceValue {
         }
     }
 
-    fn to_css(&self) -> String {
-        match *self {
+    fn to_css(self) -> String {
+        match self {
             SliceValue::Number(n) => fmt_number(n),
             SliceValue::Percentage(p) => format!("{}%", fmt_number(p)),
         }
@@ -117,7 +117,7 @@ impl PropValue for BorderImageSlice {
         Self::parse_items(&components(input))
     }
     fn to_css(&self) -> String {
-        let s = box4_css(&self.sides, SliceValue::to_css);
+        let s = box4_css(&self.sides, |v| v.to_css());
         if self.fill { format!("{s} fill") } else { s }
     }
 }
