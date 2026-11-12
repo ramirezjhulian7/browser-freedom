@@ -1,5 +1,9 @@
 //! Cookies (RFC 6265bis): parser de `Set-Cookie` (§5.6), modelo de almacenamiento (§5.7) y la
-//! cabecera `Cookie` (§5.8.3). Jarra en memoria, sin persistencia ni lista de sufijos públicos.
+//! cabecera `Cookie` (§5.8.3). Jarra en memoria; con [`CookieJar::on_disk`], las cookies
+//! persistentes se guardan en un archivo (E6).
+//!
+//! E6: la lista de sufijos públicos ([`crate::psl`]) da el sitio ([`site_of`]) y rechaza
+//! `Domain=` con un sufijo público (§5.7 paso 9).
 //!
 //! E4: `SameSite` (§5.2, §5.7 y §5.8.3) y el bloqueo de cookies de terceros. El "site for
 //! cookies" de una petición es el del documento de nivel superior: el hilo del documento lo
@@ -8,6 +12,8 @@
 //! (otro hilo, la línea de comandos antes de cargar) se trata como del mismo sitio.
 
 use std::cell::RefCell;
+use std::io;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -171,29 +177,16 @@ pub fn thread_context() -> Option<CookieContext> {
     CONTEXT.with(|c| c.borrow().clone())
 }
 
-/// El sitio de `url` (HTML §7.1.1 "obtain a site", sin esquema: dominio registrable). Sin lista
-/// de sufijos públicos: las dos últimas etiquetas, o tres si la penúltima es un segundo nivel
-/// genérico bajo un ccTLD (`example.co.uk`, `example.com.ar`). Las IP son su propio sitio.
+/// El sitio de `url` (HTML §7.1.1 "obtain a site", sin esquema): el dominio registrable según
+/// la lista de sufijos públicos (E6, [`crate::psl`]), o el host entero si no tiene (un sufijo
+/// público, `localhost`). Las IP son su propio sitio.
 pub fn site_of(url: &Url) -> Option<String> {
     let host = match url.host.as_ref()? {
-        Host::Domain(d) => d.to_ascii_lowercase(),
+        Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
         h @ (Host::Ipv4(_) | Host::Ipv6(_)) => return Some(h.to_string()),
         _ => return None,
     };
-    let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
-    let n = labels.len();
-    if n <= 2 {
-        return Some(labels.join("."));
-    }
-    let generic = [
-        "co", "com", "net", "org", "gov", "edu", "ac", "gob", "or", "ne", "go",
-    ];
-    let keep = if labels[n - 1].len() == 2 && generic.contains(&labels[n - 2]) {
-        3
-    } else {
-        2
-    };
-    Some(labels[n - keep..].join("."))
+    Some(crate::psl::registrable_domain(&host).unwrap_or(host))
 }
 
 /// ¿Una petición a `url` es del mismo sitio que el contexto? (§5.2: "same-site" si el dominio
@@ -212,6 +205,8 @@ pub struct CookieJar {
     /// No mandar ni guardar cookies en peticiones entre sitios (opción del navegador; por
     /// defecto `false`).
     block_third_party: AtomicBool,
+    /// E6: dónde se guardan las cookies persistentes ([`CookieJar::on_disk`]).
+    file: Option<PathBuf>,
 }
 
 impl CookieJar {
@@ -259,13 +254,19 @@ impl CookieJar {
         let old = jar.iter().position(|c| {
             c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path
         });
+        let mut persistent = cookie.expires.is_some();
         if let Some(old) = old {
             cookie.creation = jar[old].creation;
+            persistent |= jar[old].expires.is_some();
             jar.remove(old);
         }
         // Una cookie ya vencida solo borra la anterior.
         if cookie.expires.is_none_or(|e| e > now()) {
             jar.push(cookie);
+        }
+        // E6: la copia en disco sigue a las cookies persistentes.
+        if persistent && self.file.is_some() {
+            let _ = self.write(&jar);
         }
     }
 
@@ -354,6 +355,17 @@ impl CookieJar {
             }
         }
         cookie.expires = max_age.or(expires);
+        // §5.7 paso 9 (E6): un `Domain` que es un sufijo público solo vale si es el propio host
+        // (y entonces la cookie es *host-only*); si no, la cookie se ignora.
+        if let Some(d) = &domain_attr
+            && !is_ip
+            && crate::psl::is_public_suffix(d)
+        {
+            if *d != host.to_ascii_lowercase() {
+                return None;
+            }
+            domain_attr = None;
+        }
         if let Some(d) = domain_attr {
             if !domain_match(&host, &d, is_ip) {
                 return None;
@@ -473,6 +485,53 @@ impl CookieJar {
         Some(parts.join("; "))
     }
 
+    /// E6: una jarra que carga las cookies persistentes de `file` (si existe) y las guarda ahí
+    /// cada vez que cambia una (§5.7: las de sesión no se guardan; las vencidas no se cargan).
+    pub fn on_disk(file: impl Into<PathBuf>) -> CookieJar {
+        let file = file.into();
+        let mut cookies = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            let t = now();
+            cookies = text
+                .lines()
+                .filter_map(decode_line)
+                .filter(|c| c.expires.is_some_and(|e| e > t))
+                .collect();
+            cookies.sort_by_key(|c| c.creation);
+        }
+        let counter = cookies.iter().map(|c| c.creation).max().unwrap_or(0);
+        CookieJar {
+            cookies: Mutex::new(cookies),
+            counter: Mutex::new(counter),
+            block_third_party: AtomicBool::new(false),
+            file: Some(file),
+        }
+    }
+
+    /// E6: guarda ya las cookies persistentes (si la jarra tiene archivo).
+    pub fn save(&self) -> io::Result<()> {
+        let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+        self.write(&jar)
+    }
+
+    fn write(&self, jar: &[Cookie]) -> io::Result<()> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        let t = now();
+        let mut text = String::new();
+        for c in jar.iter().filter(|c| c.expires.is_some_and(|e| e > t)) {
+            text.push_str(&encode_line(c));
+            text.push('\n');
+        }
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = file.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, file)
+    }
+
     pub fn len(&self) -> usize {
         self.cookies.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -480,6 +539,92 @@ impl CookieJar {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// E6: una cookie por línea, campos separados por tabuladores y escapados con `%XX`.
+fn encode_line(c: &Cookie) -> String {
+    let same_site = match c.same_site {
+        SameSite::Strict => "strict",
+        SameSite::Lax => "lax",
+        SameSite::None => "none",
+        SameSite::Default => "default",
+    };
+    [
+        escape(&c.name),
+        escape(&c.value),
+        escape(&c.domain),
+        u8::from(c.host_only).to_string(),
+        escape(&c.path),
+        c.expires.unwrap_or(0).to_string(),
+        u8::from(c.secure).to_string(),
+        u8::from(c.http_only).to_string(),
+        same_site.to_owned(),
+        c.creation.to_string(),
+    ]
+    .join("\t")
+}
+
+fn decode_line(line: &str) -> Option<Cookie> {
+    let f: Vec<&str> = line.split('\t').collect();
+    let [
+        name,
+        value,
+        domain,
+        host_only,
+        path,
+        expires,
+        secure,
+        http_only,
+        same_site,
+        creation,
+    ] = f[..]
+    else {
+        return None;
+    };
+    Some(Cookie {
+        name: unescape(name)?,
+        value: unescape(value)?,
+        domain: unescape(domain)?,
+        host_only: host_only == "1",
+        path: unescape(path)?,
+        expires: Some(expires.parse().ok()?),
+        secure: secure == "1",
+        http_only: http_only == "1",
+        same_site: match same_site {
+            "strict" => SameSite::Strict,
+            "lax" => SameSite::Lax,
+            "none" => SameSite::None,
+            _ => SameSite::Default,
+        },
+        creation: creation.parse().ok()?,
+    })
+}
+
+fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '%' | '\t' | '\r' | '\n' => out.push_str(&format!("%{:02X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(s.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]
@@ -592,5 +737,58 @@ mod tests {
             "b=9; Path=/; Domain=example.com; Expires=Thu, 01 Jan 2099 00:00:00 GMT",
         );
         assert!(jar.cookie_header(&u).unwrap().contains("b=9"));
+    }
+
+    /// E6: RFC 6265bis §5.7 paso 9 con la lista de sufijos públicos.
+    #[test]
+    fn public_suffix_domains() {
+        let jar = CookieJar::default();
+        jar.set_cookie(&url("https://www.example.co.uk/"), "a=1; Domain=co.uk");
+        jar.set_cookie(&url("https://www.example.co.uk/"), "b=2; Domain=.UK");
+        assert!(jar.is_empty());
+        jar.set_cookie(
+            &url("https://www.example.co.uk/"),
+            "c=3; Domain=example.co.uk",
+        );
+        assert_eq!(jar.len(), 1);
+        // El propio host como Domain: vale, pero solo para ese host.
+        let gh = url("https://github.io/");
+        jar.set_cookie(&gh, "d=4; Domain=github.io");
+        assert_eq!(jar.cookie_header(&gh).as_deref(), Some("d=4"));
+        assert_eq!(jar.cookie_header(&url("https://x.github.io/")), None);
+        jar.set_cookie(&url("https://x.github.io/"), "e=5; Domain=github.io");
+        assert_eq!(jar.cookie_header(&url("https://y.github.io/")), None);
+        assert_eq!(
+            site_of(&url("https://x.github.io/")).as_deref(),
+            Some("x.github.io")
+        );
+    }
+
+    /// E6: las cookies persistentes sobreviven en disco; las de sesión no.
+    #[test]
+    fn persists_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("bf-cookies-{}", std::process::id()));
+        let file = dir.join("cookies.txt");
+        let _ = std::fs::remove_file(&file);
+        let u = url("https://www.example.com/a/");
+        {
+            let jar = CookieJar::on_disk(&file);
+            jar.set_cookie(&u, "s=session");
+            jar.set_cookie(&u, "p=1; Max-Age=1000; HttpOnly; SameSite=Strict; Path=/");
+            jar.set_cookie(&u, "q=a%3Bb c; Max-Age=1000; Domain=example.com; Secure");
+        }
+        let jar = CookieJar::on_disk(&file);
+        assert_eq!(jar.len(), 2);
+        assert_eq!(
+            jar.cookie_header(&url("https://sub.example.com/a/"))
+                .as_deref(),
+            Some("q=a%3Bb c")
+        );
+        assert_eq!(jar.script_cookies(&u), "q=a%3Bb c");
+        assert_eq!(jar.cookie_header(&u).as_deref(), Some("q=a%3Bb c; p=1"));
+        // Borrar una persistente también llega al disco.
+        jar.set_cookie(&u, "p=; Max-Age=0; Path=/");
+        assert_eq!(CookieJar::on_disk(&file).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

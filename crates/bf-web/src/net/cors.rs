@@ -59,6 +59,8 @@ pub struct FetchParams {
     pub referrer_policy: String,
     /// "Use-CORS-preflight flag" (XHR con listeners de subida).
     pub use_preflight: bool,
+    /// E6: el *cache mode* (Fetch §2.2.5), para la caché HTTP de `bf-net`.
+    pub cache: bf_net::CacheMode,
 }
 
 /// La cabecera de la respuesta final de main fetch, sin filtrar, con su tainting.
@@ -334,6 +336,10 @@ fn preflight(
             redirect: bf_net::RedirectMode::Manual,
             credentials: false,
             referrer: referrer_for(p, url),
+            // E6: la misma política que ya aplicó `referrer_for` (bf-net la vuelve a aplicar).
+            referrer_policy: bf_net::ReferrerPolicy::parse(&p.referrer_policy).unwrap_or_default(),
+            // E6: el preflight no se guarda ni se busca en la caché HTTP (OPTIONS).
+            cache: bf_net::CacheMode::NoStore,
         },
     };
     let res = backend.fetch(&req)?;
@@ -558,6 +564,10 @@ pub fn main_fetch(
                 redirect: bf_net::RedirectMode::Manual,
                 credentials: include,
                 referrer: referrer_for(p, &url),
+                // E6: idempotente sobre el referente ya calculado.
+                referrer_policy: bf_net::ReferrerPolicy::parse(&p.referrer_policy)
+                    .unwrap_or_default(),
+                cache: p.cache,
             },
         };
         let mut sink = HopSink {

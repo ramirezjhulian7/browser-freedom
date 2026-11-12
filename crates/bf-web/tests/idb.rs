@@ -605,3 +605,115 @@ fn many_writes_compact_log() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Entre pestañas (storage::shared): dos agentes con el mismo directorio de origen ---
+
+impl Page {
+    /// Como [`Page::run`], pero haciendo avanzar también a `other` (la otra pestaña).
+    fn run_with(&mut self, other: &mut Page, src: &str) -> String {
+        self.exec("done = false; result = null; log = [];");
+        let code = format!("(async () => {{ {src} }})().catch(fail);");
+        self.exec(&code);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let _ = self.rt.run_until_idle();
+            let _ = other.rt.run_until_idle();
+            if self.eval_string("done") == "true" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "tiempo agotado; log = {}",
+                self.eval_string("JSON.stringify(log)")
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.eval_string("result")
+    }
+}
+
+/// IndexedDB §5.1 paso 10: el `open` con versión mayor de una pestaña manda `versionchange`
+/// a la conexión de la otra; si esta se cierra en el listener, no hay `blocked`.
+#[test]
+fn versionchange_across_tabs() {
+    let dir = temp_dir("tabs-vc");
+    let mut a = Page::new(Some(dir.clone()));
+    let mut b = Page::new(Some(dir.clone()));
+    assert_eq!(
+        a.run(
+            "var db = await openDb('t', 1, (db) => db.createObjectStore('s')); globalThis.seen = []; \
+             db.onversionchange = (e) => { seen.push(e.oldVersion + '->' + e.newVersion + ' ' + (e instanceof IDBVersionChangeEvent)); db.close(); }; finish('ok');"
+        ),
+        "ok"
+    );
+    let r = b.run_with(
+        &mut a,
+        "var r = indexedDB.open('t', 2); r.onblocked = () => log.push('blocked'); \
+         r.onupgradeneeded = (e) => log.push('upgrade ' + e.oldVersion + ' ' + Array.from(r.result.objectStoreNames)); \
+         var db = await req(r); finish(db.version + ' ' + log.join());",
+    );
+    assert_eq!(r, "2 upgrade 1 s");
+    assert_eq!(a.eval_string("seen.join()"), "1->2 true");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Si la otra pestaña no se cierra al recibir `versionchange`, el `open` recibe `blocked`
+/// y sigue cuando se cierra.
+#[test]
+fn blocked_across_tabs() {
+    let dir = temp_dir("tabs-blocked");
+    let mut a = Page::new(Some(dir.clone()));
+    let mut b = Page::new(Some(dir.clone()));
+    a.run(
+        "var db = await openDb('t', 3); db.onversionchange = () => setTimeout(() => db.close(), 30); finish('ok');",
+    );
+    let r = b.run_with(
+        &mut a,
+        "var r = indexedDB.open('t', 5); r.onblocked = (e) => log.push('blocked ' + e.oldVersion + '->' + e.newVersion); \
+         var db = await req(r); finish(db.version + ' ' + log.join());",
+    );
+    assert_eq!(r, "5 blocked 3->5");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `deleteDatabase` en una pestaña: la conexión de la otra recibe `versionchange` con
+/// `newVersion` null.
+#[test]
+fn delete_across_tabs() {
+    let dir = temp_dir("tabs-delete");
+    let mut a = Page::new(Some(dir.clone()));
+    let mut b = Page::new(Some(dir.clone()));
+    a.run(
+        "var db = await openDb('t', 2); globalThis.seen = []; db.onversionchange = (e) => { seen.push(e.oldVersion + ' ' + e.newVersion); db.close(); }; finish('ok');",
+    );
+    let r = b.run_with(
+        &mut a,
+        "var r = indexedDB.deleteDatabase('t'); r.onblocked = () => log.push('blocked'); \
+         r.onsuccess = (e) => finish(e.oldVersion + ' ' + e.newVersion + ' ' + log.join());",
+    );
+    assert_eq!(r, "2 null ");
+    assert_eq!(a.eval_string("seen.join()"), "2 null");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Lo que otra pestaña escribió (datos y versión nueva) se ve al reabrir, aunque esta
+/// pestaña ya tuviera la base de datos en memoria.
+#[test]
+fn reopen_sees_other_tab_writes() {
+    let dir = temp_dir("tabs-stale");
+    let mut a = Page::new(Some(dir.clone()));
+    let mut b = Page::new(Some(dir.clone()));
+    a.run(
+        "var db = await openDb('t', 1, (db) => db.createObjectStore('s')); var t = db.transaction('s', 'readwrite'); \
+         t.objectStore('s').put('a', 1); await txDone(t); db.close(); finish('ok');",
+    );
+    b.run(
+        "var db = await openDb('t', 2, (db, t) => { db.createObjectStore('u'); t.objectStore('s').put('b', 2); }); db.close(); finish('ok');",
+    );
+    let r = a.run(
+        "var db = await openDb('t'); var all = await req(db.transaction('s').objectStore('s').getAll()); \
+         finish(db.version + ' ' + Array.from(db.objectStoreNames) + ' ' + all);",
+    );
+    assert_eq!(r, "2 s,u a,b");
+    let _ = std::fs::remove_dir_all(&dir);
+}
