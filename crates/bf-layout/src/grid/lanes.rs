@@ -696,7 +696,7 @@ impl<'a> Layout<'a> {
                 Space::Definite(cb.width),
                 (cb.width, cb.width),
                 matches!(
-                    cs.justify_content,
+                    cs.justify_content.value,
                     ContentAlign::Normal | ContentAlign::Stretch
                 ),
             );
@@ -806,15 +806,20 @@ impl<'a> Layout<'a> {
             }
             let range = run.range_end();
             // E5: alineación del último ítem de cada pista en el eje de apilado.
-            let frees = stacking_free_space(&spans, &stack, n, range);
+            // El último de cada pista llega hasta el final del content box.
+            let end = cb
+                .height
+                .unwrap_or_else(|| range.min(hmax).max(hmin))
+                .max(range);
+            let frees = stacking_free_space(&spans, &stack, n, (row_gap, end));
             for (i, free) in frees.into_iter().enumerate() {
                 if free <= 0.0 {
                     continue;
                 }
                 let b = setup.items[i].0;
                 let s = &b.style;
-                let a = match block_axis(s.align_self) {
-                    ItemAlign::Auto => block_axis(cs.align_items),
+                let a = match block_axis(s.align_self).value {
+                    ItemAlign::Auto => block_axis(cs.align_items).value,
                     a => a,
                 };
                 let (item_cb, x, w, margins, hole_dx) = relayout[i];
@@ -849,7 +854,7 @@ impl<'a> Layout<'a> {
                 }
             }
             content_h = cb.height.unwrap_or_else(|| range.min(hmax).max(hmin));
-            let off = stacking_offset(cs.align_content, content_h, range, fill_reverse);
+            let off = stacking_offset(cs.align_content.value, content_h, range, fill_reverse);
             for (f, (y, outer)) in out.iter_mut().zip(&stack) {
                 // `fill-reverse`: se refleja en el rango de apilado.
                 let dy = if fill_reverse {
@@ -915,7 +920,7 @@ impl<'a> Layout<'a> {
                 contribs.push(c);
             }
             let stretch = matches!(
-                cs.align_content,
+                cs.align_content.value,
                 ContentAlign::Normal | ContentAlign::Stretch
             );
             let (space, limits) = match cb.height {
@@ -1077,15 +1082,15 @@ impl<'a> Layout<'a> {
             }
             let range = run.range_end();
             // E5: alineación del último ítem de cada pista en el eje de apilado (inline).
-            let frees = stacking_free_space(&spans, &stack, n, range);
+            let frees = stacking_free_space(&spans, &stack, n, (col_gap, cb.width.max(range)));
             for (i, free) in frees.into_iter().enumerate() {
                 if free <= 0.0 {
                     continue;
                 }
                 let b = setup.items[i].0;
                 let s = &b.style;
-                let a = match s.justify_self {
-                    ItemAlign::Auto => cs.justify_items,
+                let a = match s.justify_self.value {
+                    ItemAlign::Auto => cs.justify_items.value,
                     a => a,
                 };
                 // `left`/`right` son físicos: con el flujo de derecha a izquierda se invierten.
@@ -1120,7 +1125,7 @@ impl<'a> Layout<'a> {
                     stack[i].0 += shift;
                 }
             }
-            let off = stacking_offset(cs.justify_content, cb.width, range, fill_reverse);
+            let off = stacking_offset(cs.justify_content.value, cb.width, range, fill_reverse);
             for (f, (x, outer)) in out.iter_mut().zip(&stack) {
                 // En rtl el flujo va de derecha a izquierda; `fill-reverse` lo invierte.
                 let mirrored = rtl != fill_reverse;
@@ -1326,37 +1331,36 @@ impl<'a> Layout<'a> {
 }
 
 /// E5: alineación propia en el eje de apilado (CSS Grid 3, "alignment in the stacking axis"):
-/// el último ítem de cada pista se alinea en el espacio que queda hasta el final del rango de
-/// apilado. `spans` son las pistas de cada ítem y `stack` su posición de apilado y su tamaño
-/// exterior. Devuelve, por ítem, el espacio libre de su contenedor de alineación (0 si no es
-/// el último de todas sus pistas).
+/// el contenedor de alineación de un ítem va desde su posición hasta el inicio (menos el gap)
+/// del siguiente ítem en cualquiera de sus pistas, o hasta `end` (el final del content box)
+/// si es el último en todas. `spans` son las pistas de cada ítem y `stack` su posición de
+/// apilado y su tamaño exterior; `gap` es el del eje de apilado. Devuelve, por ítem, el espacio
+/// libre de su contenedor de alineación.
 fn stacking_free_space(
     spans: &[(usize, usize)],
     stack: &[(f32, f32)],
     n: usize,
-    range: f32,
+    (gap, end): (f32, f32),
 ) -> Vec<f32> {
-    let mut last: Vec<Option<(f32, usize)>> = vec![None; n];
-    for (i, (&(y, outer), &(t0, t1))) in stack.iter().zip(spans).enumerate() {
-        for l in last.iter_mut().take(t1.min(n)).skip(t0) {
-            if l.is_none_or(|(e, _)| y + outer >= e) {
-                *l = Some((y + outer, i));
-            }
-        }
-    }
     spans
         .iter()
         .enumerate()
         .map(|(i, &(t0, t1))| {
-            let is_last = t0 < t1.min(n)
-                && last[t0..t1.min(n)]
-                    .iter()
-                    .all(|l| l.is_some_and(|(_, j)| j == i));
-            if is_last {
-                (range - stack[i].0 - stack[i].1).max(0.0)
-            } else {
-                0.0
-            }
+            let (y, outer) = stack[i];
+            let limit = (t0..t1.min(n))
+                .map(|t| {
+                    stack
+                        .iter()
+                        .zip(spans)
+                        .enumerate()
+                        .filter(|&(j, (&(yj, _), &(u0, u1)))| {
+                            j != i && u0 <= t && t < u1 && (yj > y || (yj == y && j > i))
+                        })
+                        .map(|(_, (&(yj, _), _))| yj - gap)
+                        .fold(end, f32::min)
+                })
+                .fold(end, f32::min);
+            (limit - y - outer).max(0.0)
         })
         .collect()
 }

@@ -1054,10 +1054,11 @@ impl<'a> Layout<'a> {
                 b.control,
                 Some(Control::TextField { .. } | Control::Select { .. })
             );
-            let shift = match style.align_content {
+            let shift = match style.align_content.value {
                 ContentAlign::Center if unsafe_center => free / 2.0,
                 ContentAlign::Center => (free / 2.0).max(0.0),
-                ContentAlign::End | ContentAlign::FlexEnd => free.max(0.0),
+                // E5: `flow-end` (CSS Box Alignment 3) fuera de grid lanes es `end`.
+                ContentAlign::End | ContentAlign::FlexEnd | ContentAlign::FlowEnd => free.max(0.0),
                 _ => 0.0,
             };
             if shift != 0.0 {
