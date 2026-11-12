@@ -1198,13 +1198,12 @@ pub fn format_string(dtf: &DateTimeFormat, t: f64) -> String {
         .collect()
 }
 
-/// PartitionDateTimeRangePattern (§11.5.?).
-fn range_parts(
-    dtf: &DateTimeFormat,
-    x: f64,
-    y: f64,
-) -> Vec<(&'static str, String, Option<&'static str>)> {
-    let data = &locale::data_for(&dtf.data_locale).dates;
+/// Una parte de un rango: (tipo, valor, `source`).
+type RangePart = (&'static str, String, Option<&'static str>);
+
+/// PartitionDateTimeRangePattern (ECMA-402, §11.5). Los patrones de intervalo son los
+/// `intervalFormats` de CLDR (UTS #35, parte 4, "Dates").
+fn range_parts(dtf: &DateTimeFormat, x: f64, y: f64) -> Vec<RangePart> {
     let fx = fields_at(&dtf.time_zone, x);
     let fy = fields_at(&dtf.time_zone, y);
     let fields = pattern_fields(&dtf.pattern);
@@ -1237,6 +1236,48 @@ fn range_parts(
             .map(|(t, v)| (t, v, Some("shared")))
             .collect();
     }
+    if let Some(parts) = interval_parts(dtf, &dtf.pattern, greatest, x, y) {
+        return parts;
+    }
+    // Fecha y hora con el mismo día (cambia la hora, el período o algo menor) y sin patrón
+    // de intervalo para el skeleton entero: como ICU (DateIntervalFormat), la fecha va una
+    // sola vez y después el intervalo de la hora, unidos con el patrón dateTime de CLDR
+    // (`{1}, {0}` en `en`). El patrón del formato ya se armó con ese patrón dateTime, así
+    // que se parte en su bloque de fecha y su bloque de hora, y los literales de alrededor
+    // son el pegamento.
+    if !matches!(greatest, Some('G' | 'y' | 'M' | 'd'))
+        && let Some((date, time, glue)) = split_date_time(&dtf.pattern)
+    {
+        let time_parts = interval_parts(dtf, &time, greatest, x, y)
+            .unwrap_or_else(|| fallback_parts(dtf, &time, x, y));
+        let mut out: Vec<RangePart> = Vec::new();
+        for g in glue {
+            match g {
+                Glue::Date => out.extend(
+                    format_pattern(dtf, &date, x)
+                        .into_iter()
+                        .map(|(t, v)| (t, v, Some("shared"))),
+                ),
+                Glue::Time => out.extend(time_parts.iter().cloned()),
+                Glue::Lit(s) => out.push(("literal", s, Some("shared"))),
+            }
+        }
+        return out;
+    }
+    fallback_parts(dtf, &dtf.pattern, x, y)
+}
+
+/// El rango con el patrón de `intervalFormats` del skeleton de `pattern` para el campo más
+/// grande que cambia, si CLDR lo tiene.
+fn interval_parts(
+    dtf: &DateTimeFormat,
+    pattern: &str,
+    greatest: Option<char>,
+    x: f64,
+    y: f64,
+) -> Option<Vec<RangePart>> {
+    let data = &locale::data_for(&dtf.data_locale).dates;
+    let fields = pattern_fields(pattern);
     // El patrón de intervalo del skeleton del patrón, si hay.
     let skeleton: String = {
         let mut s: Vec<(char, usize)> = fields
@@ -1255,6 +1296,13 @@ fn range_parts(
                 )
             })
             .collect();
+        // Los skeletons de CLDR escriben minutos y segundos con una letra (`hm`, `Hms`)
+        // aunque el patrón los rellene a dos (`h:mm`).
+        for (c, n) in &mut s {
+            if matches!(c, 'm' | 's') {
+                *n = 1;
+            }
+        }
         let order = "GyMEdBhHkKmsSzOv";
         s.sort_by_key(|(c, _)| order.find(*c).unwrap_or(99));
         s.iter()
@@ -1276,59 +1324,63 @@ fn range_parts(
         Some('y') | Some('G') => "y",
         _ => "",
     };
-    if let Some(&(_, _, pat)) = data
+    let &(_, _, pat) = data
         .intervals
         .iter()
-        .find(|(sk, f, _)| *sk == skeleton && *f == field_key)
-    {
-        // El patrón de intervalo: la primera repetición de un campo empieza la segunda parte.
-        let toks = tokenize(pat);
-        let mut seen: Vec<char> = Vec::new();
-        let mut split = toks.len();
-        for (i, t) in toks.iter().enumerate() {
-            if let PatTok::Field(c, _) = t {
-                let ty = field_type(*c);
-                if seen.contains(&ty) {
-                    split = i;
-                    break;
-                }
-                seen.push(ty);
+        .find(|(sk, f, _)| *sk == skeleton && *f == field_key)?;
+    // El patrón de intervalo: la primera repetición de un campo empieza la segunda parte.
+    let toks = tokenize(pat);
+    let mut seen: Vec<char> = Vec::new();
+    let mut split = toks.len();
+    for (i, t) in toks.iter().enumerate() {
+        if let PatTok::Field(c, _) = t {
+            let ty = field_type(*c);
+            if seen.contains(&ty) {
+                split = i;
+                break;
             }
+            seen.push(ty);
         }
-        // Retroceder sobre el literal que separa.
-        let first: String = untokenize(&toks[..split]);
-        let second: String = untokenize(&toks[split..]);
-        let mut out: Vec<(&'static str, String, Option<&'static str>)> = Vec::new();
-        let p1 = format_pattern(dtf, &first, x);
-        let p2 = format_pattern(dtf, &second, y);
-        // El literal final de la primera parte es el separador compartido.
-        let mut p1 = p1;
-        let sep = match p1.last() {
-            Some(("literal", _)) => p1.pop(),
-            _ => None,
-        };
-        out.extend(p1.into_iter().map(|(t, v)| (t, v, Some("startRange"))));
-        if let Some((t, v)) = sep {
-            out.push((t, v, Some("shared")));
-        }
-        out.extend(p2.into_iter().map(|(t, v)| (t, v, Some("endRange"))));
-        return out;
     }
+    // Retroceder sobre el literal que separa.
+    let first: String = untokenize(&toks[..split]);
+    let second: String = untokenize(&toks[split..]);
+    let mut out: Vec<RangePart> = Vec::new();
+    let p1 = format_pattern(dtf, &first, x);
+    let p2 = format_pattern(dtf, &second, y);
+    // El literal final de la primera parte es el separador compartido.
+    let mut p1 = p1;
+    let sep = match p1.last() {
+        Some(("literal", _)) => p1.pop(),
+        _ => None,
+    };
+    out.extend(p1.into_iter().map(|(t, v)| (t, v, Some("startRange"))));
+    if let Some((t, v)) = sep {
+        out.push((t, v, Some("shared")));
+    }
+    out.extend(p2.into_iter().map(|(t, v)| (t, v, Some("endRange"))));
+    Some(out)
+}
+
+/// El rango con `intervalFormatFallback` (`{0} – {1}`): `pattern` completo para los dos
+/// extremos.
+fn fallback_parts(dtf: &DateTimeFormat, pattern: &str, x: f64, y: f64) -> Vec<RangePart> {
+    let data = &locale::data_for(&dtf.data_locale).dates;
     let fallback = data.interval_fallback;
     let (before, rest) = fallback.split_once("{0}").unwrap_or(("", fallback));
     let (mid, after) = rest.split_once("{1}").unwrap_or((rest, ""));
-    let mut out: Vec<(&'static str, String, Option<&'static str>)> = Vec::new();
+    let mut out: Vec<RangePart> = Vec::new();
     if !before.is_empty() {
         out.push(("literal", before.to_owned(), Some("shared")));
     }
     out.extend(
-        format_pattern(dtf, &dtf.pattern, x)
+        format_pattern(dtf, pattern, x)
             .into_iter()
             .map(|(t, v)| (t, v, Some("startRange"))),
     );
     out.push(("literal", mid.to_owned(), Some("shared")));
     out.extend(
-        format_pattern(dtf, &dtf.pattern, y)
+        format_pattern(dtf, pattern, y)
             .into_iter()
             .map(|(t, v)| (t, v, Some("endRange"))),
     );
@@ -1336,6 +1388,76 @@ fn range_parts(
         out.push(("literal", after.to_owned(), Some("shared")));
     }
     out
+}
+
+/// Un trozo del patrón de fecha y hora partido: el bloque de fecha, el de hora o un literal
+/// del pegamento.
+enum Glue {
+    Date,
+    Time,
+    Lit(String),
+}
+
+/// Parte un patrón de fecha y hora en su bloque de fecha, su bloque de hora y el pegamento
+/// (en orden). `None` si le falta uno de los dos o si los campos de fecha y de hora se
+/// intercalan.
+fn split_date_time(pattern: &str) -> Option<(String, String, Vec<Glue>)> {
+    let is_time = |c: char| {
+        matches!(
+            c,
+            'a' | 'b'
+                | 'B'
+                | 'h'
+                | 'H'
+                | 'k'
+                | 'K'
+                | 'm'
+                | 's'
+                | 'S'
+                | 'A'
+                | 'z'
+                | 'Z'
+                | 'O'
+                | 'v'
+                | 'V'
+                | 'x'
+                | 'X'
+        )
+    };
+    let toks = tokenize(pattern);
+    let mut date: Option<(usize, usize)> = None;
+    let mut time: Option<(usize, usize)> = None;
+    for (i, t) in toks.iter().enumerate() {
+        if let PatTok::Field(c, _) = t {
+            let r = if is_time(*c) { &mut time } else { &mut date };
+            *r = Some(r.map_or((i, i), |(a, _)| (a, i)));
+        }
+    }
+    let (d, t) = (date?, time?);
+    if !(d.1 < t.0 || t.1 < d.0) {
+        return None;
+    }
+    let mut glue = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if i == d.0 {
+            glue.push(Glue::Date);
+            i = d.1 + 1;
+        } else if i == t.0 {
+            glue.push(Glue::Time);
+            i = t.1 + 1;
+        } else {
+            if let PatTok::Lit(s) = &toks[i] {
+                glue.push(Glue::Lit(s.clone()));
+            }
+            i += 1;
+        }
+    }
+    Some((
+        untokenize(&toks[d.0..=d.1]),
+        untokenize(&toks[t.0..=t.1]),
+        glue,
+    ))
 }
 
 // --- Constructor y prototipo ---
@@ -1676,5 +1798,45 @@ mod tests {
             apply_hour_cycle("h:mm:ss a", "h23"),
             "HH:mm:ss".replace("HH", "H")
         );
+    }
+
+    #[test]
+    fn range_with_date_and_time_on_the_same_day() {
+        let text = |parts: &[RangePart]| parts.iter().map(|p| p.1.as_str()).collect::<String>();
+        let sources = |parts: &[RangePart]| -> Vec<(String, &'static str)> {
+            parts
+                .iter()
+                .map(|p| (p.1.clone(), p.2.unwrap_or("")))
+                .collect()
+        };
+        // 2021-08-04T00:30:45Z y 23:30:45Z: cambia el período (sin intervalo `hms` en `en`):
+        // la fecha una vez, el pegamento ", " y la hora con el fallback.
+        let d = dtf("M/d/y, h:mm:ss a");
+        let p = range_parts(&d, 1_628_037_045_000.0, 1_628_119_845_000.0);
+        assert_eq!(
+            text(&p),
+            "8/4/2021, 12:30:45 AM\u{2009}\u{2013}\u{2009}11:30:45 PM"
+        );
+        let s = sources(&p);
+        assert_eq!(s[0], ("8".into(), "shared"));
+        assert_eq!(s[5], (", ".into(), "shared"));
+        assert_eq!(s[6], ("12".into(), "startRange"));
+        assert_eq!(s.last().unwrap(), &("PM".into(), "endRange"));
+        // 10:00 y 11:30 del mismo día: el intervalo `hm` de CLDR para la hora.
+        let d = dtf("M/d/y, h:mm a");
+        let p = range_parts(&d, 1_628_071_200_000.0, 1_628_076_600_000.0);
+        assert_eq!(
+            text(&p),
+            "8/4/2021, 10:00\u{2009}\u{2013}\u{2009}11:30\u{202f}AM"
+        );
+        // Días distintos: la fecha cambia y sigue el fallback con las dos fechas.
+        let p = range_parts(&d, 1_628_071_200_000.0, 1_628_125_200_000.0);
+        assert_eq!(
+            text(&p),
+            "8/4/2021, 10:00 AM\u{2009}\u{2013}\u{2009}8/5/2021, 1:00 AM"
+        );
+        // Sin hora o sin fecha en el patrón no hay nada que partir.
+        assert!(split_date_time("M/d/y").is_none());
+        assert!(split_date_time("h:mm a").is_none());
     }
 }

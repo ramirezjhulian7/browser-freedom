@@ -140,7 +140,7 @@ Generado por `BF_FULL=1 cargo test -p bf-js --test test262_parse -- --nocapture`
 
 Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md`.
 
-- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-11-07; 52017 archivos en 2872 s.
+- Commit de test262: `d53ebc8b1931d9f1541e43d59650776e4b766248`; fecha: 2026-11-12; 52017 archivos en 504 s.
 - Cada test corre en un realm nuevo con `assert.js`, `sta.js` y sus `includes`; sin flags, dos veces (no estricto y con `"use strict";`). Pasa solo si pasan todas sus ejecuciones. Los `module` corren una vez como módulo, con sus `_FIXTURE` desde el disco; un error al cargar o enlazar el grafo es de fase `resolution`.
 - `skipped`: las propuestas de `UNSUPPORTED_FEATURES`. Todo lo demás que falla cuenta como `failed`, incluido lo que todavía no está implementado; `timeout`: presupuesto de instrucciones o 10 s. Las propuestas omitidas:
   - `decorators`: stage 3: `@dec` en clases.
@@ -201,7 +201,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/RegExpStringIteratorPrototype | 17 | 0 | 0 | 0 | 100.0% |
 | built-ins/Set | 383 | 0 | 0 | 0 | 100.0% |
 | built-ins/SetIteratorPrototype | 11 | 0 | 0 | 0 | 100.0% |
-| built-ins/ShadowRealm | 0 | 64 | 0 | 0 | 0.0% |
+| built-ins/ShadowRealm | 64 | 0 | 0 | 0 | 100.0% |
 | built-ins/SharedArrayBuffer | 104 | 0 | 0 | 0 | 100.0% |
 | built-ins/String | 1223 | 0 | 0 | 0 | 100.0% |
 | built-ins/StringIteratorPrototype | 7 | 0 | 0 | 0 | 100.0% |
@@ -216,7 +216,7 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/WeakRef | 29 | 0 | 0 | 0 | 100.0% |
 | built-ins/WeakSet | 85 | 0 | 0 | 0 | 100.0% |
 | built-ins/decodeURI | 55 | 0 | 0 | 0 | 100.0% |
-| built-ins/decodeURIComponent | 56 | 0 | 0 | 0 | 100.0% |
+| built-ins/decodeURIComponent | 55 | 0 | 0 | 1 | 98.2% |
 | built-ins/encodeURI | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/encodeURIComponent | 31 | 0 | 0 | 0 | 100.0% |
 | built-ins/eval | 10 | 0 | 0 | 0 | 100.0% |
@@ -228,23 +228,23 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | built-ins/undefined | 8 | 0 | 0 | 0 | 100.0% |
 | intl402 | 22 | 0 | 0 | 0 | 100.0% |
 | intl402/Array | 2 | 0 | 0 | 0 | 100.0% |
-| intl402/BigInt | 10 | 1 | 0 | 0 | 90.9% |
+| intl402/BigInt | 11 | 0 | 0 | 0 | 100.0% |
 | intl402/Collator | 62 | 3 | 0 | 0 | 95.4% |
 | intl402/Date | 12 | 0 | 0 | 0 | 100.0% |
-| intl402/DateTimeFormat | 159 | 86 | 0 | 0 | 64.9% |
-| intl402/DisplayNames | 4 | 53 | 0 | 0 | 7.0% |
-| intl402/DurationFormat | 0 | 110 | 0 | 0 | 0.0% |
+| intl402/DateTimeFormat | 212 | 33 | 0 | 0 | 86.5% |
+| intl402/DisplayNames | 57 | 0 | 0 | 0 | 100.0% |
+| intl402/DurationFormat | 109 | 1 | 0 | 0 | 99.1% |
 | intl402/FallbackSymbol | 2 | 0 | 0 | 0 | 100.0% |
-| intl402/Intl | 61 | 5 | 0 | 0 | 92.4% |
-| intl402/ListFormat | 80 | 1 | 0 | 0 | 98.8% |
+| intl402/Intl | 63 | 3 | 0 | 0 | 95.5% |
+| intl402/ListFormat | 81 | 0 | 0 | 0 | 100.0% |
 | intl402/Locale | 189 | 1 | 0 | 0 | 99.5% |
 | intl402/Number | 7 | 0 | 0 | 0 | 100.0% |
-| intl402/NumberFormat | 209 | 42 | 0 | 0 | 83.3% |
+| intl402/NumberFormat | 221 | 30 | 0 | 0 | 88.0% |
 | intl402/PluralRules | 51 | 2 | 0 | 0 | 96.2% |
-| intl402/RelativeTimeFormat | 73 | 7 | 0 | 0 | 91.2% |
-| intl402/Segmenter | 2 | 77 | 0 | 0 | 2.5% |
+| intl402/RelativeTimeFormat | 80 | 0 | 0 | 0 | 100.0% |
+| intl402/Segmenter | 79 | 0 | 0 | 0 | 100.0% |
 | intl402/String | 15 | 4 | 0 | 0 | 78.9% |
-| intl402/Temporal | 72 | 1957 | 0 | 0 | 3.5% |
+| intl402/Temporal | 1497 | 532 | 0 | 0 | 73.8% |
 | intl402/TypedArray | 1 | 0 | 0 | 0 | 100.0% |
 | language/arguments-object | 261 | 2 | 0 | 0 | 99.2% |
 | language/asi | 102 | 0 | 0 | 0 | 100.0% |
@@ -275,39 +275,88 @@ Generado por `cargo run --release -p bf-js --bin test262 -- tests/test262 --out 
 | language/types | 113 | 0 | 0 | 0 | 100.0% |
 | language/white-space | 67 | 0 | 0 | 0 | 100.0% |
 | **language/ (total)** | 23183 | 11 | 532 | 0 | 100.0% |
-| **Total** | 48791 | 2429 | 797 | 0 | 95.3% |
+| **Total** | 50594 | 625 | 797 | 1 | 98.8% |
 
 ### Los 30 errores más frecuentes
 
 | # | tests | error |
 |---:|---:|---|
-| 1 | 263 | `RangeError: Unsupported calendar: gregory` |
-| 2 | 139 | `RangeError: Unsupported calendar: buddhist` |
-| 3 | 138 | `RangeError: Unsupported calendar: chinese` |
-| 4 | 135 | `RangeError: Unsupported calendar: japanese` |
-| 5 | 131 | `RangeError: Unsupported calendar: hebrew` |
-| 6 | 120 | `RangeError: Unsupported calendar: dangi` |
-| 7 | 114 | `RangeError: Unsupported calendar: roc` |
-| 8 | 106 | `RangeError: Unsupported calendar: islamic-civil` |
-| 9 | 104 | `RangeError: Unsupported calendar: ethiopic` |
-| 10 | 93 | `RangeError: Unsupported calendar: islamic-tbla` |
-| 11 | 84 | `RangeError: Unsupported calendar: coptic` |
-| 12 | 84 | `RangeError: Unsupported calendar: ethioaa` |
-| 13 | 83 | `RangeError: Unsupported calendar: persian` |
-| 14 | 82 | `RangeError: Unsupported calendar: islamic-umalqura` |
-| 15 | 73 | `RangeError: Unsupported calendar: indian` |
-| 16 | 72 | `TypeError: Intl.DurationFormat is not a constructor` |
-| 17 | 61 | `ReferenceError: ShadowRealm is not defined` |
-| 18 | 59 | `TypeError: Temporal objects cannot be converted to primitives; use compare() or equals()` |
-| 19 | 49 | `RangeError: Unknown time zone: America/Vancouver` |
-| 20 | 45 | `TestNError: Expected SameValue(«…», «…») to be true` |
-| 21 | 36 | `TypeError: Cannot read properties of undefined (reading 'prototype')` |
-| 22 | 32 | `TypeError: Intl.Segmenter is not a constructor` |
-| 23 | 24 | `TypeError: Intl.DisplayNames is not a constructor` |
-| 24 | 21 | `TypeError: Cannot read properties of undefined (reading 'supportedLocalesOf')` |
-| 25 | 13 | `RangeError: Unsupported calendar: islamicc` |
-| 26 | 11 | `RangeError: Unknown time zone: America/Los_Angeles` |
-| 27 | 10 | `RangeError: Unknown time zone: Africa/Monrovia` |
-| 28 | 10 | `TestNError: Expected a TestNError but got a TypeError` |
-| 29 | 10 | `TypeError: Cannot convert undefined to object` |
-| 30 | 8 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a RangeError` |
+| 1 | 163 | `RangeError: Unsupported calendar: chinese` |
+| 2 | 120 | `RangeError: Unsupported calendar: dangi` |
+| 3 | 96 | `RangeError: Unsupported calendar: islamic-umalqura` |
+| 4 | 49 | `RangeError: Unknown time zone: America/Vancouver` |
+| 5 | 19 | `TestNError: Expected SameValue(«…», «…») to be true` |
+| 6 | 11 | `RangeError: Unknown time zone: America/Los_Angeles` |
+| 7 | 10 | `RangeError: Unknown time zone: Africa/Monrovia` |
+| 8 | 6 | `RangeError: Unknown time zone: Africa/Abidjan` |
+| 9 | 6 | `RangeError: Unknown time zone: America/Toronto` |
+| 10 | 6 | `TestNError: Code unit: dN Expected SameValue(«…», «…») to be true` |
+| 11 | 5 | `RangeError: Unknown time zone: Asia/Calcutta` |
+| 12 | 5 | `RangeError: the calendar islamic-tbla does not match the calendar of the format (gregory)` |
+| 13 | 5 | `TestNError: Missing year throws TypeError before month/monthCode conflict throws RangeError Expected a TypeError but got a RangeError` |
+| 14 | 4 | `RangeError: Maximum call stack size exceeded` |
+| 15 | 4 | `RangeError: Unknown time zone: America/Bogota` |
+| 16 | 4 | `TestNError: Actual [noon] and expected [] should have the same contents. unused dayPeriods: noon` |
+| 17 | 4 | `TestNError: negative: parts[N].value Expected SameValue(«…», «…») to be true` |
+| 18 | 3 | `RangeError: Unknown time zone: America/Sao_Paulo` |
+| 19 | 3 | `RangeError: Unknown time zone: Etc/GMT+N` |
+| 20 | 3 | `RangeError: Unknown time zone: Europe/Vienna` |
+| 21 | 3 | `RangeError: Unknown time zone: Pacific/Apia` |
+| 22 | 3 | `TestNError: Compact short: N: length Expected SameValue(«…», «…») to be true` |
+| 23 | 3 | `TestNError: calendar mismatch Expected a RangeError to be thrown but no exception was thrown at all` |
+| 24 | 2 | `RangeError: Unknown time zone: Africa/Asmera` |
+| 25 | 2 | `RangeError: Unknown time zone: America/Kentucky/Louisville` |
+| 26 | 2 | `RangeError: Unknown time zone: America/New_York` |
+| 27 | 2 | `RangeError: Unknown time zone: America/St_Johns` |
+| 28 | 2 | `RangeError: Unknown time zone: Asia/Kolkata` |
+| 29 | 2 | `RangeError: Unknown time zone: Asia/Tokyo` |
+| 30 | 2 | `RangeError: Unknown time zone: Etc/GMT-N` |
+
+## macOS frente a Windows
+
+La sección "Ejecución" de arriba es la primera corrida completa en macOS (2026-11-12, Apple M4
+de 10 núcleos, Rust 1.100.0, `master` `5b9a230`). Comando:
+`cargo run --release -p bf-js --bin test262 -- tests/test262 --threads 4 --out docs/test262-status.md`.
+El runner reescribe solo la sección "Ejecución"; esta se queda.
+
+| corrida | archivos | passed | failed | skipped | timeout | % | tiempo |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Windows, 2026-11-07 (E8, `488bf24`) | 52 017 | 48 791 | 2 429 | 797 | 0 | 95.3 % | 2 872 s |
+| macOS, 2026-11-12 (`5b9a230`) | 52 017 | **50 594** | 625 | 797 | 1 | **98.8 %** | 504 s |
+
+- Mismo commit de test262 (`d53ebc8`). `language/` igual: 99.95 % (23 183 passed, 11 failed).
+- **0 pánicos** (el runner los atrapa y los anota como `pánico: …`; ninguno en
+  `target/test262/results.tsv`).
+- **1 timeout**, por carga: `built-ins/decodeURIComponent/S15.1.3.2_A2.5_T1.js` (recorre
+  rangos grandes de code points). Corrido solo pasa en 9 s de reloj (6.2 s de CPU) con el
+  presupuesto de 10 s; durante la corrida completa la carga de la máquina estaba en 95–120
+  (otros cinco ejecutores compilando). En Windows pasó.
+- 504 s con `--threads 4` y la máquina cargada (791 s de CPU de usuario, 163 % de CPU),
+  frente a 2 872 s en Windows.
+- Directorios que cambiaron (todos por lo que E8 añadió después de la corrida de Windows: los
+  calendarios de Temporal, Temporal en DateTimeFormat, ShadowRealm, Segmenter, DurationFormat,
+  DisplayNames y datos CLDR de `de`/`pl`); ninguna regresión fuera del timeout de arriba:
+
+| directorio | passed Windows | passed macOS | failed Windows | failed macOS |
+|---|---:|---:|---:|---:|
+| built-ins/ShadowRealm | 0 | 64 | 64 | 0 |
+| intl402/BigInt | 10 | 11 | 1 | 0 |
+| intl402/DateTimeFormat | 159 | 212 | 86 | 33 |
+| intl402/DisplayNames | 4 | 57 | 53 | 0 |
+| intl402/DurationFormat | 0 | 109 | 110 | 1 |
+| intl402/Intl | 61 | 63 | 5 | 3 |
+| intl402/ListFormat | 80 | 81 | 1 | 0 |
+| intl402/NumberFormat | 209 | 221 | 42 | 30 |
+| intl402/RelativeTimeFormat | 73 | 80 | 7 | 0 |
+| intl402/Segmenter | 2 | 79 | 77 | 0 |
+| intl402/Temporal | 72 | 1 497 | 1 957 | 532 |
+| built-ins/decodeURIComponent | 56 | 55 | 0 | 0 (1 timeout) |
+
+- Después de la corrida completa, los rangos de fecha y hora del mismo día (`formatRange` ya no
+  repite la fecha) suben `intl402/DateTimeFormat` de 212 a 214 (los dos
+  `temporal-objects-resolved-time-zone.js`), medido con `--filter intl402/` y comparado test
+  por test, sin regresiones; la tabla de arriba es de antes de ese cambio.
+- Lo que queda (625): sobre todo `intl402/Temporal` (532: calendarios `chinese`, `dangi` e
+  `islamic-umalqura`, que necesitan tablas astronómicas, y zonas IANA, que no hay en el árbol),
+  `intl402/DateTimeFormat` (33) e `intl402/NumberFormat` (30). Ver "Los 30 errores más
+  frecuentes" arriba.
