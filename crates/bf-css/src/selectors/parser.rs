@@ -305,14 +305,18 @@ impl<'a> Parser<'a> {
     fn element_ns(&self, prefix: Option<&TokenKind>) -> Result<NsConstraint> {
         Ok(match prefix {
             None => match &self.ns.default {
-                Some(url) => NsConstraint::Url(url.clone()),
+                Some(url) => NsConstraint::Url {
+                    url: url.clone(),
+                    prefix: None,
+                },
                 None => NsConstraint::Any,
             },
-            Some(TokenKind::Delim('*')) => NsConstraint::Any,
+            Some(TokenKind::Delim('*')) => NsConstraint::ExplicitAny,
             Some(TokenKind::Delim('|')) => NsConstraint::None,
-            Some(TokenKind::Ident(p)) => {
-                NsConstraint::Url(self.ns.prefixes.get(p).ok_or(SelectorError)?.clone())
-            }
+            Some(TokenKind::Ident(p)) => NsConstraint::Url {
+                url: self.ns.prefixes.get(p).ok_or(SelectorError)?.clone(),
+                prefix: Some(p.clone()),
+            },
             Some(_) => unreachable!(),
         })
     }
@@ -373,7 +377,13 @@ impl<'a> Parser<'a> {
             ) => {
                 p.pos += 3;
                 let url = self.ns.prefixes.get(prefix).ok_or(SelectorError)?;
-                (AttrNs::Url(url.clone()), n.clone())
+                (
+                    AttrNs::Url {
+                        url: url.clone(),
+                        prefix: prefix.clone(),
+                    },
+                    n.clone(),
+                )
             }
             (
                 Some(TokenKind::Delim('*')),
@@ -596,6 +606,14 @@ impl<'a> Parser<'a> {
                 }
                 PseudoClass::Heading(levels)
             }
+            // HTML §4.13.7.4: `:state(<ident>)`; el identificador distingue mayúsculas.
+            "state" => {
+                let mut values = args.iter().filter(|v| !v.is_whitespace());
+                match (values.next().and_then(ComponentValue::token), values.next()) {
+                    (Some(TokenKind::Ident(v)), None) => PseudoClass::State(v.clone()),
+                    _ => return Err(SelectorError),
+                }
+            }
             "dir" => {
                 let mut values = args.iter().filter(|v| !v.is_whitespace());
                 match (values.next().and_then(ComponentValue::token), values.next()) {
@@ -688,6 +706,8 @@ fn pseudo_class(lower: &str) -> Option<PseudoClass> {
         "placeholder-shown" => PseudoClass::PlaceholderShown,
         "scope" => PseudoClass::Scope,
         "defined" => PseudoClass::Defined,
+        "valid" => PseudoClass::Valid,
+        "invalid" => PseudoClass::Invalid,
         "host" => PseudoClass::Host(None),
         "heading" => PseudoClass::Heading(Vec::new()),
         _ => return None,

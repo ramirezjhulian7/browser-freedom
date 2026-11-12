@@ -88,7 +88,7 @@ fn create_document(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => "application/xml".into(),
     };
     let ctx = WebContextHandle::current(agent);
-    d.url = ctx.get(agent).document().url.clone();
+    // La URL queda en `about:blank` (DOM §4.5.1: el documento nuevo no hereda la URL).
     let root = d.root();
     if let Some(dt) = doctype {
         // El doctype se importa (los nodos no se mueven entre arenas).
@@ -137,7 +137,7 @@ fn create_html_document(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     let body = d.create(NodeData::Element(Element::new(Namespace::Html, "body")));
     d.append(html, body);
     let ctx = WebContextHandle::current(agent);
-    d.url = ctx.get(agent).document().url.clone();
+    // La URL queda en `about:blank` (DOM §4.5.1).
     let i = ctx.get_mut(agent).add_document(d);
     let root = ctx.get(agent).doc(i).root();
     Ok(wrap_node(agent, NodeRef::new(i, root)))
