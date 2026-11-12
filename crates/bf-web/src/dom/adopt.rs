@@ -12,7 +12,8 @@ use crate::dom::state::{ListenerRec, state};
 use crate::dom::{mutated, throw_dom};
 use crate::{DocIndex, NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
-/// Adopta `n` en el documento `to` y devuelve su nuevo `NodeRef` (el mismo si ya es de `to`).
+/// Adopta `n` en el documento `to` y devuelve su nuevo `NodeRef` (el mismo si ya es de `to`,
+/// y entonces no lo quita de su padre: ver `adoptNode`).
 /// Los `Document` no se pueden adoptar (`NotSupportedError`).
 pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeRef> {
     let is_document = with_doc(agent, n.doc, |d| {
@@ -25,8 +26,11 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
     if with_doc(agent, n.doc, |d| d.is_shadow_root(n.node)) {
         return throw_dom(agent, DomException::HierarchyRequestError);
     }
+    // E1: en el mismo documento no hay nada que mover de arena. El paso 2 de "adopt" (quitarlo
+    // de su padre) lo hace `adoptNode`; los demás usos (insertar, "convert nodes into a node")
+    // lo quitan al insertarlo, y hacerlo aquí antes cambiaría el "viable sibling" de
+    // `before()`/`after()`/`replaceWith()` cuando el propio nodo es un argumento (§4.2.8).
     if n.doc == to {
-        with_doc_mut(agent, to, |d| d.adopt(n.node));
         return Ok(n);
     }
     let from = n.doc;
@@ -51,10 +55,19 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         *wc.doc_mut(to) = target;
         copy
     };
-    let new: Vec<NodeId> = with_doc(agent, to, |d| {
+    let mut new: Vec<NodeId> = with_doc(agent, to, |d| {
         d.shadow_including_inclusive_descendants(copy)
     }); // E1
     crate::dom::insertion::copy_script_state(agent, (from, &old), (to, &new));
+    let mut old = old;
+    {
+        let wc = ctx.get_mut(agent);
+        let mut target = std::mem::take(wc.doc_mut(to));
+        let (ao, an) = attr_pairs(wc.doc(from), &mut target, &old, &new);
+        *wc.doc_mut(to) = target;
+        old.extend(ao);
+        new.extend(an);
+    }
     let realm = ctx.realm;
     for (&o, &nw) in old.iter().zip(new.iter()) {
         let (old_ref, new_ref) = (NodeRef::new(from, o), NodeRef::new(to, nw));
@@ -194,7 +207,7 @@ pub fn adopt_foreign(
         *ctx.get_mut(agent).doc_mut(to) = target;
         copy
     };
-    let new: Vec<NodeId> = with_doc(agent, to, |d| {
+    let mut new: Vec<NodeId> = with_doc(agent, to, |d| {
         d.shadow_including_inclusive_descendants(copy)
     });
     with_doc_mut(agent, to, |d| {
@@ -204,6 +217,16 @@ pub fn adopt_foreign(
             }
         }
     });
+    let mut old = old;
+    {
+        let ctx = WebContextHandle { realm: here };
+        let mut target = std::mem::take(ctx.get_mut(agent).doc_mut(to));
+        let src = WebContextHandle { realm: from };
+        let (ao, an) = attr_pairs(src.get(agent).doc(n.doc), &mut target, &old, &new);
+        *ctx.get_mut(agent).doc_mut(to) = target;
+        old.extend(ao);
+        new.extend(an);
+    }
     for (&o, &nw) in old.iter().zip(new.iter()) {
         let (old_ref, new_ref) = (NodeRef::new(n.doc, o), NodeRef::new(to, nw));
         if let Some(obj) = agent.host_transplant((from, old_ref.key()), (here, new_ref.key()))
@@ -291,6 +314,27 @@ fn move_foreign_listeners(agent: &mut Agent, from: RealmId, old: NodeRef, new: N
         .doc_mut(old.doc)
         .move_listeners_remapped(old_t, &mut target, new_t, |id| remap.get(&id).copied());
     *ctx.get_mut(agent).doc_mut(new.doc) = target;
+}
+
+/// E1: los `Attr` que JavaScript pudo haber visto de los elementos `old` (de `src`), con el
+/// que les corresponde en su copia `new` (de `dst`): DOM §4.5 "adopt" paso 3.1 adopta los
+/// `Attr` de cada elemento con él, así que su wrapper debe pasar al `Attr` de la copia.
+fn attr_pairs(
+    src: &bf_dom::Document,
+    dst: &mut bf_dom::Document,
+    old: &[NodeId],
+    new: &[NodeId],
+) -> (Vec<NodeId>, Vec<NodeId>) {
+    let (mut ao, mut an) = (Vec::new(), Vec::new());
+    for (&o, &nw) in old.iter().zip(new) {
+        for a in src.existing_attr_nodes(o) {
+            if let Some(b) = dst.matching_attr_node(nw, src, a) {
+                ao.push(a);
+                an.push(b);
+            }
+        }
+    }
+    (ao, an)
 }
 
 /// Mueve los event handlers (y sus listeners) de un nodo a su copia.

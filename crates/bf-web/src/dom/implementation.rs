@@ -61,6 +61,8 @@ fn create_document_type(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
 /// `createDocument(namespace, qualifiedName, doctype)` (un `XMLDocument`).
 fn create_document(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_doc(agent, a)?;
+    // E1: `namespace` y `qualifiedName` son obligatorios (WebIDL).
+    crate::dom::events::required(agent, a, 2, "createDocument")?;
     let ns = to_opt_dom_string(agent, &a.arg(0))?;
     let qn = if a.arg(1).is_null() {
         bf_infra::DomString::new()
@@ -89,22 +91,27 @@ fn create_document(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let ctx = WebContextHandle::current(agent);
     // La URL queda en `about:blank` (DOM §4.5.1: el documento nuevo no hereda la URL).
-    let root = d.root();
-    if let Some(dt) = doctype {
-        // El doctype se importa (los nodos no se mueven entre arenas).
-        let src = ctx.get(agent).doc(dt.doc).clone();
-        let copy = d.import_from(&src, dt.node);
-        d.append(root, copy);
-    }
-    if !qn.is_empty() {
+    // Pasos 3-5: el elemento se crea primero (puede lanzar) y se agrega después del doctype.
+    let element = if qn.is_empty() {
+        None
+    } else {
         match d.create_element_ns(ns_str.as_deref().filter(|s| !s.is_empty()), &qn) {
-            Ok(e) => d.append(root, e),
+            Ok(e) => Some(e),
             Err(e) => return throw_dom(agent, e),
         }
-    }
+    };
     let i = ctx.get_mut(agent).add_document(d);
     let _ = parent;
     let root = ctx.get(agent).doc(i).root();
+    // E1: el doctype es el mismo nodo, adoptado (§4.5 "append" lo adopta), no una copia.
+    if let Some(dt) = doctype {
+        let dt = crate::dom::adopt::adopt_into(agent, dt, i)?;
+        let _ = crate::with_doc_mut(agent, i, |d| d.append_child(root, dt.node));
+    }
+    if let Some(e) = element {
+        crate::with_doc_mut(agent, i, |d| d.append(root, e));
+    }
+    crate::dom::mutated(agent);
     Ok(wrap_node(agent, NodeRef::new(i, root)))
 }
 

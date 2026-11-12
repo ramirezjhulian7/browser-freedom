@@ -472,6 +472,20 @@ impl ScriptHost for JsHost<'_> {
         sync_lent(self.agent, self.ctx.realm, self.doc, doc, target, type_);
     }
 
+    // E1: los listeners de los eventos de la activation behavior (`change` de un checkbox) ven
+    // el `click` ya despachado (`target`, fase `NONE`), no la celda vacía del dispatch. Con un
+    // `relatedTarget` la celda sigue vacía (sin `target` ni `relatedTarget`), lo que espera
+    // `relatedTarget.window.js` "Reset targets before activation behavior" (ver
+    // `docs/pendiente/mac/e1.md`).
+    fn before_activation(&mut self, event: &Event) {
+        if let Some((_, cell, _)) = &self.wrapper
+            && self.main == Some(event_key(event))
+            && event.related_target().is_none()
+        {
+            *cell.borrow_mut() = event.clone();
+        }
+    }
+
     fn call_listener(&mut self, doc: &mut Document, handle: u64, event: &mut Event) -> bool {
         let key = event_key(event);
         // El documento vuelve al contexto mientras corre el listener.
@@ -613,11 +627,94 @@ pub fn with_checkpoint_each<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// E1: los realms que alguna vez fueron marcos (para reconocer uno ya quitado de la lista de
+/// marcos de `bom::frames`, que lo olvida al sincronizar).
+#[derive(Default)]
+struct KnownFrames(std::collections::HashSet<bf_js::vm::RealmId>);
+
+/// E1: ¿el documento de la ventana `realm` es "fully active" (HTML §7.3.3)? Lo es el de una
+/// ventana de nivel superior, y el de un marco cuyo `<iframe>` sigue conectado en el documento
+/// de su padre y cuyo padre es fully active. Quitar el `<iframe>` destruye su navegable
+/// ("destroy a child navigable", en los removing steps del elemento), así que basta con que
+/// el elemento ya no esté conectado, aunque la lista de marcos todavía no se sincronizó. Un
+/// realm sin `WebContext` (un worker) cuenta como activo.
+pub fn fully_active(agent: &mut Agent, realm: bf_js::vm::RealmId) -> bool {
+    let mut r = realm;
+    for _ in 0..16 {
+        if agent.realm_data::<crate::WebContext>(r).is_none() {
+            return true;
+        }
+        let frame = crate::bom::frames::frame_of(agent, r).map(|f| (f.parent, f.element));
+        let Some((parent, element)) = frame else {
+            return !agent
+                .embedder_data::<KnownFrames>()
+                .is_some_and(|k| k.0.contains(&r));
+        };
+        if agent.embedder_data::<KnownFrames>().is_none() {
+            agent.set_embedder_data(KnownFrames::default());
+        }
+        if let Some(k) = agent.embedder_data_mut::<KnownFrames>() {
+            k.0.insert(r);
+        }
+        let connected = agent
+            .realm_data::<crate::WebContext>(parent)
+            .is_some_and(|c| {
+                let d = c.doc(0);
+                element.index() < d.node_count() && d.is_connected(element)
+            });
+        if !connected {
+            return false;
+        }
+        r = parent;
+    }
+    true
+}
+
+/// E1: la ventana del callback de un listener es fully active (DOM §2.10 "inner invoke":
+/// el realm de una función es el suyo, `GetFunctionRealm`; el de un objeto con `handleEvent`,
+/// el del `Object.prototype` de su cadena de prototipos). Sin realm reconocible, sí.
+fn callback_fully_active(agent: &mut Agent, cb: &Value) -> bool {
+    let Value::Object(o) = cb else {
+        return true;
+    };
+    let realm = if agent.is_callable(cb) {
+        agent.get_function_realm(*o).ok()
+    } else {
+        let mut p = agent.heap[*o].proto;
+        let mut found = None;
+        for _ in 0..64 {
+            let Some(cur) = p else { break };
+            if let Some(r) = (0..agent.realms.len())
+                .find(|&r| agent.realms[r].intrinsics.object_prototype == cur)
+            {
+                found = Some(r);
+                break;
+            }
+            p = agent.heap[cur].proto;
+        }
+        found
+    };
+    realm.is_none_or(|r| r == agent.current_realm || fully_active(agent, r))
+}
+
 /// Llama a un listener de script; `true` si lanzó.
 fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc<Object>) -> bool {
     let Some(rec) = state(agent).listeners.get(&handle).cloned() else {
         return false;
     };
+    // E1: "inner invoke" (DOM §2.10, whatwg/dom#1084): un listener no corre si la ventana del
+    // target (el realm en curso: el del documento del nodo, o el del `EventTarget`) o la de su
+    // callback es una `Window` cuyo documento ya no es fully active (un `<iframe>` quitado). Se
+    // mira por listener, así que quitar el marco dentro de uno salta los que siguen.
+    if !fully_active(agent, agent.current_realm) {
+        return false;
+    }
+    if let ListenerRec::Callback(h) = &rec {
+        let cb = agent.host_pinned(*h).unwrap_or_default();
+        if !callback_fully_active(agent, &cb) {
+            return false;
+        }
+    }
     let ev = Value::Object(event);
     let current = {
         let d = event_data(agent, &ev).expect("evento");
@@ -2070,6 +2167,11 @@ fn run_event_handler(
     if !agent.is_callable(&callback) {
         return Ok(Value::Undefined);
     }
+    // E1: "the event handler processing algorithm" (HTML §8.1.8.1) no corre un callback cuya
+    // ventana ya no es fully active.
+    if !callback_fully_active(agent, &callback) {
+        return Ok(Value::Undefined);
+    }
     let error_special = type_ == "error"
         && target == EventTarget::Window
         && matches!(
@@ -2161,10 +2263,9 @@ pub fn create_event(agent: &mut Agent, doc: DocIndex, interface: &str) -> JsResu
             EventIface::Mouse,
             EventKind::Mouse(MouseEventData::default()),
         ),
-        "touchevent" => (
-            EventIface::Class(classes(agent).touch_event),
-            EventKind::Ui { detail: 0 },
-        ),
+        // E1: "touchevent" solo con "expose legacy touch event APIs" (Touch Events §8), que
+        // en un navegador de escritorio es falso (no hay `ontouchstart` en `document`): cae
+        // en `NotSupportedError`.
         "textevent" => (EventIface::Ui, EventKind::Ui { detail: 0 }),
         "beforeunloadevent" | "devicemotionevent" | "deviceorientationevent" => {
             (EventIface::Event, EventKind::Event)

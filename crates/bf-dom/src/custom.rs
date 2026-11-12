@@ -23,6 +23,10 @@ pub enum CustomElementEvent {
     Connected(NodeId),
     /// El elemento dejó de estar conectado (paso 16 de "remove").
     Disconnected(NodeId),
+    /// E1: el elemento conectado se movió con `moveBefore()` (paso 22.2 de "move", DOM
+    /// §4.2.3): `connectedMoveCallback`, o si no lo hay `disconnectedCallback` y
+    /// `connectedCallback` (HTML §4.13.6).
+    Moved(NodeId),
     /// Cambió un atributo del elemento ("handle attribute changes").
     AttributeChanged {
         element: NodeId,
@@ -151,6 +155,19 @@ impl Document {
         for n in self.shadow_including_inclusive_descendants(node) {
             if self.ce_candidate(n) {
                 self.custom.events.push(CustomElementEvent::Connected(n));
+            }
+        }
+    }
+
+    /// E1: paso 22.2 de "move": los custom elements de lo que se movió, si el nuevo padre está
+    /// conectado.
+    pub(crate) fn custom_moved(&mut self, node: NodeId) {
+        if !self.custom.enabled || !self.is_connected(node) {
+            return;
+        }
+        for n in self.shadow_including_inclusive_descendants(node) {
+            if self.ce_candidate(n) {
+                self.custom.events.push(CustomElementEvent::Moved(n));
             }
         }
     }

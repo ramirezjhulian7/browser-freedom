@@ -32,6 +32,8 @@ struct Definition {
     observed: Vec<String>,
     connected: Option<HostHandle>,
     disconnected: Option<HostHandle>,
+    /// E1: `connectedMoveCallback` (lo usa `moveBefore()`).
+    connected_move: Option<HostHandle>,
     adopted: Option<HostHandle>,
     attribute_changed: Option<HostHandle>,
     form_associated: bool,
@@ -50,6 +52,8 @@ enum Reaction {
     Upgrade(usize),
     Connected,
     Disconnected,
+    /// E1: `connectedMoveCallback()`.
+    ConnectedMove,
     Adopted(crate::DocIndex, crate::DocIndex),
     AttributeChanged {
         name: DomString,
@@ -384,7 +388,7 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         let disconnected = get_callback(agent, proto, "disconnectedCallback")?;
         let adopted = get_callback(agent, proto, "adoptedCallback")?;
         let attribute_changed = get_callback(agent, proto, "attributeChangedCallback")?;
-        let _connected_move = get_callback(agent, proto, "connectedMoveCallback")?;
+        let connected_move = get_callback(agent, proto, "connectedMoveCallback")?;
         let mut observed = Vec::new();
         if attribute_changed.is_some() {
             let v = agent.get_str(ctor, "observedAttributes")?;
@@ -409,7 +413,7 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             }
         }
         Ok((
-            connected,
+            (connected, connected_move),
             disconnected,
             adopted,
             attribute_changed,
@@ -420,7 +424,7 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     })();
     registry(agent).running = false;
     let (
-        connected,
+        (connected, connected_move),
         disconnected,
         adopted,
         attribute_changed,
@@ -439,6 +443,7 @@ fn define(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             observed,
             connected,
             disconnected,
+            connected_move,
             adopted,
             attribute_changed,
             form_associated,
@@ -585,6 +590,7 @@ fn enqueue_callback(agent: &mut Agent, el: NodeRef, reaction: Reaction) {
     let has = match &reaction {
         Reaction::Connected => d.connected.is_some(),
         Reaction::Disconnected => d.disconnected.is_some(),
+        Reaction::ConnectedMove => d.connected_move.is_some(),
         Reaction::Adopted(..) => d.adopted.is_some(),
         Reaction::AttributeChanged {
             name, namespace, ..
@@ -654,6 +660,7 @@ pub fn process_reactions(agent: &mut Agent) {
                         enqueue_callback(agent, el, Reaction::Disconnected);
                     }
                 }
+                CustomElementEvent::Moved(node) => moved(agent, NodeRef::new(doc, node)),
                 CustomElementEvent::AttributeChanged {
                     element,
                     local_name,
@@ -718,6 +725,28 @@ fn invoke_reactions(agent: &mut Agent) {
     }
 }
 
+/// E1: un custom element movido con `moveBefore()` (HTML §4.13.6 "enqueue a custom element
+/// callback reaction" con `connectedMoveCallback`): si la definición no lo tiene, se encolan
+/// `disconnectedCallback` y `connectedCallback`.
+fn moved(agent: &mut Agent, el: NodeRef) {
+    if !with_doc(agent, el.doc, |d| d.is_custom_element(el.node)) {
+        return;
+    }
+    let has_move = registry_ref(agent)
+        .and_then(|r| {
+            r.element_defs
+                .get(&el)
+                .map(|&i| r.defs[i].connected_move.is_some())
+        })
+        .unwrap_or(false);
+    if has_move {
+        enqueue_callback(agent, el, Reaction::ConnectedMove);
+    } else {
+        enqueue_callback(agent, el, Reaction::Disconnected);
+        enqueue_callback(agent, el, Reaction::Connected);
+    }
+}
+
 fn requeue_event(agent: &mut Agent, doc: crate::DocIndex, ev: CustomElementEvent) {
     match ev {
         CustomElementEvent::Connected(node) => {
@@ -734,6 +763,7 @@ fn requeue_event(agent: &mut Agent, doc: crate::DocIndex, ev: CustomElementEvent
                 enqueue_callback(agent, el, Reaction::Disconnected);
             }
         }
+        CustomElementEvent::Moved(node) => moved(agent, NodeRef::new(doc, node)),
         CustomElementEvent::AttributeChanged {
             element,
             local_name,
@@ -767,6 +797,7 @@ fn invoke_callback(agent: &mut Agent, el: NodeRef, reaction: Reaction) -> JsResu
         match &reaction {
             Reaction::Connected => (d.connected, Vec::new()),
             Reaction::Disconnected => (d.disconnected, Vec::new()),
+            Reaction::ConnectedMove => (d.connected_move, Vec::new()),
             Reaction::Adopted(..) => (d.adopted, Vec::new()),
             Reaction::AttributeChanged { .. } => (d.attribute_changed, Vec::new()),
             Reaction::Upgrade(_) => (None, Vec::new()),

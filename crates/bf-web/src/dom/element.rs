@@ -13,7 +13,7 @@ use crate::dom::adopt::adopt_into;
 use crate::dom::collections::{html_collection, named_node_map, token_list};
 use crate::dom::insertion::{inserted, inserted_markup};
 use crate::dom::{
-    arg_node, classes, from_dom_string, from_opt_dom_string, mixins, mutated, this_node, throw_dom,
+    classes, from_dom_string, from_opt_dom_string, mixins, mutated, this_node, throw_dom,
     to_dom_string, to_opt_dom_string, wrap_node, wrap_opt,
 };
 use crate::{NodeRef, with_doc, with_doc_mut};
@@ -21,6 +21,8 @@ use crate::{NodeRef, with_doc, with_doc_mut};
 pub fn element_class(node: HostClassId) -> HostClass {
     let c = HostClass::new("Element")
         .parent(node)
+        // E1: ParentNode `moveBefore` (DOM §4.2.6).
+        .method("moveBefore", 2, crate::dom::node::move_before)
         .attribute("namespaceURI", Some(namespace_uri), None)
         .attribute("prefix", Some(prefix), None)
         .attribute("localName", Some(local_name), None)
@@ -145,17 +147,21 @@ fn set_class_list(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// `slot` refleja el atributo `slot`.
+/// `slot` refleja el atributo `slot` (E1: el de namespace nulo, HTML §2.6.1).
 fn get_slot(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let v = with_doc(agent, n.doc, |d| d.get_attribute(n.node, &"slot".into()));
+    let v = with_doc(agent, n.doc, |d| {
+        d.get_attribute_ns(n.node, None, &"slot".into())
+    });
     Ok(from_dom_string(&v.unwrap_or_default()))
 }
 
 fn set_slot(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let v = to_dom_string(agent, &a.arg(0))?;
-    let r = with_doc_mut(agent, n.doc, |d| d.set_attribute(n.node, &"slot".into(), v));
+    let r = with_doc_mut(agent, n.doc, |d| {
+        d.set_attribute_ns(n.node, None, &"slot".into(), v)
+    });
     done(agent, r)
 }
 
@@ -310,18 +316,33 @@ fn get_attribute_node_ns(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value>
 }
 
 /// Un argumento que debe ser un `Attr`.
-fn arg_attr(agent: &mut Agent, v: &Value) -> JsResult<NodeRef> {
+fn arg_attr(agent: &mut Agent, v: &Value) -> JsResult<crate::dom::adopt::NodeArg> {
     let attr = classes(agent).attr;
     if !agent.host_is_instance(v, attr) {
         return agent.type_error("parameter 1 is not of type 'Attr'.");
     }
-    arg_node(agent, v, "parameter 1")
+    crate::dom::adopt::arg_node_any(agent, v, "parameter 1")
 }
 
 /// `setAttributeNode` / `setAttributeNodeNS` (§4.9.2 "set an attribute").
 fn set_attribute_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let attr = arg_attr(agent, &a.arg(0))?;
+    let attr = match arg_attr(agent, &a.arg(0))? {
+        crate::dom::adopt::NodeArg::Local(attr) => attr,
+        // E1: un `Attr` del documento de otra ventana: en uso, `InUseAttributeError`; si no, se
+        // adopta (§4.9.2 "set an attribute" paso 2 y "adopt").
+        crate::dom::adopt::NodeArg::Foreign(realm, attr) => {
+            let owned = crate::WebContextHandle { realm }
+                .get(agent)
+                .doc(attr.doc)
+                .owner_element(attr.node)
+                .is_some();
+            if owned {
+                return throw_dom(agent, DomException::InUseAttributeError);
+            }
+            crate::dom::adopt::adopt_foreign(agent, realm, attr, n.doc)?
+        }
+    };
     let attr = if attr.doc != n.doc {
         // Un `Attr` en uso en otro elemento no se puede mover (§4.9.2 paso 2).
         let owned = with_doc(agent, attr.doc, |d| d.owner_element(attr.node).is_some());
@@ -344,10 +365,11 @@ fn set_attribute_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn remove_attribute_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let attr = arg_attr(agent, &a.arg(0))?;
-    if attr.doc != n.doc {
-        return throw_dom(agent, DomException::NotFoundError);
-    }
+    // E1: un `Attr` de otra ventana nunca es de este elemento.
+    let attr = match arg_attr(agent, &a.arg(0))? {
+        crate::dom::adopt::NodeArg::Local(attr) if attr.doc == n.doc => attr,
+        _ => return throw_dom(agent, DomException::NotFoundError),
+    };
     let r = with_doc_mut(agent, n.doc, |d| d.remove_attribute_node(n.node, attr.node));
     match r {
         Ok(old) => {
@@ -392,12 +414,26 @@ fn insert_adjacent_element(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Valu
     if !agent.host_is_instance(&a.arg(1), element) {
         return agent.type_error("parameter 2 is not of type 'Element'.");
     }
-    let el = arg_node(
+    let el = crate::dom::adopt::arg_node_any(
         agent,
         &a.arg(1),
         "Failed to execute 'insertAdjacentElement' on 'Element': parameter 2",
     )?;
-    let el = adopt_into(agent, el, n.doc)?;
+    // E1: "insert adjacent" (§4.9) valida `where` (y mira el padre) antes de insertar: un
+    // elemento de otro documento o de otra ventana no se adopta si no se va a insertar.
+    let foreign_doc = !matches!(el, crate::dom::adopt::NodeArg::Local(e) if e.doc == n.doc);
+    if foreign_doc {
+        let w = where_.to_ascii_lowercase();
+        let outside = match w.as_str() {
+            "beforebegin" | "afterend" => true,
+            "afterbegin" | "beforeend" => false,
+            _ => return throw_dom(agent, DomException::SyntaxError),
+        };
+        if outside && with_doc(agent, n.doc, |d| d.parent(n.node)).is_none() {
+            return Ok(Value::Null);
+        }
+    }
+    let el = crate::dom::adopt::adopt_arg(agent, el, n.doc)?;
     let r = with_doc_mut(agent, n.doc, |d| {
         d.insert_adjacent_element(n.node, &where_, el.node)
     });

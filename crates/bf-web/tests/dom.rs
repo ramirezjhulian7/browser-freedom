@@ -1528,3 +1528,147 @@ fn nodes_of_two_documents_are_not_mixed() {
         "ok,true,true,true,true,ok,null,ok,null,InvalidStateError,true,NotFoundError"
     );
 }
+
+// E1 (ronda 2 en macOS): `before()`/`after()`/`replaceWith()` con el propio nodo entre los
+// argumentos (§4.2.8, "viable sibling"): el nodo no se quita antes de calcular dónde insertar.
+#[test]
+fn child_node_mutators_with_the_node_itself() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           function fresh() { \
+             var parent = document.createElement('div'); \
+             parent.append('text', document.createElement('test'), document.createElement('x')); \
+             return [parent, parent.childNodes[1], parent.childNodes[2]]; \
+           } \
+           var out = [], t; \
+           t = fresh(); t[1].before(t[1]); out.push(t[0].innerHTML); \
+           t = fresh(); t[1].after(t[2], t[1]); out.push(t[0].innerHTML); \
+           t = fresh(); t[1].replaceWith(t[2], t[1]); out.push(t[0].innerHTML); \
+           var lone = document.createElement('div'), c = document.createElement('c'); \
+           lone.appendChild(c); \
+           var mo = new MutationObserver(function () {}); mo.observe(lone, {childList: true}); \
+           lone.replaceChildren(c); out.push(mo.takeRecords().length, lone.firstChild === c); \
+           return out.join('|'); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "text<test></test><x></x>|text<x></x><test></test>|text<x></x><test></test>|1|true"
+    );
+}
+
+// E1: `createDocument(ns, qn, doctype)` agrega el mismo doctype (adoptado), no una copia; los
+// `Attr` con wrapper siguen a su elemento al adoptarlo; `isEqualNode` compara entre documentos;
+// los argumentos obligatorios de `createDocument`, `insertBefore` y `CharacterData`.
+#[test]
+fn documents_doctypes_and_attrs_across_documents() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var dt = document.implementation.createDocumentType('foo', '', ''); \
+           var x = document.implementation.createDocument(null, 'foo', dt); \
+           out.push(x.doctype === dt, dt.ownerDocument === x, x.firstChild === dt, \
+                    x.documentElement.localName); \
+           var d = document.implementation.createHTMLDocument(''); \
+           var div = d.createElement('div'); div.setAttribute('data-a', '1'); \
+           var attr = div.getAttributeNode('data-a'); \
+           document.adoptNode(div); \
+           out.push(attr.ownerDocument === document, div.getAttributeNode('data-a') === attr); \
+           var a1 = document.implementation.createDocument('', ''); \
+           var a2 = document.implementation.createDocument('', ''); \
+           out.push(a1.isEqualNode(a2), document.createElement('p').isEqualNode(d.createElement('p'))); \
+           out.push(err(function () { document.implementation.createDocument(); }), \
+                    err(function () { document.body.insertBefore(document.createTextNode('t')); }), \
+                    err(function () { document.createTextNode('t').appendData(); }), \
+                    err(function () { document.createTextNode('t').substringData(); })); \
+           var other = d.createElement('span'); \
+           out.push(err(function () { document.createTextNode('t').insertBefore(document.createElement('i'), other); })); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,true,foo,true,true,true,true,TypeError,TypeError,TypeError,TypeError,\
+         HierarchyRequestError"
+    );
+}
+
+// E1: `moveBefore()` (DOM §4.2.6, "move" §4.2.3): mueve sin removing/insertion steps (un
+// script movido no corre; el foco se queda), con dos mutation records, y lanza en los casos de
+// la spec (otra raíz, ancestro, hijo ajeno, tipo).
+#[test]
+fn move_before_moves_without_reinserting() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var a = document.getElementById('a'), p1 = a.children[0], p2 = a.children[1]; \
+           var mo = new MutationObserver(function () {}); \
+           mo.observe(a, {childList: true}); \
+           a.moveBefore(p2, p1); \
+           var recs = mo.takeRecords(); \
+           out.push(a.firstElementChild === p2, recs.length, recs[0].removedNodes[0] === p2, \
+                    recs[1].addedNodes[0] === p2); \
+           a.moveBefore(p1, p1); out.push(a.lastElementChild === p1); \
+           out.push(err(function () { a.moveBefore(document.createElement('i'), null); }), \
+                    err(function () { p1.moveBefore(a, null); }), \
+                    err(function () { a.moveBefore(p1, document.body); }), \
+                    err(function () { document.moveBefore(document.createTextNode('t'), null); }), \
+                    err(function () { a.moveBefore(p1); })); \
+           window.ran = 0; \
+           var s = document.createElement('script'); s.textContent = 'ran++'; \
+           a.appendChild(s); document.body.moveBefore(s, null); \
+           out.push(ran, document.body.lastChild === s); \
+           var log = []; \
+           customElements.define('x-m', class extends HTMLElement { \
+             connectedCallback() { log.push('c'); } disconnectedCallback() { log.push('d'); } \
+             connectedMoveCallback() { log.push('m'); } }); \
+           customElements.define('x-n', class extends HTMLElement { \
+             connectedCallback() { log.push('c'); } disconnectedCallback() { log.push('d'); } }); \
+           var m = document.createElement('x-m'), n = document.createElement('x-n'); \
+           a.append(m, n); log.push('|'); \
+           document.body.moveBefore(m, null); document.body.moveBefore(n, null); \
+           out.push(log.join('')); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,2,true,true,true,HierarchyRequestError,HierarchyRequestError,NotFoundError,\
+         HierarchyRequestError,TypeError,1,true,cc|mdc"
+    );
+}
+
+// E1: `HTMLElement.dataset` y `DOMStringMap` (HTML §3.2.6.6): los atributos `data-*` en
+// camelCase, `[SameObject]`, setter, deleter, enumeración y `[LegacyOverrideBuiltIns]`.
+#[test]
+fn dataset_maps_data_attributes() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var e = document.createElement('div'); \
+           e.setAttribute('data-foo-bar', '1'); e.setAttribute('data-x', '2'); \
+           /* en HTML el nombre pasa a minúsculas: `data-upper`. */ \
+           e.setAttribute('data-Upper', 'no'); e.setAttribute('title', 't'); \
+           var ds = e.dataset; \
+           out.push(ds === e.dataset, ds instanceof DOMStringMap, ds.fooBar, ds.x, ds.upper); \
+           out.push(Object.keys(ds).join('+'), 'fooBar' in ds, 'nope' in ds); \
+           ds.newThing = 7; out.push(e.getAttribute('data-new-thing')); \
+           delete ds.x; out.push(e.hasAttribute('data-x')); \
+           out.push(err(function () { ds['a-b'] = 1; })); \
+           e.setAttribute('data-to-string', 'ts'); out.push(ds.toString); \
+           e.removeAttribute('data-to-string'); out.push(typeof ds.toString); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,1,2,no,fooBar+x+upper,true,false,7,false,SyntaxError,ts,function"
+    );
+}

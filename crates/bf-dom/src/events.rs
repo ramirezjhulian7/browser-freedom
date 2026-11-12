@@ -435,6 +435,12 @@ pub trait ScriptHost {
     /// registra el event handler del atributo de contenido si todavía no lo hizo (HTML
     /// §8.1.8.1, los atributos `on…` se compilan perezosamente).
     fn before_invoke(&mut self, _doc: &mut Document, _target: EventTarget, _type_: &DomString) {}
+
+    /// E1: el dispatch terminó (pasos 6-10 de §2.9) y va a correr la activation behavior (paso
+    /// 11), que puede disparar otros eventos (`input`/`change` de un checkbox): el host puede
+    /// mostrar desde ya a script el estado final de `event` (fase `NONE`, sin
+    /// `currentTarget`, con su `target`).
+    fn before_activation(&mut self, _event: &Event) {}
 }
 
 /// Sin motor de script: los listeners de script no hacen nada.
@@ -849,6 +855,7 @@ impl Document {
         }
         // 11.
         if let Some(a) = activation_target {
+            host.before_activation(event);
             if !event.canceled {
                 self.activation_behavior(a, event, host);
             } else if let Some(Some(old)) = legacy_state {
@@ -1040,7 +1047,7 @@ impl Document {
 
     /// "Legacy-pre-activation behavior" de checkbox y radio; devuelve el estado anterior
     /// (checkedness y, para radio, el radio del grupo que estaba marcado).
-    fn legacy_pre_activation(&mut self, n: NodeId) -> Option<(bool, Option<NodeId>)> {
+    fn legacy_pre_activation(&mut self, n: NodeId) -> Option<LegacyState> {
         if !self.element(n).is_some_and(|e| e.is_html("input")) {
             return None;
         }
@@ -1048,7 +1055,11 @@ impl Document {
             "checkbox" => {
                 let old = self.checkedness(n);
                 self.set_checkedness(n, !old);
-                Some((old, None))
+                Some(LegacyState {
+                    radio: false,
+                    old,
+                    previous: None,
+                })
             }
             "radio" => {
                 let old = self.checkedness(n);
@@ -1057,24 +1068,28 @@ impl Document {
                     .into_iter()
                     .find(|&r| self.checkedness(r));
                 self.set_checkedness(n, true);
-                Some((old, previous))
+                Some(LegacyState {
+                    radio: true,
+                    old,
+                    previous,
+                })
             }
             _ => None,
         }
     }
 
-    /// "Legacy-canceled-activation behavior": restaura el estado.
-    fn legacy_canceled_activation(&mut self, n: NodeId, (old, previous): (bool, Option<NodeId>)) {
-        match self.input_type(n).as_str() {
-            "checkbox" => self.set_checkedness(n, old),
-            "radio" => {
-                if let Some(p) = previous {
-                    self.set_checkedness(p, true);
-                } else {
-                    self.set_checkedness(n, old);
-                }
+    /// "Legacy-canceled-activation behavior": restaura el estado. E1: con el algoritmo del
+    /// tipo que tenía el `input` en el pre-activation, aunque un listener le cambiara el
+    /// `type` (un checkbox que pasó a `date` vuelve a su checkedness; un radio que salió del
+    /// grupo no se queda marcado).
+    fn legacy_canceled_activation(&mut self, n: NodeId, st: LegacyState) {
+        if st.radio {
+            self.set_checkedness(n, st.old);
+            if let Some(p) = st.previous {
+                self.set_checkedness(p, true);
             }
-            _ => {}
+        } else {
+            self.set_checkedness(n, st.old);
         }
     }
 
@@ -1160,6 +1175,14 @@ impl Document {
 enum Phase {
     Capturing,
     Bubbling,
+}
+
+/// El estado que guarda el "legacy-pre-activation behavior" de un `input` checkbox o radio.
+#[derive(Debug, Clone, Copy)]
+struct LegacyState {
+    radio: bool,
+    old: bool,
+    previous: Option<NodeId>,
 }
 
 // E3: mover los listeners de un nodo a otro documento (adopción entre arenas en bf-web).

@@ -372,6 +372,119 @@ impl Document {
         self.children_changed(parent);
     }
 
+    /// E1: `ParentNode.moveBefore(node, child)` (DOM §4.2.6): "move" `node` a `self` antes de
+    /// `child` (o de su hermano siguiente, si `child` es el propio `node`).
+    pub fn move_before(
+        &mut self,
+        parent: NodeId,
+        node: NodeId,
+        child: Option<NodeId>,
+    ) -> Result<(), DomException> {
+        let child = if child == Some(node) {
+            self.get(node).next_sibling()
+        } else {
+            child
+        };
+        self.move_node(node, parent, child)
+    }
+
+    /// E1: "move" (DOM §4.2.3): como quitar e insertar, pero sin removing ni insertion steps
+    /// (el nodo conserva su estado: foco, scripts, marcos, animaciones), con las reacciones
+    /// `connectedMoveCallback` y dos mutation records (la salida y la entrada).
+    fn move_node(
+        &mut self,
+        node: NodeId,
+        new_parent: NodeId,
+        child: Option<NodeId>,
+    ) -> Result<(), DomException> {
+        // 1. La misma raíz shadow-including (y así el mismo documento y conectividad).
+        if self.shadow_including_root(new_parent) != self.shadow_including_root(node) {
+            return Err(DomException::HierarchyRequestError);
+        }
+        // 2.
+        if self.is_host_including_inclusive_ancestor(node, new_parent) {
+            return Err(DomException::HierarchyRequestError);
+        }
+        // 3.
+        if let Some(c) = child
+            && self.parent(c) != Some(new_parent)
+        {
+            return Err(DomException::NotFoundError);
+        }
+        // 4-5.
+        let parent_is_document = matches!(self.get(new_parent).data, NodeData::Document);
+        match self.get(node).data {
+            NodeData::Element(_)
+            | NodeData::Comment(_)
+            | NodeData::ProcessingInstruction { .. } => {}
+            NodeData::Text(_) | NodeData::CdataSection(_) if !parent_is_document => {}
+            _ => return Err(DomException::HierarchyRequestError),
+        }
+        // 6.
+        if parent_is_document && self.element(node).is_some() {
+            let has_element = self.children(new_parent).any(|c| self.element(c).is_some());
+            let is_doctype =
+                |d: &Self, n: NodeId| matches!(d.get(n).data, NodeData::Doctype { .. });
+            let doctype_after = child.is_some_and(|c| {
+                let mut n = self.get(c).next_sibling();
+                while let Some(x) = n {
+                    if is_doctype(self, x) {
+                        return true;
+                    }
+                    n = self.get(x).next_sibling();
+                }
+                false
+            });
+            if has_element || child.is_some_and(|c| is_doctype(self, c)) || doctype_after {
+                return Err(DomException::HierarchyRequestError);
+            }
+        }
+        // 7-8.
+        let Some(old_parent) = self.parent(node) else {
+            return Err(DomException::HierarchyRequestError);
+        };
+        // 9-10. Los rangos vivos (pre-remove).
+        if self.has_live_ranges() {
+            let index = self.index(node) as u32;
+            self.ranges_remove(node, old_parent, index);
+        }
+        // 11-12.
+        let old_previous = self.get(node).prev_sibling();
+        let old_next = self.get(node).next_sibling();
+        self.unlink(node);
+        self.bump_version();
+        // 13-15. Slots.
+        self.shadow_remove_steps(node, old_parent);
+        // Como en "remove" (paso 17): el subárbol movido sigue observado por los observers de
+        // sus ancestros viejos hasta la próxima entrega (lo que espera
+        // `mutation-observer-moved-subtree.window.js`).
+        self.add_transient_observers(old_parent, node);
+        // 16. Los rangos vivos (insert).
+        if let Some(c) = child
+            && self.has_live_ranges()
+        {
+            let index = self.index(c) as u32;
+            self.ranges_insert(new_parent, index, 1);
+        }
+        // 17-18.
+        let new_previous = match child {
+            Some(c) => self.get(c).prev_sibling(),
+            None => self.get(new_parent).last_child(),
+        };
+        self.link(new_parent, node, child);
+        self.bump_version();
+        // 19-21. Slots.
+        self.shadow_insert_steps(node, new_parent);
+        // 22. Moving steps (ninguno propio todavía) y `connectedMoveCallback`.
+        self.custom_moved(node);
+        // 23-24.
+        self.queue_tree_mutation_record(old_parent, &[], &[node], old_previous, old_next);
+        self.queue_tree_mutation_record(new_parent, &[node], &[], new_previous, child);
+        self.children_changed(old_parent);
+        self.children_changed(new_parent);
+        Ok(())
+    }
+
     /// "Adopt" `node` en este documento: lo desvincula de su padre (un `Document` es una sola
     /// arena, así que el node document no cambia y no hay adopting steps que correr).
     pub fn adopt(&mut self, node: NodeId) {

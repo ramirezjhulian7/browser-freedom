@@ -16,8 +16,8 @@ use crate::dom::element::{
 };
 use crate::dom::events::{GLOBAL_EVENT_HANDLERS, create_event, with_event_handlers};
 use crate::dom::{
-    arg_node, classes, from_dom_string, implementation, mixins, mutated, this_node, throw_dom,
-    to_dom_string, traversal, wrap_node, wrap_opt,
+    classes, from_dom_string, implementation, mixins, mutated, this_node, throw_dom, to_dom_string,
+    traversal, wrap_node, wrap_opt,
 };
 use crate::{DocIndex, NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
@@ -25,6 +25,8 @@ pub fn document_class(node: HostClassId) -> HostClass {
     let c = HostClass::new("Document")
         .parent(node)
         .constructor(document_ctor, 0)
+        // E1: ParentNode `moveBefore` (DOM §4.2.6).
+        .method("moveBefore", 2, crate::dom::node::move_before)
         .attribute("implementation", Some(get_implementation), None)
         .attribute("URL", Some(url), None)
         .attribute("documentURI", Some(url), None)
@@ -80,7 +82,9 @@ pub fn document_class(node: HostClassId) -> HostClass {
 pub fn document_fragment_class(node: HostClassId) -> HostClass {
     let c = HostClass::new("DocumentFragment")
         .parent(node)
-        .constructor(document_fragment_ctor, 0);
+        .constructor(document_fragment_ctor, 0)
+        // E1: ParentNode `moveBefore` (DOM §4.2.6).
+        .method("moveBefore", 2, crate::dom::node::move_before);
     mixins::non_element_parent_node(mixins::parent_node(c))
 }
 
@@ -392,11 +396,19 @@ fn create_tree_walker(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `importNode(node, subtree = false)` (§4.5): una copia en este documento.
 fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
-    let n = arg_node(
+    // E1: un nodo del documento de otra ventana también se clona (DOM §4.5 importNode: "clone
+    // a node" con este documento; el original no cambia).
+    let n = match crate::dom::adopt::arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'importNode' on 'Document': parameter 1",
-    )?;
+    )? {
+        crate::dom::adopt::NodeArg::Local(n) => n,
+        crate::dom::adopt::NodeArg::Foreign(realm, n) => {
+            let deep = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
+            return import_foreign(agent, doc, realm, n, deep);
+        }
+    };
     let deep = bf_js::host::webidl::to_boolean(agent, &a.arg(1));
     let kind = with_doc(agent, n.doc, |d| d.get(n.node).data.clone());
     if matches!(kind, NodeData::Document) {
@@ -429,6 +441,47 @@ fn import_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(wrap_node(agent, NodeRef::new(doc, copy)))
 }
 
+/// E1: `importNode` de un nodo `n` del documento de otra ventana (`realm`): la copia se hace
+/// en la arena de `doc` leyendo la de la otra ventana.
+fn import_foreign(
+    agent: &mut Agent,
+    doc: crate::DocIndex,
+    realm: bf_js::vm::RealmId,
+    n: NodeRef,
+    deep: bool,
+) -> JsResult<Value> {
+    let there = WebContextHandle { realm };
+    let (is_document, started) = {
+        let d = there.get(agent).doc(n.doc);
+        let started: Vec<bool> = d
+            .inclusive_descendants(n.node)
+            .iter()
+            .map(|&o| d.script_state(o).already_started)
+            .collect();
+        (matches!(d.get(n.node).data, NodeData::Document), started)
+    };
+    if is_document {
+        return throw_dom(agent, bf_dom::DomException::NotSupportedError);
+    }
+    let here = WebContextHandle::current(agent);
+    let mut target = std::mem::take(here.get_mut(agent).doc_mut(doc));
+    let copy = target.import_from(there.get(agent).doc(n.doc), n.node);
+    if !deep {
+        target.replace_all(None, copy);
+    }
+    *here.get_mut(agent).doc_mut(doc) = target;
+    with_doc_mut(agent, doc, |d| {
+        let new = d.inclusive_descendants(copy);
+        for (nw, s) in new.iter().zip(&started) {
+            if *s {
+                d.script_state_mut(*nw).already_started = true;
+            }
+        }
+    });
+    crate::html::custom_elements::cloned(agent, NodeRef::new(doc, copy));
+    Ok(wrap_node(agent, NodeRef::new(doc, copy)))
+}
+
 fn adopt_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let doc = this_doc(agent, a)?;
     // E1: también un nodo del documento de otra ventana.
@@ -438,6 +491,15 @@ fn adopt_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         "Failed to execute 'adoptNode' on 'Document': parameter 1",
     )?;
     let r = crate::dom::adopt::adopt_arg(agent, n, doc)?;
+    // Paso 2 de "adopt" (§4.5) para un nodo que ya era de este documento: quitarlo de su padre
+    // (`adopt_into` solo mueve de arena).
+    if let crate::dom::adopt::NodeArg::Local(l) = n
+        && l.doc == doc
+    {
+        // (Un `Attr` no tiene padre: sigue en su elemento.)
+        with_doc_mut(agent, doc, |d| d.adopt(r.node));
+        crate::dom::mutated(agent);
+    }
     Ok(wrap_node(agent, r))
 }
 

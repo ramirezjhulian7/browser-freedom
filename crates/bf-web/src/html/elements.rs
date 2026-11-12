@@ -79,6 +79,8 @@ fn html_element_class(element: HostClassId) -> HostClass {
             Some(set_content_editable),
         )
         .attribute("isContentEditable", Some(is_content_editable), None)
+        // E1: HTMLOrSVGElement `dataset` (HTML §3.2.6.6).
+        .attribute("dataset", Some(super::dataset::get_dataset), None)
         .method("click", 0, super::misc::click)
         .method("focus", 0, super::misc::focus)
         .method("blur", 0, super::misc::blur)
@@ -123,6 +125,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     define_reflection(agent, realm);
     define_document_colors(agent, realm);
     define_document_collections(agent, realm);
+    super::dataset::register(agent, realm); // E1
 }
 
 // --- Las colecciones del documento (HTML §3.1.4, "DOM tree accessors") ---
@@ -461,16 +464,20 @@ pub(crate) fn reflected_attr(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<&'
     }
 }
 
-/// El valor de un atributo de contenido (`None` si no está).
+/// El valor de un atributo de contenido (`None` si no está). E1: "get an attribute value"
+/// (DOM §4.9, lo que usa la reflexión de HTML §2.6.1): el de namespace nulo y ese nombre
+/// local, no uno con namespace que tenga el mismo nombre cualificado.
 pub fn attr_value(agent: &Agent, n: NodeRef, name: &str) -> Option<DomString> {
-    let name = DomString::from(name);
-    with_doc(agent, n.doc, |d| d.get_attribute(n.node, &name))
+    let name = DomString::from(name.to_ascii_lowercase().as_str());
+    with_doc(agent, n.doc, |d| d.get_attribute_ns(n.node, None, &name))
 }
 
-/// Fija un atributo de contenido.
+/// Fija un atributo de contenido ("set an attribute value": E1, el de namespace nulo).
 pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> JsResult<()> {
-    let name = DomString::from(name);
-    let r = with_doc_mut(agent, n.doc, |d| d.set_attribute(n.node, &name, value));
+    let name = DomString::from(name.to_ascii_lowercase().as_str());
+    let r = with_doc_mut(agent, n.doc, |d| {
+        d.set_attribute_ns(n.node, None, &name, value)
+    });
     match r {
         Ok(()) => {
             mutated(agent);
@@ -484,9 +491,12 @@ pub fn set_attr(agent: &mut Agent, n: NodeRef, name: &str, value: DomString) -> 
 
 /// Quita un atributo de contenido.
 pub fn remove_attr(agent: &mut Agent, n: NodeRef, name: &str) {
-    let name = DomString::from(name);
-    let had = with_doc(agent, n.doc, |d| d.has_attribute(n.node, &name));
-    with_doc_mut(agent, n.doc, |d| d.remove_attribute(n.node, &name));
+    // E1: el de namespace nulo (DOM §4.9 "remove an attribute by namespace and local name").
+    let name = DomString::from(name.to_ascii_lowercase().as_str());
+    let had = with_doc(agent, n.doc, |d| {
+        d.get_attribute_ns(n.node, None, &name).is_some()
+    });
+    with_doc_mut(agent, n.doc, |d| d.remove_attribute_ns(n.node, None, &name));
     mutated(agent);
     if had {
         crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), true);
