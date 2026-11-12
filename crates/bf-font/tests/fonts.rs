@@ -109,8 +109,10 @@ fn weight_and_style_matching() {
 }
 
 /// Directorio con Ahem: el de WPT si está descargado, o una fuente del sistema copiada.
-fn ahem_fixture() -> Option<(PathBuf, String)> {
-    let dir = std::env::temp_dir().join(format!("bf-font-{}", std::process::id()));
+/// `test` da un directorio propio a cada test: los tests corren en paralelo y copiar
+/// `font.ttf` al mismo directorio mientras otro lo lee falla de forma intermitente.
+fn ahem_fixture(test: &str) -> Option<(PathBuf, String)> {
+    let dir = std::env::temp_dir().join(format!("bf-font-{}-{test}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let wpt = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/fonts/Ahem.ttf");
     let (src, family) = if wpt.is_file() {
@@ -145,7 +147,7 @@ fn font_face_fonts(css: &str, db: Arc<FontDb>) -> Fonts {
 
 #[test]
 fn font_face_local_file() {
-    let Some((dir, family)) = ahem_fixture() else {
+    let Some((dir, family)) = ahem_fixture("local-file") else {
         eprintln!("aviso: sin fuente para el test de @font-face");
         return;
     };
@@ -187,7 +189,7 @@ fn font_face_local_file() {
 
 #[test]
 fn unicode_range_and_cmap_fallback() {
-    let Some((dir, family)) = ahem_fixture() else {
+    let Some((dir, family)) = ahem_fixture("unicode-range") else {
         return;
     };
     if family != "Ahem" {
@@ -231,4 +233,47 @@ fn clusters_are_char_boundaries() {
             g.cluster
         );
     }
+}
+
+/// E9: `shape_dir` da los glifos de un run RTL en orden visual (clústeres de mayor a menor) y
+/// cada clúster es un límite de carácter, también con controles que ocupan 2 bytes.
+#[test]
+fn shape_dir_rtl_runs() {
+    let Some(db) = system() else { return };
+    let fonts = Fonts::new(db);
+    let family = generic("sans-serif");
+    let req = request(&family, 400.0, false);
+    for text in [
+        "שלום עולם",
+        "مرحبا بالعالم",
+        "ab\u{85}cd",
+        "אב\u{9d}גד",
+        "مرحبا שלום",
+    ] {
+        for rtl in [false, true] {
+            let glyphs = fonts.shape_dir(text, &req, rtl);
+            assert!(!glyphs.is_empty(), "{text:?}");
+            assert!(
+                glyphs.iter().all(|g| text.is_char_boundary(g.cluster)),
+                "{text:?} rtl={rtl}: {glyphs:?}"
+            );
+            let ordered = glyphs.windows(2).all(|w| {
+                if rtl {
+                    w[0].cluster >= w[1].cluster
+                } else {
+                    w[0].cluster <= w[1].cluster
+                }
+            });
+            assert!(ordered, "{text:?} rtl={rtl}: {glyphs:?}");
+        }
+    }
+    // Las dos direcciones ocupan lo mismo y no se mezclan en la caché.
+    let width = |g: &[bf_layout::Glyph]| g.iter().map(|g| g.advance).sum::<f32>();
+    let ltr = fonts.shape_dir("שלום", &req, false);
+    let rtl = fonts.shape_dir("שלום", &req, true);
+    assert!((width(&ltr) - width(&rtl)).abs() < 0.01);
+    assert_ne!(
+        ltr.first().map(|g| g.cluster),
+        rtl.first().map(|g| g.cluster)
+    );
 }
