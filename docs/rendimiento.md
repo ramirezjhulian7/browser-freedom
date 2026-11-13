@@ -296,6 +296,9 @@ La meta de 500 ms no se cumple: solo la red se lleva ~660 ms (ver la nota de E4,
   los elementos y fallaban subiendo hasta la raíz. A/B del filtro solo, en el mismo binario
   (`BF_NO_ANCESTOR_FILTER`, 7 rondas, carga 150-190): emparejar 167,3 / 203,4 → 76,7 / 116,2 ms,
   cascada 327,1 / 393,3 → 193,7 / 292,0 ms.
+  A/B de la caché de la expansión sola (un interruptor temporal en el mismo binario, quitado
+  después; 7 rondas alternando, carga 14): declaraciones 23,1 / 23,8 → 12,7 / 14,4 ms,
+  cascada 103,8 / 109,5 → 85,2 / 96,5 ms.
 
 ## Parseo de la primera pintura (E3, cierre ronda 5)
 
