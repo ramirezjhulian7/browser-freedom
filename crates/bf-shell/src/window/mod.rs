@@ -298,6 +298,9 @@ struct App {
     image_frame: u64,
     panel_cache: RefCell<Option<(RasterKey, Pixmap)>>,
     panel_generation: u64,
+    /// E4: raster de la barra con su clave (`Chrome::bar_key`, DPI y tamaño): sin cambios en
+    /// la barra no se vuelve a pintar en cada cuadro.
+    bar_cache: RefCell<Option<(BarKey, Pixmap)>>,
     /// Último viewport con el que se pidió layout al hilo de trabajo.
     last_layout_request: Option<Size>,
     /// Al terminar la carga en curso, dejar el campo de URL enfocado y vacío (pestaña nueva).
@@ -391,6 +394,9 @@ fn timestamp() -> String {
         rem % 60
     )
 }
+
+/// E4: la clave del raster de la barra (ver `App::bar_cache`).
+type BarKey = ((u64, bool, u32, [u32; 8]), [u32; 6]);
 
 /// E4: el raster de la página en caché: su clave, el pixmap y, si se pintó en tiles de la
 /// página (`bf_paint::raster::render_tiled`), el scroll (en px de dispositivo enteros) con que
@@ -906,6 +912,7 @@ impl App {
             image_frame: 0,
             panel_cache: RefCell::new(None),
             panel_generation: 0,
+            bar_cache: RefCell::new(None),
             last_layout_request: None,
             focus_bar_on_load: false,
             last_progress_frame: Instant::now(),
@@ -2896,24 +2903,24 @@ impl App {
                 let vp = Rect::new(0.0, 0.0, viewport.width, viewport.height);
                 let hover = self.overlay_hover.as_ref().map(|h| (h.0, h.1));
                 let list = overlay::overlay(&p.tree, &theme, view, vp, hover);
-                let layer = render_scrolled(
+                bf_paint::raster::render_over(
                     &list,
+                    &mut frame,
+                    (0.0, area.y * dpi),
                     viewport,
                     dpi * self.zoom,
-                    Rgba::TRANSPARENT,
                     self.scroll,
                 );
-                blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
             if let Some(list) = self.find_highlights() {
-                let layer = render_scrolled(
+                bf_paint::raster::render_over(
                     &list,
+                    &mut frame,
+                    (0.0, area.y * dpi),
                     viewport,
                     dpi * self.zoom,
-                    Rgba::TRANSPARENT,
                     self.scroll,
                 );
-                blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
             if let Some(sel) = self.selection.filter(|s| !s.is_empty())
                 && let Some(index) = self.text_index()
@@ -2926,14 +2933,14 @@ impl App {
                         radii: Radii::default(),
                     });
                 }
-                let layer = render_scrolled(
+                bf_paint::raster::render_over(
                     &list,
+                    &mut frame,
+                    (0.0, area.y * dpi),
                     viewport,
                     dpi * self.zoom,
-                    Rgba::TRANSPARENT,
                     self.scroll,
                 );
-                blit(&mut frame, &layer, 0.0, area.y * dpi);
             }
             if let (Some(f), Some(root), Some(current)) =
                 (&self.focus, p.tree.root.as_ref(), &self.current)
@@ -2961,14 +2968,14 @@ impl App {
                     });
                 }
                 if !list.items.is_empty() {
-                    let layer = render_scrolled(
+                    bf_paint::raster::render_over(
                         &list,
+                        &mut frame,
+                        (0.0, area.y * dpi),
                         viewport,
                         dpi * self.zoom,
-                        Rgba::TRANSPARENT,
                         self.scroll,
                     );
-                    blit(&mut frame, &layer, 0.0, area.y * dpi);
                 }
             }
         }
@@ -2985,10 +2992,31 @@ impl App {
                 blit(&mut frame, layer, area.right() * dpi, area.y * dpi);
             }
         }
-        if let Some(list) = self.chrome.bar_display_list(self.progress_phase()) {
-            let bar = render(&list, self.chrome.bar_size(), dpi, theme.chrome);
-            blit(&mut frame, &bar, 0.0, 0.0);
+        let phase = self.progress_phase();
+        let size = self.chrome.bar_size();
+        let key: BarKey = (
+            self.chrome.bar_key(phase),
+            [
+                dpi,
+                size.width,
+                size.height,
+                theme.chrome.r,
+                theme.chrome.g,
+                theme.chrome.b,
+            ]
+            .map(f32::to_bits),
+        );
+        let mut bar = self.bar_cache.borrow_mut();
+        if bar.as_ref().is_none_or(|(k, _)| *k != key) {
+            *bar = self
+                .chrome
+                .bar_display_list(phase)
+                .map(|list| (key, render(&list, size, dpi, theme.chrome)));
         }
+        if let Some((_, bar)) = bar.as_ref() {
+            blit(&mut frame, bar, 0.0, 0.0);
+        }
+        drop(bar);
         if let Some((list, (x, y), size)) = self.find_layer() {
             let layer = render(&list, size, dpi, Rgba::TRANSPARENT);
             blit(&mut frame, &layer, x * dpi, y * dpi);
@@ -3556,6 +3584,7 @@ impl App {
     /// E12: las barras de desplazamiento de los scroll containers y del viewport, encima de la
     /// página (en px de dispositivo, la página empieza en `top`).
     fn paint_scrollbars(&self, frame: &mut Pixmap, p: &bf_paint::Page, top: f32) {
+        use bf_paint::raster::render_over;
         use bf_paint::scrollbars::{THICKNESS, scrollbars, viewport_scrollbars};
         let theme = self.chrome.theme;
         let color = Rgba {
@@ -3564,11 +3593,10 @@ impl App {
         };
         let viewport = self.viewport();
         let scale = self.dpi() * self.zoom;
+        // E4: solo la caja que cubren las barras (`render_over`): componer una capa del tamaño
+        // del viewport en cada cuadro costaba casi lo mismo que el raster de la página.
         let list = scrollbars(&p.tree, color);
-        if !list.items.is_empty() {
-            let layer = render_scrolled(&list, viewport, scale, Rgba::TRANSPARENT, self.scroll);
-            blit(frame, &layer, 0.0, top);
-        }
+        render_over(&list, frame, (0.0, top), viewport, scale, self.scroll);
         // El viewport: solo las franjas de los bordes derecho e inferior.
         let extent = document_extent(&p.tree);
         let list = viewport_scrollbars(
@@ -3588,26 +3616,26 @@ impl App {
             width: strip,
             height: viewport.height,
         };
-        let layer = render_scrolled(
+        render_over(
             &list,
+            frame,
+            ((viewport.width - strip) * scale, top),
             vertical,
             scale,
-            Rgba::TRANSPARENT,
             (viewport.width - strip, 0.0),
         );
-        blit(frame, &layer, (viewport.width - strip) * scale, top);
         let horizontal = bf_layout::Size {
             width: viewport.width - strip,
             height: strip,
         };
-        let layer = render_scrolled(
+        render_over(
             &list,
+            frame,
+            (0.0, top + (viewport.height - strip) * scale),
             horizontal,
             scale,
-            Rgba::TRANSPARENT,
             (0.0, viewport.height - strip),
         );
-        blit(frame, &layer, 0.0, top + (viewport.height - strip) * scale);
     }
 
     /// E12: aplica a la página mostrada posiciones de scroll de elementos y el scroll de la
@@ -4395,6 +4423,9 @@ impl App {
     fn scroll_bench(&mut self, n: usize, dy: &mut f32) -> String {
         let mut frames = Vec::with_capacity(n);
         let mut rasters = Vec::with_capacity(n);
+        // Lo que pasa antes de `frame`: el scroll al hilo del documento, lo que llegó de él y
+        // lo `sticky`.
+        let mut pre = Vec::with_capacity(n);
         self.raster_kinds.set((0, 0, 0));
         for _ in 0..n {
             let start = Instant::now();
@@ -4407,6 +4438,7 @@ impl App {
             self.sync_view();
             self.receive();
             self.apply_page_scroll(&[]);
+            pre.push(start.elapsed());
             let _ = self.frame();
             frames.push(start.elapsed());
             rasters.push(self.raster.get().unwrap_or_default());
@@ -4425,6 +4457,7 @@ impl App {
             .count();
         let (f50, f95, fmax) = stats(&mut frames);
         let (r50, _, _) = stats(&mut rasters);
+        let (p50, _, _) = stats(&mut pre);
         // Cuántos ítems y cuántas capas (opacidad, máscara, efecto) tiene la lista.
         let count = |f: fn(&DisplayItem) -> bool| {
             self.page
@@ -4470,13 +4503,14 @@ impl App {
         ));
         format!(
             "perf desplazamiento: {n} cuadros de {} px a escala {}: mediana {}, p95 {}, máx {}; \
-             raster mediano {}; {slow} cuadros de más de 16,7 ms",
+             raster mediano {}, antes del cuadro {}; {slow} cuadros de más de 16,7 ms",
             dy.abs(),
             self.dpi(),
             ms(f50),
             ms(f95),
             ms(fmax),
-            ms(r50)
+            ms(r50),
+            ms(p50)
         )
     }
 

@@ -252,3 +252,66 @@ fn incremental_scroll_falls_back() {
         "un filter"
     );
 }
+
+/// `render_over` (solo la caja que cubren los ítems) da los mismos píxeles que la capa entera
+/// del cuadro compuesta con `draw_pixmap`: barras redondeadas con recorte y opacidad, texto,
+/// un scroll fraccionario y una lista con transformación (que se pinta entera).
+#[test]
+fn render_over_matches_full_layer() {
+    use bf_layout::fragment::Rect;
+    use bf_paint::display_list::{DisplayItem, DisplayList, Radii};
+    use bf_paint::raster::render_over;
+    use tiny_skia::{PixmapPaint, Transform};
+
+    let gray = Rgba {
+        r: 0.3,
+        g: 0.3,
+        b: 0.35,
+        a: 0.55,
+    };
+    let bar = |x: f32, y: f32, w: f32, h: f32| DisplayItem::Rect {
+        rect: Rect::new(x, y, w, h),
+        color: gray,
+        radii: Radii([(3.0, 3.0); 4]),
+    };
+    let mut bars = DisplayList::default();
+    bars.push(DisplayItem::PushClip {
+        rect: Rect::new(10.0, 40.0, 300.0, 120.0),
+        radii: Radii::default(),
+    });
+    bars.push(bar(300.5, 52.25, 6.0, 40.0));
+    bars.push(DisplayItem::PushOpacity(0.7));
+    bars.push(bar(12.0, 150.0, 120.0, 6.0));
+    bars.push(DisplayItem::PopOpacity);
+    bars.push(DisplayItem::PopClip);
+    bars.push(bar(-20.0, 230.0, 80.0, 30.0)); // corta el borde del cuadro
+    let mut moved = bars.clone();
+    moved.push(DisplayItem::PushTransform { dx: 5.0, dy: 7.0 });
+    moved.push(bar(40.0, 20.0, 30.0, 30.0));
+    moved.push(DisplayItem::PopTransform);
+    let text = page("<p style='margin: 30px'>Texto <b>resaltado</b> encima de la página</p>");
+    for list in [&bars, &moved, &text.display_list, &DisplayList::default()] {
+        for scale in [1.0f32, 2.0] {
+            for scroll in [(0.0, 0.0), (0.0, 13.0), (3.0, 7.25)] {
+                let mut base = Pixmap::new(400, 600).unwrap();
+                base.fill(tiny_skia::Color::from_rgba8(200, 220, 240, 255));
+                let at = (4.0, 31.0 * scale);
+                let mut want = base.clone();
+                let layer = render_scrolled(list, VIEWPORT, scale, Rgba::TRANSPARENT, scroll);
+                want.draw_pixmap(
+                    at.0 as i32,
+                    at.1 as i32,
+                    layer.as_ref(),
+                    &PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
+                let mut got = base;
+                render_over(list, &mut got, at, VIEWPORT, scale, scroll);
+                if let Some(d) = diff(&got, &want) {
+                    panic!("escala {scale}, scroll {scroll:?}: {d}");
+                }
+            }
+        }
+    }
+}

@@ -1492,6 +1492,99 @@ pub fn render_scrolled(
     render_rows(dl, size, scale, bg, scroll, 0..height)
 }
 
+/// E4: compone `dl` (sin fondo) sobre `target`, con el origen del cuadro de `size` px CSS en
+/// `at` (px de dispositivo de `target`): lo mismo que [`render_scrolled`] con fondo
+/// transparente y `draw_pixmap` del resultado en `at`, pero rasterizando y componiendo solo la
+/// caja que cubren los ítems dentro del cuadro. Para las capas pequeñas sobre la página
+/// (barras de desplazamiento, resaltados, el cursor): un pixmap del tamaño del viewport
+/// compuesto entero costaba más que el raster incremental de la página.
+pub fn render_over(
+    dl: &DisplayList,
+    target: &mut Pixmap,
+    at: (f32, f32),
+    size: Size,
+    scale: f32,
+    scroll: (f32, f32),
+) {
+    let (w, h) = frame_size(size, scale);
+    let (w, h) = (i64::from(w), i64::from(h));
+    let (x0, y0, x1, y1) = match painted_box(dl) {
+        Painted::Nothing => return,
+        Painted::Unknown => (0, 0, w, h),
+        // La caja en px de dispositivo, con 2 px de holgura para el antialiasing (así ningún
+        // camino cruza el borde del pixmap y se pinta como en el cuadro entero).
+        Painted::Within(r) => {
+            let dev = |v: f32, s: f32| (v - s) * scale;
+            (
+                (dev(r.x, scroll.0).floor() as i64 - 2).max(0),
+                (dev(r.y, scroll.1).floor() as i64 - 2).max(0),
+                (dev(r.right(), scroll.0).ceil() as i64 + 2).min(w),
+                (dev(r.bottom(), scroll.1).ceil() as i64 + 2).min(h),
+            )
+        }
+    };
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let layer = render_region(
+        dl,
+        scale,
+        Rgba::TRANSPARENT,
+        scroll,
+        (x0 as f32, y0 as f32),
+        ((x1 - x0) as u32, (y1 - y0) as u32),
+        false,
+    );
+    target.draw_pixmap(
+        (at.0.round() as i64 + x0) as i32,
+        (at.1.round() as i64 + y0) as i32,
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Qué pinta una lista, en px CSS sin desplazar (ver [`render_over`]).
+enum Painted {
+    Nothing,
+    Within(Rect),
+    /// Hay transformaciones, efectos o ítems sin caja conocida: todo el cuadro.
+    Unknown,
+}
+
+fn painted_box(dl: &DisplayList) -> Painted {
+    let mut b: Option<Rect> = None;
+    for item in &dl.items {
+        match item {
+            // Los recortes y la opacidad no pintan ni mueven nada fuera de lo que encierran.
+            DisplayItem::PushClip { .. }
+            | DisplayItem::PopClip
+            | DisplayItem::PushOpacity(_)
+            | DisplayItem::PopOpacity => {}
+            _ => match crate::display_list::item_bounds(item) {
+                Some(r) => {
+                    b = Some(match b {
+                        None => r,
+                        Some(a) => {
+                            let x = a.x.min(r.x);
+                            let y = a.y.min(r.y);
+                            Rect::new(
+                                x,
+                                y,
+                                a.right().max(r.right()) - x,
+                                a.bottom().max(r.bottom()) - y,
+                            )
+                        }
+                    });
+                }
+                None => return Painted::Unknown,
+            },
+        }
+    }
+    b.map_or(Painted::Nothing, Painted::Within)
+}
+
 /// El tamaño en px de dispositivo del cuadro de `size` px CSS a escala `scale`.
 pub fn frame_size(size: Size, scale: f32) -> (u32, u32) {
     (
