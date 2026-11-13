@@ -28,6 +28,19 @@ use matching::{Descriptors, best_match, generic_candidates};
 const WEB_BIT: u32 = 1 << 31;
 /// Sin ninguna fuente disponible: glifos `.notdef` sin contorno.
 const NO_FONT: FontKey = FontKey(u32::MAX);
+/// E5: en la clave de una cara del sistema, el `opsz` con que se dan forma y se dibujan sus
+/// glifos (bits 20 a 29; 0 = el valor por defecto del eje). Ver [`Fonts::sized_key`].
+const OPSZ_SHIFT: u32 = 20;
+const OPSZ_MASK: u32 = 0x3FF << OPSZ_SHIFT;
+
+/// E5: la clave sin `opsz` y el `opsz` que lleva.
+fn split_key(key: FontKey) -> (FontKey, Option<u16>) {
+    if key == NO_FONT || key.0 & WEB_BIT != 0 {
+        return (key, None);
+    }
+    let o = (key.0 & OPSZ_MASK) >> OPSZ_SHIFT;
+    (FontKey(key.0 & !OPSZ_MASK), (o > 0).then_some(o as u16))
+}
 
 struct WebFace {
     rule: FontFaceRule,
@@ -154,6 +167,7 @@ impl Fonts {
     }
 
     fn face(&self, key: FontKey) -> Option<Arc<LoadedFace>> {
+        let (key, _) = split_key(key);
         if key == NO_FONT {
             None
         } else if key.0 & WEB_BIT != 0 {
@@ -225,7 +239,12 @@ impl Fonts {
                     let web: Vec<usize> = (0..self.web.len())
                         .filter(|&i| self.web[i].rule.family == lower)
                         .collect();
-                    if web.is_empty() {
+                    if web.is_empty() && matching::system_font_alias(name) {
+                        generic_candidates("system-ui")
+                            .iter()
+                            .find_map(|n| self.system_family(n, weight, italic))
+                            .map(|k| vec![k])
+                    } else if web.is_empty() {
                         self.system_family(name, weight, italic).map(|k| vec![k])
                     } else {
                         let descriptors: Vec<Descriptors> = web
@@ -329,6 +348,7 @@ impl Fonts {
         // segmento y elegir el fallback por script.
         let mut runs: Vec<(usize, usize, FontKey, bf_layout::unicode::Script)> = Vec::new();
         for (sstart, send, script) in bf_layout::unicode::script_runs(text) {
+            let run_family = self.run_family(&families, &text[sstart..send], script.tag(), request);
             for (i, c) in text[sstart..send].char_indices() {
                 let i = sstart + i;
                 let end = i + c.len_utf8();
@@ -348,7 +368,7 @@ impl Fonts {
                 let k = emoji_next
                     .then(|| self.emoji_font(c, request))
                     .flatten()
-                    .or_else(|| self.font_for(&families, c, script.tag(), request))
+                    .or_else(|| self.font_for(&families, c, script.tag(), request, run_family))
                     .unwrap_or(fallback);
                 match runs.last_mut() {
                     Some(last) if last.2 == k && last.3 == script => last.1 = end,
@@ -376,7 +396,7 @@ impl Fonts {
             map.resize(run.len() + 1, end);
             self.shape_run(
                 &run,
-                k,
+                self.sized_key(k, request.size),
                 request.size,
                 &map,
                 Some(script.tag()),
@@ -409,6 +429,7 @@ impl Fonts {
         c: char,
         script: &str,
         request: &FontRequest<'_>,
+        run_family: Option<&str>,
     ) -> Option<FontKey> {
         families
             .iter()
@@ -416,8 +437,9 @@ impl Fonts {
             .copied()
             .find(|&k| self.covers(k, c))
             .or_else(|| {
-                matching::script_fallback(script)
-                    .iter()
+                run_family
+                    .into_iter()
+                    .chain(matching::script_fallback(script).iter().copied())
                     .find_map(|name| self.best_covering(self.db.family(name), c, request))
             })
             .or_else(|| {
@@ -432,6 +454,61 @@ impl Fonts {
                 self.best_covering(faces, c, request)
                     .or(Some(FontKey(i as u32)))
             })
+    }
+
+    /// E5: la familia de fallback del script que cubre todos los caracteres de `segment` (un
+    /// tramo de un solo script) que no tienen las familias pedidas, si hay alguna. Así un texto
+    /// chino sin `lang` sale de una sola familia (Hiragino Sans GB) en vez de mezclarla con la
+    /// japonesa (Hiragino Sans) carácter a carácter.
+    fn run_family(
+        &self,
+        families: &[Vec<FontKey>],
+        segment: &str,
+        script: &str,
+        request: &FontRequest<'_>,
+    ) -> Option<&'static str> {
+        let needed: Vec<char> = segment
+            .chars()
+            .filter(|&c| !c.is_control() && !c.is_whitespace())
+            .filter(|&c| !families.iter().flatten().any(|&k| self.covers(k, c)))
+            .collect();
+        if needed.is_empty() {
+            return None;
+        }
+        matching::script_fallback(script)
+            .iter()
+            .copied()
+            .find(|name| {
+                let faces = self.db.family(name);
+                !faces.is_empty()
+                    && needed
+                        .iter()
+                        .all(|&c| self.best_covering(faces, c, request).is_some())
+            })
+    }
+
+    /// E5: la clave con que se dan forma y se dibujan los glifos de la cara `key` a `size` px:
+    /// si la cara tiene eje `opsz`, con el tamaño óptico igual al tamaño de fuente en px
+    /// dentro del rango del eje (`font-optical-sizing: auto`, CSS Fonts 4 §7.4), redondeado.
+    fn sized_key(&self, key: FontKey, size: f32) -> FontKey {
+        let (base, _) = split_key(key);
+        if base == NO_FONT || base.0 & WEB_BIT != 0 || base.0 & OPSZ_MASK != 0 {
+            return base;
+        }
+        let Some((min, max)) = self.db.faces().get(base.0 as usize).and_then(|f| f.opsz) else {
+            return base;
+        };
+        let opsz = size.clamp(min, max).round().clamp(1.0, 1023.0) as u32;
+        FontKey(base.0 | opsz << OPSZ_SHIFT)
+    }
+
+    /// E5: el índice en [`FontDb::faces`] de la cara del sistema que dibuja con `key` (`None`
+    /// para las caras `@font-face` y sin fuente).
+    pub fn system_face(&self, key: FontKey) -> Option<usize> {
+        let (base, _) = split_key(key);
+        (base != NO_FONT && base.0 & WEB_BIT == 0)
+            .then_some(base.0 as usize)
+            .filter(|&i| i < self.db.faces().len())
     }
 
     /// E5: la cara de la genérica `emoji` que tenga `c`.
@@ -488,14 +565,18 @@ impl Fonts {
         out: &mut Vec<Glyph>,
     ) {
         let face = self.face(key);
+        let (_, opsz) = split_key(key);
         let shaped = face.as_ref().and_then(|f| {
             let mut rb = rustybuzz::Face::from_slice(&f.data, f.index)?;
-            // E5: la instancia de una fuente variable (avances con `HVAR`, sustituciones).
-            if let Some(w) = f.wght {
-                rb.set_variations(&[rustybuzz::Variation {
-                    tag: face::WGHT,
-                    value: w,
-                }]);
+            // E5: la instancia de una fuente variable (avances con `HVAR`, sustituciones) y su
+            // tamaño óptico.
+            let variations: Vec<rustybuzz::Variation> = f
+                .variations(opsz.map(f32::from))
+                .into_iter()
+                .map(|(tag, value)| rustybuzz::Variation { tag, value })
+                .collect();
+            if !variations.is_empty() {
+                rb.set_variations(&variations);
             }
             let mut buffer = rustybuzz::UnicodeBuffer::new();
             buffer.push_str(text);
@@ -586,7 +667,8 @@ impl FontProvider for Fonts {
             return None;
         }
         if font.0 & WEB_BIT == 0 {
-            return self.db.outline(font.0 as usize, glyph);
+            let (base, opsz) = split_key(font);
+            return self.db.outline_at(base.0 as usize, glyph, opsz);
         }
         let i = (font.0 & !WEB_BIT) as usize;
         if let Some(o) = lock(&self.web_outlines).get(&(i, glyph)) {

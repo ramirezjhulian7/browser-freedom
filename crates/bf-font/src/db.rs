@@ -35,10 +35,15 @@ pub struct FaceInfo {
     /// E5: en una fuente variable, el valor del eje `wght` de esta instancia (ver
     /// [`variable_instances`]).
     pub wght: Option<f32>,
+    /// E5: rango del eje `opsz` de una fuente variable (mínimo, máximo).
+    pub opsz: Option<(f32, f32)>,
 }
 
 /// Contornos cacheados por (cara, glifo); `None` si el glifo no tiene contorno.
 pub type OutlineCache = Mutex<HashMap<(usize, u16), Option<Arc<Outline>>>>;
+
+/// E5: contornos de las caras del sistema por (cara, glifo, `opsz`; 0 = por defecto).
+type SizedOutlineCache = Mutex<HashMap<(usize, u16, u16), Option<Arc<Outline>>>>;
 
 #[derive(Debug, Default)]
 pub struct FontDb {
@@ -48,7 +53,7 @@ pub struct FontDb {
     loaded: Vec<OnceLock<Option<Arc<LoadedFace>>>>,
     files: Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>>,
     fallback: Mutex<HashMap<char, Option<usize>>>,
-    outlines: OutlineCache,
+    outlines: SizedOutlineCache,
 }
 
 /// Directorios de fuentes de Windows, Linux y macOS (los que existan).
@@ -273,6 +278,7 @@ fn face_info(path: &Path, index: u32, raw: &RawFace<'_>) -> Option<FaceInfo> {
         stretch,
         unicode_ranges,
         wght: None,
+        opsz: None,
     })
 }
 
@@ -280,12 +286,13 @@ fn face_info(path: &Path, index: u32, raw: &RawFace<'_>) -> Option<FaceInfo> {
 /// registra como una cara por cada peso CSS de 100 a 900 dentro del rango del eje (CSS Fonts 4
 /// §5.2 elige entre ellas como entre caras estáticas). Los demás ejes quedan en su valor por
 /// defecto. Sin ese eje, la cara tal cual.
-fn variable_instances(info: FaceInfo, raw: &RawFace<'_>) -> Vec<FaceInfo> {
-    let axis = raw
+fn variable_instances(mut info: FaceInfo, raw: &RawFace<'_>) -> Vec<FaceInfo> {
+    let fvar = raw
         .table(Tag::from_bytes(b"fvar"))
-        .and_then(ttf_parser::fvar::Table::parse)
-        .and_then(|fvar| fvar.axes.into_iter().find(|a| a.tag == crate::face::WGHT));
-    let Some(axis) = axis else {
+        .and_then(ttf_parser::fvar::Table::parse);
+    let axis = |tag| fvar.and_then(|f| f.axes.into_iter().find(|a| a.tag == tag));
+    info.opsz = axis(crate::face::OPSZ).map(|a| (a.min_value, a.max_value));
+    let Some(axis) = axis(crate::face::WGHT) else {
         return vec![info];
     };
     let instances: Vec<FaceInfo> = (1..=9)
@@ -409,19 +416,29 @@ impl FontDb {
 
     /// Contorno (cacheado) de un glifo de la cara `i`.
     pub fn outline(&self, i: usize, glyph: u16) -> Option<Arc<Outline>> {
+        self.outline_at(i, glyph, None)
+    }
+
+    /// E5: [`FontDb::outline`] con el tamaño óptico `opsz` (entero, ver
+    /// [`LoadedFace::face_at`]).
+    pub fn outline_at(&self, i: usize, glyph: u16, opsz: Option<u16>) -> Option<Arc<Outline>> {
+        let key = (i, glyph, opsz.unwrap_or(0));
         if let Some(o) = self
             .outlines
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(i, glyph))
+            .get(&key)
         {
             return o.clone();
         }
-        let outline = self.load(i).and_then(|f| f.outline(glyph)).map(Arc::new);
+        let outline = self
+            .load(i)
+            .and_then(|f| f.outline_at(glyph, opsz.map(f32::from)))
+            .map(Arc::new);
         self.outlines
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert((i, glyph), outline.clone());
+            .insert(key, outline.clone());
         outline
     }
 

@@ -40,8 +40,7 @@ fn named(name: &str) -> FontFamily {
 /// La cara del sistema que dibuja el primer glifo de `text`.
 fn face_of(fonts: &Fonts, text: &str, req: &FontRequest<'_>) -> Option<usize> {
     let g = fonts.shape(text, req);
-    let k = g.first()?.font.0;
-    (k & (1 << 31) == 0 && (k as usize) < fonts.db().faces().len()).then_some(k as usize)
+    fonts.system_face(g.first()?.font)
 }
 
 #[test]
@@ -364,7 +363,7 @@ fn macos_color_emoji() {
         assert_eq!(glyphs.len(), 1, "{text:?}: {glyphs:?}");
         let g = glyphs[0];
         assert!(
-            db.faces()[g.font.0 as usize]
+            db.faces()[fonts.system_face(g.font).expect("cara del sistema")]
                 .families
                 .iter()
                 .any(|f| f == "apple color emoji"),
@@ -393,7 +392,7 @@ fn macos_cjk_single_weight() {
     let text = "我们在使用简体中文测试字体的粗细";
     for (weight, range) in [(700.0, 600.0..=700.0), (400.0, 300.0..=400.0)] {
         for g in fonts.shape(text, &request(&family, weight, false)) {
-            let face = &db.faces()[g.font.0 as usize];
+            let face = &db.faces()[fonts.system_face(g.font).expect("cara del sistema")];
             assert!(
                 face.families.iter().any(|f| f.starts_with("hiragino")),
                 "{weight}: {:?}",
@@ -406,4 +405,82 @@ fn macos_cjk_single_weight() {
             );
         }
     }
+}
+
+/// E5: `-apple-system` y `BlinkMacSystemFont` resuelven como `system-ui` en macOS, y las
+/// genéricas `ui-*` a las fuentes de Apple con su nombre real.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_system_font_aliases() {
+    let Some(db) = system() else { return };
+    if db.family(".SF NS").is_empty() {
+        eprintln!("aviso: no está .SF NS; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db.clone());
+    let family_of = |f: &FontFamily| {
+        let i = face_of(&fonts, "a", &request(f, 400.0, false)).expect("cara");
+        db.faces()[i].families[0].clone()
+    };
+    for name in ["-apple-system", "BlinkMacSystemFont"] {
+        let list = FontFamily(vec![
+            FamilyName::Named(name.into()),
+            FamilyName::Generic("serif".into()),
+        ]);
+        assert_eq!(family_of(&list), ".sf ns", "{name}");
+    }
+    assert_eq!(family_of(&generic("ui-sans-serif")), ".sf ns");
+    if !db.family(".SF NS Rounded").is_empty() {
+        assert_eq!(family_of(&generic("ui-rounded")), ".sf ns rounded");
+    }
+}
+
+/// E5: `font-optical-sizing: auto` (CSS Fonts 4 §7.4): SF a 12 px y a 72 px usa distinto
+/// `opsz`, así que el mismo glifo tiene otro contorno (escalado a la misma em).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_optical_size() {
+    let Some(db) = system() else { return };
+    if db.family(".SF NS").is_empty() {
+        eprintln!("aviso: no está .SF NS; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db);
+    let family = generic("system-ui");
+    let at = |size: f32| {
+        let req = FontRequest {
+            family: &family,
+            size,
+            weight: 400.0,
+            italic: false,
+        };
+        let g = fonts.shape("a", &req)[0];
+        fonts
+            .outline(g.font, g.id)
+            .expect("contorno")
+            .commands
+            .clone()
+    };
+    assert_ne!(at(12.0), at(72.0));
+    // Dentro del mismo tamaño, la misma clave y el mismo contorno.
+    assert_eq!(at(12.0), at(12.0));
+}
+
+/// E5: un tramo chino sin `lang` sale de una sola familia cuando una la cubre entera.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cjk_single_family() {
+    let Some(db) = system() else { return };
+    if db.family("Hiragino Sans GB").is_empty() {
+        eprintln!("aviso: no está Hiragino Sans GB; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db.clone());
+    let family = generic("sans-serif");
+    let glyphs = fonts.shape("我们在使用简体中文测试", &request(&family, 400.0, false));
+    let families: std::collections::BTreeSet<String> = glyphs
+        .iter()
+        .map(|g| db.faces()[fonts.system_face(g.font).expect("cara")].families[0].clone())
+        .collect();
+    assert_eq!(families.len(), 1, "{families:?}");
 }
