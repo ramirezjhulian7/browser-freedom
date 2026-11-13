@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-13** (`master` `03bbd8a`, ciclo nuevo). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `7681f2a`, cierre del día; en GitHub). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -553,11 +553,12 @@ y los list box se desplazan con la rueda.
   sin descargarla dos veces. En la ventana, las perezosas se revisan con la maqueta del
   navegador (E3, HTML §8.1.7.3): las cercanas aparecen un cuadro después de la primera
   pintura.
+- **Hecho después** (E6, en `master` desde `84e2dd0`; `pendiente/mac/e6.md`,
+  `load::shared_requests`): una imagen que piden a la vez `bf-web` y el primer pintado se
+  descarga una sola vez aunque la respuesta no sea cacheable (las peticiones de imagen en
+  vuelo se juntan, RFC 9111 §4 con la *list of available images* de HTML §4.8.4.3).
 - **Falta**: `loading=lazy` dentro de un `<iframe>` y dentro de contenedores con `overflow`
-  (no se recorta contra ellos); una imagen no perezosa que piden a la vez `bf-web` y el
-  primer pintado se descarga dos veces si la respuesta no es cacheable (`CachedLoader` no
-  junta las peticiones en vuelo; E6 lo tiene en curso en `army/e6`); carga incremental de
-  imágenes; `scroll-behavior: smooth` es instantáneo; `scroll-snap`, `overscroll-behavior`,
+  (no se recorta contra ellos); carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo; `scroll-snap`, `overscroll-behavior`,
   scroll containers RTL.
 
 ---
@@ -730,9 +731,20 @@ Pendientes que no tienen `TODO(` en el código pero están medidos en
 
 Pruebas del usuario con el navegador del 2026-11-13:
 
-- **`IntersectionObserver` y `ResizeObserver` ausentes**: rompen sitios reales (la carga
+- **`IntersectionObserver` y `ResizeObserver` ausentes**: rompían sitios reales (la carga
   diferida hecha con scripts, las listas infinitas, los componentes que se adaptan a su
-  tamaño). En curso (E2); ver [`faltantes-web.md`](faltantes-web.md).
+  tamaño). Hecho (E2, en `master` desde `1070d8e`; WPT 222 / 315 y 94 / 115); lo que falla,
+  en [`faltantes-web.md`](faltantes-web.md).
+- **`https://app.asimetrix.co/ASIMETRIX`** (build `ce1e596`), tres fallos sin arreglar; el
+  detalle y el orden están en `RETOMAR-EN-MAC.md`, sección 9c:
+  - **la pestaña se cae** con `el realm no tiene WebContext`: algún camino pide el
+    `WebContext` de un realm que no lo tiene (¿worker, marco o realm ya desmontado?). Es lo
+    primero: ningún sitio debe poder detener la pestaña;
+  - **`ChunkLoadError: Loading CSS chunk … failed`**: probablemente el tropiezo 3b de
+    `pendiente/mac/e6.md`, los `<link rel=stylesheet>` que disparan `error` en vez de `load`
+    en la ventana (hipótesis sin confirmar en este sitio);
+  - **`TypeError: Illegal invocation`**: sin diagnosticar; un método de la plataforma llamado
+    con un `this` distinto del esperado.
 
 Pruebas del usuario con el navegador del 2026-11-12:
 
