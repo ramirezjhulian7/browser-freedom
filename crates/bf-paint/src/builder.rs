@@ -984,6 +984,16 @@ impl<'a> Builder<'a> {
         }
         // E12: `object-fit` y `object-position` (CSS Images 3 §5.5 y §5.6): el tamaño
         // concreto del objeto y su sitio en el content box.
+        // Con `srcset`, el tamaño natural es el corregido por densidad (HTML §4.8.4.4): un
+        // recurso `2x` mide la mitad de sus píxeles.
+        let density = f.node.map_or(1.0, |n| self.images.density(n));
+        let corrected = |v: f32| {
+            if density > 0.0 && density.is_finite() {
+                v / density
+            } else {
+                v
+            }
+        };
         let natural = match self.images.svgs.get(url) {
             Some(svg) => {
                 let i = svg.intrinsic();
@@ -991,12 +1001,12 @@ impl<'a> Builder<'a> {
                     (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(w / h),
                     _ => None,
                 });
-                (i.width, i.height, ratio)
+                (i.width.map(corrected), i.height.map(corrected), ratio)
             }
             None => match self.images.for_url(url) {
                 Some(p) => {
                     let (w, h) = (p.width() as f32, p.height() as f32);
-                    (Some(w), Some(h), Some(w / h))
+                    (Some(corrected(w)), Some(corrected(h)), Some(w / h))
                 }
                 None => return,
             },

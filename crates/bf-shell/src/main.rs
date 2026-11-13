@@ -352,6 +352,8 @@ fn render(arg: &str, args: &[String]) -> Result<(), String> {
         fonts,
         extra: &[],
         text_zoom: 1.0,
+        // E2: `--scale` es la densidad de la salida: elige la fuente de `srcset`.
+        device_pixel_ratio: scale,
     };
     let page = bf_paint::prepare_page_with_frames(&loaded.doc, &ctx, viewport, &[], &frames);
     let start = std::time::Instant::now();

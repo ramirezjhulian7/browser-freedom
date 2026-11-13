@@ -213,8 +213,12 @@ pub struct PageImages {
     pub svg_resources: SvgResources,
     /// Rasterizados de SVG por (URL, ancho, alto) en píxeles.
     svg_cache: Mutex<HashMap<(String, u32, u32), Arc<Pixmap>>>,
-    /// URL del contenido de cada `<img>`/`<input type=image>`.
+    /// URL del contenido de cada `<img>`/`<input type=image>`: la fuente elegida por
+    /// `srcset`/`<picture>` ya resuelta (lo que `currentSrc` devuelve, HTML §4.8.4.3).
     pub element_url: HashMap<NodeId, String>,
+    /// Densidad de la fuente elegida de cada `<img>` cuando no es 1 (`2x`, o `w` con `sizes`):
+    /// su tamaño natural es el de los píxeles dividido por ella (HTML §4.8.4.4).
+    pub element_density: HashMap<NodeId, f32>,
     /// Estado para el layout.
     pub sizes: ImageSizes,
     /// URLs que fallaron y por qué.
@@ -273,6 +277,11 @@ impl PageImages {
         }
         cache.insert(key, pixmap.clone());
         Some(pixmap)
+    }
+
+    /// La densidad de la fuente elegida para `node` (1 si no se eligió por densidad).
+    pub fn density(&self, node: NodeId) -> f32 {
+        self.element_density.get(&node).copied().unwrap_or(1.0)
     }
 
     /// [`PageImages::image_at`] para el contenido de un `<img>`.
@@ -556,12 +565,47 @@ fn inline_svgs(
     }
 }
 
-/// Carga y decodifica las imágenes que usa el documento.
+/// Tamaño natural corregido por densidad (HTML §4.8.4.4, "density-corrected natural width
+/// and height"): los píxeles divididos por la densidad de la fuente elegida. Una densidad
+/// infinita (descriptor `w` con `sizes` 0) da 0×0; una nula o inválida deja los píxeles.
+fn density_corrected(size: Size, density: f32) -> Size {
+    if density.is_infinite() && density > 0.0 {
+        return Size::default();
+    }
+    if !(density > 0.0 && density.is_finite()) || density == 1.0 {
+        return size;
+    }
+    Size {
+        width: size.width / density,
+        height: size.height / density,
+    }
+}
+
+/// Carga y decodifica las imágenes que usa el documento, con un entorno por defecto
+/// (viewport 1280×720, densidad 1) para elegir entre `srcset` y `<picture>`.
 pub fn load_images(
     doc: &Document,
     styles: &StyleMap,
     base: &Url,
     loader: &dyn ResourceLoader,
+) -> PageImages {
+    load_images_in(
+        doc,
+        styles,
+        base,
+        loader,
+        &bf_css::media::MediaContext::default(),
+    )
+}
+
+/// [`load_images`] en el entorno `media`: su viewport y su `device_pixel_ratio` eligen la
+/// fuente de cada `<img>` (`srcset`, `sizes` y los `<source>` de `<picture>`, HTML §4.8.4.3).
+pub fn load_images_in(
+    doc: &Document,
+    styles: &StyleMap,
+    base: &Url,
+    loader: &dyn ResourceLoader,
+    media: &bf_css::media::MediaContext,
 ) -> PageImages {
     let mut images = PageImages::default();
     let mut urls: Vec<String> = Vec::new();
@@ -575,14 +619,27 @@ pub fn load_images(
             continue;
         };
         if is_image_element(el) {
-            match el
-                .attr("src")
-                .filter(|s| !s.trim().is_empty())
-                .and_then(|s| Url::parse(s.trim(), Some(base)).ok())
-            {
-                Some(u) => {
+            // `<img>`: la fuente que eligen `srcset`/`sizes`/`<picture>`; `<input type=image>`
+            // no tiene `srcset`, solo `src`.
+            let chosen = if el.is_html("img") {
+                bf_image::source::select_image_source(doc, node, media)
+                    .map(|s| (s.url, s.density as f32))
+            } else {
+                el.attr("src").map(|s| (s.to_owned(), 1.0))
+            };
+            match chosen.and_then(|(src, density)| {
+                let src = src.trim();
+                if src.is_empty() {
+                    return None;
+                }
+                Url::parse(src, Some(base)).ok().map(|u| (u, density))
+            }) {
+                Some((u, density)) => {
                     let href = u.href();
                     images.element_url.insert(node, href.clone());
+                    if density != 1.0 {
+                        images.element_density.insert(node, density);
+                    }
                     want(href, &mut urls);
                 }
                 None => {
@@ -693,13 +750,19 @@ pub fn load_images(
                 } if r > 0.0 && r.is_finite() => ImageState::Ratio(r),
                 _ => {
                     let (width, height) = svg.default_size();
-                    ImageState::Loaded(Size { width, height })
+                    ImageState::Loaded(density_corrected(
+                        Size { width, height },
+                        images.density(node),
+                    ))
                 }
             },
-            (None, Some(p)) => ImageState::Loaded(Size {
-                width: p.width() as f32,
-                height: p.height() as f32,
-            }),
+            (None, Some(p)) => ImageState::Loaded(density_corrected(
+                Size {
+                    width: p.width() as f32,
+                    height: p.height() as f32,
+                },
+                images.density(node),
+            )),
             (None, None) => ImageState::Broken,
         };
         images.sizes.insert(node, state);
@@ -792,6 +855,7 @@ pub(crate) fn foreign_objects(
             fonts: ctx.fonts.clone(),
             extra: &extra,
             text_zoom: ctx.text_zoom,
+            device_pixel_ratio: ctx.device_pixel_ratio,
         };
         let page = crate::prepare_page(&child, &child_ctx, size);
         // Se pinta todo lo maquetado (con `overflow: visible` se ve lo que desborda); el

@@ -31,6 +31,7 @@ fn page_and_doc(html: &str) -> (bf_paint::Page, bf_dom::Document) {
         fonts: Arc::new(FontDb::from_faces(Vec::new())),
         extra: &[],
         text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
     };
     let page = prepare_page_with_frames(&doc, &ctx, VIEWPORT, &[], &[]);
     (page, doc)

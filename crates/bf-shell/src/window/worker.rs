@@ -670,6 +670,7 @@ impl State {
         };
         let viewport = self.viewport();
         let view_zoom = self.view().text_zoom;
+        let view_dpr = self.view().device_pixel_ratio;
         let fonts = self.fonts.clone();
         let canvases = current.canvases.clone();
         // E4: los documentos de los `<iframe>`, que se pintan dentro de su caja.
@@ -686,6 +687,7 @@ impl State {
                 fonts: fonts.clone(),
                 extra: &[],
                 text_zoom: view_zoom,
+                device_pixel_ratio: view_dpr,
             };
             catch_unwind(AssertUnwindSafe(|| {
                 prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames)

@@ -31,7 +31,7 @@ pub use builder::{
     document_extent,
 };
 pub use display_list::{DisplayItem, DisplayList, GlyphInstance, PathOp, Radii};
-pub use images::{PageImages, load_images};
+pub use images::{PageImages, load_images, load_images_in};
 pub use raster::{raster_color, render, render_scrolled};
 pub use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
@@ -182,6 +182,10 @@ pub struct PageContext<'a> {
     /// Zoom de texto del navegador (1 = sin zoom; ver `MediaContext::text_zoom`). Los marcos
     /// anidados heredan el del documento.
     pub text_zoom: f32,
+    /// E2: densidad de píxeles de la pantalla (`devicePixelRatio`, 1 en las pruebas). Elige
+    /// la fuente de `srcset`/`<picture>` (HTML §4.8.4.3) y la evalúa `resolution` en las media
+    /// queries.
+    pub device_pixel_ratio: f32,
 }
 
 /// Estilo → layout → lista de visualización.
@@ -216,6 +220,7 @@ pub fn prepare_page_with_frames(
         width: f64::from(viewport.width),
         height: f64::from(viewport.height),
         text_zoom: f64::from(ctx.text_zoom),
+        device_pixel_ratio: f64::from(ctx.device_pixel_ratio),
         ..MediaContext::default()
     };
     let sheets = document_stylesheets(
@@ -237,7 +242,7 @@ pub fn prepare_page_with_frames(
         style_document_with_sheets(doc, &sheets, extra, &media, &match_ctx, Some(&metrics));
     let style = start.elapsed();
     let start = Instant::now();
-    let mut images = load_images(doc, &styles, base, &*loader);
+    let mut images = load_images_in(doc, &styles, base, &*loader, &media);
     // E7: contenido HTML de los `foreignObject` de los SVG en línea.
     images::foreign_objects(doc, ctx, &mut images.svg_resources);
     for (node, pixmap) in canvases {
@@ -314,6 +319,7 @@ fn prepare_frames(
                 fonts: ctx.fonts.clone(),
                 extra: &[],
                 text_zoom: ctx.text_zoom,
+                device_pixel_ratio: ctx.device_pixel_ratio,
             };
             let size = Size {
                 width: rect.width,

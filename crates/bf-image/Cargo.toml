@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# E2: `source` (srcset, sizes, <picture>) evalúa media queries y longitudes CSS sobre el DOM
+bf-css = { path = "../bf-css" }
+bf-dom = { path = "../bf-dom" }
 gif = "0.14"
 png = "0.17"
 zune-jpeg = "0.4"
