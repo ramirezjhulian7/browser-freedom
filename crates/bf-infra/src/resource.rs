@@ -47,6 +47,13 @@ pub trait ResourceLoader: Send + Sync {
         let _ = destination;
         self.load(url)
     }
+
+    /// E2: `resource` es el contenido de `url`, obtenido por otro camino (el motor web, que
+    /// pidió la imagen de un `<img>` con su propia red). Un loader con caché lo guarda para
+    /// que quien lo pida después (el pintado) no lo descargue otra vez; por defecto, nada.
+    fn remember(&self, url: &Url, resource: &Resource) {
+        let _ = (url, resource);
+    }
 }
 
 /// Un loader que pide todo con un mismo [`Destination`] (`load` llama a
@@ -74,6 +81,10 @@ impl ResourceLoader for ForDestination {
 
     fn load_for(&self, url: &Url, destination: Destination) -> Option<Resource> {
         self.inner.load_for(url, destination)
+    }
+
+    fn remember(&self, url: &Url, resource: &Resource) {
+        self.inner.remember(url, resource);
     }
 }
 

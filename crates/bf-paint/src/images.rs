@@ -671,11 +671,22 @@ pub fn load_images_in(
             urls.push(u);
         }
     };
+    let mut deferred = 0usize;
     for node in doc.inclusive_descendants(doc.root()) {
         let Some(el) = doc.element(node) else {
             continue;
         };
         if is_image_element(el) {
+            // E2: `loading=lazy` (HTML §4.8.4.3.9): la imagen que el motor web tiene aplazada
+            // (lejos del viewport) o aún en camino no se pide; se maqueta como imagen aún no
+            // disponible (con el tamaño de sus atributos y su `aspect-ratio`). Cuando llega,
+            // el motor quita la anotación y la deja en la caché del loader: se pinta sin
+            // descargarla otra vez. Sin motor (un documento sin scripts) no hay anotaciones y
+            // `lazy` no aplica: se piden todas.
+            if doc.image_deferred(node) {
+                deferred += 1;
+                continue;
+            }
             // `<img>`: la fuente que eligen `srcset`/`sizes`/`<picture>`; `<input type=image>`
             // no tiene `srcset`, solo `src`.
             let chosen = if el.is_html("img") {
@@ -728,6 +739,13 @@ pub fn load_images_in(
                 want(u.clone(), &mut urls);
             }
         }
+    }
+    // Para medir (`docs/rendimiento.md`): cuántas imágenes pide esta maqueta.
+    if std::env::var_os("BF_TRACE").is_some() {
+        eprintln!(
+            "perf imágenes pedidas: {} ({deferred} <img> perezosas aplazadas)",
+            urls.len()
+        );
     }
     // Carga en paralelo: la red domina el tiempo.
     let results: Mutex<Vec<(String, Result<Loaded, String>)>> = Mutex::default();
