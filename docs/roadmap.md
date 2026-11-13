@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-13** (`master` `0c8b903`, cierre del ciclo). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `03bbd8a`, ciclo nuevo). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -25,23 +25,22 @@ mediciones anteriores, con su fecha).
 
 Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
 está cerrada y no entra en la cuenta. Con ella al 100 %, el total sería (100 + 94.7 + 94.1 +
-100 + 33.3) / 5 = **84.4 %**.
+100 + 50) / 5 = **87.8 %**.
 
 | Fase | Criterios | Cumplidos | Sin medir | Avance |
 |---|---:|---:|---:|---:|
 | 2: JavaScript y la plataforma web dinámica | 19 | 18 | 0 | 94.7 % |
 | 3: completar CSS y el texto | 17 | 16 | 0 | 94.1 % |
 | 4: red, medios y documentos | 9 | 9 | 0 | 100.0 % |
-| 5: navegador de uso diario | 6 | 2 | 0 | 33.3 % |
-| **Total** (media de las fases) | 51 | 45 | 0 | **80.5 %** |
+| 5: navegador de uso diario | 6 | 3 | 0 | 50.0 % |
+| **Total** (media de las fases) | 51 | 46 | 0 | **84.7 %** |
 
-Cuenta: (94.7 + 94.1 + 100 + 33.3) / 4 = 80.5 %; cumplidos 18 + 16 + 9 + 2 = 45 de
+Cuenta: (94.7 + 94.1 + 100 + 50) / 4 = 84.7 %; cumplidos 18 + 16 + 9 + 3 = 46 de
 19 + 17 + 9 + 6 = 51.
 
-Sin cambios en la tabla desde la ronda 3 del ciclo de cierre: lo integrado después
-(hasta `0c8b903`) mejora cifras, pero no cierra ningún criterio (ver la lista de abajo).
-Quedan fuera de `master`, en curso, `army/e4`, `army/e5` y `army/e6` (`RETOMAR-EN-MAC.md`,
-sección 8).
+Cambios respecto de la tabla del cierre del ciclo anterior (80.5 %):
+- **Fase 5, 60 fps al desplazar Wikipedia**: cumplido en la medida del planificador sobre
+  `276fa07`, con los ejecutores casi parados (ver el bloque **Estado** de la fase 5).
 
 Cambios respecto de la tabla de la ronda 1 del ciclo de cierre (76.4 %):
 - **Fase 5, `html-aam` y `wai-aria`**: 93.3 % y 91.8 % en `master` (E1, integrado en
@@ -63,11 +62,9 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 | 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 95 / 107 en `master` (8 de los 12 que faltan son de CSS Flexbox 2) | pasan | `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3" |
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
-| 5 | 60 fps al desplazar Wikipedia | E4: mediana de 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (carga 15-36). Planificador sobre `0995c60`, carga 46-58: 12.6-15.3 ms a densidad 1 y 27.7-37.7 ms a densidad 2. Sin confirmar con la máquina libre | 60 fps (16.7 ms) | `pendiente/mac/e4.md`, "Cierre, ronda 3"; la del planificador, su reporte de la ronda 7 |
-| 5 | Primera pintura de Wikipedia en release | última medida completa 823-936 ms (E2, carga 25, antes del arreglo de red de E6); sin medida sobre `master` con la máquina libre. Por partes: red 401 ms (E6), parseo 56-60 ms (E2 y E3), cascada 76 ms (E4), maqueta 100-168 ms (E4) | < 500 ms | [`rendimiento.md`](rendimiento.md); `pendiente/mac/e6.md` y `e3.md`, "Ciclo de cierre, ronda 5"; `e4.md`, "Cierre, ronda 1" y "Cierre, ronda 3"; la de E2, `git show 3dfeedf:docs/pendiente/mac/e2.md`, "Ciclo de cierre, ronda 6" |
+| 5 | Primera pintura de Wikipedia en release | 542-665 ms en cinco corridas (`276fa07`, caché caliente, ejecutores casi parados); la red sola, 247-315 ms | < 500 ms | medida del planificador, reparto de la ronda 1 del ciclo nuevo; desglose en el bloque **Estado** de la fase 5 |
 
-El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md). Las
-dos se midieron con la máquina cargada por otros ejecutores.
+El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md).
 
 ## Decisiones pendientes del usuario
 
@@ -589,7 +586,7 @@ y los list box se desplazan con la rueda.
   - Aceptación: 60 fps al desplazar Wikipedia; primera pintura de Wikipedia < 500 ms en
     release.
 
-**Estado** (2 de 6 criterios cumplidos):
+**Estado** (3 de 6 criterios cumplidos):
 - **Accesibilidad** (E1, en `master`; `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" y
   "Ciclo de cierre, ronda 3"):
   - El motor calcula el rol y el nombre accesible de cada elemento (HTML-AAM, ARIA 1.2,
@@ -651,30 +648,37 @@ y los list box se desplazan con la rueda.
     - la cascada salta los `::before`/`::after` sin `content` (E4, "Cierre, ronda 3");
     - con una VPN que da una ruta IPv6 que no sale, IPv4 va primero (RFC 6724 §6 en Happy
       Eyeballs; E6, "Ciclo de cierre, ronda 5").
-  - **Desplazamiento** (mediana por cuadro, meta 16.7 ms = 60 fps):
-    - E4 (`pendiente/mac/e4.md`, "Cierre, ronda 3"), carga 15-36: **8.0 ms a densidad 1**
-      (raster 5.5) y **17.7 ms a densidad 2** (raster 10.8). Antes, 20.9 y 59.1 ms.
-    - El planificador sobre `0995c60`, carga 46-58: 12.6-15.3 ms a densidad 1 y 27.7-37.7 ms
-      a densidad 2.
-    - A densidad 1 cabe en 16.7 ms en las dos medidas; a densidad 2, no. Sin confirmar con
-      la máquina libre: el criterio no se da por cumplido.
-  - **Primera pintura de Wikipedia** (meta < 500 ms): sin medida sobre `master` con la
-    máquina libre (la carga llegó a 160-210 al cerrar el ciclo). La última medida completa es
-    de **823-936 ms** (5 corridas, mediana 868 ms, carga 25; E2, "Ciclo de cierre, ronda 6",
-    en `git show 3dfeedf:docs/pendiente/mac/e2.md`): con la maqueta de las imágenes
-    perezosas ya quitada, pero antes del arreglo de red de E6. Por partes, cada una de su
-    fuente y con su carga:
+    - integrado hasta `276fa07` (`pendiente/mac/e4.md`, `e5.md` y `e6.md`): raster a
+      densidad 2, caché de `expand` en la cascada y atajo del parser de CSS (E4, merge
+      `276fa07`); caché de líneas y de anchos intrínsecos y cobertura de glifos por `cmap`
+      (E5, merge `f7fd9e2`: la maqueta de Wikipedia, de 192 a 65 ms); precarga durante la
+      validación del documento, escrituras de la caché fuera del camino y peticiones de
+      imagen simultáneas compartidas (E6, merge `84e2dd0`).
+  - **Desplazamiento: 60 fps, criterio cumplido.** Medida del planificador sobre `276fa07`
+    (release, Wikipedia `Navegador_web`, caché caliente, ejecutores casi parados;
+    `scrollbench:120:40`, meta 16.7 ms por cuadro):
+    - densidad 1: mediana 3.7-4.0 ms;
+    - densidad 2: mediana 5.2-6.1 ms, p95 9.4-11.2 ms; 2-3 cuadros de 120 pasan de 16.7 ms.
+    - Antes: 8.0 y 17.7 ms (E4, `pendiente/mac/e4.md`, "Cierre, ronda 3", carga 15-36).
+  - **Primera pintura de Wikipedia: 542-665 ms** en cinco corridas (meta < 500 ms; misma
+    medida del planificador). Desglose de dos corridas con traza:
 
-    | Fase | ms | Fuente |
-    |---|---:|---|
-    | Red y caché | 401 (mediana; 711 antes) | E6, "Ciclo de cierre, ronda 5" |
-    | Parseo | 56-60 (medianas; 281-307 antes) | E3, "Ciclo de cierre, ronda 5"; E2, "Ciclo de cierre, ronda 6" |
-    | Cascada | 76 (mediana; 105 antes) | E4, "Cierre, ronda 3" |
-    | Maqueta | 100-168 | E4, "Cierre, ronda 1" (168) y muestreo de "Cierre, ronda 3" (100) |
+    | Parte | Corrida 1 (ms) | Corrida 2 (ms) |
+    |---|---:|---:|
+    | Red y caché | 247 | 315 |
+    | Parseo | 54 | 62 |
+    | Scripts | 22 | 27 |
+    | Hojas | 23 | 27 |
+    | Cascada | 90 | 126 |
+    | Maqueta | 85 | 55 |
+    | Lista de pintado | 15 | 10 |
+    | Raster | 27 | 21 |
 
-    Otras medidas completas, todas de antes de juntar los cambios: 1076 ms (E4, carga 17-20,
-    sin los de E3 y E6), 1271 ms (E3, carga 13, sin el de E6) y 1495 ms (E6, carga 9-11, sin
-    el de E3).
+    Dentro del parseo, instalar la ventana cuesta 39-42 ms y el parser 36-45 ms. La red no
+    baja de unos 250 ms, así que el resto tiene que caber en unos 200. Las dos vías del ciclo
+    nuevo: abaratar cascada y maqueta, y adelantar a la espera de la red lo que no depende de
+    la respuesta (instalar la ventana, parsear las hojas en caché, compilar los scripts en
+    caché).
   - **Suelo de red**: el documento se valida en cada visita (`max-age=0, must-revalidate`) y
     un proceso nuevo no tiene conexión abierta. TCP, TLS 1.3 y el 304 cuestan un viaje de ida
     y vuelta cada uno, unos 115 ms en esta red: unos 345 ms antes de parsear (E6). Qué hacer
@@ -723,6 +727,12 @@ Pendientes que no tienen `TODO(` en el código pero están medidos en
   identidad para mejorar esa detección.
 
 ## Hallazgos de pruebas reales
+
+Pruebas del usuario con el navegador del 2026-11-13:
+
+- **`IntersectionObserver` y `ResizeObserver` ausentes**: rompen sitios reales (la carga
+  diferida hecha con scripts, las listas infinitas, los componentes que se adaptan a su
+  tamaño). En curso (E2); ver [`faltantes-web.md`](faltantes-web.md).
 
 Pruebas del usuario con el navegador del 2026-11-12:
 
