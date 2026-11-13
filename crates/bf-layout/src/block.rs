@@ -88,6 +88,9 @@ pub(crate) struct Layout<'a> {
     /// una columna con alto indefinido: no es definido para los porcentajes (CSS Flexbox 1
     /// §9.8 punto 2).
     pub forced_height_indefinite: bool,
+    /// E5: el alto que recibe el próximo `flex_layout` no es definido para los porcentajes
+    /// (su `gap` en porcentaje se resuelve contra 0; CSS Box Alignment 3 §8.3).
+    pub flex_height_pct_indefinite: bool,
     /// Leyenda renderizada del `<fieldset>` en curso, que `block_children` no coloca.
     pub legend: Option<&'a LayoutBox>,
     /// E4: columnas de cada tabla ya medidas (por dirección de la caja de tabla).
@@ -342,6 +345,7 @@ impl<'a> Layout<'a> {
             root: None,
             forced_height: None,
             forced_height_indefinite: false,
+            flex_height_pct_indefinite: false,
             legend: None,
             table_cache: std::collections::HashMap::new(),
             table_paint: None,
@@ -1030,7 +1034,13 @@ impl<'a> Layout<'a> {
                 };
                 (Vec::new(), h)
             }
-            _ if crate::flex::is_flex_container(b) => self.flex_layout(b, child_cb),
+            _ if crate::flex::is_flex_container(b) => {
+                // E5: un contenedor flex flexionado en una columna de alto indefinido usa ese
+                // alto para sus líneas, pero no es definido para los porcentajes (§9.8).
+                self.flex_height_pct_indefinite = forced_indefinite
+                    && specified_height(style, cb.height, edges_v).is_none();
+                self.flex_layout(b, child_cb)
+            }
             // E4: grid y tablas.
             _ if crate::grid::is_grid_container(b) => self.grid_layout(b, child_cb),
             BoxKind::Table => self.table_layout(b, child_cb),

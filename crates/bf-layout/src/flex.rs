@@ -327,7 +327,8 @@ impl<'a> Layout<'a> {
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
-        self.flex_layout_pass(container, cb, None)
+        let pct_height_indefinite = std::mem::take(&mut self.flex_height_pct_indefinite);
+        self.flex_layout_pass(container, cb, None, pct_height_indefinite)
     }
 
     /// E5: una pasada del algoritmo. Con ítems `visibility: collapse` (§4.4), la primera
@@ -339,6 +340,7 @@ impl<'a> Layout<'a> {
         container: &'a LayoutBox,
         cb: Cb,
         struts: Option<&[f32]>,
+        pct_height_indefinite: bool,
     ) -> (Vec<Fragment>, f32) {
         let abs_mark = (self.abs_frames.last().map_or(0, Vec::len), self.fixed.len());
         let is_collapsed =
@@ -362,13 +364,17 @@ impl<'a> Layout<'a> {
         let cross_flip = wrap_reverse != (!row && rtl);
         // Espacio disponible: el ancho siempre es definido; el alto, si se especificó.
         let avail_main = if row { Some(cb.width) } else { cb.height };
+        // E5: `row-gap` en porcentaje se resuelve contra el alto del contenido; si no es
+        // definido, contra 0 (CSS Box Alignment 3 §8.3), también cuando el contenedor es un ítem
+        // flexionado en una columna de alto indefinido (§9.8; WPT `gap-percentage-wrap`).
+        let pct_height = cb.height.filter(|_| !pct_height_indefinite).unwrap_or(0.0);
         let main_gap = if row {
             gap_px(&cs.column_gap, cb.width)
         } else {
-            gap_px(&cs.row_gap, cb.height.unwrap_or(0.0))
+            gap_px(&cs.row_gap, pct_height)
         };
         let cross_gap = if row {
-            gap_px(&cs.row_gap, cb.height.unwrap_or(0.0))
+            gap_px(&cs.row_gap, pct_height)
         } else {
             gap_px(&cs.column_gap, cb.width)
         };
@@ -860,7 +866,7 @@ impl<'a> Layout<'a> {
                     frame.truncate(abs_mark.0);
                 }
                 self.fixed.truncate(abs_mark.1);
-                return self.flex_layout_pass(container, cb, Some(&s));
+                return self.flex_layout_pass(container, cb, Some(&s), pct_height_indefinite);
             }
             Some(s) => {
                 for line in &mut lines {
