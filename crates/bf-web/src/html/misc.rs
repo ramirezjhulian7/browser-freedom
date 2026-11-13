@@ -305,6 +305,10 @@ fn natural_size(agent: &mut Agent, n: NodeRef) -> Option<(u32, u32)> {
         .0
         .get(&url.serialize(false))
         .copied()?;
+    // Una densidad infinita (un `w` con `sizes` 0) da 0×0.
+    if density.is_infinite() && density > 0.0 {
+        return Some((0, 0));
+    }
     if !(density > 0.0 && density.is_finite()) || density == 1.0 {
         return Some((w, h));
     }
@@ -372,6 +376,15 @@ fn img_natural_height(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// decodificada.
 fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E2: con petición, `complete` es "no está pendiente" (disponible o rota).
+    if let Some(state) = super::legacy_factories::image_state(agent, n) {
+        // Pendiente o aplazada (`loading=lazy`, sin pedir todavía): no está completa.
+        return Ok(Value::Boolean(!matches!(
+            state,
+            super::legacy_factories::ImageState::Pending
+                | super::legacy_factories::ImageState::Deferred
+        )));
+    }
     let src = attr_value(agent, n, "src");
     let srcset = attr_value(agent, n, "srcset");
     let done = match (&src, &srcset) {
@@ -380,6 +393,16 @@ fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => natural_size(agent, n).is_some(),
     };
     Ok(Value::Boolean(done))
+}
+
+/// El tamaño natural (corregido por densidad) de la imagen de `n`, si se conoce.
+pub(crate) fn natural_size_of(agent: &mut Agent, n: NodeRef) -> Option<(u32, u32)> {
+    natural_size(agent, n)
+}
+
+/// ¿Se conoce el tamaño natural de la imagen de `n`?
+pub(crate) fn has_natural_size(agent: &mut Agent, n: NodeRef) -> bool {
+    natural_size(agent, n).is_some()
 }
 
 /// `currentSrc` (§4.8.4.3): la URL de la fuente elegida ([`selected_source`]).
@@ -391,11 +414,10 @@ fn img_current_src(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(js_str(&s))
 }
 
-/// `decode()`: una promesa ya resuelta (las imágenes se decodifican fuera del motor).
-fn img_decode(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    let p = agent.new_internal_promise();
-    agent.fulfill_promise(p, Value::Undefined);
-    Ok(Value::Object(p))
+/// `decode()` (§4.8.4.4): espera a la petición actual (E2, `legacy_factories::img_decode`).
+fn img_decode(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(super::legacy_factories::img_decode(agent, n))
 }
 
 // --- HTMLTemplateElement (§4.12.3) ---
@@ -532,7 +554,99 @@ fn focus_event(agent: &mut Agent, n: NodeRef, type_: &str, related: Option<NodeR
 
 /// "Focusing steps" (§6.6.4), sin el *focus chain* de documentos anidados.
 pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let mut n = this_node(agent, a)?;
+    let n = this_node(agent, a)?;
+    focusing_steps(agent, n);
+    Ok(Value::Undefined)
+}
+
+/// E3: lo que hizo el documento con sus candidatos de autofocus (HTML §6.6.3).
+#[derive(Debug, Default, Clone, Copy)]
+struct Autofocus {
+    /// *Autofocus processed flag*.
+    processed: bool,
+    /// La versión del documento la última vez que se buscaron candidatos: sin cambios, no
+    /// hay candidatos nuevos y no se vuelve a recorrer el árbol.
+    seen_version: Option<u64>,
+}
+
+/// E3: "flush autofocus candidates" (HTML §6.6.3), del paso de *update the rendering* que va
+/// antes de las animaciones y los callbacks de `requestAnimationFrame` (§8.1.7.3). En vez de
+/// la lista de candidatos que llenan los insertion steps, se busca el primer elemento con
+/// `autofocus` en orden de árbol cuando el documento cambió: el primero que el parser inserta
+/// es también el primero en el árbol en un documento que solo crece. Si ya hay algo con el
+/// foco, el documento no lo roba (paso 4) y queda procesado.
+pub fn flush_autofocus_candidates(agent: &mut Agent, realm: bf_js::vm::RealmId) {
+    let Some(ctx) = agent.realm_data::<crate::WebContext>(realm) else {
+        return;
+    };
+    let version = ctx.document().version();
+    let state = agent
+        .realm_data::<Autofocus>(realm)
+        .copied()
+        .unwrap_or_default();
+    if state.processed || state.seen_version == Some(version) {
+        return;
+    }
+    agent.set_realm_data(
+        realm,
+        Autofocus {
+            processed: false,
+            seen_version: Some(version),
+        },
+    );
+    let name = DomString::from("autofocus");
+    let candidates: Vec<bf_dom::NodeId> = with_doc(agent, 0, |d| {
+        d.descendants(d.root())
+            .into_iter()
+            .filter(|&n| d.element(n).is_some() && d.has_attribute(n, &name))
+            .collect()
+    });
+    if candidates.is_empty() {
+        return;
+    }
+    // Paso 5: un candidato que no es una *focusable area* (sin caja: `display: none` en él o
+    // en un ancestro, como un popover cerrado) se salta.
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let styles = crate::cssom::current_styles(agent);
+    let rendered = |agent: &Agent, n: bf_dom::NodeId| {
+        let ancestors = with_doc(agent, 0, |d| d.inclusive_ancestors(n));
+        ancestors.into_iter().all(|a| {
+            with_doc(agent, 0, |d| d.element(a).is_none())
+                || (styles
+                    .get(&(a, None))
+                    .is_some_and(|s| s.display != bf_style::properties::types::Display::None)
+                    && !super::legacy::is_closed_popover(agent, NodeRef::new(0, a)))
+        })
+    };
+    let node = candidates
+        .into_iter()
+        .find(|&n| is_focusable(agent, NodeRef::new(0, n)) && rendered(agent, n));
+    agent.current_realm = saved;
+    let Some(node) = node else {
+        return;
+    };
+    agent.set_realm_data(
+        realm,
+        Autofocus {
+            processed: true,
+            seen_version: Some(version),
+        },
+    );
+    if agent
+        .realm_data::<Focus>(realm)
+        .is_some_and(|f| f.0.is_some())
+    {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    focusing_steps(agent, NodeRef::new(0, node));
+    agent.current_realm = saved;
+}
+
+/// "Focusing steps" (§6.6.4) sobre `n`.
+fn focusing_steps(agent: &mut Agent, mut n: NodeRef) {
     // E1: un shadow host con `delegatesFocus` pasa el foco al primer elemento enfocable de
     // su shadow tree (HTML §6.6.4 "focus delegate"); si el foco ya está dentro, se queda.
     if delegates_focus(agent, n) {
@@ -544,20 +658,20 @@ pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                     d.is_shadow_including_inclusive_ancestor(n.node, c.node)
                 })
         }) {
-            return Ok(Value::Undefined);
+            return;
         }
         match focus_delegate(agent, n) {
             Some(d) => n = d,
-            None => return Ok(Value::Undefined),
+            None => return,
         }
     }
     if !is_focusable(agent, n) {
-        return Ok(Value::Undefined);
+        return;
     }
     let realm = WebContextHandle::current(agent).realm;
     let old = agent.realm_data::<Focus>(realm).and_then(|f| f.0);
     if old == Some(n) {
-        return Ok(Value::Undefined);
+        return;
     }
     if let Some(o) = old {
         focus_event(agent, o, "blur", Some(n));
@@ -566,7 +680,6 @@ pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     agent.set_realm_data(realm, Focus(Some(n)));
     focus_event(agent, n, "focus", old);
     focus_event(agent, n, "focusin", old);
-    Ok(Value::Undefined)
 }
 
 /// E1: ¿Es un shadow host con `delegatesFocus`?

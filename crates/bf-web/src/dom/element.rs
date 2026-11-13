@@ -244,6 +244,7 @@ fn remove_attribute(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     crate::dom::events::content_attribute_changed(agent, n, &name);
     if had {
         crate::cssom::sheets::link_attribute_changed(agent, n, name.as_lossy_str(), true);
+        crate::html::legacy_factories::img_attribute_changed(agent, n, name.as_lossy_str()); // E2
     }
     Ok(Value::Undefined)
 }

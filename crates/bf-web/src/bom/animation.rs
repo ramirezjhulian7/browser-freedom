@@ -166,6 +166,8 @@ pub fn update_and_send_events(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     if agent.realm_data::<crate::WebContext>(realm).is_some() {
+        // E3: "flush autofocus candidates" va antes en *update the rendering* (§8.1.7.3).
+        crate::html::misc::flush_autofocus_candidates(agent, realm);
         // La hora del cuadro (Web Animations 1 §4.5).
         let now = super::performance::now_ms(agent);
         state_mut(agent).time = Some(now);

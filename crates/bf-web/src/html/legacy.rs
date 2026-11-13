@@ -120,6 +120,16 @@ pub fn noop(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 // --- HTMLElement: popover ---
 
+/// E3: ¿`n` tiene `popover` y está cerrado? (La hoja UA de HTML §15.3.1 los oculta con
+/// `[popover]:not(:popover-open):not(dialog[open]) { display: none }`; la del motor todavía
+/// no, así que quien necesita saber si se renderiza lo pregunta aquí.)
+pub fn is_closed_popover(agent: &Agent, n: NodeRef) -> bool {
+    popover_state(agent, n).is_some()
+        && !agent
+            .realm_data::<LegacyState>(WebContextHandle::current(agent).realm)
+            .is_some_and(|st| st.open_popovers.contains(&n))
+}
+
 /// El estado del atributo `popover` (§6.12): `auto` (vacío o `auto`), `manual`, `hint`, o
 /// `manual` si el valor no es válido; `None` sin el atributo.
 fn popover_state(agent: &Agent, n: NodeRef) -> Option<&'static str> {

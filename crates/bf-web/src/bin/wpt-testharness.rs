@@ -16,8 +16,116 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bf_web::html::testharness::{
-    DocResult, Harness, SubStatus, doc_limit, is_test_file, run_doc, test_docs,
+    DocResult, Harness, SubStatus, TestDoc, doc_limit, is_test_file, run_doc, test_docs,
 };
+
+/// Las variantes de un test `.html`: un documento por cada `<meta name="variant"
+/// content="?…">`, con esa query en la URL y en la ruta (WPT, "Variants"); el documento tal
+/// cual si no declara ninguna. Las de `.any.js` y `.window.js` (`META: variant=`) ya vienen
+/// expandidas de `test_docs`.
+fn with_html_variants(doc: TestDoc) -> Vec<TestDoc> {
+    if doc.path.contains('?') || doc.path.contains('#') || !doc.path.ends_with(".html") {
+        return vec![doc];
+    }
+    let variants = html_variants(&doc.html);
+    if variants.is_empty() {
+        return vec![doc];
+    }
+    variants
+        .into_iter()
+        .map(|v| TestDoc {
+            path: format!("{}{v}", doc.path),
+            url: format!("{}{v}", doc.url),
+            ..doc.clone()
+        })
+        .collect()
+}
+
+/// Los `content` de los `<meta name="variant">` del documento, en orden (los que empiezan
+/// por `?` o `#`, como exige WPT).
+fn html_variants(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("<meta") {
+        let start = from + i;
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        let tag = &html[start..end];
+        if attr(tag, "name").is_some_and(|n| n.eq_ignore_ascii_case("variant"))
+            && let Some(v) = attr(tag, "content")
+            && (v.starts_with('?') || v.starts_with('#'))
+        {
+            out.push(v.to_owned());
+        }
+        from = end;
+    }
+    out
+}
+
+/// El valor de un atributo entre comillas (o sin ellas) dentro de una etiqueta.
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(name) {
+        let at = from + i;
+        from = at + name.len();
+        let before_ok = at > 0 && lower.as_bytes()[at - 1].is_ascii_whitespace();
+        let rest = tag[from..].trim_start();
+        if !before_ok || !rest.starts_with('=') {
+            continue;
+        }
+        let rest = rest[1..].trim_start();
+        return Some(match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => rest[1..].split(q).next().unwrap_or(""),
+            _ => rest
+                .split(|c: char| c.is_ascii_whitespace() || c == '/')
+                .next()
+                .unwrap_or(""),
+        });
+    }
+    None
+}
+
+/// ¿Es un test manual de WPT? (`x-manual.html`, `x-manual.https.html`, `x-manual.any.js`…:
+/// el nombre del archivo hasta el primer punto termina en `-manual`.)
+fn is_manual(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.split('.')
+        .next()
+        .is_some_and(|stem| stem.ends_with("-manual"))
+}
+
+/// Margen sobre el límite del documento antes de abandonar su hilo (ver [`run_watched`]).
+const GRACE: Duration = Duration::from_secs(10);
+
+/// Corre un documento en un hilo propio y lo abandona si no termina en su límite más
+/// [`GRACE`]. El límite de [`run_doc`] lo comprueba el motor JS (`AgentOptions::deadline`);
+/// un bucle en código Rust del motor (un ciclo en el árbol, por ejemplo) nunca vuelve a
+/// mirarlo. Un hilo no se puede matar sin `unsafe`: el abandonado sigue hasta que termina el
+/// proceso, y el documento cuenta como `NORESULT`.
+fn run_watched(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (root_owned, doc_owned) = (root.to_path_buf(), doc.clone());
+    let spawned = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            let _ = tx.send(run_doc(&root_owned, &doc_owned, limit));
+        });
+    if spawned.is_err() {
+        return run_doc(root, doc, limit);
+    }
+    match rx.recv_timeout(limit + GRACE) {
+        Ok(r) => r,
+        Err(_) => DocResult {
+            path: doc.path.clone(),
+            harness: Harness::NoResult(format!(
+                "el motor no cedió el control en {} s (hilo abandonado)",
+                (limit + GRACE).as_secs()
+            )),
+            subtests: Vec::new(),
+        },
+    }
+}
 
 /// Los directorios por defecto.
 const DEFAULT_DIRS: &[&str] = &[
@@ -143,11 +251,18 @@ fn main() {
     if let Some(f) = &filter {
         files.retain(|p| p.contains(f.as_str()));
     }
+    // Los tests manuales (`-manual` antes de la extensión) necesitan a una persona: WPT no
+    // los corre como testharness y aquí terminaban en `TIMEOUT`.
+    files.retain(|p| !is_manual(p));
     files.sort();
     files.dedup();
     // Un trabajo por documento (las variantes de un `.any.js` también corren en paralelo):
     // cada uno tiene su agente y no comparte estado.
-    let docs: Vec<_> = files.iter().flat_map(|rel| test_docs(&root, rel)).collect();
+    let docs: Vec<_> = files
+        .iter()
+        .flat_map(|rel| test_docs(&root, rel))
+        .flat_map(with_html_variants)
+        .collect();
     let start = Instant::now();
     let limit = Duration::from_secs(timeout);
     let next = Mutex::new(0usize);
@@ -165,7 +280,7 @@ fn main() {
                             i
                         };
                         let Some(doc) = docs.get(i) else { break };
-                        let r = run_doc(&root, doc, doc_limit(doc, limit));
+                        let r = run_watched(&root, doc, doc_limit(doc, limit));
                         results.lock().unwrap().push(r);
                     }
                 })

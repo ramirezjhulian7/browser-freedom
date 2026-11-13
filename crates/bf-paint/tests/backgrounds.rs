@@ -79,3 +79,31 @@ fn body_background_propagation() {
     assert_eq!(px(&p, 12, 12), (0, 255, 0));
     assert_eq!(px(&p, 32, 32), (255, 255, 255));
 }
+
+/// Un SVG lima de 10×10 (con `viewBox`, para que escale al tamaño en que se pinta).
+const LIME_10: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' \
+     viewBox='0 0 10 10'%3E\
+     %3Crect width='10' height='10' fill='lime'/%3E%3C/svg%3E";
+
+/// `image-set()` (CSS Images 4 §2.4): la opción elegida pinta con su tamaño natural dividido
+/// por su resolución (`0.5x` dobla); una con `type()` sin soporte se salta; una de `0x` no
+/// pinta.
+#[test]
+fn image_set_resolution_and_type() {
+    let page = |value: &str| {
+        render(&format!(
+            "<style>div {{ width:100px;height:100px;background-repeat:no-repeat;\
+             background-image:{value} }}</style><body style='margin:0'><div></div>"
+        ))
+    };
+    let p = page(&format!("image-set(url(\"{LIME_10}\") 0.5x)"));
+    assert_eq!(px(&p, 18, 18), (0, 255, 0));
+    assert_eq!(px(&p, 22, 22), (255, 255, 255));
+    let p = page(&format!(
+        "image-set(url(\"nada.avif\") type(\"image/avif\"), url(\"{LIME_10}\") 2x type(\"image/svg+xml\"))"
+    ));
+    assert_eq!(px(&p, 4, 4), (0, 255, 0));
+    assert_eq!(px(&p, 6, 6), (255, 255, 255));
+    let p = page(&format!("image-set(url(\"{LIME_10}\") calc(-1 * 1x))"));
+    assert_eq!(px(&p, 4, 4), (255, 255, 255));
+}

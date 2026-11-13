@@ -52,6 +52,9 @@ pub struct Frame {
     pub opaque: bool,
     /// Navegación pendiente pedida desde el propio marco (`location.href = …`).
     pending: Option<(Url, bool)>,
+    /// E2: el `load` del `<iframe>` espera al `load` del documento del marco (HTML §7.4.6.3,
+    /// "iframe load event steps"); mientras, demora el `load` del documento del padre.
+    load_pending: bool,
 }
 
 /// Los marcos del agente (dato del embebedor).
@@ -76,6 +79,24 @@ fn frames_mut(agent: &mut Agent) -> &mut Frames {
 /// El marco de `realm`, si es un marco.
 pub fn frame_of(agent: &Agent, realm: RealmId) -> Option<&Frame> {
     frames(agent)?.list.iter().find(|f| f.realm == realm)
+}
+
+/// E3: "completely finish loading" de un documento de marco que no terminó por una
+/// navegación (`document.open()`, `write()` y `close()` desde script): encola los *iframe load
+/// event steps* (HTML §4.8.5) en el `<iframe>` que lo contiene, si sigue siendo el mismo.
+pub fn queue_iframe_load(agent: &mut Agent, realm: RealmId) {
+    let Some((parent, element)) = frame_of(agent, realm).map(|f| (f.parent, f.element)) else {
+        return;
+    };
+    agent.queue_task(
+        TaskSource::DomManipulation,
+        Box::new(move |agent: &mut Agent| {
+            if frame_of(agent, realm).is_some_and(|f| f.parent == parent && f.element == element) {
+                let mut ev = Event::new("load", EventInit::default());
+                super::script::dispatch_trusted(agent, parent, EventTarget::Node(element), &mut ev);
+            }
+        }),
+    );
 }
 
 /// La ventana que contiene a `realm` (`None` para la de la pestaña).
@@ -293,6 +314,7 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
         signature: String::new(),
         opaque: false,
         pending: None,
+        load_pending: false,
     });
     realm
 }
@@ -319,10 +341,29 @@ struct Fetched {
     encoding: Encoding,
 }
 
+/// Lo que [`fetch`] necesita de un recurso del loader o del blob URL store.
+struct BlobOrResource {
+    bytes: Vec<u8>,
+    content_type: Option<String>,
+    url: Url,
+}
+
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
-    let loader = window_loader(agent, realm)?;
-    let res = loader.load(url)?;
+    // E3: una URL `blob:` sale del blob URL store (File API §8.3.2, "resolve a blob URL"),
+    // no del loader de la ventana (`iframe.src = URL.createObjectURL(blob)`).
+    let (bytes, content_type, res_url) = if url.scheme == "blob" {
+        let entry = bf_net::blob::resolve(url)?;
+        (entry.bytes.to_vec(), Some(entry.mime), url.clone())
+    } else {
+        let res = window_loader(agent, realm)?.load(url)?;
+        (res.bytes, res.content_type, res.url)
+    };
+    let res = BlobOrResource {
+        bytes,
+        content_type,
+        url: res_url,
+    };
     let xml = xml_type(res.content_type.as_deref(), &res.url);
     // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del
     // `Content-Type`, prescan de `<meta>`; si no, el del documento que contiene al marco
@@ -413,6 +454,9 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     }
     let deep = depth_of(agent, realm) > MAX_DEPTH;
     let parent_base = WebContextHandle { realm: parent }.get(agent).base.clone();
+    // El `load` del `<iframe>` queda pendiente (y demora el del padre) desde ya: el documento
+    // del marco puede terminar dentro de `load_document` o mucho después (sus imágenes).
+    set_load_pending(agent, realm, true);
     match target {
         Target::Blank => {}
         Target::Srcdoc(text) => {
@@ -454,9 +498,89 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
             }
         },
     }
-    // El `load` del `<iframe>` (HTML §4.8.5 "iframe load event steps").
+    let _ = element;
+    // El `load` del `<iframe>` (HTML §7.4.6.3 "iframe load event steps"): si el documento del
+    // marco ya terminó (o no hay documento que esperar: `about:blank`, XML, un error), ahora;
+    // si no, cuando termine ([`frame_document_loaded`]).
+    let html = matches!(
+        WebContextHandle { realm }.get(agent).documents[0],
+        DocumentOwner::Parser(_)
+    );
+    if !html {
+        fire_iframe_load(agent, realm);
+    } else {
+        frame_document_loaded(agent, realm);
+    }
+}
+
+/// Marca (o desmarca) el `load` pendiente del marco `realm` y, con él, la demora del `load`
+/// del documento del padre (el indicador del `<iframe>` que mira "the end", paso 8).
+fn set_load_pending(agent: &mut Agent, realm: RealmId, on: bool) {
+    let Some(frame) = frames_mut(agent).list.iter_mut().find(|f| f.realm == realm) else {
+        return;
+    };
+    frame.load_pending = on;
+    let (parent, element) = (frame.parent, frame.element);
+    WebContextHandle { realm: parent }
+        .get_mut(agent)
+        .doc_mut(0)
+        .script_state_mut(element)
+        .delaying_load_event = on;
+}
+
+/// Dispara el `load` del `<iframe>` del marco `realm` (si estaba pendiente), deja de demorar
+/// el `load` del padre y deja que el padre siga con "the end" (que puede terminar a su vez el
+/// marco que lo contiene).
+fn fire_iframe_load(agent: &mut Agent, realm: RealmId) {
+    let Some(frame) = frame_of(agent, realm).cloned() else {
+        return;
+    };
+    if !frame.load_pending {
+        return;
+    }
+    set_load_pending(agent, realm, false);
     let mut ev = Event::new("load", EventInit::default());
-    super::script::dispatch_trusted(agent, parent, EventTarget::Node(element), &mut ev);
+    super::script::dispatch_trusted(
+        agent,
+        frame.parent,
+        EventTarget::Node(frame.element),
+        &mut ev,
+    );
+    crate::html::legacy_factories::resume_load(agent, frame.parent);
+    frame_document_loaded(agent, frame.parent);
+}
+
+/// E2: ¿el documento del marco `realm` tiene los scripts deshabilitados? (`sandbox` sin
+/// `allow-scripts` en su `<iframe>`, HTML §7.6.5). Entonces `loading=lazy` no aplaza nada
+/// (§4.8.4.3.9, "will lazy load element steps").
+pub fn scripting_disabled(agent: &Agent, realm: RealmId) -> bool {
+    let Some(frame) = frame_of(agent, realm) else {
+        return false;
+    };
+    let ctx = WebContextHandle {
+        realm: frame.parent,
+    }
+    .get(agent);
+    sandbox_tokens(ctx.document(), frame.element)
+        .is_some_and(|t| !t.iter().any(|t| t == "allow-scripts"))
+}
+
+/// E2: el documento del marco `realm` pudo haber terminado de cargar (se disparó su `load`):
+/// si es así y su `<iframe>` esperaba, se dispara el `load` del elemento. Lo llaman quien
+/// suelta lo que demoraba un `load` (imágenes, hojas) y [`sync_frames`].
+pub fn frame_document_loaded(agent: &mut Agent, realm: RealmId) {
+    let pending = frame_of(agent, realm).is_some_and(|f| f.load_pending);
+    if !pending {
+        return;
+    }
+    let complete = WebContextHandle { realm }
+        .get(agent)
+        .document()
+        .ready_state()
+        == bf_dom::script::DocumentReadiness::Complete;
+    if complete {
+        fire_iframe_load(agent, realm);
+    }
 }
 
 /// Parsea `text` como el documento XML del marco `realm` en `url` (sin ejecutar sus scripts:
@@ -494,6 +618,8 @@ fn load_document(
     }
     super::script::feed(agent, realm, text);
     super::script::finish(agent, realm);
+    // E2: sus propios marcos, antes de soltar su `load` (que así los espera).
+    sync_level(agent, realm, depth_of(agent, realm));
     super::script::resources_loaded(agent, realm);
 }
 
@@ -510,6 +636,28 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
         if let Some(f) = frames_mut(agent).list.iter_mut().find(|f| f.realm == r) {
             f.pending = Some((url, replace));
         }
+    }
+    // E2: las imágenes `loading=lazy` que ya están cerca del viewport (de la ventana y de sus
+    // marcos) se piden: este es el punto en que el bucle queda sin trabajo.
+    crate::html::legacy_factories::check_lazy_images(agent, realm);
+    let frame_realms: Vec<RealmId> = frames(agent)
+        .map(|f| f.list.iter().map(|f| f.realm).collect())
+        .unwrap_or_default();
+    for r in frame_realms {
+        crate::html::legacy_factories::check_lazy_images(agent, r);
+    }
+    // E2: los `<iframe>` que esperaban a que su documento terminara de cargar.
+    let waiting: Vec<RealmId> = frames(agent)
+        .map(|f| {
+            f.list
+                .iter()
+                .filter(|f| f.load_pending)
+                .map(|f| f.realm)
+                .collect()
+        })
+        .unwrap_or_default();
+    for r in waiting {
+        frame_document_loaded(agent, r);
     }
     sync_level(agent, realm, 0);
     frames(agent).map_or(0, |f| f.navigations) != before
