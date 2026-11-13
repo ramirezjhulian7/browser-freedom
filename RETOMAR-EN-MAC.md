@@ -2,7 +2,8 @@
 
 Estado actual del proyecto, para quien lo continúe sin el historial de las sesiones anteriores.
 El desarrollo se hace en un Mac (macOS, Apple M4) desde el 2026-11-12. Si eres una sesión de
-Claude Code, lee este archivo entero; la sección 9 resume qué se espera de ti.
+Claude Code, lee este archivo entero; la sección 9 dice por dónde seguir y la 10 trae el
+prompt para empezar.
 
 El hash de `master` cambia en cada integración: mira `git log --oneline -1 master`.
 
@@ -111,6 +112,12 @@ bloques a seis ejecutores; cada uno trabaja en su worktree y su rama `army/e<n>`
     reintenta.
   - Si se cambia un tipo público, `cargo check --workspace --all-targets`. Si se toca
     `bf-style`, también los tests de `bf-layout`, `bf-paint`, `bf-web` y `bf-shell`.
+  - **Medidas de tiempo.** Con seis ejecutores compilando y midiendo a la vez, la carga
+    llegó a 200 y las cifras de tiempo dejaron de ser comparables entre corridas: el mismo
+    binario dio una primera pintura de 1,5 s (mediana) con carga 13 y de 4,3 s con carga 64-72
+    (`docs/pendiente/mac/e3.md`, "Ciclo de cierre, ronda 5"). Un antes y después se mide alternando los dos
+    binarios (5 corridas de cada uno), con el mínimo y la mediana, la carga de `uptime` en
+    cada corrida y el tiempo de CPU de `/usr/bin/time -l`, que depende menos de la carga.
 
 Territorios del ciclo del Mac (cada ronda el planificador fija además qué archivos puede tocar
 cada uno):
@@ -128,23 +135,37 @@ cada uno):
 
 El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A grandes rasgos:
 
-- **Motor de documentos:** HTML, CSS, flex, grid con subgrid y lanes, tablas, tamaños
-  intrínsecos, escritura vertical, bidi, cortes de línea, scroll con `sticky`, SVG, WebP y
-  `object-fit`.
+- **Motor de documentos:** HTML, CSS, flex (con los tamaños intrínsecos de §9.9.1), grid
+  con subgrid y lanes, tablas, tamaños intrínsecos, escritura vertical, bidi, cortes de
+  línea, scroll con `sticky`, SVG, WebP y `object-fit`. `:popover-open`: los popovers
+  cerrados no se pintan. El parser HTML sigue a los nodos que un script adopta en otro
+  documento.
 - **JavaScript propio:** test262 al 98.8 %, con Intl y Temporal.
 - **Plataforma web:**
   - DOM con Shadow DOM y custom elements;
   - fetch, XHR, streams, IndexedDB, workers, Service Workers y Cache API;
   - transiciones, animaciones y `transform`;
-  - del ciclo del Mac: carga de imágenes con sus eventos y `loading=lazy` (también al
-    desplazar la ventana), CSS Font Loading (`document.fonts`), el `load` de `<iframe>` que
-    espera a su documento y `pageshow` tras el `load`.
-- **Accesibilidad:** el motor calcula el rol y el nombre accesible de cada elemento
-  (`html-aam` 93.3 %, `wai-aria` 91.8 %). El árbol todavía no se expone a macOS.
+  - del ciclo del Mac: carga de imágenes con sus eventos, CSS Font Loading
+    (`document.fonts`), el `load` de `<iframe>` que espera a su documento y `pageshow` tras
+    el `load`;
+  - `loading=lazy` completo: el motor decide qué imagen espera, la pide al desplazar la
+    ventana y el pintado no descarga ni las lejanas ni dos veces las cercanas (E2). Las
+    perezosas cercanas se revisan con la maqueta del navegador (HTML §8.1.7.3) y aparecen
+    un cuadro después de la primera pintura (E3).
+- **Accesibilidad:** el motor calcula el rol, el nombre y los estados de cada elemento y arma
+  el árbol de accesibilidad del documento (`html-aam` 93.4 %, `wai-aria` 95.7 %). El árbol
+  todavía no se expone a macOS.
 - **Red y seguridad:** HTTP/2, caché HTTP en disco, HSTS, Referrer-Policy, Content Security
-  Policy y bloqueo de contenido mixto.
-- **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental;
-  Wikipedia se desplaza a 53 fps a densidad 1. `monospace` y `<pre>` salen a 13 px.
+  Policy (con `img-src` y el evento `securitypolicyviolation`) y bloqueo de contenido mixto.
+  Con una VPN que da una ruta IPv6 sin salida, la conexión prueba IPv4 primero (RFC 6724).
+- **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental; el
+  cuadro de la ventana se reutiliza y los `sticky` van en capa propia. Desplazar Wikipedia
+  cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (E4, carga 15-36); falta
+  confirmarlo con la máquina libre. `monospace` y `<pre>` salen a 13 px.
+- **Primera pintura de Wikipedia:** el parseo bajó de unos 300 ms a 56-60 ms (E3 y E2, ver
+  `docs/rendimiento.md`) y la red a unos 400 ms (E6). La última medida completa es de 823 a
+  936 ms (E2, carga 25, antes del arreglo de red de E6); falta medirla sobre `master` con la
+  máquina libre. La meta es menos de 500 ms.
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
 - **Empaquetado:** `Freedom.app` firmada ad hoc con su `.dmg`
@@ -155,28 +176,41 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
 criterios: 80.5 %** de las fases 2 a 5 (84.4 % contando la fase 1). Lo que falta está en la
-lista "Criterios no cumplidos" del roadmap; tres puntos esperan una decisión del usuario
+lista "Criterios no cumplidos" del roadmap; cinco puntos esperan una decisión del usuario
 (roadmap, "Decisiones pendientes del usuario").
 
 ## 8. Ramas en integración
 
-Esta rama tiene trabajo que `master` todavía no tiene. `git log --oneline master..army/e<n>`
-muestra cuál, y la nota de la rama dice qué está hecho y qué falta:
+Al 2026-11-13, con `master` en `0c8b903`. `army/e2` y `army/e3` ya están integradas.
+`git log --oneline master..army/e<n>` muestra qué trae cada rama, y su nota
+(`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y qué falta. Las tres
+siguen en curso al cerrar el ciclo, y su trabajo **no** está en `master`:
 
-| Rama | Qué trae | Nota (en esa rama) |
+| Rama | Qué trae | Nota |
 |---|---|---|
-| `army/e5` | Tamaños intrínsecos de flex (§9.9.1), porcentajes a través de bloques anónimos, baseline en columnas y `:popover-open`; 3.6 sube a 94 / 107. No entró porque choca con la de E1 en un archivo de tests | `docs/pendiente/mac/e5.md`, "Ciclo de cierre, ronda 1" |
+| `army/e4` | 60 fps a densidad 2, cascada y parseo de CSS | `docs/pendiente/mac/e4.md` de la rama, cuando la entregue (en `master`, hasta "Cierre, ronda 3") |
+| `army/e5` | Tiempo de maqueta | `docs/pendiente/mac/e5.md` de la rama, cuando la entregue |
+| `army/e6` | Calentar la caché durante la validación del documento y juntar las peticiones en vuelo repetidas | `docs/pendiente/mac/e6.md` de la rama, "Ciclo de cierre, ronda 6" |
 
-Para leer la nota de la rama sin cambiar de rama:
-`git show army/e5:docs/pendiente/mac/e5.md`.
+## 9. Lo primero al retomar
 
-## 9. Prompt para pegar en Claude Code
+1. Integrar `army/e4`, `army/e5` y `army/e6` (`git merge --no-ff`, una por una) y correr la
+   verificación completa (sección 4).
+2. Con la máquina libre, medir el desplazamiento (`scrollbench:120:40` a densidad 1 y a
+   densidad 2) y la primera pintura de Wikipedia, con el método de
+   [`docs/rendimiento.md`](docs/rendimiento.md), y actualizar los dos criterios de la fase 5
+   en `docs/roadmap.md`.
+3. Las decisiones pendientes del usuario (roadmap, "Decisiones pendientes del usuario"):
+   lector de pantalla, fuzzer de IPC, los 8 tests de CSS Flexbox 2 de 3.6, los 2 subtests de
+   `html/syntax/parsing` que no se pueden cumplir y el suelo de red de la primera pintura.
+
+## 10. Prompt para pegar en Claude Code
 
 ```
 Continúa el proyecto Freedom (navegador con motor propio en Rust) en este Mac.
 Lee primero RETOMAR-EN-MAC.md en la raíz del repo, luego docs/roadmap.md (tabla
 "Avance por criterios" y "Criterios no cumplidos") y las notas de docs/pendiente/mac/.
-Comprueba con git log qué ramas army/e<n> tienen trabajo que master no tiene.
-No cambies las reglas del proyecto (sección 5) ni las del ciclo (sección 6). Dime el
+Comprueba con git log qué ramas army/e<n> tienen trabajo que master no tiene, y sigue el
+orden de la sección 9 ("Lo primero al retomar"). No cambies las reglas del proyecto (sección 5) ni las del ciclo (sección 6). Dime el
 estado y propón el siguiente reparto entre los seis ejecutores.
 ```

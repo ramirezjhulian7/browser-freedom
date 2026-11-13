@@ -104,7 +104,9 @@ cualquier programa del Mac.
 - **Funciona:**
   - **Páginas:** HTML y CSS, con su texto, tablas y la mayoría de los diseños, incluido el
     texto de derecha a izquierda (árabe, hebreo) y el vertical (japonés, chino).
-  - **Imágenes:** PNG, JPEG, GIF y APNG animados, WebP, BMP, ICO y SVG.
+  - **Imágenes:** PNG, JPEG, GIF y APNG animados, WebP, BMP, ICO y SVG. Las imágenes
+    marcadas como perezosas (`loading="lazy"`) solo se descargan al acercarse a la zona
+    visible, y una sola vez.
   - **Movimiento:** animaciones, transiciones y transformaciones de CSS.
   - **Scripts:** los de las páginas, con buena parte de las funciones del navegador que usan.
   - **Navegación:** enlaces, pestañas y varias ventanas, atrás y adelante, buscar en la
@@ -114,7 +116,7 @@ cualquier programa del Mac.
     pestañas de la última vez.
   - **Seguridad:** las páginas `https` no cargan scripts ni otro contenido activo por `http`
     (contenido mixto), y se respetan las reglas de Content Security Policy que manda el sitio
-    sobre qué scripts, conexiones y marcos puede usar.
+    sobre qué scripts, imágenes, conexiones y marcos puede usar.
   - **En macOS:** se instala como `Freedom.app`.
 - **Todavía no:**
   - parte de las funciones de JavaScript que usan los sitios;
@@ -164,9 +166,14 @@ Lo que ya está:
 - HTTP/2 con caché HTTP en disco, SVG y WebP, y scroll containers con `sticky`.
 
 La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está a medias:
-- el rol y el nombre accesible de cada elemento ya se calculan, pero no se exponen al sistema;
-- CSP y contenido mixto ya se aplican;
-- Wikipedia se desplaza a 53 fps a densidad 1 (meta: 60);
+- el rol, el nombre y los estados de cada elemento y el árbol de accesibilidad ya se
+  calculan, pero no se exponen al sistema;
+- CSP (también `img-src` y el evento `securitypolicyviolation`) y contenido mixto ya se
+  aplican;
+- desplazar Wikipedia cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (meta:
+  16.7 ms, 60 fps), sin confirmar con la máquina libre;
+- la primera pintura de Wikipedia midió 823-936 ms antes del último arreglo de red (meta:
+  menos de 500 ms), y falta medirla con la máquina libre;
 - faltan los procesos separados con sandbox.
 
 Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
@@ -192,8 +199,8 @@ Sus recuentos son los de la última corrida con resumen y no se han vuelto a ano
 | APIs web | DOM, Shadow DOM, HTML, CSSOM, Fetch, Encoding | WPT testharness.js | `html/dom` **97.2 %**, `dom/nodes` **92.8 %**, `dom/events` **80.2 %**, `css/cssom` **81.6 %**, `fetch/api/basic` **89.4 %**, `encoding` **97.5 %** | [`docs/roadmap.md`](docs/roadmap.md), 2.2, 2.3 y 3.5 |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) | `cargo test -p bf-js --test parser_tests` |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) | [`docs/test262-status.md`](docs/test262-status.md) |
-| Accesibilidad | HTML-AAM, WAI-ARIA 1.2, AccName 1.2 | WPT `html-aam`, `wai-aria` | **93.3 %** (829 / 889) y **91.8 %** (540 / 588); el árbol no se expone al sistema | `docs/pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
-| Seguridad | CSP 3, Mixed Content 2 | WPT `content-security-policy`, `mixed-content` | **173 / 1782** subtests; casi todos los demás necesitan cabeceras o subdominios de `wptserve` | `docs/pendiente/mac/e6.md`, "Ciclo de cierre, ronda 1" |
+| Accesibilidad | HTML-AAM, WAI-ARIA 1.2, AccName 1.2, Core-AAM | WPT `html-aam`, `wai-aria` | **93.4 %** (830 / 889) y **95.7 %** (563 / 588); con el árbol de accesibilidad, que no se expone al sistema | `docs/pendiente/mac/e1.md`, "Ciclo de cierre, ronda 3" |
+| Seguridad | CSP 3, Mixed Content 2 | WPT `content-security-policy`, `mixed-content` | **231 / 1782** subtests (con `img-src` y `securitypolicyviolation`); casi todos los demás necesitan cabeceras o subdominios de `wptserve` | `docs/pendiente/mac/e6.md`, "Ciclo de cierre, ronda 3" |
 | Motor JavaScript | ECMA-262 2026 | test262 (ejecución) | `language/` **99.95 %**, `built-ins/` **99.99 %**; total **98.8 %** (50 594 / 51 220) | [`docs/test262-status.md`](docs/test262-status.md); `built-ins/` en [`docs/roadmap.md`](docs/roadmap.md), 2.1 |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
@@ -628,6 +635,7 @@ regresión de test262) siguen igual: se corren con `--ignored`.
 | Qué | Prueba |
 |---|---|
 | Carga de imágenes: `load`, `error` y `decode()` de `<img>`; `loading=lazy`; el `load` de `<iframe>` que espera a su documento | `cargo test -p bf-web --test img_load` |
+| `loading=lazy` en el pintado: las perezosas que esperan no se piden y las que llegan no se descargan dos veces | `cargo test -p bf-paint --test lazy_images` y `cargo test -p bf-shell --bin freedom lazy_paint_tests` |
 | Una sola decodificación por imagen | `cargo test -p bf-image --test shared_cache` y `cargo test -p bf-shell --test image_decode_once` |
 | CSS Font Loading (`document.fonts`, `FontFace`) | `cargo test -p bf-web --test font_loading` |
 | Parser HTML: adoption agency sin ciclos a través de shadow roots y templates, scripts SVG, CR LF partido entre dos `document.write` | `cargo test -p bf-html --test robustness` |

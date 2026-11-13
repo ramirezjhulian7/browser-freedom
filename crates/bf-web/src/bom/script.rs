@@ -127,6 +127,37 @@ pub struct ScriptEnv {
     /// E4: tiempo total ejecutando scripts del documento (compilar y evaluar; para las
     /// mediciones de `BF_TRACE`).
     pub run_time: std::time::Duration,
+    /// E3: en qué se va el parseo del documento además de los scripts (`BF_TRACE`).
+    pub parse_profile: ParseProfile,
+}
+
+/// E3: el tiempo que el parser del documento pasa en el navegador, por partes (para las
+/// mediciones de `BF_TRACE`; lo que queda del parseo es el tokenizador y el tree builder).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseProfile {
+    /// Buscar los scripts externos (red o caché).
+    pub script_fetch: std::time::Duration,
+    /// Los `<link>` que insertó el parser (sus hojas y `preload`).
+    pub links: std::time::Duration,
+    /// Los `<img>` que insertó el parser.
+    pub images: std::time::Duration,
+    /// Los puntos de control de microtasks antes de cada `script` (§13.2.6.4.8, paso 1).
+    pub checkpoints: std::time::Duration,
+    /// `document.write()` y `writeln()`, incluido lo que parsean (y los scripts que corran
+    /// dentro, que también cuentan en `run_time`).
+    pub writes: std::time::Duration,
+}
+
+/// E3: suma a la parte `part` del perfil de parseo de `realm` el tiempo desde `start`.
+fn profile(
+    agent: &mut Agent,
+    realm: RealmId,
+    start: Instant,
+    part: fn(&mut ParseProfile) -> &mut std::time::Duration,
+) {
+    if let Some(env) = env_mut(agent, realm) {
+        *part(&mut env.parse_profile) += start.elapsed();
+    }
 }
 
 impl ScriptEnv {
@@ -155,6 +186,7 @@ pub fn install_frame_scripting(
             executed: 0,
             failed: 0,
             run_time: std::time::Duration::ZERO,
+            parse_profile: ParseProfile::default(),
         },
     );
 }
@@ -185,6 +217,7 @@ pub fn install_scripting(
             executed: 0,
             failed: 0,
             run_time: std::time::Duration::ZERO,
+            parse_profile: ParseProfile::default(),
         },
     );
 }
@@ -329,8 +362,11 @@ impl WebScripts<'_> {
     }
 
     fn fetch(&mut self, url: &Url, charset: &str) -> Option<Fetched> {
+        let start = Instant::now();
         let loader = script_env(self.agent, self.realm)?.loader.clone();
-        let res = loader.load(url)?;
+        let res = loader.load(url);
+        profile(self.agent, self.realm, start, |p| &mut p.script_fetch);
+        let res = res?;
         let fallback = Encoding::for_label(charset).unwrap_or(Encoding::Utf8);
         let (source, _) = encoding::decode(&res.bytes, fallback);
         Some(Fetched {
@@ -686,23 +722,27 @@ impl bf_html::ScriptHost for WebScripts<'_> {
     // E2: los `<link>` del parser cargan su hoja o su `preload` y disparan `load`/`error`.
     fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
         let realm = self.realm;
+        let start = Instant::now();
         crate::html::legacy_factories::with_lent_document(
             self.agent,
             realm,
             doc.document_mut(),
             |agent| crate::cssom::sheets::link_connected(agent, crate::NodeRef::new(0, link)),
         );
+        profile(self.agent, realm, start, |p| &mut p.links);
     }
 
     // E2: los `<img>` del parser piden su imagen (y demoran `load`, §4.8.4.3.5).
     fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
         let realm = self.realm;
+        let start = Instant::now();
         crate::html::legacy_factories::with_lent_document(
             self.agent,
             realm,
             doc.document_mut(),
             |agent| crate::html::legacy_factories::img_created(agent, crate::NodeRef::new(0, img)),
         );
+        profile(self.agent, realm, start, |p| &mut p.images);
     }
 
     fn prepare(&mut self, doc: &mut Parser, script: NodeId) -> ScriptDisposition {
@@ -824,6 +864,7 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         if !self.agent.frames.is_empty() {
             return;
         }
+        let start = Instant::now();
         let placeholder = Parser::new(&parse_options());
         let parser = std::mem::replace(doc, placeholder);
         put_parser(self.agent, self.realm, parser);
@@ -837,6 +878,7 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         }
         self.agent.current_realm = saved;
         *doc = take_parser(self.agent, self.realm);
+        profile(self.agent, self.realm, start, |p| &mut p.checkpoints);
     }
 
     /// E3: `pageshow` tras el `load` de la ventana (HTML §13.2.7).
@@ -883,13 +925,21 @@ fn parser_op(
 /// `document.write(...text)`.
 pub fn document_write(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = concat_args(agent, a)?;
-    parser_op(agent, a, |p, host| p.write(host, &text))
+    let start = Instant::now();
+    let r = parser_op(agent, a, |p, host| p.write(host, &text));
+    let realm = WebContextHandle::current(agent).realm;
+    profile(agent, realm, start, |p| &mut p.writes);
+    r
 }
 
 /// `document.writeln(...text)`.
 pub fn document_writeln(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = concat_args(agent, a)?;
-    parser_op(agent, a, |p, host| p.writeln(host, &text))
+    let start = Instant::now();
+    let r = parser_op(agent, a, |p, host| p.writeln(host, &text));
+    let realm = WebContextHandle::current(agent).realm;
+    profile(agent, realm, start, |p| &mut p.writes);
+    r
 }
 
 /// `document.open()`: devuelve el documento.

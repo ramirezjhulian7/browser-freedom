@@ -12,7 +12,10 @@ mod downloads;
 mod find;
 mod history;
 mod internal;
+#[cfg(test)]
+mod lazy_paint_tests; // E2
 mod load;
+mod preload;
 mod profile;
 mod reftest_js;
 mod restore;
