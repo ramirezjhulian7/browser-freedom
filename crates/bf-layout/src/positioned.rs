@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use bf_style::ComputedStyle;
-use bf_style::properties::types::{LengthPercentageAuto, Position};
+use bf_style::properties::types::{LengthPercentageAuto, Position, Size};
 
 use crate::block::{
     Cb, Layout, PendingAbs, border_edges, margin_value, padding_edges, specified_width,
@@ -120,7 +120,41 @@ impl<'a> Layout<'a> {
         // E9: una absoluta de otro modo de escritura es la raíz de un flujo ortogonal: se
         // maqueta en su marco y se coloca con sus insets (o en su posición estática).
         if self.is_orthogonal(b) {
-            let mut f = self.orthogonal_fragment(b, cb);
+            // E5: con `width`/`height` `auto` e insets opuestos definidos, el tamaño sale de
+            // ellos (CSS 2.2 §10.3.7 y §10.6.4, caso de `left`, `width` y `right`).
+            let auto_size = |v: &Size| matches!(v, Size::Auto);
+            let m = |v| margin_value(v, cb.width).unwrap_or(0.0);
+            let (border, padding) = (border_edges(s), padding_edges(s, cb.width));
+            let width = match (
+                inset(&s.left, Some(cb.width)),
+                inset(&s.right, Some(cb.width)),
+            ) {
+                (Some(l), Some(r)) if auto_size(&s.width) => Some(
+                    (cb.width
+                        - l
+                        - r
+                        - m(&s.margin_left)
+                        - m(&s.margin_right)
+                        - border.horizontal()
+                        - padding.horizontal())
+                    .max(0.0),
+                ),
+                _ => None,
+            };
+            let height = match (inset(&s.top, cb.height), inset(&s.bottom, cb.height)) {
+                (Some(t), Some(bm)) if auto_size(&s.height) => Some(
+                    (cb_rect.height
+                        - t
+                        - bm
+                        - m(&s.margin_top)
+                        - m(&s.margin_bottom)
+                        - border.vertical()
+                        - padding.vertical())
+                    .max(0.0),
+                ),
+                _ => None,
+            };
+            let mut f = self.orthogonal_sized_fragment(b, cb, width, height);
             let outer = f.margin_rect();
             let x = match (
                 inset(&s.left, Some(cb.width)),

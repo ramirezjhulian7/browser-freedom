@@ -43,7 +43,7 @@ use bf_style::properties::types::{
 use bf_style::values::color::Rgba;
 use bf_style::values::{Length, LengthPercentage};
 
-use crate::block::{Cb, Layout, border_edges, padding_edges};
+use crate::block::{Cb, Layout, PendingAbs, border_edges, is_positioned, padding_edges};
 use crate::box_tree::{BoxKind, LayoutBox};
 use crate::float::FloatContext;
 use crate::fragment::{
@@ -1305,6 +1305,10 @@ impl<'a> Layout<'a> {
         let x1 = col_x.last().copied().unwrap_or(cb.x);
         let mut row_frags: Vec<Vec<Fragment>> = vec![Vec::new(); nrows];
         let mut lowest: Vec<f32> = vec![f32::NEG_INFINITY; nrows];
+        // E5: absolutos y fijos cuyo containing block es una fila o un grupo de filas
+        // (posicionado o transformado; CSS Transforms 1 §3), por dueño: `(es fila, índice)`.
+        let mut owned_abs: Vec<((bool, usize), Vec<PendingAbs<'a>>)> = Vec::new();
+        let mut owned_fixed: Vec<((bool, usize), Vec<PendingAbs<'a>>)> = Vec::new();
         for (c, m) in grid.cells.iter().zip(&measures) {
             if heights[c.row..c.row + c.rowspan].iter().all(|&h| h == 0.0)
                 && is_collapsed(row_style(c.row))
@@ -1325,7 +1329,35 @@ impl<'a> Layout<'a> {
                     _ => 0.0,
                 },
             };
+            let (rs, gs) = (row_style(c.row), &t.children[c.group].style);
+            let transformed = crate::positioned::transform_contains;
+            let abs_owner = if is_positioned(rs) || transformed(rs) {
+                Some((true, c.row))
+            } else if is_positioned(gs) || transformed(gs) {
+                Some((false, c.group))
+            } else {
+                None
+            };
+            let fixed_owner = if transformed(rs) {
+                Some((true, c.row))
+            } else if transformed(gs) {
+                Some((false, c.group))
+            } else {
+                None
+            };
+            if abs_owner.is_some() {
+                self.abs_frames.push(Vec::new());
+            }
+            let outer_fixed = fixed_owner.map(|_| std::mem::take(&mut self.fixed));
             let mut f = self.layout_cell(cell, cell_cb, (x, top + offset), w);
+            if let Some(o) = abs_owner {
+                let pending = self.abs_frames.pop().unwrap_or_default();
+                owned_push(&mut owned_abs, o, pending);
+            }
+            if let (Some(o), Some(outer)) = (fixed_owner, outer_fixed) {
+                let pending = std::mem::replace(&mut self.fixed, outer);
+                owned_push(&mut owned_fixed, o, pending);
+            }
             // La celda mide su columna aunque su padding y borde no quepan (columnas de
             // `table-layout: fixed`).
             f.rect.width = w;
@@ -1433,8 +1465,10 @@ impl<'a> Layout<'a> {
                     None => row_y[r] + heights[r],
                 });
                 rf.children = std::mem::take(&mut row_frags[r]);
+                self.place_owned(&mut rf, (true, r), &mut owned_abs, &mut owned_fixed);
                 gf.children.push(rf);
             }
+            self.place_owned(&mut gf, (false, gi), &mut owned_abs, &mut owned_fixed);
             out.push(gf);
         }
         // --- Bordes colapsados ---
@@ -1489,6 +1523,28 @@ impl<'a> Layout<'a> {
         (out, content_h)
     }
 
+    /// E5: maqueta dentro de la fila o el grupo `f` (su containing block, sin padding) los
+    /// absolutos y fijos que le tocan.
+    fn place_owned(
+        &mut self,
+        f: &mut Fragment,
+        owner: (bool, usize),
+        abs: &mut Vec<((bool, usize), Vec<PendingAbs<'a>>)>,
+        fixed: &mut Vec<((bool, usize), Vec<PendingAbs<'a>>)>,
+    ) {
+        let rect = f.rect;
+        if let Some(i) = abs.iter().position(|(o, _)| *o == owner) {
+            for p in abs.swap_remove(i).1 {
+                let a = self.absolute(p, rect);
+                f.children.push(a);
+            }
+        }
+        if let Some(i) = fixed.iter().position(|(o, _)| *o == owner) {
+            let list = fixed.swap_remove(i).1;
+            f.children.extend(self.contained_fixed(list, rect));
+        }
+    }
+
     /// Completa el fragmento de una caja de tabla (pintura y baseline) o de su envoltorio
     /// (baseline de la tabla).
     pub(crate) fn table_fragment(&mut self, b: &'a LayoutBox, f: &mut Fragment) {
@@ -1511,5 +1567,20 @@ impl<'a> Layout<'a> {
                 .find(|c| matches!(c.table, Some(TableRole::Table(_))))
                 .and_then(|t| t.baseline.or(Some(t.rect.bottom())));
         }
+    }
+}
+
+/// E5: añade los pendientes de `pending` a los del dueño `owner`.
+fn owned_push<'a>(
+    list: &mut Vec<((bool, usize), Vec<PendingAbs<'a>>)>,
+    owner: (bool, usize),
+    pending: Vec<PendingAbs<'a>>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    match list.iter_mut().find(|(o, _)| *o == owner) {
+        Some((_, v)) => v.extend(pending),
+        None => list.push((owner, pending)),
     }
 }
