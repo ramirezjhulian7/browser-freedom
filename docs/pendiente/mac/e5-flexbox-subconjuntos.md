@@ -1,62 +1,59 @@
 # E5: subconjuntos de `css/css-flexbox` de los criterios 3.3, 3.4 y 3.6 del roadmap
 
-Medido el 2026-11-12 en macOS sobre `army/e5` (ronda 5, `master` `cd8fc5a` más los cambios de
-E5), con `REFTEST_GROUPS=css/css-flexbox,css/css-writing-modes cargo test -p bf-paint --test
-wpt_reftests_groups -- --ignored --test-threads=3`. Solo reftests (los de testharness no
-cuentan). Cada subconjunto son los reftests cuyo archivo o referencia (`rel=match`) contiene el
-texto indicado; un test puede estar en dos. Para E3 (roadmap).
+Medido en macOS (ronda 6) sobre `army/e5` (`master` `d1148b8` más los cambios de E5), con
+`REFTEST_GROUPS=css/css-flexbox,… cargo test -p bf-paint --test wpt_reftests_groups -- --ignored
+--test-threads=3`. Solo reftests (los de testharness no cuentan). Cada subconjunto son los
+reftests cuyo archivo o referencia (`rel=match`) contiene el texto indicado; un test puede estar
+en dos. Para E3 (roadmap).
 
-| Criterio | `master` `cd8fc5a` | `army/e5` | Meta |
-|---|---:|---:|---|
-| 3.3 `linear-gradient` | 15/16 | 15/16 | todos |
-| 3.4 `writing-mode`/rtl | 95/136 (69,9 %) | **103/136 (75,7 %)** | ≥ 75 % |
-| 3.6 palabras clave de tamaño | 74/108 | 74/108 | todos |
-| `css/selectors/of-type-selectors.xhtml` | pasa | pasa | pasa |
+| Criterio | ronda 5 (`cd8fc5a`) | `master` `d1148b8` | `army/e5` ronda 6 | Meta |
+|---|---:|---:|---:|---|
+| 3.3 `linear-gradient` | 15/16 | 15/16 | **16/16** | todos (cumplido) |
+| 3.4 `writing-mode`/rtl | 95/136 | 103/136 | **107/136 (78,7 %)** | ≥ 75 % (cumplido) |
+| 3.6 palabras clave de tamaño | 74/108 | 74/108 | **86/108** | todos |
+| `css/selectors/of-type-selectors.xhtml` | pasa | pasa | pasa | pasa |
+| `css/css-flexbox` entero | 747/949 | 762/949 | **780/949** | — |
 
-## Causas de los fallos
+## Causas de los fallos que quedan
 
-3.3 (1): `align-self-016`: no es el gradiente. Un ítem `align-self: start` en un contenedor
-`column wrap` de 100 px con dos floats de 100 px: los navegadores le dan su ancho max-content
-(200 px) y aquí sale fit-content (100 px).
+3.3: ninguno (`align-self-016` pasa: refit fit-content en columnas multilínea y floats seguidos
+sumados en el max-content).
 
-3.4 (33):
-- Baseline en flujos verticales o sintetizada (11): `baseline-synthesis-001/003/004`,
-  `baseline-synthesis-vert-lr-line-under`, `synthesize-vrl-baseline`,
-  `flex-align-baseline-column-vert-{lr,rl}-rtl-wrap-reverse`,
-  `flexbox-align-self-baseline-horiz-006/008`, `flex-container-line-if-empty-vertical-writing-mode`,
-  `flexbox_align-items-stretch-3`. Un fragmento vertical pierde su baseline al volver a físico
-  (`fragment_to_physical`).
+3.4 (29):
+- Baseline (7): `flex-align-baseline-column-vert-{lr,rl}-rtl-wrap-reverse`,
+  `baseline-synthesis-003` (600 px), `flex-container-line-if-empty-vertical-writing-mode`,
+  `flexbox-align-self-baseline-horiz-006/008`, `flexbox_align-items-stretch-3`.
 - `sideways-lr` (5): `flexbox-writing-mode-slr`, `-slr-rtl`, `-slr-row-mix`,
-  `justify-content-sideways-001` y `flexbox-writing-mode-015`. `sideways-lr` se trata como
+  `justify-content-sideways-001`, `flexbox-writing-mode-015`. `sideways-lr` se trata como
   `vertical-lr` (pendiente de E9).
 - `align-self` en vertical con rtl (5): `flexbox-align-self-vert-rtl-001…005`.
 - `safe` respecto al containing block exterior (3, tentative):
   `flex-abspos-align-self-safe-outer-cb-001…003`.
-- `flex-wrap: balance` (1): `balance/balance-available-size-002` (no implementado).
+- `flex-wrap: balance` (1): `balance/balance-available-size-002`.
 - Tablas como ítem en vertical (1): `table-as-item-specified-width-vertical`.
-- Sueltos: `flexbox-writing-mode-011/012` (ítems de varios modos de escritura con márgenes e
-  `inline-size` lógico; sin analizar en detalle),
-  `aspect-ratio-intrinsic-size-009`, `flexbox-flex-wrap-flexing-003`,
-  `flexbox-align-self-horiz-002`, `flexbox-basic-canvas-vert-001v` (antialias, 392 px),
-  `flexbox-mbp-horiz-001-rtl` (49 px de texto).
+- Sueltos (7): `flexbox-writing-mode-011/012` (ítems de varios modos de escritura con márgenes
+  e `inline-size` lógico; sin analizar en detalle), `aspect-ratio-intrinsic-size-009`,
+  `flexbox-flex-wrap-flexing-003`, `flexbox-align-self-horiz-002`,
+  `flexbox-basic-canvas-vert-001v` (antialias, 392 px), `flexbox-mbp-horiz-001-rtl` (49 px de
+  texto).
 
-3.6 (34):
-- `flex-wrap: balance` (8): `balance/balance-002` y `balance-line-count-intrinsic-001…007`.
-- Mínimo automático (`min-width`/`min-height: auto`, §4.5) (8):
-  `flexbox-min-{width,height}-auto-001` (28–30 px, texto) y `-002a/b/c`.
-- Tamaños intrínsecos de contenedores en columna con wrap (5):
-  `intrinsic-size/col-wrap-012/015/016/017`, `row-wrap-002.tentative`.
-- `gap` con palabras clave o porcentajes (3): `gap-015`, `gap-collapse`, `gap-percentage-wrap`.
-- Tablas como ítem (2): `table-as-flex-item-max-content`, `table-as-item-fixed-min-width-2`.
-- Contenedor con `min-content`/`max-content` (2): `flex-container-max-content-001`,
-  `flex-container-min-content-001`.
-- Sueltos: `align-baseline`, `align-self-016` (ver 3.3), `flex-item-max-width-min-content-002`,
-  `flex-minimum-height-flex-items-023`, `flex-minimum-width-flex-items-013`,
-  `percentage-heights-022`.
+3.6 (22):
+- `flex-wrap: balance` y `flex-line-count` (8): `balance/balance-002`,
+  `balance-line-count-intrinsic-001…007`. Es CSS Flexbox 2 (borrador del editor reciente,
+  `#algo-balance`, `#flex-line-count-property`), sin texto estable: no se implementa.
+- Algoritmo de tamaños intrínsecos de flex (§9.9.1) (5): `intrinsic-size/row-001` (pasaba;
+  ver nota de la ronda 6 en `e5.md`), `gap-015`, `flex-container-max-content-001`,
+  `flex-container-min-content-001`, `intrinsic-size/row-wrap-002.tentative`.
+- Borde punteado con ancho fraccionario (2, pintura): `flexbox-min-width-auto-001` y
+  `flexbox-min-height-auto-001` (la caja de `calc(10% + 50px)` mide 50,1 px y los puntos caen
+  distinto; el layout coincide).
+- Sueltos (7): `align-baseline`, `flex-item-max-width-min-content-002`,
+  `flex-minimum-height-flex-items-023`, `flex-minimum-width-flex-items-013`, `gap-percentage-wrap`,
+  `percentage-heights-022`, `table-as-item-fixed-min-width-2`.
 
 # Lista completa
 
-## 3.3 — `linear-gradient` en el test o su referencia: 15/16
+## 3.3 — `linear-gradient` en el test o su referencia: 16/16
 
 - pasa `align-content-001.htm`
 - pasa `align-content-002.htm`
@@ -68,14 +65,14 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - pasa `align-items-002.htm`
 - pasa `align-items-003.htm`
 - pasa `align-items-004.htm`
-- **falla** `align-self-016.html`
+- pasa `align-self-016.html`
 - pasa `justify-content-001.htm`
 - pasa `justify-content-002.htm`
 - pasa `justify-content-003.htm`
 - pasa `justify-content-004.htm`
 - pasa `justify-content-005.htm`
 
-## 3.4 — `writing-mode` o rtl en el test o su referencia: 103/136
+## 3.4 — `writing-mode` o rtl en el test o su referencia: 107/136
 
 - pasa `abspos/abspos-autopos-htb-ltr.html`
 - pasa `abspos/abspos-autopos-htb-rtl.html`
@@ -95,11 +92,11 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - **falla** `aspect-ratio-intrinsic-size-009.html`
 - pasa `auto-margins-003.html`
 - **falla** `balance/balance-available-size-002.html`
-- **falla** `baseline-synthesis-001.html`
+- pasa `baseline-synthesis-001.html`
 - pasa `baseline-synthesis-002.html`
 - **falla** `baseline-synthesis-003.html`
-- **falla** `baseline-synthesis-004.html`
-- **falla** `baseline-synthesis-vert-lr-line-under.html`
+- pasa `baseline-synthesis-004.html`
+- pasa `baseline-synthesis-vert-lr-line-under.html`
 - pasa `cross-axis-scrollbar.html`
 - pasa `css-flexbox-row-reverse-wrap-reverse.html`
 - pasa `css-flexbox-row-reverse-wrap.html`
@@ -210,17 +207,17 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - pasa `percentage-size-subitems-001.html`
 - pasa `stretch-obeys-min-max-002.html`
 - pasa `stretching-orthogonal-flows.html`
-- **falla** `synthesize-vrl-baseline.html`
+- pasa `synthesize-vrl-baseline.html`
 - **falla** `table-as-item-specified-width-vertical.html`
 - pasa `webkit-box-vertical-writing-mode.html`
 
-## 3.6 — `min-content`, `max-content` o `fit-content` en el test o su referencia: 74/108
+## 3.6 — `min-content`, `max-content` o `fit-content` en el test o su referencia: 86/108
 
 - **falla** `align-baseline.html`
 - pasa `align-content-wrap-004.html`
 - pasa `align-items-006.html`
 - pasa `align-items-007.html`
-- **falla** `align-self-016.html`
+- pasa `align-self-016.html`
 - **falla** `balance/balance-002.html`
 - **falla** `balance/balance-line-count-intrinsic-001.html`
 - **falla** `balance/balance-line-count-intrinsic-002.html`
@@ -275,19 +272,19 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - pasa `flexbox-flex-basis-content-004a.html`
 - pasa `flexbox-flex-basis-content-004b.html`
 - **falla** `flexbox-min-height-auto-001.html`
-- **falla** `flexbox-min-height-auto-002a.html`
-- **falla** `flexbox-min-height-auto-002b.html`
-- **falla** `flexbox-min-height-auto-002c.html`
+- pasa `flexbox-min-height-auto-002a.html`
+- pasa `flexbox-min-height-auto-002b.html`
+- pasa `flexbox-min-height-auto-002c.html`
 - **falla** `flexbox-min-width-auto-001.html`
-- **falla** `flexbox-min-width-auto-002a.html`
-- **falla** `flexbox-min-width-auto-002b.html`
-- **falla** `flexbox-min-width-auto-002c.html`
+- pasa `flexbox-min-width-auto-002a.html`
+- pasa `flexbox-min-width-auto-002b.html`
+- pasa `flexbox-min-width-auto-002c.html`
 - **falla** `gap-015.html`
 - pasa `gap-016.html`
 - pasa `gap-019.html`
 - pasa `gap-020.html`
 - pasa `gap-021.html`
-- **falla** `gap-collapse.html`
+- pasa `gap-collapse.html`
 - **falla** `gap-percentage-wrap.html`
 - pasa `image-nested-within-definite-column-flexbox.html`
 - pasa `inline-flex-min-content-height.html`
@@ -298,14 +295,14 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - pasa `intrinsic-size/col-wrap-007.html`
 - pasa `intrinsic-size/col-wrap-008.html`
 - pasa `intrinsic-size/col-wrap-011.html`
-- **falla** `intrinsic-size/col-wrap-012.html`
+- pasa `intrinsic-size/col-wrap-012.html`
 - pasa `intrinsic-size/col-wrap-013.html`
 - pasa `intrinsic-size/col-wrap-014.html`
-- **falla** `intrinsic-size/col-wrap-015.html`
-- **falla** `intrinsic-size/col-wrap-016.html`
-- **falla** `intrinsic-size/col-wrap-017.html`
+- pasa `intrinsic-size/col-wrap-015.html`
+- pasa `intrinsic-size/col-wrap-016.html`
+- pasa `intrinsic-size/col-wrap-017.html`
 - pasa `intrinsic-size/col-wrap-020.html`
-- pasa `intrinsic-size/row-001.html`
+- **falla** `intrinsic-size/row-001.html`
 - pasa `intrinsic-size/row-002.html`
 - pasa `intrinsic-size/row-003.html`
 - pasa `intrinsic-size/row-004.html`
@@ -316,7 +313,7 @@ texto indicado; un test puede estar en dos. Para E3 (roadmap).
 - **falla** `intrinsic-size/row-wrap-002.tentative.html`
 - **falla** `percentage-heights-022.html`
 - pasa `percentage-heights-023.html`
-- **falla** `table-as-flex-item-max-content.html`
+- pasa `table-as-flex-item-max-content.html`
 - **falla** `table-as-item-fixed-min-width-2.html`
 - pasa `table-as-item-fixed-min-width-3.html`
 - pasa `table-as-item-fixed-min-width.html`
