@@ -42,6 +42,9 @@ pub struct FaceInfo {
 /// Contornos cacheados por (cara, glifo); `None` si el glifo no tiene contorno.
 pub type OutlineCache = Mutex<HashMap<(usize, u16), Option<Arc<Outline>>>>;
 
+/// E5: contornos de las caras del sistema por (cara, glifo, `opsz`; 0 = por defecto).
+type SizedOutlineCache = Mutex<HashMap<(usize, u16, u16), Option<Arc<Outline>>>>;
+
 #[derive(Debug, Default)]
 pub struct FontDb {
     faces: Vec<FaceInfo>,
@@ -50,7 +53,7 @@ pub struct FontDb {
     loaded: Vec<OnceLock<Option<Arc<LoadedFace>>>>,
     files: Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>>,
     fallback: Mutex<HashMap<char, Option<usize>>>,
-    outlines: Mutex<HashMap<(usize, u16, u16), Option<Arc<Outline>>>>,
+    outlines: SizedOutlineCache,
 }
 
 /// Directorios de fuentes de Windows, Linux y macOS (los que existan).
