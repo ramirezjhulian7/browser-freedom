@@ -4504,6 +4504,11 @@ impl App {
         // lo `sticky`.
         let mut pre = Vec::with_capacity(n);
         self.raster_kinds.set((0, 0, 0, 0));
+        // E4: el raster por partes (ver `bf_paint::raster::profile`).
+        let profiling = tracing();
+        bf_paint::raster::profile::set(profiling);
+        // Los cuadros lentos: cuál fue y cómo se pintó (para la cola del p95).
+        let mut slow_frames: Vec<String> = Vec::new();
         for _ in 0..n {
             let start = Instant::now();
             let before = self.scroll;
@@ -4516,9 +4521,29 @@ impl App {
             self.receive();
             self.apply_page_scroll(&[]);
             pre.push(start.elapsed());
+            let kinds = self.raster_kinds.get();
             let frame = self.frame();
-            frames.push(start.elapsed());
+            let took = start.elapsed();
+            frames.push(took);
             self.spare_frame.set(Some(frame));
+            if profiling && took.as_secs_f64() > 1.0 / 60.0 {
+                let now = self.raster_kinds.get();
+                let how = if now.0 > kinds.0 {
+                    "incremental"
+                } else if now.1 > kinds.1 {
+                    "tiles enteros"
+                } else if now.2 > kinds.2 {
+                    "una pasada"
+                } else {
+                    "sin raster"
+                };
+                slow_frames.push(format!(
+                    "{} ({how}, raster {}, antes {})",
+                    ms(took),
+                    ms(self.raster.get().unwrap_or_default()),
+                    ms(pre.last().copied().unwrap_or_default())
+                ));
+            }
             rasters.push(self.raster.get().unwrap_or_default());
         }
         let stats = |v: &mut Vec<Duration>| {
@@ -4568,6 +4593,30 @@ impl App {
                 info.margin,
                 rects.join(", ")
             ));
+        }
+        if profiling {
+            let parts = bf_paint::raster::profile::take();
+            bf_paint::raster::profile::set(false);
+            let parts: Vec<String> = parts
+                .iter()
+                .filter(|(_, ms)| *ms >= 0.05)
+                .map(|(name, ms)| format!("{name} {ms:.1}"))
+                .collect();
+            trace(&format!(
+                "perf raster por partes (ms sumados entre hilos, {n} cuadros): {}",
+                parts.join(" · ")
+            ));
+            slow_frames.sort_by(|a, b| {
+                let v = |s: &str| {
+                    s.split(' ')
+                        .next()
+                        .and_then(|x| x.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                v(b).total_cmp(&v(a))
+            });
+            slow_frames.truncate(8);
+            trace(&format!("perf cuadros lentos: {}", slow_frames.join("; ")));
         }
         let (inc, til, one, layered) = self.raster_kinds.get();
         trace(&format!(

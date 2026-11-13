@@ -502,7 +502,7 @@ impl<'a> Stream<'a> {
                 }
                 _ => {
                     self.mark();
-                    if let Some(decl) = self.consume_declaration(true) {
+                    if let Some(decl) = self.consume_declaration_in(true, shortcut()) {
                         decls.push(decl);
                         self.discard_mark();
                     } else {
@@ -534,19 +534,64 @@ impl<'a> Stream<'a> {
 
     /// Consume a declaration (§5.5.6).
     fn consume_declaration(&mut self, nested: bool) -> Option<Declaration> {
+        self.consume_declaration_in(nested, false)
+    }
+
+    /// [`Stream::consume_declaration`]; con `speculative`, el intento de "consume a block's
+    /// contents" (§5.5.4), que restaura la posición si no sale una declaración: entonces,
+    /// en cuanto se sabe que no sale ninguna, vuelve sin consumir el resto. El resultado es el
+    /// mismo, pero sin esto cada regla de un bloque (`@media { .a {…} .b {…} … }`) consumía
+    /// como restos todas las que la siguen en el bloque (cuadrático en el número de reglas).
+    fn consume_declaration_in(&mut self, nested: bool, speculative: bool) -> Option<Declaration> {
         let Some(TokenKind::Ident(name)) = self.next_kind() else {
-            self.consume_bad_declaration_remnants(nested);
+            if !speculative {
+                self.consume_bad_declaration_remnants(nested);
+            }
             return None;
         };
         self.discard();
         self.discard_whitespace();
         if self.next_kind() != Some(&TokenKind::Colon) {
-            self.consume_bad_declaration_remnants(nested);
+            if !speculative {
+                self.consume_bad_declaration_remnants(nested);
+            }
             return None;
         }
         self.discard();
         self.discard_whitespace();
-        let mut value = self.consume_list_of_component_values(Some(&TokenKind::Semicolon), nested);
+        let mut value = if speculative && nested && !name.starts_with("--") {
+            // Un valor con un bloque `{}` y más de un valor que no es espacio no es una
+            // declaración (abajo). Quitar `!important` quita dos valores y nunca el bloque,
+            // así que con el bloque y cuatro valores ya no puede serlo (`a:hover { … } b { … }`).
+            let mut values = Vec::new();
+            let (mut solid, mut curly) = (0usize, false);
+            loop {
+                match self.next_kind() {
+                    _ if self.is_empty() => break,
+                    Some(TokenKind::Semicolon | TokenKind::RightBrace) => break,
+                    _ => {
+                        let v = self.consume_component_value();
+                        if !v.is_whitespace() {
+                            solid += 1;
+                        }
+                        curly |= matches!(
+                            v,
+                            ComponentValue::Block(SimpleBlock {
+                                kind: BlockKind::Curly,
+                                ..
+                            })
+                        );
+                        values.push(v);
+                        if curly && solid >= 4 {
+                            return None;
+                        }
+                    }
+                }
+            }
+            values
+        } else {
+            self.consume_list_of_component_values(Some(&TokenKind::Semicolon), nested)
+        };
         let full_span = value
             .first()
             .zip(value.last())
@@ -729,4 +774,57 @@ fn looks_like_custom_property(prelude: &[ComponentValue]) -> bool {
         (non_ws.next().and_then(ComponentValue::token), non_ws.next().and_then(ComponentValue::token)),
         (Some(TokenKind::Ident(name)), Some(TokenKind::Colon)) if name.starts_with("--")
     )
+}
+
+/// E4: si los intentos de declaración de "consume a block's contents" vuelven en cuanto saben
+/// que no sale ninguna (ver `Stream::consume_declaration_in`). Los tests lo apagan para
+/// comparar con el recorrido completo.
+fn shortcut() -> bool {
+    #[cfg(test)]
+    {
+        !shortcut_tests::FULL.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    thread_local! {
+        pub static FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// E4: con y sin el atajo, los mismos resultados.
+    #[test]
+    fn speculative_declarations_parse_the_same() {
+        let sheets = [
+            "@media screen { .a { color: red } div .b { x: y } a:hover { c: d } #i { e: f } \
+             li:first-child > a { g: h } *:not(.x) { i: j } [k] { l: m } }",
+            "@supports (display: grid) { a:hover { color: red } b:focus { color: blue } }",
+            ".n { color: red; & .m { color: blue } a:hover { x: y } --c: { a b }; z: 1 }",
+            ".p { foo: { a } !important; bar: { a } ! important; baz: x { y }; q: { a } b }",
+            ".q { a:b { c } d e { f } g; h: i }",
+            "@layer x { .r { s: t } u:v w { x } y { z } }",
+            ".s { --x: { a } b; --y: c { d } e f; ok: 1 }",
+            "@media print { a { b: c } ; d { e: f } } g { h: i }",
+            "@media (x) { a:b; c { d: e } f:g { h } i }",
+        ];
+        for css in sheets {
+            let fast = parse_stylesheet(css);
+            FULL.with(|f| f.set(true));
+            let full = parse_stylesheet(css);
+            FULL.with(|f| f.set(false));
+            assert_eq!(fast, full, "{css}");
+            let inner = css.split_once('{').map_or(css, |(_, r)| r);
+            let fast = parse_block_contents(inner);
+            FULL.with(|f| f.set(true));
+            let full = parse_block_contents(inner);
+            FULL.with(|f| f.set(false));
+            assert_eq!(fast, full, "{inner}");
+        }
+    }
 }

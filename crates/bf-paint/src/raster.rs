@@ -1674,6 +1674,7 @@ fn render_items(
         {
             continue;
         }
+        let _timer = profile::Timer::start(profile::kind(item));
         match item {
             DisplayItem::Rect { rect, color, radii } => {
                 if let Some(p) = rounded_path(rect, radii) {
@@ -1913,6 +1914,7 @@ fn paint_tiles(
     let (tw, th) = (i64::from(tw), i64::from(th));
     let m = i64::from(margin);
     let render = |&(c, r): &Tile| {
+        let _timer = profile::Timer::start(profile::TILE);
         // En coordenadas del cuadro: la página está corrida `-s_dev`.
         let x0 = c * tw - s_dev.0 - m;
         let y0 = r * th - s_dev.1 - m;
@@ -1943,6 +1945,7 @@ fn paint_tiles(
                 .collect::<Vec<Pixmap>>()
         })
     };
+    let _timer = profile::Timer::start(profile::COPY);
     let (fw, fh) = (i64::from(out.width()), i64::from(out.height()));
     for (&(c, r), tile) in tiles.iter().zip(&pixmaps) {
         let x0 = c * tw - s_dev.0;
@@ -2181,6 +2184,7 @@ fn render_layer(
     place: &LayerPlace,
     scale: f32,
 ) -> StickyLayer {
+    let _timer = profile::Timer::start(profile::STICKY);
     let inner = &dl.items[g.items.start + 1..g.items.end.saturating_sub(1).max(g.items.start + 1)];
     // `scale · (p + translate) + frac − origin`: `p` en las coordenadas del grupo.
     let pixmap = render_items(
@@ -2212,6 +2216,7 @@ fn compose_over(
     rows: (i64, i64),
     clip: Option<DevClip>,
 ) {
+    let _timer = profile::Timer::start(profile::COMPOSE);
     let (tw, lw) = (i64::from(target.width()), i64::from(layer.width()));
     let [cx0, cy0, cx1, cy1] = clip.unwrap_or([f32::MIN, f32::MIN, f32::MAX, f32::MAX]);
     let x0 = at.0.max(0).max(cx0.floor() as i64);
@@ -2267,6 +2272,7 @@ fn compose_over(
 
 /// Corre las filas de `p` `di` filas hacia arriba (o hacia abajo si es negativo).
 fn shift_rows(p: &mut Pixmap, di: i64) {
+    let _timer = profile::Timer::start(profile::COPY);
     let stride = p.width() as usize * 4;
     let h = p.height() as usize;
     let n = di.unsigned_abs() as usize;
@@ -2487,6 +2493,114 @@ impl TiledFrame {
             compose_over(&mut out, &layer.pixmap, *at, (0, end), *clip);
         }
         out
+    }
+}
+
+/// E4: en qué se va el raster (con [`profile::set`]; lo imprime `scrollbench` con
+/// `BF_TRACE`): tiempo acumulado por clase de ítem y por paso (copias, composición), sumado
+/// entre los hilos de los tiles.
+pub mod profile {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    use crate::display_list::DisplayItem;
+
+    pub const TEXT: usize = 0;
+    pub const RECT: usize = 1;
+    pub const BORDER: usize = 2;
+    pub const IMAGE: usize = 3;
+    pub const BACKGROUND: usize = 4;
+    pub const SHADOW: usize = 5;
+    pub const PATH: usize = 6;
+    pub const LAYER: usize = 7;
+    pub const CLIP: usize = 8;
+    pub const OTHER: usize = 9;
+    /// Un tile entero (de crear su pixmap a terminar sus ítems).
+    pub const TILE: usize = 10;
+    /// Copiar los tiles al cuadro y correr sus filas.
+    pub const COPY: usize = 11;
+    /// Pintar las capas `sticky`.
+    pub const STICKY: usize = 12;
+    /// Componer las capas `sticky` sobre el cuadro.
+    pub const COMPOSE: usize = 13;
+
+    pub const NAMES: [&str; 14] = [
+        "texto",
+        "rectángulos",
+        "bordes",
+        "imágenes",
+        "fondos (gradientes, imágenes de fondo)",
+        "sombras",
+        "caminos",
+        "capas (opacidad, máscara, efecto)",
+        "recortes",
+        "otros",
+        "tiles enteros",
+        "copias",
+        "capas sticky",
+        "composición sticky",
+    ];
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static NANOS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+
+    /// Empieza o deja de medir (y pone a cero lo acumulado).
+    pub fn set(on: bool) {
+        for n in &NANOS {
+            n.store(0, Ordering::Relaxed);
+        }
+        ON.store(on, Ordering::Relaxed);
+    }
+
+    /// Lo acumulado por parte, en ms.
+    pub fn take() -> Vec<(&'static str, f64)> {
+        NAMES
+            .iter()
+            .zip(&NANOS)
+            .map(|(name, n)| (*name, n.swap(0, Ordering::Relaxed) as f64 / 1e6))
+            .collect()
+    }
+
+    /// Mide hasta que se suelta (si está activo).
+    pub struct Timer(Option<(usize, Instant)>);
+
+    impl Timer {
+        pub fn start(kind: usize) -> Timer {
+            Timer(ON.load(Ordering::Relaxed).then(|| (kind, Instant::now())))
+        }
+    }
+
+    impl Drop for Timer {
+        fn drop(&mut self) {
+            if let Some((kind, t)) = self.0 {
+                NANOS[kind].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn kind(item: &DisplayItem) -> usize {
+        match item {
+            DisplayItem::Text { .. } => TEXT,
+            DisplayItem::Rect { .. } => RECT,
+            DisplayItem::Border { .. } => BORDER,
+            DisplayItem::Image { .. } => IMAGE,
+            DisplayItem::BackgroundImage { .. } | DisplayItem::Gradient { .. } => BACKGROUND,
+            DisplayItem::BoxShadow { .. }
+            | DisplayItem::PushShadow { .. }
+            | DisplayItem::PopShadow => SHADOW,
+            DisplayItem::Path { .. } => PATH,
+            DisplayItem::PushOpacity(_)
+            | DisplayItem::PopOpacity
+            | DisplayItem::PushMask
+            | DisplayItem::PopMask { .. }
+            | DisplayItem::PushEffect
+            | DisplayItem::PopEffect(_) => LAYER,
+            DisplayItem::PushClip { .. }
+            | DisplayItem::PushClipBorder { .. }
+            | DisplayItem::PushClipText { .. }
+            | DisplayItem::PopClip => CLIP,
+            _ => OTHER,
+        }
     }
 }
 
