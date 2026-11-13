@@ -10,10 +10,16 @@
 //! llega primero A, se espera a AAAA hasta el *Resolution Delay* (50 ms). La familia que
 //! no llegó a tiempo queda de reserva ([`Resolution::late`]): si fallan todas las conexiones
 //! con la primera, se prueba con esa.
+//!
+//! E6: §4 pide ordenar los destinos con la *Destination Address Selection* de RFC 6724 §6.
+//! Pedir AAAA y A por separado pierde el orden que daría `getaddrinfo`, así que se aplica aquí
+//! entre las dos familias ([`ipv4_first`]): con un origen IPv6 que no sirve para el destino
+//! (sin ruta, de otro ámbito o de otra etiqueta, como una ULA de una VPN frente a un destino
+//! global) va primero IPv4, y la espera del *Resolution Delay* es por la familia preferida.
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -75,10 +81,110 @@ pub fn has_route() -> bool {
     probe("0.0.0.0:0", "192.0.2.1:9") || probe("[::]:0", "[2001:db8::1]:9")
 }
 
+/// RFC 6724 §2.1: la precedencia y la etiqueta de la tabla de políticas por omisión
+/// (el prefijo más largo que coincide). Las IPv4 cuentan como `::ffff:0:0/96`.
+fn policy(ip: &IpAddr) -> (u8, u8) {
+    let v6 = match ip {
+        IpAddr::V4(_) => return (35, 4),
+        IpAddr::V6(v6) => v6,
+    };
+    let seg = v6.segments();
+    if *v6 == Ipv6Addr::LOCALHOST {
+        (50, 0)
+    } else if v6.to_ipv4_mapped().is_some() {
+        (35, 4)
+    } else if seg[..6] == [0; 6] {
+        // ::/96 (las compatibles con IPv4, obsoletas).
+        (1, 3)
+    } else if seg[0] == 0x2001 && seg[1] == 0 {
+        // 2001::/32 (Teredo).
+        (5, 5)
+    } else if seg[0] == 0x2002 {
+        // 2002::/16 (6to4).
+        (30, 2)
+    } else if seg[0] == 0x3ffe {
+        (1, 12)
+    } else if seg[0] & 0xffc0 == 0xfec0 {
+        (1, 11)
+    } else if seg[0] & 0xfe00 == 0xfc00 {
+        // fc00::/7 (ULA, RFC 4193).
+        (3, 13)
+    } else {
+        (40, 1)
+    }
+}
+
+/// RFC 6724 §3.1: el ámbito de una dirección (2: enlace, 5: sitio, 14: global). Las IPv4 de
+/// bucle local y de enlace (169.254/16) son de enlace; una ULA es global (RFC 4193 §3.3).
+fn scope(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() || v4.is_link_local() {
+                2
+            } else {
+                14
+            }
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            if v6.is_multicast() {
+                (seg0 & 0x000f) as u8
+            } else if v6.is_loopback() || seg0 & 0xffc0 == 0xfe80 {
+                2
+            } else if seg0 & 0xffc0 == 0xfec0 {
+                5
+            } else {
+                14
+            }
+        }
+    }
+}
+
+/// La dirección de origen que usaría el sistema para llegar a `dest` (RFC 6724 §4, como hace
+/// `getaddrinfo`): `connect` de un socket UDP solo consulta la tabla de rutas, sin mandar
+/// nada. `None` si no hay ruta.
+pub fn system_source(dest: IpAddr) -> Option<IpAddr> {
+    let bind = if dest.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let s = UdpSocket::bind(bind).ok()?;
+    s.connect(SocketAddr::new(dest, 9)).ok()?;
+    s.local_addr().ok().map(|a| a.ip())
+}
+
+/// La dirección de origen para un destino ([`system_source`], inyectable en los tests).
+pub type SourceProbe = dyn Fn(IpAddr) -> Option<IpAddr> + Send + Sync;
+
+/// RFC 6724 §6 entre un destino IPv6 y uno IPv4, con el origen de cada uno según `source`:
+/// ¿va primero el IPv4? Regla 1 (evitar destinos sin ruta), regla 2 (preferir el ámbito que
+/// coincide con el del origen), regla 5 (preferir la etiqueta que coincide con la del origen)
+/// y regla 6 (mayor precedencia); las reglas 3, 4, 7 y 8 no distinguen familias aquí y la 10
+/// deja el orden (IPv6 primero).
+pub fn ipv4_first(v6: IpAddr, v4: IpAddr, source: &SourceProbe) -> bool {
+    let (s6, s4) = (source(v6), source(v4));
+    let (s6, s4) = match (s6, s4) {
+        (None, Some(_)) => return true,
+        (_, None) => return false,
+        (Some(a), Some(b)) => (a, b),
+    };
+    let scope_ok = |d: &IpAddr, s: &IpAddr| scope(d) == scope(s);
+    if scope_ok(&v6, &s6) != scope_ok(&v4, &s4) {
+        return scope_ok(&v4, &s4);
+    }
+    let label_ok = |d: &IpAddr, s: &IpAddr| policy(d).1 == policy(s).1;
+    if label_ok(&v6, &s6) != label_ok(&v4, &s4) {
+        return label_ok(&v4, &s4);
+    }
+    policy(&v4).0 > policy(&v6).0
+}
+
 /// Lo resuelto de un host: la familia que llegó primero (o las dos) y, si la otra no llegó a
 /// tiempo, por dónde va a llegar.
 pub struct Resolution {
-    /// Las direcciones para conectar ya, IPv6 primero.
+    /// Las direcciones para conectar ya, la familia preferida (RFC 6724, [`ipv4_first`])
+    /// primero.
     pub addrs: Vec<IpAddr>,
     /// La familia que faltaba, cuando llegue (vacía si falló).
     pub late: Option<Receiver<Vec<IpAddr>>>,
@@ -98,6 +204,8 @@ pub struct Dns {
     cache: Arc<Mutex<HashMap<String, Cached>>>,
     /// Respuestas por familia de las búsquedas en curso: cuando están las dos, van a `cache`.
     partial: Arc<Mutex<HashMap<String, Partial>>>,
+    /// El origen que usaría el sistema para cada destino (RFC 6724).
+    source: Arc<SourceProbe>,
 }
 
 #[derive(Default)]
@@ -125,6 +233,40 @@ impl Dns {
             ttl: DEFAULT_TTL,
             cache: Arc::default(),
             partial: Arc::default(),
+            source: Arc::new(system_source),
+        }
+    }
+
+    /// Con otra forma de saber el origen de cada destino (tests de RFC 6724).
+    pub fn with_source_probe(
+        mut self,
+        probe: impl Fn(IpAddr) -> Option<IpAddr> + Send + Sync + 'static,
+    ) -> Dns {
+        self.source = Arc::new(probe);
+        self
+    }
+
+    /// ¿Va primero IPv4 entre `v6` y `v4` (RFC 6724, [`ipv4_first`])? Sin una de las dos, la
+    /// otra.
+    fn v4_preferred(&self, v6: &[IpAddr], v4: &[IpAddr]) -> bool {
+        match (v6.first(), v4.first()) {
+            (Some(a), Some(b)) => ipv4_first(*a, *b, &*self.source),
+            (Some(a), None) => {
+                // Sin A todavía: contra una IPv4 de documentación (RFC 5737), solo para saber
+                // si IPv4 tiene ruta y si el origen IPv6 sirve para el destino.
+                let doc = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+                ipv4_first(*a, doc, &*self.source)
+            }
+            _ => true,
+        }
+    }
+
+    /// `v6` y `v4` en el orden de RFC 6724.
+    fn ordered(&self, v6: Vec<IpAddr>, v4: Vec<IpAddr>) -> Vec<IpAddr> {
+        if self.v4_preferred(&v6, &v4) {
+            v4.into_iter().chain(v6).collect()
+        } else {
+            v6.into_iter().chain(v4).collect()
         }
     }
 
@@ -164,7 +306,7 @@ impl Dns {
         let key = host.to_ascii_lowercase();
         if let Some(c) = self.cached(&key) {
             return Ok(Resolution {
-                addrs: c.v6.into_iter().chain(c.v4).collect(),
+                addrs: self.ordered(c.v6, c.v4),
                 late: None,
             });
         }
@@ -186,32 +328,57 @@ impl Dns {
         let mut v6: Option<io::Result<Vec<IpAddr>>> = None;
         let mut v4: Option<io::Result<Vec<IpAddr>>> = None;
         let mut last_error = None;
-        // La primera respuesta; con A primero, AAAA hasta el *Resolution Delay*.
+        // La primera respuesta de la familia preferida; con la otra primero, la preferida
+        // hasta el *Resolution Delay*. Sin RFC 6724 de por medio, la preferida es AAAA.
         let mut wait = LOOKUP_TIMEOUT;
+        let usable = |r: &Option<io::Result<Vec<IpAddr>>>| {
+            r.as_ref()
+                .is_some_and(|r| r.as_ref().is_ok_and(|a| !a.is_empty()))
+        };
+        // E6: si AAAA llegó, ¿va detrás de A (RFC 6724)?
+        let mut v6_behind: Option<bool> = None;
         loop {
             match rx.recv_timeout(wait) {
                 Ok((Family::V6, r)) => v6 = Some(r),
                 Ok((Family::V4, r)) => v4 = Some(r),
                 Err(_) => break,
             }
-            let usable = |r: &Option<io::Result<Vec<IpAddr>>>| {
-                r.as_ref()
-                    .is_some_and(|r| r.as_ref().is_ok_and(|a| !a.is_empty()))
+            if v6_behind.is_none()
+                && let Some(Ok(a)) = &v6
+                && !a.is_empty()
+            {
+                let first_v4 = match &v4 {
+                    Some(Ok(b)) => b.clone(),
+                    _ => Vec::new(),
+                };
+                v6_behind = Some(self.v4_preferred(a, &first_v4));
+            }
+            let preferred_ready = if v6_behind == Some(true) {
+                usable(&v4)
+            } else {
+                usable(&v6)
             };
-            if (v6.is_some() && v4.is_some()) || usable(&v6) {
+            if (v6.is_some() && v4.is_some()) || preferred_ready {
                 break;
             }
-            if usable(&v4) {
+            if usable(&v4) || usable(&v6) {
                 wait = RESOLUTION_DELAY;
             }
         }
-        let mut addrs = Vec::new();
-        for r in [v6.as_mut(), v4.as_mut()].into_iter().flatten() {
-            match r {
-                Ok(a) => addrs.append(a),
-                Err(e) => last_error = Some(io::Error::new(e.kind(), e.to_string())),
+        let mut take = |r: Option<&mut io::Result<Vec<IpAddr>>>| match r {
+            Some(Ok(a)) => std::mem::take(a),
+            Some(Err(e)) => {
+                last_error = Some(io::Error::new(e.kind(), e.to_string()));
+                Vec::new()
             }
-        }
+            None => Vec::new(),
+        };
+        let (a6, a4) = (take(v6.as_mut()), take(v4.as_mut()));
+        let addrs = if v6_behind == Some(true) {
+            a4.into_iter().chain(a6).collect::<Vec<_>>()
+        } else {
+            a6.into_iter().chain(a4).collect()
+        };
         let missing = v6.is_none() || v4.is_none();
         if addrs.is_empty() {
             // Nada todavía: la que falta es lo único que queda (si llega).
@@ -390,6 +557,109 @@ mod tests {
         );
         assert_eq!(r.addrs, [v6()]);
         assert_eq!(r.late.expect("A de reserva").recv().unwrap(), [v4()]);
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// RFC 6724 §6 entre las dos familias, con el origen que daría el sistema.
+    #[test]
+    fn rfc6724_between_families() {
+        let (d6, d4) = (ip("2620:0:862:ed1a::1"), ip("208.80.154.224"));
+        let with = |s6: Option<&'static str>, s4: Option<&'static str>| {
+            move |d: IpAddr| if d.is_ipv6() { s6 } else { s4 }.map(ip)
+        };
+        // Origen global: IPv6 primero (regla 6, precedencia 40 > 35).
+        assert!(!ipv4_first(
+            d6,
+            d4,
+            &with(Some("2600::5"), Some("192.168.1.2"))
+        ));
+        // Una ULA (la de una VPN) frente a un destino global: etiquetas 13 y 1 (regla 5).
+        assert!(ipv4_first(
+            d6,
+            d4,
+            &with(Some("fd7a:115c:a1e0::1"), Some("192.168.1.2"))
+        ));
+        // Origen de enlace para un destino global (regla 2).
+        assert!(ipv4_first(
+            d6,
+            d4,
+            &with(Some("fe80::1"), Some("192.168.1.2"))
+        ));
+        // Sin ruta IPv6 (regla 1); sin ruta IPv4, al revés.
+        assert!(ipv4_first(d6, d4, &with(None, Some("192.168.1.2"))));
+        assert!(!ipv4_first(d6, d4, &with(Some("2600::5"), None)));
+        // Destino ULA con origen ULA: coinciden y gana IPv4 por precedencia (3 < 35).
+        assert!(ipv4_first(
+            ip("fd00::1"),
+            d4,
+            &with(Some("fd7a::1"), Some("192.168.1.2"))
+        ));
+        // Bucle local: ::1 primero (precedencia 50).
+        assert!(!ipv4_first(
+            v6(),
+            v4(),
+            &with(Some("::1"), Some("127.0.0.1"))
+        ));
+    }
+
+    /// §3 y §4 con RFC 6724: si el origen IPv6 no sirve, A va primero y, con AAAA primero,
+    /// se espera a A el *Resolution Delay*; si A no llega a tiempo, AAAA y A de reserva.
+    #[test]
+    fn ula_source_puts_a_first() {
+        let fake = |v4_delay: u64| {
+            Arc::new(Fake {
+                v6: (vec![ip("2620:0:862:ed1a::1")], Duration::ZERO),
+                v4: (vec![ip("208.80.154.224")], Duration::from_millis(v4_delay)),
+                lookups: AtomicUsize::new(0),
+            })
+        };
+        let probe = |d: IpAddr| {
+            Some(if d.is_ipv6() {
+                ip("fd7a:115c:a1e0::b201:f684")
+            } else {
+                ip("192.168.1.2")
+            })
+        };
+        let dns = Dns::new(fake(10)).with_source_probe(probe);
+        let r = dns.resolve("es.wikipedia.test").unwrap();
+        assert_eq!(r.addrs, [ip("208.80.154.224"), ip("2620:0:862:ed1a::1")]);
+        assert!(r.late.is_none());
+        // De la caché, el mismo orden.
+        let r = dns.resolve("es.wikipedia.test").unwrap();
+        assert_eq!(r.addrs[0], ip("208.80.154.224"));
+        // A muy tarde: no se espera más que el *Resolution Delay*.
+        let dns = Dns::new(fake(1500)).with_source_probe(probe);
+        let start = Instant::now();
+        let r = dns.resolve("lento.test").unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(r.addrs, [ip("2620:0:862:ed1a::1")]);
+        assert_eq!(
+            r.late.expect("A de reserva").recv().unwrap(),
+            [ip("208.80.154.224")]
+        );
+        // Con un origen IPv6 global, AAAA primero y sin esperar.
+        let dns = Dns::new(fake(1500)).with_source_probe(|d: IpAddr| {
+            Some(if d.is_ipv6() {
+                ip("2600::5")
+            } else {
+                ip("192.168.1.2")
+            })
+        });
+        let start = Instant::now();
+        let r = dns.resolve("rapido.test").unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(40),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(r.addrs, [ip("2620:0:862:ed1a::1")]);
     }
 
     #[test]

@@ -356,6 +356,39 @@ pub fn fetch_document(url: &Url, net: Arc<NetLoader>) -> Result<Loaded, LoadErro
 
 /// Como [`fetch_document`], con un cuerpo `POST` (envío de formularios): `(bytes, Content-Type)`,
 /// y, con `engine`, ejecutando los scripts del documento HTML durante el parseo.
+/// E6: con `BF_TRACE`, el tiempo de la petición del documento por partes
+/// ([`bf_net::timing`]): `perf red <url>: …`.
+fn trace_fetch(response: &bf_net::Response, total: Duration) {
+    if std::env::var_os("BF_TRACE").is_none() {
+        return;
+    }
+    let t = bf_net::timing::take();
+    let ms = |d: Duration| format!("{:.1}", d.as_secs_f64() * 1000.0);
+    eprintln!(
+        "perf red {}: {} ms ({:?}, {} {}, {} peticiones, {} conexiones nuevas): dns {} · tcp {} \
+         · tls {} · h2 inicio {} · espera {} · cuerpo {} · h2 {} · descompresión {} · caché {} \
+         · resto {} ({} bytes)",
+        response.url,
+        ms(total),
+        response.cache,
+        response.status,
+        response.protocol.name(),
+        t.requests,
+        t.connections,
+        ms(t.dns),
+        ms(t.tcp),
+        ms(t.tls),
+        ms(t.h2_setup),
+        ms(t.wait),
+        ms(t.body),
+        ms(t.h2),
+        ms(t.decode),
+        ms(t.cache),
+        ms(total.saturating_sub(t.total())),
+        response.body.len(),
+    );
+}
+
 pub fn fetch_document_with(
     url: &Url,
     net: Arc<NetLoader>,
@@ -368,10 +401,12 @@ pub fn fetch_document_with(
         options.method = bf_net::Method::Post;
         options.body = Some(body);
     }
+    bf_net::timing::take();
     let response = net
         .fetcher
         .fetch(url, &options)
         .map_err(|e| LoadError::from_fetch(&e))?;
+    trace_fetch(&response, start.elapsed());
     if !response.ok() {
         eprintln!(
             "aviso: {} respondió {} {}",
