@@ -600,7 +600,8 @@ fn set_state(agent: &mut Agent, realm: RealmId, n: NodeRef, id: u64, outcome: &O
 /// servir un formato que el motor pinta.
 fn image_size(r: &crate::net::NetResponse) -> Option<(u32, u32)> {
     let mime = r.headers.get("content-type");
-    match bf_image::decode(&r.body, mime.as_deref()) {
+    // E2: la caché del proceso, compartida con `bf-paint` (que la pinta): una decodificación.
+    match bf_image::decode_frames_shared(&r.body, mime.as_deref()) {
         Ok(img) => Some((img.width, img.height)),
         Err(bf_image::ImageError::Unsupported("image/svg+xml")) => {
             let svg = bf_svg::Svg::parse_bytes(&r.body).ok()?;

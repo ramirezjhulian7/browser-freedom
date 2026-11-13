@@ -519,7 +519,9 @@ fn decode(
             .ok_or_else(|| bf_image::ImageError::Decode("SVG vacío".into()))?;
         return Ok(Loaded::Svg(Arc::new(svg), pixmap));
     }
-    let frames = bf_image::decode_frames(bytes, mime)?;
+    // E2: con la caché del proceso (`bf-web` decodifica la misma imagen para sus eventos y
+    // `naturalWidth`): una sola decodificación; aquí se copian los píxeles.
+    let frames = (*bf_image::decode_frames_shared(bytes, mime)?).clone();
     if frames.is_animated() {
         let anim = Animation::new(frames)
             .ok_or_else(|| bf_image::ImageError::Decode("imagen vacía".into()))?;

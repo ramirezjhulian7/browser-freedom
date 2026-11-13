@@ -5,7 +5,8 @@
 //!
 //! El SVG no es un bitmap: `bf-svg` lo interpreta y `bf-paint` lo rasteriza al tamaño pedido.
 //!
-//! [`source`] elige el recurso de un `<img>` por `srcset`, `sizes` y `<picture>` (HTML §4.8.4.3).
+//! [`decode_frames_shared`] decodifica cada imagen una vez por proceso (la piden `bf-paint` y
+//! `bf-web`). [`source`] elige el recurso de un `<img>` por `srcset`, `sizes` y `<picture>` (HTML §4.8.4.3).
 //!
 //! TODO(roadmap): AVIF (diseño en `docs/pendiente/e7.md`).
 
@@ -17,12 +18,14 @@ mod gif;
 mod ico;
 mod jpeg;
 mod png;
+mod shared;
 pub mod source;
 mod webp;
 
 use std::fmt;
 
 pub use anim::{Blend, Dispose, Frame, ImageFrames};
+pub use shared::{decode_count, decode_frames_shared};
 
 /// Imagen decodificada: RGBA8 con alfa premultiplicado, filas de arriba a abajo.
 #[derive(Clone, PartialEq, Eq)]
@@ -156,6 +159,11 @@ pub(crate) fn check_size(w: u32, h: u32) -> Result<(), ImageError> {
 
 /// Decodifica `bytes` (el primer fotograma, si es animada). La firma manda sobre `mime_hint`.
 pub fn decode(bytes: &[u8], mime_hint: Option<&str>) -> Result<Image, ImageError> {
+    shared::count_decode();
+    decode_first(bytes, mime_hint)
+}
+
+fn decode_first(bytes: &[u8], mime_hint: Option<&str>) -> Result<Image, ImageError> {
     match kind(bytes, mime_hint) {
         Some("image/png") => png::decode(bytes),
         Some("image/jpeg") => jpeg::decode(bytes),
@@ -171,9 +179,10 @@ pub fn decode(bytes: &[u8], mime_hint: Option<&str>) -> Result<Image, ImageError
 /// Decodifica todos los fotogramas de `bytes`, compuestos sobre el lienzo. Los formatos sin
 /// animación (o un PNG sin `acTL`) dan un solo fotograma.
 pub fn decode_frames(bytes: &[u8], mime_hint: Option<&str>) -> Result<ImageFrames, ImageError> {
+    shared::count_decode();
     match kind(bytes, mime_hint) {
         Some("image/png") => png::decode_frames(bytes),
         Some("image/gif") => gif::decode_frames(bytes),
-        _ => decode(bytes, mime_hint).map(ImageFrames::still),
+        _ => decode_first(bytes, mime_hint).map(ImageFrames::still),
     }
 }
