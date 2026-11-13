@@ -513,6 +513,9 @@ pub struct Engine {
     /// E6: el documento es XML ([`Engine::parse_xml`]): `load` lo dispara
     /// [`Engine::resources_loaded`] sin parser HTML.
     xml_load_pending: bool,
+    /// E6: el desplazamiento y el viewport de la última revisión de las imágenes
+    /// `loading=lazy` ([`Engine::update_view`]).
+    lazy_view: Option<((f32, f32), bf_layout::Size)>,
 }
 
 impl Engine {
@@ -541,6 +544,7 @@ impl Engine {
             images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
             navigation_policies: (None, None),
             xml_load_pending: false,
+            lazy_view: None,
         }
     }
 
@@ -682,6 +686,23 @@ impl Engine {
             s.scroll = scroll;
             s.device_pixel_ratio = device_pixel_ratio;
         }
+        // E6: el "lazy load intersection observer" (HTML §4.8.4.3.9) mira la intersección con
+        // el viewport: si el desplazamiento o el tamaño del viewport cambiaron, las imágenes
+        // `loading=lazy` que quedaron cerca se piden ya (si no, solo se revisaban cuando el
+        // documento cambiaba, en `sync_frames`).
+        let viewport = self
+            .rt
+            .agent
+            .realm_data::<WebContext>(realm)
+            .and_then(|ctx| ctx.layout.as_ref())
+            .map(|l| l.viewport);
+        if let Some(viewport) = viewport {
+            let view = Some((scroll, viewport));
+            if self.lazy_view != view {
+                self.lazy_view = view;
+                bf_web::html::legacy_factories::check_lazy_images(&mut self.rt.agent, realm);
+            }
+        }
     }
 
     /// E12: los desplazamientos de elementos hechos desde JavaScript que la ventana debe
@@ -717,11 +738,16 @@ impl Engine {
         loader: Arc<CachedLoader>,
         env: &PageEnv,
     ) -> Document {
+        let security = loader.security();
         if !self.has_window() {
             self.install_window(url, loader, env);
         }
         let realm = self.realm;
         let agent = &mut self.rt.agent;
+        // E6: Mixed Content y CSP para los scripts, `eval`, `fetch`/XHR y los marcos.
+        if let Some(p) = security {
+            bf_web::security::install(agent, realm, p);
+        }
         let (coop, coep) = &self.navigation_policies;
         bf_web::workers::isolation::set_document_policies(
             agent,
@@ -733,6 +759,10 @@ impl Engine {
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
+        // E6: los `<meta>` de CSP que quedaron después del último script valen para los
+        // subrecursos que se piden al maquetar.
+        bf_web::security::refresh_meta(agent, realm, None);
+        bf_web::security::flush(agent, realm);
         bf_web::bom::frames::sync_frames(agent, realm);
         if !env.defer_load {
             bf_web::bom::script::resources_loaded(agent, realm);
@@ -752,10 +782,16 @@ impl Engine {
         loader: Arc<CachedLoader>,
         env: &PageEnv,
     ) -> Document {
+        let security = loader.security();
         if !self.has_window() {
             self.install_window(url, loader, env);
         }
+        if let Some(p) = security {
+            bf_web::security::install(&mut self.rt.agent, self.realm, p);
+        }
         crate::xml_scripts::parse(&mut self.rt.agent, self.realm, parsed, url);
+        bf_web::security::refresh_meta(&mut self.rt.agent, self.realm, None);
+        bf_web::security::flush(&mut self.rt.agent, self.realm);
         bf_web::bom::frames::sync_frames(&mut self.rt.agent, self.realm);
         self.xml_load_pending = true;
         if !env.defer_load {
@@ -768,6 +804,10 @@ impl Engine {
 
     /// El navegador cargó las imágenes y hojas del documento: `load`.
     pub fn resources_loaded(&mut self) {
+        // E6: lo que bloquearon las políticas al cargar hojas, imágenes y fuentes.
+        if self.has_window() {
+            bf_web::security::flush(&mut self.rt.agent, self.realm);
+        }
         if std::mem::take(&mut self.xml_load_pending) {
             crate::xml_scripts::fire_load(&mut self.rt.agent, self.realm);
             self.flush_rejections();
@@ -1073,6 +1113,11 @@ impl Engine {
 
     /// Corre las tareas que vencieron (temporizadores, async, …). Devuelve cuántas corrió.
     pub fn run_due_tasks(&mut self) -> usize {
+        // E6: lo que bloquearon las políticas desde la última vez (los subrecursos se piden
+        // desde el layout).
+        if self.has_window() {
+            bf_web::security::flush(&mut self.rt.agent, self.realm);
+        }
         // Las respuestas de red que llegaron (de esta ventana y de sus marcos).
         for realm in 0..self.rt.agent.realms.len() {
             if self.rt.agent.realm_data::<WebContext>(realm).is_some() {

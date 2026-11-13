@@ -119,17 +119,35 @@ fn prepare(agent: &mut Agent, realm: RealmId, el: NodeId) -> Option<(Ready, bool
         return None;
     }
     let later = info.defer || info.is_async;
+    let nonce = info.nonce.to_string();
     if info.src.is_some() {
         let Some(url) = info.url.clone() else {
             simple_event(agent, realm, EventTarget::Node(el), "error", false);
             return None;
         };
+        // E6: Mixed Content y CSP (`script-src`, con el `nonce`).
+        let Some(url) = bf_web::security::check_request(
+            agent,
+            realm,
+            None,
+            &url,
+            bf_infra::Destination::Script,
+            Some(&nonce),
+        ) else {
+            simple_event(agent, realm, EventTarget::Node(el), "error", false);
+            return None;
+        };
         return fetch(agent, realm, el, &url, info.encoding).map(|r| (r, later));
+    }
+    // E6: CSP para los scripts en línea.
+    let source = info.source_text.to_string();
+    if !bf_web::security::allow_inline_script(agent, realm, None, Some(&nonce), &source) {
+        return None;
     }
     Some((
         Ready {
             el,
-            source: info.source_text.to_string(),
+            source,
             url: doc_url,
             external: false,
         },

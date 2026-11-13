@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod abort;
+pub mod accessibility; // E1
 mod character_data;
 pub mod collections;
 mod constraint_validity; // E10

@@ -237,6 +237,14 @@ pub fn prepare_page_animated(
     animate: StyleHook<'_>,
 ) -> Page {
     let (base, extra, loader, db) = (ctx.base, ctx.extra, ctx.loader.clone(), ctx.fonts.clone());
+    // E6: cada subsistema pide con su *destination* (Fetch §2.2.5), para que un loader con
+    // políticas (Mixed Content, CSP) sepa qué directiva aplicar.
+    let for_dest = |d| bf_infra::ForDestination::wrap(loader.clone(), d);
+    let (style_loader, font_loader, image_loader) = (
+        for_dest(bf_infra::Destination::Style),
+        for_dest(bf_infra::Destination::Font),
+        for_dest(bf_infra::Destination::Image),
+    );
     let start = Instant::now();
     let media = MediaContext {
         width: f64::from(viewport.width),
@@ -249,7 +257,7 @@ pub fn prepare_page_animated(
         doc,
         &media,
         Some(Resources {
-            loader: &*loader,
+            loader: &*style_loader,
             base,
             encoding: ctx.encoding,
         }),
@@ -257,7 +265,7 @@ pub fn prepare_page_animated(
     let mut all: Vec<&Stylesheet> = sheets.iter().collect();
     all.extend(extra.iter().copied());
     let mut fonts = Fonts::new(db);
-    fonts.add_font_faces(&font_face_rules(&all, &media), loader.clone());
+    fonts.add_font_faces(&font_face_rules(&all, &media), font_loader);
     let match_ctx = MatchContext::for_document(doc);
     let metrics = bf_layout::StyleMetrics(&fonts);
     let cascade_start = Instant::now();
@@ -275,7 +283,7 @@ pub fn prepare_page_animated(
     let start = Instant::now();
     // E2: con el viewport y la densidad reales (`srcset`, `<picture>`), sobre los estilos
     // que se muestran (E4).
-    let mut images = load_images_in(doc, &shown, base, &*loader, &media);
+    let mut images = load_images_in(doc, &shown, base, &*image_loader, &media);
     // E7: contenido HTML de los `foreignObject` de los SVG en línea.
     images::foreign_objects(doc, ctx, &mut images.svg_resources);
     for (node, pixmap) in canvases {

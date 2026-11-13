@@ -1,12 +1,14 @@
 <!DOCTYPE html>
+<!-- <pre> usa font-family: monospace como única familia: medium es 13 px y no 16 px
+     (HTML §15.3.4; CSS Fonts 4 §2.5 deja al UA la tabla de `<absolute-size>`; como en Gecko y Blink). -->
 <style>body{margin:0}</style><pre>a  b
   c</pre>
 <!-- expect
-Block <html> 0,0 800×64
-  Block <body> 0,16 800×32
-    Block <pre> 0,16 800×32
-      Line 0,16 800×16
-        Text "a  b" 0,16 32×16
-      Line 0,32 800×16
-        Text "  c" 0,32 24×16
+Block <html> 0,0 800×52
+  Block <body> 0,13 800×26
+    Block <pre> 0,13 800×26
+      Line 0,13 800×13
+        Text "a  b" 0,13 26×13
+      Line 0,26 800×13
+        Text "  c" 0,26 19.5×13
 -->

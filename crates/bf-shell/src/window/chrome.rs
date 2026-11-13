@@ -344,6 +344,8 @@ pub struct Chrome {
     pub status_right: Vec<String>,
     width: f32,
     bar: Option<UiDoc>,
+    /// E4: cambia con cada maqueta nueva de la barra (la ventana guarda su raster con ella).
+    bar_generation: u64,
     regions: Vec<(Region, Rect)>,
     /// Los iconos de la barra ya con su color, y los huecos de los indicadores de carga.
     icons: Vec<(Icon, Rect, Rgba)>,
@@ -382,6 +384,7 @@ impl Chrome {
             status_right: Vec::new(),
             width: 0.0,
             bar: None,
+            bar_generation: 0,
             regions: Vec::new(),
             icons: Vec::new(),
             spinners: Vec::new(),
@@ -823,6 +826,7 @@ impl Chrome {
         self.spinners = spinners;
         let field = bar.rect("field");
         self.bar = Some(bar);
+        self.bar_generation += 1;
         if let Some(field) = field {
             self.layout_suggestions(field);
         }
@@ -922,6 +926,20 @@ impl Chrome {
             list.push(DisplayItem::PopClip);
         }
         Some(list)
+    }
+
+    /// E4: lo que decide los píxeles de [`Chrome::bar_display_list`] en la fase `phase`: la
+    /// maqueta, el tema y, solo mientras algo carga, la fase de la animación.
+    pub fn bar_key(&self, phase: f32) -> (u64, bool, u32, [u32; 8]) {
+        let animated = self.loading || !self.spinners.is_empty();
+        let (a, t) = (self.theme.accent, self.theme.text_secondary);
+        let colors = [a.r, a.g, a.b, a.a, t.r, t.g, t.b, t.a].map(f32::to_bits);
+        (
+            self.bar_generation,
+            self.loading,
+            if animated { phase.to_bits() } else { 0 },
+            colors,
+        )
     }
 
     /// La zona activa de la barra en `(x, y)`.

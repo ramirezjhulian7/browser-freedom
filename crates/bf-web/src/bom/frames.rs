@@ -350,6 +350,13 @@ struct BlobOrResource {
 
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
+    // E6: Mixed Content y CSP (`frame-src`) con la política de la ventana que contiene el
+    // marco (Mixed Content §4.4, CSP 3 §6.8.1); lo bloqueado queda en sus mensajes para la
+    // consola.
+    let url = &match crate::security::policy(agent, realm) {
+        Some(p) => p.check_request(url, bf_infra::Destination::Frame, None)?,
+        None => url.clone(),
+    };
     // E3: una URL `blob:` sale del blob URL store (File API §8.3.2, "resolve a blob URL"),
     // no del loader de la ventana (`iframe.src = URL.createObjectURL(blob)`).
     let (bytes, content_type, res_url) = if url.scheme == "blob" {

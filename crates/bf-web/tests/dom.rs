@@ -1781,3 +1781,79 @@ fn closed_popovers_are_not_rendered() {
     );
     assert_eq!(r, "none,false,block,true,none,block,fixed,none");
 }
+
+// E1 (ronda 5): el rol y el nombre accesibles con el estilo de la página
+// (`bf_web::html::accessibility`): `display: none` y `hidden` quedan fuera del nombre, el
+// `content` de `::before` entra, `aria-labelledby` llega a nodos ocultos, el valor actual de un
+// control embebido en la etiqueta de otro cuenta, y los roles implícitos dependen del contexto.
+#[test]
+fn accessible_roles_and_names_with_style() {
+    let mut p = Page::new(
+        "<!DOCTYPE html><html><head><style>.pre::before { content: \"Hola \"; } \
+         .gone { display: none }</style></head><body>\
+         <button id=b1 class=pre>mundo<span class=gone>oculto</span></button>\
+         <span id=lbl hidden>Etiqueta oculta</span>\
+         <div id=d1 role=button aria-labelledby=lbl>x</div>\
+         <label id=l1>Cantidad <input id=i1 value=3> unidades</label>\
+         <section id=s1>sin nombre</section><section id=s2 aria-label=Sec>x</section>\
+         <article><header id=h1>x</header></article><header id=h2>x</header>\
+         <img id=img1 alt=''><img id=img2 alt=foto>\
+         <ul><li id=li1>a</li></ul><li id=li2>b</li>\
+         <table><tr><th id=th1>A</th><td>1</td></tr></table>\
+         <input id=i2 type=search placeholder=Buscar>\
+         <label for=i4>Precio <input id=i5 value=x> euros</label><input id=i4>\
+         </body></html>",
+    );
+    p.eval("document.getElementById('i1').value = '7'; document.getElementById('i5').value = '9';");
+    let agent = &mut p.rt.agent;
+    let id = |agent: &mut bf_web::Agent, s: &str| {
+        let n = bf_web::with_doc(agent, 0, |d| d.get_element_by_id(&s.into())).expect(s);
+        bf_web::NodeRef::new(0, n)
+    };
+    let roles: Vec<String> = [
+        "b1", "d1", "s1", "s2", "h1", "h2", "img1", "img2", "li1", "li2", "th1", "i2",
+    ]
+    .iter()
+    .map(|s| {
+        let n = id(agent, s);
+        bf_web::html::accessibility::computed_role(agent, n)
+    })
+    .collect();
+    assert_eq!(
+        roles,
+        [
+            "button",
+            "button",
+            "generic",
+            "region",
+            "generic",
+            "banner",
+            "none",
+            "image",
+            "listitem",
+            "generic",
+            "rowheader",
+            "searchbox"
+        ]
+    );
+    let names: Vec<String> = ["b1", "d1", "i1", "i2", "img2", "i4"]
+        .iter()
+        .map(|s| {
+            let n = id(agent, s);
+            bf_web::html::accessibility::computed_label(agent, n)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        // Un control no entra en el nombre que le da su propia etiqueta; el de otro control
+        // embebido sí, con su valor actual (AccName §4.3.2 paso 2C).
+        [
+            "Hola mundo",
+            "Etiqueta oculta",
+            "Cantidad unidades",
+            "Buscar",
+            "foto",
+            "Precio 9 euros"
+        ]
+    );
+}

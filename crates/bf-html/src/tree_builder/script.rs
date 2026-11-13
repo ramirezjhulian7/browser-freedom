@@ -85,6 +85,15 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
     fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
         let _ = (doc, img);
     }
+
+    /// E3: "the end" (13.2.7), en la misma tarea que el `load` de la ventana y justo después:
+    /// el documento pasa a *page showing* y se dispara un *page transition event* `pageshow`
+    /// en el `Window` con `persisted` falso (con el documento como `target`). El evento es un
+    /// `PageTransitionEvent`, una interfaz que solo conoce el host; el parser solo marca el
+    /// momento.
+    fn page_shown(&mut self, doc: &mut Parser) {
+        let _ = doc;
+    }
 }
 
 impl ScriptHost for NoScript {}
@@ -700,6 +709,11 @@ impl Parser {
                         return;
                     }
                     self.b.doc.fire_window_load(host);
+                    if self.generation != generation {
+                        return;
+                    }
+                    // E3: *page showing* y `pageshow`, después de `load`.
+                    host.page_shown(self);
                 }
             }
         }

@@ -16,9 +16,65 @@ pub struct Resource {
     pub content_type: Option<String>,
 }
 
+/// El *destination* de una petición (Fetch §2.2.5): qué va a hacer el documento con el
+/// recurso. Lo usan las políticas de seguridad de la carga: Mixed Content (bloquear o pasar a
+/// `https:`) y Content Security Policy (qué directiva se aplica).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Destination {
+    Script,
+    Style,
+    Image,
+    Font,
+    /// Un documento de `<iframe>` (`frame-src`).
+    Frame,
+    Audio,
+    Video,
+    /// `fetch()`, `XMLHttpRequest`, `EventSource`, `WebSocket` (`connect-src`).
+    Connect,
+    Object,
+    Worker,
+    /// Sin destination conocido.
+    Other,
+}
+
 pub trait ResourceLoader: Send + Sync {
     /// Contenido de `url`, o `None` si no se pudo cargar.
     fn load(&self, url: &Url) -> Option<Resource>;
+
+    /// Como [`ResourceLoader::load`], sabiendo para qué es el recurso: un loader con políticas
+    /// de seguridad puede bloquear la petición o cambiar su URL. Por defecto, `load`.
+    fn load_for(&self, url: &Url, destination: Destination) -> Option<Resource> {
+        let _ = destination;
+        self.load(url)
+    }
+}
+
+/// Un loader que pide todo con un mismo [`Destination`] (`load` llama a
+/// [`ResourceLoader::load_for`] del de dentro): para pasarle a un subsistema que solo carga una
+/// clase de recursos (las hojas de estilo, las fuentes, las imágenes) sin que sepa de
+/// destinations.
+pub struct ForDestination {
+    pub inner: std::sync::Arc<dyn ResourceLoader>,
+    pub destination: Destination,
+}
+
+impl ForDestination {
+    pub fn wrap(
+        inner: std::sync::Arc<dyn ResourceLoader>,
+        destination: Destination,
+    ) -> std::sync::Arc<dyn ResourceLoader> {
+        std::sync::Arc::new(ForDestination { inner, destination })
+    }
+}
+
+impl ResourceLoader for ForDestination {
+    fn load(&self, url: &Url) -> Option<Resource> {
+        self.inner.load_for(url, self.destination)
+    }
+
+    fn load_for(&self, url: &Url, destination: Destination) -> Option<Resource> {
+        self.inner.load_for(url, destination)
+    }
 }
 
 /// Carga desde el sistema de archivos (`file:`), URLs `data:` y prefijos montados.

@@ -705,8 +705,9 @@ impl Document {
         self.dispatch_with_override(EventTarget::Window, &mut event, host, Some(root))
     }
 
-    /// "Dispatch" con un *target override* opcional (§2.9, pasos 1 a 5.2).
-    fn dispatch_with_override(
+    /// "Dispatch" con un *target override* opcional (§2.9, pasos 1 a 5.2). E3: público para
+    /// `pageshow`, que HTML dispara en el `Window` con el *legacy target override flag*.
+    pub fn dispatch_with_override(
         &mut self,
         target: EventTarget,
         event: &mut Event,

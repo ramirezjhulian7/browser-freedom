@@ -144,6 +144,13 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
                 .resource_needed(&url.serialize(false), ResourceKind::Script);
             return;
         }
+        // E6: Mixed Content y CSP (`script-src`, con el `nonce` del elemento).
+        let nonce = info.nonce.to_string();
+        let Some(url) = crate::security::check_inserted_script(agent, realm, &url, Some(&nonce))
+        else {
+            queue_element_event(agent, doc, el, "error");
+            return;
+        };
         // Los scripts que inserta el DOM son async (*force async*): se buscan y se ejecutan
         // en una tarea, en orden de inserción.
         let charset = info.encoding;
@@ -169,6 +176,16 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
         .url
         .serialize(false);
     let source = info.source_text.to_string();
+    // E6: CSP para los scripts en línea (`'unsafe-inline'`, `nonce` o hash; `'strict-dynamic'`
+    // permite los que inserta un script).
+    if !crate::security::allow_inserted_inline_script(
+        agent,
+        realm,
+        Some(&info.nonce.to_string()),
+        &source,
+    ) {
+        return;
+    }
     if module {
         if has_env {
             // Un módulo inline está listo cuando carga su grafo: se ejecuta en una tarea.

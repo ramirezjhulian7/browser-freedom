@@ -1943,7 +1943,14 @@ fn fetch_reply(fetch: u64, outcome: FetchOutcome) {
 // --- Instalación en un realm ---
 
 /// Evalúa `service.js` en `realm` con sus funciones nativas (`mode`: `window` o `service`).
+///
+/// E1: dentro de un ámbito de enraizado ([`Agent::rooting_scope`]): crear los métodos y
+/// compilar `service.js` pueden recolectar antes de que `native` quede enlazado.
 fn install_js(agent: &mut Agent, realm: RealmId, mode: &str) {
+    agent.rooting_scope(|agent| install_js_rooted(agent, realm, mode));
+}
+
+fn install_js_rooted(agent: &mut Agent, realm: RealmId, mode: &str) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();

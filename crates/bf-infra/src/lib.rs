@@ -62,4 +62,6 @@ pub mod identity;
 pub mod resource;
 
 pub use bf_url::Url;
-pub use resource::{FileLoader, Resource, ResourceLoader, decode_text, url_from_arg};
+pub use resource::{
+    Destination, FileLoader, ForDestination, Resource, ResourceLoader, decode_text, url_from_arg,
+};
