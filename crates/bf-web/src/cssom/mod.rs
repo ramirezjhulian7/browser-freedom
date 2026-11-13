@@ -21,6 +21,7 @@
 
 pub mod computed;
 pub mod declaration;
+pub mod font_loading; // E5: CSS Font Loading 3
 pub mod media;
 pub mod namespace;
 pub mod sheets;
@@ -201,6 +202,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     style_decl::define_property_accessors(agent, realm);
     namespace::install(agent, realm);
     namespace::install_indexed_iterators(agent, realm);
+    font_loading::install(agent, realm); // E5
 }
 
 // --- Estado ---

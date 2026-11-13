@@ -72,6 +72,12 @@ pub fn shadow_tree_stylesheets(
     sheets
 }
 
+/// E5: la marca del texto con las caras que los scripts añadieron a `document.fonts` (CSS Font
+/// Loading 3 §4), que `bf-web` guarda entre los textos adoptados de la raíz del documento
+/// (`Document::set_adopted_style_texts`). [`document_stylesheets`] solo lee de la raíz los
+/// textos con esta marca: las `adoptedStyleSheets` del documento llegan por el CSSOM.
+pub const SCRIPT_FONT_FACES: &str = "/*bf-font-loading*/";
+
 /// Hojas de autor del documento en orden de árbol: `<style>` y `<link rel="stylesheet">`
 /// (este último solo con `resources`), con su atributo `media` evaluado.
 pub fn document_stylesheets(
@@ -124,6 +130,15 @@ pub fn document_stylesheets(
                 sheets.push(sheet);
             }
         }
+    }
+    // E5: las caras de `document.fonts` añadidas desde scripts, después de las hojas (con URLs
+    // ya absolutas).
+    for text in doc
+        .adopted_style_texts(doc.root())
+        .iter()
+        .filter(|t| t.starts_with(SCRIPT_FONT_FACES))
+    {
+        sheets.push(Stylesheet::parse(text, Origin::Author));
     }
     sheets
 }
