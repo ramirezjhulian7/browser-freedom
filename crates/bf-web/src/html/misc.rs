@@ -372,6 +372,12 @@ fn img_natural_height(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// decodificada.
 fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E2: con petición, `complete` es "no está pendiente" (disponible o rota).
+    if let Some(state) = super::legacy_factories::image_state(agent, n) {
+        return Ok(Value::Boolean(
+            state != super::legacy_factories::ImageState::Pending,
+        ));
+    }
     let src = attr_value(agent, n, "src");
     let srcset = attr_value(agent, n, "srcset");
     let done = match (&src, &srcset) {
@@ -380,6 +386,11 @@ fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => natural_size(agent, n).is_some(),
     };
     Ok(Value::Boolean(done))
+}
+
+/// ¿Se conoce el tamaño natural de la imagen de `n`?
+pub(crate) fn has_natural_size(agent: &mut Agent, n: NodeRef) -> bool {
+    natural_size(agent, n).is_some()
 }
 
 /// `currentSrc` (§4.8.4.3): la URL de la fuente elegida ([`selected_source`]).
@@ -391,11 +402,10 @@ fn img_current_src(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(js_str(&s))
 }
 
-/// `decode()`: una promesa ya resuelta (las imágenes se decodifican fuera del motor).
-fn img_decode(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    let p = agent.new_internal_promise();
-    agent.fulfill_promise(p, Value::Undefined);
-    Ok(Value::Object(p))
+/// `decode()` (§4.8.4.4): espera a la petición actual (E2, `legacy_factories::img_decode`).
+fn img_decode(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = this_node(agent, a)?;
+    Ok(super::legacy_factories::img_decode(agent, n))
 }
 
 // --- HTMLTemplateElement (§4.12.3) ---

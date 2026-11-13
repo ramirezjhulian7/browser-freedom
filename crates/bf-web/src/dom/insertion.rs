@@ -71,7 +71,11 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
             // Los documentos sin browsing context (todos menos el de la ventana) tienen el
             // scripting deshabilitado (HTML §8.1.3.4).
             "script" if scripts && doc == 0 => prepare_script(agent, doc, el),
-            "img" => resource(agent, doc, el, "src", ResourceKind::Image),
+            "img" => {
+                resource(agent, doc, el, "src", ResourceKind::Image);
+                // E2: un `<img>` creado con atributos (markup, clon) pide su imagen.
+                crate::html::legacy_factories::img_created(agent, crate::NodeRef::new(doc, el));
+            }
             "link" => {
                 let stylesheet = with_doc(agent, doc, |d| {
                     d.element(el).and_then(|e| e.attr("rel")).is_some_and(|r| {
@@ -81,9 +85,9 @@ fn process(agent: &mut Agent, doc: DocIndex, roots: &[NodeId], scripts: bool) {
                 });
                 if stylesheet {
                     resource(agent, doc, el, "href", ResourceKind::Stylesheet);
-                    // E2: la hoja se carga en una tarea y dispara `load`/`error`.
-                    crate::cssom::sheets::schedule_link_load(agent, crate::NodeRef::new(doc, el));
                 }
+                // E2: la hoja (o el `preload`) se carga en una tarea y dispara `load`/`error`.
+                crate::cssom::sheets::link_connected(agent, crate::NodeRef::new(doc, el));
             }
             // E2: la hoja de un `<style>` no tiene subrecursos que esperar: `load` en una
             // tarea (HTML §4.2.6).

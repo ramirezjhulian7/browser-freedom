@@ -886,6 +886,10 @@ fn load_waits_for_resources() {
         "dcl interactive"
     );
     bom::script::resources_loaded(&mut p.rt.agent, realm);
+    // E2: el `<img>` también pide su imagen (HTML §4.8.4.3.5) y demora `load` hasta que su
+    // petición termina, en una tarea de red.
+    assert_eq!(p.show("document.readyState"), "interactive");
+    p.idle();
     assert_eq!(
         p.show("log.join() + ' ' + document.readyState"),
         "dcl,load complete"

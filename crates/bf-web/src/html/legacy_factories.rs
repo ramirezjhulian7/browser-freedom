@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use bf_dom::events::{EventInit, EventKind, EventTarget};
 use bf_infra::DomString;
-use bf_js::host::webidl;
+use bf_js::host::{HostHandle, webidl};
 use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
@@ -150,65 +150,233 @@ fn option_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(wrap_node(agent, n))
 }
 
-// --- La carga de los `<img>` desconectados (§4.8.4.3.5) ---
+// --- "Update the image data" de los `<img>` (HTML §4.8.4.3.5) ---
 
-/// Las peticiones de imagen en curso de la ventana: la última de cada elemento (una nueva
-/// aborta la anterior, §4.8.4.3.5 paso 13: solo la vigente dispara eventos).
+/// El estado de la petición actual de un `<img>` (§4.8.4.3.1, "image request state"): `Pending`
+/// mientras se busca y decodifica, y después `Available` ("completely available") o `Broken`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageState {
+    Pending,
+    Available,
+    Broken,
+}
+
+/// Las peticiones de imagen de la ventana: la última de cada elemento (una nueva aborta la
+/// anterior, §4.8.4.3.5 paso 13: solo la vigente dispara eventos), su estado y las promesas
+/// de `decode()` que esperan a que termine.
 #[derive(Default)]
 struct ImageRequests {
     next: u64,
     current: HashMap<NodeRef, u64>,
+    state: HashMap<NodeRef, ImageState>,
+    decodes: HashMap<NodeRef, Vec<HostHandle>>,
 }
 
-/// Cambió el atributo `name` de `n` (lo llaman `setAttribute` y la reflexión de `src`).
-/// Un `<img>` fuera del documento carga su imagen ("relevant mutations": se puso `src`).
+/// El estado de la petición actual de `n` (`None` si nunca se pidió su imagen).
+pub fn image_state(agent: &Agent, n: NodeRef) -> Option<ImageState> {
+    let realm = WebContextHandle::current(agent).realm;
+    agent
+        .realm_data::<ImageRequests>(realm)?
+        .state
+        .get(&n)
+        .copied()
+}
+
+/// ¿Se pide la imagen de `n`? Los `<img>` fuera del documento (`new Image()`) y los del
+/// documento de la ventana; los de documentos sin browsing context (`DOMParser`,
+/// `createHTMLDocument`) no son *fully active* y no cargan (§4.8.4.3.5 paso 1).
+fn loads_images(agent: &Agent, n: NodeRef) -> bool {
+    with_doc(agent, n.doc, |d| {
+        d.element(n.node).is_some_and(|e| e.is_html("img"))
+            && (n.doc == 0 || !d.is_connected(n.node))
+    })
+}
+
+/// Cambió el atributo `name` de `n` (lo llaman `setAttribute` y la reflexión de `src`):
+/// `src`, `srcset` y `sizes` son "relevant mutations" (§4.8.4.3.5) y vuelven a pedir la imagen.
 pub fn img_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str) {
-    // E2: también `srcset` y `sizes`, que eligen la fuente (§4.8.4.3.5 "relevant mutations").
     if !["src", "srcset", "sizes"]
         .iter()
         .any(|a| name.eq_ignore_ascii_case(a))
     {
         return;
     }
-    let disconnected_img = with_doc(agent, n.doc, |d| {
-        d.element(n.node).is_some_and(|e| e.is_html("img")) && !d.is_connected(n.node)
-    });
-    if disconnected_img {
+    if loads_images(agent, n) {
         update_image_data(agent, n);
     }
 }
 
-/// *Update the image data* (§4.8.4.3.5) con la fuente elegida por `srcset`/`<picture>`: sin fuente o
-/// que no es una URL, `error`; si no, la imagen se busca y se decodifica, y según el
-/// resultado se dispara `load` o `error`.
-fn update_image_data(agent: &mut Agent, n: NodeRef) {
+/// E2: un `<img>` creado con sus atributos (por el parser, `innerHTML` o `cloneNode`) quedó
+/// conectado al documento: si todavía no pidió su imagen, la pide ("when an img element is
+/// created", §4.8.4.3.5). Uno que ya la pidió (un `src` asignado antes de insertarlo) no
+/// vuelve a empezar.
+pub fn img_created(agent: &mut Agent, n: NodeRef) {
+    if image_state(agent, n).is_none() && loads_images(agent, n) {
+        update_image_data(agent, n);
+    }
+}
+
+/// Corre `f` con `doc` (el documento de la ventana `realm`, que el parser tiene prestado)
+/// de vuelta en el contexto, como `window.document`: para lo que el parser avisa al insertar
+/// un elemento (un `<img>`, un `<link>`).
+pub(crate) fn with_lent_document(
+    agent: &mut Agent,
+    realm: RealmId,
+    doc: &mut bf_dom::Document,
+    f: impl FnOnce(&mut Agent),
+) {
+    let real = std::mem::take(doc);
+    let saved = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        crate::DocumentOwner::Document(Box::new(real)),
+    );
+    let saved_realm = agent.current_realm;
+    agent.current_realm = realm;
+    f(agent);
+    agent.current_realm = saved_realm;
+    let back = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        saved,
+    );
+    *doc = match back {
+        crate::DocumentOwner::Document(d) => *d,
+        crate::DocumentOwner::Parser(p) => p.into_document().0,
+    };
+}
+
+/// Marca (o desmarca) que la imagen de `n` demora el evento `load` del documento (§4.8.4.3.5:
+/// la búsqueda "delays the load event"; el parser lo mira en el paso 8 de "the end"). Solo los
+/// `<img>` conectados al documento de la ventana.
+pub(crate) fn delay_load(agent: &mut Agent, n: NodeRef, on: bool) {
+    if n.doc != 0 {
+        return;
+    }
+    with_doc_mut(agent, n.doc, |d| {
+        if on && !d.is_connected(n.node) {
+            return;
+        }
+        d.script_state_mut(n.node).delaying_load_event = on;
+    });
+}
+
+/// Vuelve a evaluar "the end" del parser de la ventana (si sigue siendo un parser): la última
+/// imagen que demoraba `load` terminó.
+pub(crate) fn resume_load(agent: &mut Agent, realm: RealmId) {
+    let parsing = matches!(
+        WebContextHandle { realm }.get(agent).documents[0],
+        crate::DocumentOwner::Parser(_)
+    );
+    if parsing {
+        crate::bom::script::with_parser(agent, realm, |p, host| p.run_tasks(host));
+    }
+}
+
+/// Rechaza con `EncodingError` las promesas de `decode()` de `n` (cambió la petición o se
+/// rompió) o las cumple (`ok`).
+fn settle_decodes(agent: &mut Agent, n: NodeRef, ok: bool) {
     let realm = WebContextHandle::current(agent).realm;
+    let waiting = agent
+        .realm_data_mut::<ImageRequests>(realm)
+        .and_then(|r| r.decodes.remove(&n))
+        .unwrap_or_default();
+    for h in waiting {
+        let Some(Value::Object(p)) = agent.host_unpin(h) else {
+            continue;
+        };
+        if ok {
+            agent.fulfill_promise(p, Value::Undefined);
+        } else {
+            let e = crate::dom::exception::create(
+                agent,
+                "EncodingError",
+                "The source image cannot be decoded.",
+            );
+            agent.reject_promise(p, e);
+        }
+    }
+}
+
+/// `decode()` (§4.8.4.4): una promesa que se cumple cuando la imagen está decodificada y se
+/// rechaza con `EncodingError` si está rota o si su petición cambia antes.
+pub fn img_decode(agent: &mut Agent, n: NodeRef) -> Value {
+    let p = agent.new_internal_promise();
+    let ok = match image_state(agent, n) {
+        Some(ImageState::Pending) => {
+            let h = agent.host_pin(Value::Object(p));
+            let realm = WebContextHandle::current(agent).realm;
+            let mut reqs = agent
+                .take_realm_data::<ImageRequests>(realm)
+                .unwrap_or_default();
+            reqs.decodes.entry(n).or_default().push(h);
+            agent.set_realm_data(realm, reqs);
+            return Value::Object(p);
+        }
+        Some(ImageState::Available) => true,
+        Some(ImageState::Broken) => false,
+        // Sin petición (un documento sin browsing context): lo que se sepa de su tamaño.
+        None => super::misc::has_natural_size(agent, n),
+    };
+    if ok {
+        agent.fulfill_promise(p, Value::Undefined);
+    } else {
+        let e = crate::dom::exception::create(
+            agent,
+            "EncodingError",
+            "The source image cannot be decoded.",
+        );
+        agent.reject_promise(p, e);
+    }
+    Value::Object(p)
+}
+
+/// *Update the image data* (§4.8.4.3.5) con la fuente elegida por `srcset`/`<picture>`:
+/// - sin fuente: la petición queda rota y, si hay `src` o `srcset`, se dispara `error`;
+/// - una imagen ya en la lista de disponibles (§4.8.4.3.2): disponible al momento y `load`
+///   en una tarea;
+/// - si no, se busca y se decodifica (demorando el `load` del documento) y según el
+///   resultado se dispara `load` o `error`.
+pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
+    let realm = WebContextHandle::current(agent).realm;
+    // Una petición nueva: los `decode()` de la anterior se rechazan.
+    settle_decodes(agent, n, false);
     let mut reqs = agent
         .take_realm_data::<ImageRequests>(realm)
         .unwrap_or_default();
     reqs.next += 1;
     let id = reqs.next;
     reqs.current.insert(n, id);
+    reqs.state.insert(n, ImageState::Pending);
     agent.set_realm_data(realm, reqs);
     // El objeto del elemento vive (con sus `onload`/`onerror`) mientras se carga, aunque el
     // script ya no lo referencie.
     let wrapper = wrap_node(agent, n);
     let pin = agent.host_pin(wrapper);
-    // E2: la fuente que eligen `srcset`/`sizes` (o `src`).
     let url = super::misc::selected_source(agent, n).map(|(u, _)| u);
     let Some(url) = url else {
-        agent.queue_task(
-            bf_js::host::TaskSource::DomManipulation,
-            Box::new(move |agent: &mut Agent| {
-                let saved = agent.current_realm;
-                agent.current_realm = realm;
-                finish(agent, n, id, pin, None);
-                agent.current_realm = saved;
-            }),
+        let has_source = with_doc(agent, n.doc, |d| {
+            d.element(n.node)
+                .is_some_and(|e| e.attr("src").is_some() || e.attr("srcset").is_some())
+        });
+        queue_finish(
+            agent,
+            realm,
+            n,
+            id,
+            pin,
+            Outcome::Broken { event: has_source },
         );
         return;
     };
     let key = url.serialize(false);
+    // Ya en la lista de imágenes disponibles: sin buscarla otra vez.
+    let known = agent
+        .realm_data::<super::misc::ImageSizes>(realm)
+        .and_then(|s| s.0.get(&key).copied());
+    if let Some(size) = known {
+        queue_finish(agent, realm, n, id, pin, Outcome::Loaded(key, size));
+        return;
+    }
+    delay_load(agent, n, true);
     let started = crate::bom::performance_observer::now_ms(agent);
     let req = crate::net::NetRequest {
         url,
@@ -230,10 +398,72 @@ fn update_image_data(agent: &mut Agent, n: NodeRef) {
                     r.body.len(),
                 );
             }
-            let size = result.ok().and_then(|r| image_size(&r));
-            finish(agent, n, id, pin, size.map(|s| (key, s)));
+            let outcome = match result.ok().and_then(|r| image_size(&r)) {
+                Some(size) => Outcome::Loaded(key, size),
+                None => Outcome::Broken { event: true },
+            };
+            finish(agent, n, id, pin, outcome);
+            delay_load(agent, n, false);
+            resume_load(agent, realm);
         }),
     );
+}
+
+/// Cómo terminó una petición.
+enum Outcome {
+    /// Decodificada: URL y tamaño en píxeles (0×0 para un SVG, sin tamaño conocido aquí).
+    Loaded(String, (u32, u32)),
+    /// Rota; `event`: si se dispara `error`.
+    Broken { event: bool },
+}
+
+/// [`finish`] en una tarea del event loop (§4.8.4.3.5: "queue an element task").
+fn queue_finish(
+    agent: &mut Agent,
+    realm: RealmId,
+    n: NodeRef,
+    id: u64,
+    pin: HostHandle,
+    outcome: Outcome,
+) {
+    // El estado cambia ya (`complete`, `naturalWidth` síncronos); el evento, en la tarea.
+    set_state(agent, realm, n, id, &outcome);
+    agent.queue_task(
+        bf_js::host::TaskSource::DomManipulation,
+        Box::new(move |agent: &mut Agent| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
+            finish(agent, n, id, pin, outcome);
+            agent.current_realm = saved;
+        }),
+    );
+}
+
+/// Si `id` sigue siendo la petición de `n`, deja su estado y su tamaño según `outcome`.
+fn set_state(agent: &mut Agent, realm: RealmId, n: NodeRef, id: u64, outcome: &Outcome) -> bool {
+    let current = agent
+        .realm_data_mut::<ImageRequests>(realm)
+        .is_some_and(|r| {
+            let current = r.current.get(&n) == Some(&id);
+            if current {
+                let state = match outcome {
+                    Outcome::Loaded(..) => ImageState::Available,
+                    Outcome::Broken { .. } => ImageState::Broken,
+                };
+                r.state.insert(n, state);
+            }
+            current
+        });
+    if current && let Outcome::Loaded(url, size) = outcome {
+        if *size != (0, 0) {
+            let mut sizes = agent
+                .take_realm_data::<super::misc::ImageSizes>(realm)
+                .unwrap_or_default();
+            sizes.0.insert(url.clone(), *size);
+            agent.set_realm_data(realm, sizes);
+        }
+    }
+    current
 }
 
 /// El tamaño natural de la imagen de la respuesta, o `None` si no es una imagen que el motor
@@ -250,48 +480,30 @@ fn image_size(r: &crate::net::NetResponse) -> Option<(u32, u32)> {
     }
 }
 
-/// Termina la petición `id` de `n`: si sigue vigente, guarda el tamaño y dispara `load`
-/// (`loaded` con la URL y el tamaño) o `error`.
-fn finish(
-    agent: &mut Agent,
-    n: NodeRef,
-    id: u64,
-    pin: bf_js::host::HostHandle,
-    loaded: Option<(String, (u32, u32))>,
-) {
+/// Termina la petición `id` de `n`: si sigue vigente, deja el estado y el tamaño, dispara
+/// `load` o `error` y resuelve los `decode()` que esperaban.
+fn finish(agent: &mut Agent, n: NodeRef, id: u64, pin: HostHandle, outcome: Outcome) {
     agent.host_unpin(pin);
     let realm = WebContextHandle::current(agent).realm;
-    let current = agent
-        .realm_data_mut::<ImageRequests>(realm)
-        .is_some_and(|r| {
-            let current = r.current.get(&n) == Some(&id);
-            if current {
-                r.current.remove(&n);
-            }
-            current
-        });
-    if !current {
+    if !set_state(agent, realm, n, id, &outcome) {
         return;
     }
-    let event = match loaded {
-        Some((url, size)) => {
-            if size != (0, 0) {
-                let mut sizes = agent
-                    .take_realm_data::<super::misc::ImageSizes>(realm)
-                    .unwrap_or_default();
-                sizes.0.insert(url, size);
-                agent.set_realm_data(realm, sizes);
-            }
-            "load"
-        }
-        None => "error",
+    if let Some(r) = agent.realm_data_mut::<ImageRequests>(realm) {
+        r.current.remove(&n);
+    }
+    let event = match outcome {
+        Outcome::Loaded(..) => Some("load"),
+        Outcome::Broken { event } => event.then_some("error"),
     };
-    crate::dom::events::fire_event(
-        agent,
-        n.doc,
-        EventTarget::Node(n.node),
-        event,
-        EventInit::default(),
-        EventKind::Event,
-    );
+    settle_decodes(agent, n, matches!(outcome, Outcome::Loaded(..)));
+    if let Some(event) = event {
+        crate::dom::events::fire_event(
+            agent,
+            n.doc,
+            EventTarget::Node(n.node),
+            event,
+            EventInit::default(),
+            EventKind::Event,
+        );
+    }
 }
