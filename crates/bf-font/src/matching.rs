@@ -126,10 +126,16 @@ pub fn generic_candidates(generic: &str) -> &'static [&'static str] {
                 "Helvetica",
             ],
         ),
-        ("ui-serif", &["New York", "Times"]),
-        ("ui-sans-serif", &["SF Pro", "Helvetica Neue"]),
-        ("ui-monospace", &["SF Mono", "Menlo"]),
-        ("ui-rounded", &["SF Pro Rounded", "Helvetica Neue"]),
+        // E5: las fuentes de Apple de cada genérica `ui-*` (CSS Fonts 4 §4.2.1) con sus nombres
+        // reales en `/System/Library/Fonts` (empiezan por punto); las demás, por si vienen
+        // instaladas aparte.
+        ("ui-serif", &[".New York", "New York", "Times"]),
+        ("ui-sans-serif", &[".SF NS", "SF Pro", "Helvetica Neue"]),
+        ("ui-monospace", &[".SF NS Mono", "SF Mono", "Menlo"]),
+        (
+            "ui-rounded",
+            &[".SF NS Rounded", "SF Pro Rounded", "Helvetica Neue"],
+        ),
         ("math", &["STIX Two Math", "Times"]),
         ("emoji", &["Apple Color Emoji"]),
         ("fangsong", &["STFangsong"]),
@@ -176,6 +182,17 @@ pub fn generic_candidates(generic: &str) -> &'static [&'static str] {
         .iter()
         .find(|(g, _)| g.eq_ignore_ascii_case(generic))
         .map_or(&[], |(_, list)| list)
+}
+
+/// E5: nombres de familia que las hojas de estilo usan para pedir la fuente del sistema y que en
+/// macOS los navegadores resuelven como `system-ui` (Safari: `-apple-system`; Chrome:
+/// `BlinkMacSystemFont`). Fuera de macOS no son nada, como en esos navegadores.
+pub fn system_font_alias(name: &str) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            name.trim().to_ascii_lowercase().as_str(),
+            "-apple-system" | "blinkmacsystemfont"
+        )
 }
 
 /// Familias que se prueban primero en el fallback por carácter.
