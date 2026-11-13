@@ -1242,7 +1242,8 @@ impl<'a> Styler<'a> {
 
     /// E4: el tamaño de las palabras clave de `font-size` según la familia genérica: con
     /// `font-family: monospace` sola, `medium` es 13 px y no 16 px (y el resto de las palabras
-    /// clave escalan igual), como en Gecko y Blink. Un tamaño que sale de una palabra clave
+    /// clave escalan igual), como en Gecko y Blink (HTML §15.3.4; CSS Fonts 4 §2.5 deja al UA
+    /// los valores de `<absolute-size>`). Un tamaño que sale de una palabra clave
     /// (heredado o relativo: `em`, `%`, `smaller`, `larger`) lleva su factor en
     /// `ComputedStyle::font_size_keyword`; al cambiar la familia genérica entre el padre y el
     /// elemento se escala por la razón de los dos `medium`.
