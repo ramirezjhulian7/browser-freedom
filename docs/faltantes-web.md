@@ -34,9 +34,20 @@ Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
   ventana mientras cargan. Asignar `src` desde un script dispara `onload`. También se disparan
   el `load` de `<link>` y el de `preload` (E2, `pendiente/mac/e2.md`, ronda 6;
   `bf-web/tests/img_load.rs`).
-- **`loading=lazy`** (HTML §4.8.4.3.9): la imagen se pide cuando queda a menos de 1250 px del
-  viewport, y cada imagen se decodifica una sola vez por proceso (E2, ronda 8). La ventana las
-  pide también al desplazar (E6, `pendiente/mac/e6.md`, "Ciclo de cierre, ronda 1").
+- **`loading=lazy`** (HTML §4.8.4.3.9), completo en JavaScript y en el pintado:
+  - la imagen se pide cuando queda a menos de 1250 px del viewport, y cada imagen se
+    decodifica una sola vez por proceso (E2, ronda 8);
+  - la ventana las pide también al desplazar (E6, `pendiente/mac/e6.md`, "Ciclo de cierre,
+    ronda 1");
+  - el pintado no descarga las perezosas que esperan, y las que llegan las toma de la caché
+    del loader de la ventana, sin descargarlas otra vez (E2, `pendiente/mac/e2.md`, "Ciclo de
+    cierre, ronda 4");
+  - en la ventana se revisan con la maqueta del navegador, no con una propia del motor (E3,
+    `pendiente/mac/e3.md`, "Ciclo de cierre, ronda 5"): las cercanas aparecen un cuadro
+    después de la primera pintura, como pide HTML §8.1.7.3.
+  - Falta: las perezosas dentro de un `<iframe>` y dentro de contenedores con `overflow`; y
+    una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
+    dos veces si la respuesta no es cacheable (E6 lo tiene en curso, sin integrar).
 - **CSS Font Loading** (`document.fonts`, `FontFace`, `FontFaceSet`): antes `document.fonts`
   no existía y `document.fonts.ready` lanzaba `TypeError` (E5, `pendiente/mac/e5.md`, ronda 7;
   `bf-web/tests/font_loading.rs`).

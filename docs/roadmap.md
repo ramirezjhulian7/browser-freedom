@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-13** (`master` `0995c60`, más `army/e3` donde se dice). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `0c8b903`, cierre del ciclo). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -39,7 +39,9 @@ Cuenta: (94.7 + 94.1 + 100 + 33.3) / 4 = 80.5 %; cumplidos 18 + 16 + 9 + 2 = 45 
 19 + 17 + 9 + 6 = 51.
 
 Sin cambios en la tabla desde la ronda 3 del ciclo de cierre: lo integrado después
-(`0995c60`) mejora cifras, pero no cierra ningún criterio (ver la lista de abajo).
+(hasta `0c8b903`) mejora cifras, pero no cierra ningún criterio (ver la lista de abajo).
+Quedan fuera de `master`, en curso, `army/e4`, `army/e5` y `army/e6` (`RETOMAR-EN-MAC.md`,
+sección 8).
 
 Cambios respecto de la tabla de la ronda 1 del ciclo de cierre (76.4 %):
 - **Fase 5, `html-aam` y `wai-aria`**: 93.3 % y 91.8 % en `master` (E1, integrado en
@@ -62,7 +64,7 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
 | 5 | 60 fps al desplazar Wikipedia | E4: mediana de 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (carga 15-36). Planificador sobre `0995c60`, carga 46-58: 12.6-15.3 ms a densidad 1 y 27.7-37.7 ms a densidad 2. Sin confirmar con la máquina libre | 60 fps (16.7 ms) | `pendiente/mac/e4.md`, "Cierre, ronda 3"; la del planificador, su reporte de la ronda 7 |
-| 5 | Primera pintura de Wikipedia en release | sin medida conjunta tras los últimos cambios. Por partes: red 401 ms (E6), parseo 60 ms (E3, en `army/e3`), cascada 76 ms (E4), maqueta 100-168 ms (E4) | < 500 ms | [`rendimiento.md`](rendimiento.md); `pendiente/mac/e6.md` y `e3.md`, "Ciclo de cierre, ronda 5"; `e4.md`, "Cierre, ronda 1" y "Cierre, ronda 3" |
+| 5 | Primera pintura de Wikipedia en release | última medida completa 823-936 ms (E2, carga 25, antes del arreglo de red de E6); sin medida sobre `master` con la máquina libre. Por partes: red 401 ms (E6), parseo 56-60 ms (E2 y E3), cascada 76 ms (E4), maqueta 100-168 ms (E4) | < 500 ms | [`rendimiento.md`](rendimiento.md); `pendiente/mac/e6.md` y `e3.md`, "Ciclo de cierre, ronda 5"; `e4.md`, "Cierre, ronda 1" y "Cierre, ronda 3"; la de E2, `git show 3dfeedf:docs/pendiente/mac/e2.md`, "Ciclo de cierre, ronda 6" |
 
 El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md). Las
 dos se midieron con la máquina cargada por otros ejecutores.
@@ -546,10 +548,20 @@ y los list box se desplazan con la rueda.
   decodifica una vez por proceso (`bf_image::decode_frames_shared`). WPT `the-img-element`
   75.2 % (1470 / 1954). Desde la ronda 1 del ciclo de cierre (E6, `pendiente/mac/e6.md`) la
   ventana también las pide al desplazar (`Engine::update_view`).
-- **Falta**: el pintado del shell pide todos los `<img>` sin mirar `loading`
-  (`bf_paint::images::load_images_in`, hallazgo de E6; lo resuelve `army/e2`, sin integrar);
-  carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo; `scroll-snap`,
-  `overscroll-behavior`, scroll containers RTL.
+- **Hecho después** (E2, `pendiente/mac/e2.md`, "Ciclo de cierre, ronda 4"; en `master`
+  desde `0c8b903`): el pintado respeta `loading=lazy`. `bf-web` anota en el documento las
+  imágenes perezosas que espera (`Document::set_image_deferred`) y
+  `bf_paint::images::load_images_in` no las pide; cuando llegan, `bf-web` deja la respuesta en
+  la caché del loader de la ventana (`ResourceLoader::remember`) y el pintado la toma de ahí,
+  sin descargarla dos veces. En la ventana, las perezosas se revisan con la maqueta del
+  navegador (E3, HTML §8.1.7.3): las cercanas aparecen un cuadro después de la primera
+  pintura.
+- **Falta**: `loading=lazy` dentro de un `<iframe>` y dentro de contenedores con `overflow`
+  (no se recorta contra ellos); una imagen no perezosa que piden a la vez `bf-web` y el
+  primer pintado se descarga dos veces si la respuesta no es cacheable (`CachedLoader` no
+  junta las peticiones en vuelo; E6 lo tiene en curso en `army/e6`); carga incremental de
+  imágenes; `scroll-behavior: smooth` es instantáneo; `scroll-snap`, `overscroll-behavior`,
+  scroll containers RTL.
 
 ---
 
@@ -646,19 +658,23 @@ y los list box se desplazan con la rueda.
       a densidad 2.
     - A densidad 1 cabe en 16.7 ms en las dos medidas; a densidad 2, no. Sin confirmar con
       la máquina libre: el criterio no se da por cumplido.
-  - **Primera pintura de Wikipedia** (meta < 500 ms): no hay medida conjunta con los últimos
-    cambios (el planificador la toma al integrar `army/e3`). Por partes, cada una de su
+  - **Primera pintura de Wikipedia** (meta < 500 ms): sin medida sobre `master` con la
+    máquina libre (la carga llegó a 160-210 al cerrar el ciclo). La última medida completa es
+    de **823-936 ms** (5 corridas, mediana 868 ms, carga 25; E2, "Ciclo de cierre, ronda 6",
+    en `git show 3dfeedf:docs/pendiente/mac/e2.md`): con la maqueta de las imágenes
+    perezosas ya quitada, pero antes del arreglo de red de E6. Por partes, cada una de su
     fuente y con su carga:
 
     | Fase | ms | Fuente |
     |---|---:|---|
     | Red y caché | 401 (mediana; 711 antes) | E6, "Ciclo de cierre, ronda 5" |
-    | Parseo | 60 (mediana; 307 antes) | E3, "Ciclo de cierre, ronda 5" (en `army/e3`) |
+    | Parseo | 56-60 (medianas; 281-307 antes) | E3, "Ciclo de cierre, ronda 5"; E2, "Ciclo de cierre, ronda 6" |
     | Cascada | 76 (mediana; 105 antes) | E4, "Cierre, ronda 3" |
     | Maqueta | 100-168 | E4, "Cierre, ronda 1" (168) y muestreo de "Cierre, ronda 3" (100) |
 
-    Medidas completas: 1076 ms (E4, carga 17-20, sin los cambios de E3 y E6), 1271 ms (E3,
-    carga 13, sin el de E6) y 1495 ms (E6, carga 9-11, sin el de E3).
+    Otras medidas completas, todas de antes de juntar los cambios: 1076 ms (E4, carga 17-20,
+    sin los de E3 y E6), 1271 ms (E3, carga 13, sin el de E6) y 1495 ms (E6, carga 9-11, sin
+    el de E3).
   - **Suelo de red**: el documento se valida en cada visita (`max-age=0, must-revalidate`) y
     un proceso nuevo no tiene conexión abierta. TCP, TLS 1.3 y el 304 cuestan un viaje de ida
     y vuelta cada uno, unos 115 ms en esta red: unos 345 ms antes de parsear (E6). Qué hacer
