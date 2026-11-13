@@ -611,6 +611,26 @@ fn fixed_scroll(f: &Fragment, scroll: (f32, f32)) -> (f32, f32) {
     }
 }
 
+/// E2: el rectángulo de `getBoundingClientRect()` de `n` (x, y, ancho, alto respecto del
+/// viewport), o `None` si no tiene caja (no se pinta).
+pub(crate) fn client_rect(agent: &mut Agent, n: NodeRef) -> Option<(f32, f32, f32, f32)> {
+    let scroll = scroll_offset(agent);
+    let bs = boxes(agent, n);
+    let rects: Vec<Rect> = bs.iter().map(|f| f.rect).collect();
+    let non_empty: Vec<Rect> = rects
+        .iter()
+        .filter(|r| r.width > 0.0 || r.height > 0.0)
+        .copied()
+        .collect();
+    let r = if non_empty.is_empty() {
+        rects.first().copied()
+    } else {
+        union(&non_empty)
+    }?;
+    let s = bs.first().map_or(scroll, |f| fixed_scroll(f, scroll));
+    Some((r.x - s.0, r.y - s.1, r.width, r.height))
+}
+
 /// `getBoundingClientRect()` (CSSOM View §6.1): la unión de los rectángulos no vacíos, o
 /// el primero si todos lo son.
 fn get_bounding_client_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {

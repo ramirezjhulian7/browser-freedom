@@ -513,6 +513,21 @@ fn fire_iframe_load(agent: &mut Agent, realm: RealmId) {
     frame_document_loaded(agent, frame.parent);
 }
 
+/// E2: ¿el documento del marco `realm` tiene los scripts deshabilitados? (`sandbox` sin
+/// `allow-scripts` en su `<iframe>`, HTML §7.6.5). Entonces `loading=lazy` no aplaza nada
+/// (§4.8.4.3.9, "will lazy load element steps").
+pub fn scripting_disabled(agent: &Agent, realm: RealmId) -> bool {
+    let Some(frame) = frame_of(agent, realm) else {
+        return false;
+    };
+    let ctx = WebContextHandle {
+        realm: frame.parent,
+    }
+    .get(agent);
+    sandbox_tokens(ctx.document(), frame.element)
+        .is_some_and(|t| !t.iter().any(|t| t == "allow-scripts"))
+}
+
 /// E2: el documento del marco `realm` pudo haber terminado de cargar (se disparó su `load`):
 /// si es así y su `<iframe>` esperaba, se dispara el `load` del elemento. Lo llaman quien
 /// suelta lo que demoraba un `load` (imágenes, hojas) y [`sync_frames`].
@@ -584,6 +599,15 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
         if let Some(f) = frames_mut(agent).list.iter_mut().find(|f| f.realm == r) {
             f.pending = Some((url, replace));
         }
+    }
+    // E2: las imágenes `loading=lazy` que ya están cerca del viewport (de la ventana y de sus
+    // marcos) se piden: este es el punto en que el bucle queda sin trabajo.
+    crate::html::legacy_factories::check_lazy_images(agent, realm);
+    let frame_realms: Vec<RealmId> = frames(agent)
+        .map(|f| f.list.iter().map(|f| f.realm).collect())
+        .unwrap_or_default();
+    for r in frame_realms {
+        crate::html::legacy_factories::check_lazy_images(agent, r);
     }
     // E2: los `<iframe>` que esperaban a que su documento terminara de cargar.
     let waiting: Vec<RealmId> = frames(agent)
