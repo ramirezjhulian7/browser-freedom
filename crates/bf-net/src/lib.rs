@@ -1514,9 +1514,11 @@ pub struct RequestOptions {
     /// E6: el *destination* de la petición (Fetch §2.2.5).
     pub destination: Option<bf_infra::Destination>,
     /// E6: el documento que pide (un identificador del navegador). Dos peticiones de imagen
-    /// idénticas del mismo documento que se cruzan comparten una sola petición a la red: la
-    /// *list of available images* de HTML (§4.8.4.3.2) ya deja reutilizar una imagen dentro del
-    /// documento aunque HTTP no permita guardarla.
+    /// idénticas del mismo documento que se cruzan comparten una sola petición a la red. RFC
+    /// 9111 §4 deja juntar peticiones (*collapsed requests*) si la respuesta se puede reutilizar
+    /// para todas; para las imágenes de un documento esa reutilización la da la *list of
+    /// available images* de HTML (§4.8.4.3), aunque HTTP no permita guardarla. Otras
+    /// peticiones (un `fetch` de una respuesta `no-store`) no se juntan.
     pub client: Option<u64>,
 }
 
