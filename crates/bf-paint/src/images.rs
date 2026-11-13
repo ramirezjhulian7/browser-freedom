@@ -628,7 +628,7 @@ pub fn load_images_in(
                 el.attr("src").map(|s| (s.to_owned(), 1.0))
             };
             match chosen.and_then(|(src, density)| {
-                let src = src.trim();
+                let src = src.trim_matches(|c: char| c.is_ascii_whitespace());
                 if src.is_empty() {
                     return None;
                 }
