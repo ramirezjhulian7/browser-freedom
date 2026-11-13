@@ -4,10 +4,11 @@
 //! propiedades), que siempre es Unicode válido.
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
+
+use crate::object::{FastHashMap, FastHashSet};
 
 /// Un string de ECMAScript: code units UTF-16 compartidos. Una concatenación larga es un
 /// *rope* (E3): guarda las dos partes y se aplana una sola vez, la primera vez que se leen sus
@@ -226,10 +227,13 @@ impl fmt::Debug for JsString {
 }
 
 thread_local! {
-    static INTERNED: RefCell<HashSet<Rc<str>>> = RefCell::new(HashSet::new());
+    // E3: con el hash rápido de las tablas de propiedades (los nombres los elige la página,
+    // que a lo sumo se hace lenta a sí misma): el lexer interna cada identificador.
+    static INTERNED: RefCell<FastHashSet<Rc<str>>> = RefCell::new(FastHashSet::default());
     /// El `JsString` de cada átomo (E3): las claves de propiedades con el mismo nombre
     /// comparten la memoria y se comparan por puntero.
-    static ATOM_STRINGS: RefCell<HashMap<Rc<str>, JsString>> = RefCell::new(HashMap::new());
+    static ATOM_STRINGS: RefCell<FastHashMap<Rc<str>, JsString>> =
+        RefCell::new(FastHashMap::default());
 }
 
 /// Un nombre internado: dos `Atom` con el mismo texto comparten la memoria.

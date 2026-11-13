@@ -324,7 +324,9 @@ impl Lexer {
             self.template_chars(start)?
         } else {
             let mut found = None;
-            for p in PUNCTUATORS {
+            // E3: solo los que empiezan por `c` (la lista sigue en su orden, del más largo al
+            // más corto, así que el primero que coincide es el más largo).
+            for p in PUNCTUATORS.iter().filter(|p| p.starts_with(c)) {
                 if self.starts_with(p) {
                     // `?.` seguido de un dígito es `?` y un número (`a?.5:b`).
                     if *p == "?." && self.peek_at(2).is_some_and(|d| d.is_ascii_digit()) {

@@ -197,3 +197,77 @@ pintura 2143 → 1954 ms. Por partes, después y con carga 16: emparejar 46-50 m
 10, valores 19-21; los pseudoelementos, 13-14 ms (4034 de 4444 sin `content`, sin calcular).
 La meta de 500 ms no se cumple: solo la red se lleva ~660 ms (ver la nota de E4,
 `docs/pendiente/mac/e4.md`, cierre 3, para el reparto por funciones).
+
+## Parseo de la primera pintura (E3, cierre ronda 5)
+
+Con `BF_TRACE=1`, después de `perf carga` sale una línea con el detalle de **parseo**
+(`Engine::parse`, `crates/bf-shell/src/script.rs`):
+
+```
+perf parseo <url>: ventana · parser (tokenizador y árbol · buscar scripts · link · img ·
+microtasks · write) · después · copia
+```
+
+- **ventana**: instalar la ventana del motor (`bf_web::install`: las clases del DOM y las
+  fábricas en JavaScript de streams, IndexedDB, Service Workers, Cache y Font Loading).
+- **parser**: el parser HTML con lo que hace dentro. Entre paréntesis, lo que pasa en el
+  navegador (`bf_web::bom::script::ParseProfile`): buscar los scripts externos, los `<link>` y
+  los `<img>` que inserta el parser, los puntos de control de microtasks y
+  `document.write`. **tokenizador y árbol** es lo que queda: el parser propiamente dicho.
+- **después**: los `<meta>` de CSP, `sync_frames` (los marcos y las imágenes perezosas).
+- **copia**: la copia del documento que va al navegador.
+
+### Qué había en los 334 ms
+
+En `https://es.wikipedia.org/wiki/Navegador_web` (233 KB de HTML, 4049 nodos), con la caché
+de disco caliente, el parseo **no** era el parser: el tokenizador y el tree builder tardan
+12-16 ms (8-9 ms el parser solo, medido aparte sobre el mismo HTML), buscar los scripts
+menos de 1 ms y los `<img>` 1-2 ms. Lo grande era **después**, 200-320 ms: `sync_frames`
+revisaba las 8 imágenes `loading=lazy` para ver si estaban cerca del viewport, y para eso el
+motor JS hacía su propia cascada y su propia maqueta del documento entero, justo antes de
+que el navegador hiciera las suyas para pintar.
+
+El "lazy load intersection observer" mira la intersección después de maquetar, en *update
+the rendering* (HTML §8.1.7.3, §4.8.4.3.9). Ahora, con navegador (una ventana con proveedor
+de maquetas), `sync_frames` no la revisa mientras la maqueta del documento de ahora no
+exista (`bf_web::cssom::awaiting_shell_layout`). `Engine::set_layout` la revisa siempre con
+la maqueta que trae el navegador. Sin navegador (`freedom render`, los runners de WPT) nada
+cambia. Lo que se pinta tampoco: `bf_paint` pide todos los `<img>` sin mirar `loading`
+(en `master` `0995c60`; `army/e2`, sin integrar, hace que el pintado respete `loading`, y con
+las dos ramas la imagen perezosa cercana sale en el cuadro siguiente a la primera pintura).
+
+A/B con dos binarios que solo difieren en ese cambio (los dos con las marcas), alternados,
+5 corridas cada uno, carga de 1 minuto 13,1-13,6 (de 5 minutos, 37-44):
+
+| | Parseo (mín. · mediana) | después | CPU de usuario (mediana) | Primera pintura (mín. · mediana) |
+|---|---|---|---|---|
+| antes | 253 · 307 ms | 198-318 ms | 0,82 s | 1314 · 1543 ms |
+| después | 50 · 60 ms | 0,2-0,3 ms | 0,63 s | 1075 · 1271 ms |
+
+Binario final (los tres cambios) contra el de antes (solo las marcas), alternados, 5
+corridas cada uno, con la máquina mucho más cargada (carga de 1 minuto 64-72, de 5 minutos
+50-53):
+
+| | Parseo (mín. · mediana) | CPU de usuario (mediana) | Primera pintura (mín. · mediana) |
+|---|---|---|---|
+| antes | 917 · 1278 ms | 1,23 s | 3796 · 4262 ms |
+| final | 128 · 163 ms | 0,98 s | 2451 · 2592 ms |
+
+### Lo que queda del parseo (unos 60 ms)
+
+- **ventana**, 35-55 ms: tres cuartos son compilar 258 KB de JavaScript propio del motor
+  (`streams.js` 105 KB, `idb1.js` + `idb2.js` 87 KB, `service.js` 28 KB, `font_loading.js`
+  23 KB, `cache.js` 14 KB) en cada ventana nueva. Ejecutarlo apenas cuenta. El parser de JS
+  y el compilador ahora son un 10-15 % más rápidos (el hash rápido de las tablas de
+  propiedades en el internado de nombres y en las constantes del compilador; los signos de
+  puntuación se buscan solo entre los que empiezan por el carácter leído): en esos 258 KB,
+  parseo 17,3 → 15,0 ms y compilación 15,3 → 13,6 ms (medianas de 21, alternados).
+- **scripts** (la línea `perf carga`), 12-30 ms.
+- **tokenizador y árbol**, 12-16 ms. El tokenizador en modo red guarda una foto de su
+  estado en cada token para poder deshacerlo si se acaba la entrada; la foto copiaba el
+  nombre del último start tag (una asignación por token). Ahora es compartido: el
+  tokenizador sobre el HTML de Wikipedia pasa de 8,5 a 7,6 ms y el parser completo (`feed`
+  y `finish`) de 13,1 a 12,0 ms (medianas de 21, alternados).
+
+**red/caché** es ahora la parte mayor de la primera pintura: 620-710 ms en estas corridas
+(287 ms en la medida de E4) con la caché de disco caliente.

@@ -18,8 +18,9 @@ mod pattern;
 pub mod scope;
 mod stmt;
 
-use std::collections::HashMap;
 use std::rc::Rc;
+
+use crate::object::FastHashMap;
 
 use crate::ast::*;
 use crate::string::{Atom, JsString};
@@ -101,8 +102,9 @@ pub(crate) struct FnState {
     pub strict: bool,
     pub ops: Vec<Op>,
     pub consts: Vec<Constant>,
-    names: HashMap<Atom, u32>,
-    strings: HashMap<JsString, u32>,
+    /// E3: con el hash rápido de las tablas de propiedades (`crate::object::FastHashMap`).
+    names: FastHashMap<Atom, u32>,
+    strings: FastHashMap<JsString, u32>,
     pub next_local: u32,
     pub max_locals: u32,
     pub scope: ScopeId,
@@ -265,8 +267,8 @@ impl FnState {
             strict,
             ops: Vec::new(),
             consts: Vec::new(),
-            names: HashMap::new(),
-            strings: HashMap::new(),
+            names: FastHashMap::default(),
+            strings: FastHashMap::default(),
             next_local: locals,
             max_locals: locals,
             scope,

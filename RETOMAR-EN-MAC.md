@@ -128,9 +128,11 @@ cada uno):
 
 El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A grandes rasgos:
 
-- **Motor de documentos:** HTML, CSS, flex, grid con subgrid y lanes, tablas, tamaños
-  intrínsecos, escritura vertical, bidi, cortes de línea, scroll con `sticky`, SVG, WebP y
-  `object-fit`.
+- **Motor de documentos:** HTML, CSS, flex (con los tamaños intrínsecos de §9.9.1), grid
+  con subgrid y lanes, tablas, tamaños intrínsecos, escritura vertical, bidi, cortes de
+  línea, scroll con `sticky`, SVG, WebP y `object-fit`. `:popover-open`: los popovers
+  cerrados no se pintan. El parser HTML sigue a los nodos que un script adopta en otro
+  documento.
 - **JavaScript propio:** test262 al 98.8 %, con Intl y Temporal.
 - **Plataforma web:**
   - DOM con Shadow DOM y custom elements;
@@ -139,12 +141,16 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
   - del ciclo del Mac: carga de imágenes con sus eventos y `loading=lazy` (también al
     desplazar la ventana), CSS Font Loading (`document.fonts`), el `load` de `<iframe>` que
     espera a su documento y `pageshow` tras el `load`.
-- **Accesibilidad:** el motor calcula el rol y el nombre accesible de cada elemento
-  (`html-aam` 93.3 %, `wai-aria` 91.8 %). El árbol todavía no se expone a macOS.
+- **Accesibilidad:** el motor calcula el rol, el nombre y los estados de cada elemento y arma
+  el árbol de accesibilidad del documento (`html-aam` 93.4 %, `wai-aria` 95.7 %). El árbol
+  todavía no se expone a macOS.
 - **Red y seguridad:** HTTP/2, caché HTTP en disco, HSTS, Referrer-Policy, Content Security
-  Policy y bloqueo de contenido mixto.
-- **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental;
-  Wikipedia se desplaza a 53 fps a densidad 1. `monospace` y `<pre>` salen a 13 px.
+  Policy (con `img-src` y el evento `securitypolicyviolation`) y bloqueo de contenido mixto.
+  Con una VPN que da una ruta IPv6 sin salida, la conexión prueba IPv4 primero (RFC 6724).
+- **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental; el
+  cuadro de la ventana se reutiliza y los `sticky` van en capa propia. Desplazar Wikipedia
+  cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (E4, carga 15-36); falta
+  confirmarlo con la máquina libre. `monospace` y `<pre>` salen a 13 px.
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
 - **Empaquetado:** `Freedom.app` firmada ad hoc con su `.dmg`
@@ -155,20 +161,21 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
 criterios: 80.5 %** de las fases 2 a 5 (84.4 % contando la fase 1). Lo que falta está en la
-lista "Criterios no cumplidos" del roadmap; tres puntos esperan una decisión del usuario
+lista "Criterios no cumplidos" del roadmap; cinco puntos esperan una decisión del usuario
 (roadmap, "Decisiones pendientes del usuario").
 
 ## 8. Ramas en integración
 
-Esta rama tiene trabajo que `master` todavía no tiene. `git log --oneline master..army/e<n>`
-muestra cuál, y la nota de la rama dice qué está hecho y qué falta:
+Al 2026-11-13, con `master` en `0995c60`. `git log --oneline master..army/e<n>` muestra qué
+trae cada rama, y su nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está
+hecho y qué falta:
 
-| Rama | Qué trae | Nota (en esa rama) |
+| Rama | Qué trae | Estado |
 |---|---|---|
-| `army/e5` | Tamaños intrínsecos de flex (§9.9.1), porcentajes a través de bloques anónimos, baseline en columnas y `:popover-open`; 3.6 sube a 94 / 107. No entró porque choca con la de E1 en un archivo de tests | `docs/pendiente/mac/e5.md`, "Ciclo de cierre, ronda 1" |
-
-Para leer la nota de la rama sin cambiar de rama:
-`git show army/e5:docs/pendiente/mac/e5.md`.
+| `army/e3` | El parseo de la primera pintura de Wikipedia baja de 307 a 60 ms de mediana: con navegador, las imágenes `loading=lazy` se revisan con la maqueta del navegador y el motor ya no hace una propia (HTML §8.1.7.3). También un tokenizador HTML y un parser de JS algo más rápidos | Lista para integrar; nota: `docs/pendiente/mac/e3.md`, "Ciclo de cierre, ronda 5" |
+| `army/e2` | El pintado respeta `loading=lazy`: no pide las imágenes perezosas lejanas y toma las cercanas de la caché del loader | En curso. Con `army/e3`, la imagen perezosa cercana sale en el cuadro siguiente a la primera pintura, no en la primera |
+| `army/e4` | Rendimiento (cascada, hojas, raster y ventana) | En curso: tiene cambios, falta medirlos |
+| `army/e5`, `army/e6` | Rendimiento | En curso, sin commits nuevos sobre `master` |
 
 ## 9. Prompt para pegar en Claude Code
 

@@ -516,6 +516,23 @@ pub struct Engine {
     /// E6: el desplazamiento y el viewport de la última revisión de las imágenes
     /// `loading=lazy` ([`Engine::update_view`]).
     lazy_view: Option<((f32, f32), bf_layout::Size)>,
+    /// E3: las partes de la última llamada a [`Engine::parse`] (para `BF_TRACE`).
+    parse_marks: ParseMarks,
+}
+
+/// E3: en qué se fue [`Engine::parse`] (para las mediciones de `BF_TRACE`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseMarks {
+    /// Instalar la ventana (el `WebContext`, los scripts, la red) y sus políticas.
+    pub window: Duration,
+    /// El parser HTML, con todo lo que hace dentro (scripts, hojas, imágenes) y "the end".
+    pub parser: Duration,
+    /// Lo de después: los `<meta>` de CSP, los marcos, `load` si no se demora.
+    pub after: Duration,
+    /// La copia del documento que se devuelve al navegador.
+    pub copy: Duration,
+    /// El detalle de lo que el parser hizo en el navegador.
+    pub profile: bf_web::bom::script::ParseProfile,
 }
 
 impl Engine {
@@ -543,6 +560,7 @@ impl Engine {
             reported_rejections: 0,
             images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
             navigation_policies: (None, None),
+            parse_marks: ParseMarks::default(),
             xml_load_pending: false,
             lazy_view: None,
         }
@@ -666,6 +684,12 @@ impl Engine {
         if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
             ctx.layout = Some(snapshot);
         }
+        // E3: con la maqueta nueva, el "lazy load intersection observer" se revisa siempre
+        // (HTML §8.1.7.3, *update the rendering*: las observaciones de intersección van después
+        // de maquetar), aunque no cambien el desplazamiento ni el viewport: `sync_frames` la
+        // deja para este momento en vez de maquetar por su cuenta
+        // (`bf_web::cssom::awaiting_shell_layout`).
+        self.lazy_view = None;
         self.update_view(scroll, device_pixel_ratio);
     }
 
@@ -738,6 +762,7 @@ impl Engine {
         loader: Arc<CachedLoader>,
         env: &PageEnv,
     ) -> Document {
+        let start = Instant::now();
         let security = loader.security();
         if !self.has_window() {
             self.install_window(url, loader, env);
@@ -756,9 +781,13 @@ impl Engine {
             coop.as_deref(),
             coep.as_deref(),
         );
+        let window = start.elapsed();
+        let start = Instant::now();
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
+        let parser = start.elapsed();
+        let start = Instant::now();
         // E6: los `<meta>` de CSP que quedaron después del último script valen para los
         // subrecursos que se piden al maquetar.
         bf_web::security::refresh_meta(agent, realm, None);
@@ -769,7 +798,24 @@ impl Engine {
         }
         self.flush_rejections();
         self.take_dirty();
-        self.document().cloned().unwrap_or_default()
+        let after = start.elapsed();
+        let start = Instant::now();
+        let doc = self.document().cloned().unwrap_or_default();
+        self.parse_marks = ParseMarks {
+            window,
+            parser,
+            after,
+            copy: start.elapsed(),
+            profile: bf_web::bom::script::script_env(&self.rt.agent, self.realm)
+                .map(|e| e.parse_profile)
+                .unwrap_or_default(),
+        };
+        doc
+    }
+
+    /// E3: las partes de la última llamada a [`Engine::parse`] (para `BF_TRACE`).
+    pub fn parse_marks(&self) -> ParseMarks {
+        self.parse_marks
     }
 
     /// E6: un documento XML (XHTML, SVG) ya parseado como documento de la ventana, con sus

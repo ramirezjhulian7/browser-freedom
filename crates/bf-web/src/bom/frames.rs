@@ -646,7 +646,13 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
     }
     // E2: las imágenes `loading=lazy` que ya están cerca del viewport (de la ventana y de sus
     // marcos) se piden: este es el punto en que el bucle queda sin trabajo.
-    crate::html::legacy_factories::check_lazy_images(agent, realm);
+    // E3: si la ventana maqueta con el navegador y su maqueta todavía no llegó, la revisión
+    // espera a esa maqueta (el shell la hace en `Engine::set_layout`): las observaciones de
+    // intersección van después de maquetar, en *update the rendering* (HTML §8.1.7.3,
+    // §4.8.4.3.9), y así no se maqueta el documento dos veces al cargarlo.
+    if !crate::cssom::awaiting_shell_layout(agent, realm) {
+        crate::html::legacy_factories::check_lazy_images(agent, realm);
+    }
     let frame_realms: Vec<RealmId> = frames(agent)
         .map(|f| f.list.iter().map(|f| f.realm).collect())
         .unwrap_or_default();
