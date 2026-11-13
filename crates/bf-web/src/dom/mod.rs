@@ -75,6 +75,8 @@ pub struct DomClasses {
     pub hash_change_event: HostClassId,
     pub pop_state_event: HostClassId,
     pub page_transition_event: HostClassId,
+    /// E6: CSP 3 §5.1.
+    pub security_policy_violation_event: HostClassId,
     pub message_event: HostClassId,
     pub storage_event: HostClassId,
     pub composition_event: HostClassId,
@@ -179,6 +181,8 @@ pub fn register_classes(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHand
         let pop_state_event = agent.register_host_class(event_types::pop_state_event_class(event));
         let page_transition_event =
             agent.register_host_class(event_types::page_transition_event_class(event));
+        let security_policy_violation_event =
+            agent.register_host_class(event_types::security_policy_violation_event_class(event));
         let message_event = agent.register_host_class(event_types::message_event_class(event));
         let storage_event = agent.register_host_class(event_types::storage_event_class(event));
         let composition_event =
@@ -235,6 +239,7 @@ pub fn register_classes(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHand
             hash_change_event,
             pop_state_event,
             page_transition_event,
+            security_policy_violation_event,
             message_event,
             storage_event,
             composition_event,

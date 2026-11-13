@@ -58,7 +58,12 @@ pub struct Policy {
 /// Una violación: la directiva que no lo permitió y la disposición de su política.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
+    /// La directiva que no lo permitió, serializada (`img-src 'none'`).
     pub directive: String,
+    /// La directiva efectiva (§6.8.1): `img-src` aunque la que se aplicó fuera `default-src`.
+    pub effective: String,
+    /// La política entera, serializada (`originalPolicy`, §5.3).
+    pub policy: String,
     pub disposition: Disposition,
 }
 
@@ -510,9 +515,20 @@ impl Policy {
             .find_map(|name| self.directives.iter().find(|d| d.name == *name))
     }
 
-    fn violation(&self, d: &Directive) -> Violation {
+    /// La serialización de la política (§2.2: las directivas separadas por `"; "`).
+    pub fn serialize(&self) -> String {
+        self.directives
+            .iter()
+            .map(Directive::serialize)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn violation(&self, d: &Directive, effective: &str) -> Violation {
         Violation {
             directive: d.serialize(),
+            effective: effective.to_owned(),
+            policy: self.serialize(),
             disposition: self.disposition,
         }
     }
@@ -554,9 +570,9 @@ impl Policy {
         if destination == Destination::Script
             && d.value.iter().any(|t| is_keyword(t, "'strict-dynamic'"))
         {
-            return parser_inserted.then(|| self.violation(d));
+            return parser_inserted.then(|| self.violation(d, effective));
         }
-        (!matches_source_list(url, &d.value, origin)).then(|| self.violation(d))
+        (!matches_source_list(url, &d.value, origin)).then(|| self.violation(d, effective))
     }
 
     /// ¿Esta política impide el script o estilo en línea `source` con el `nonce` de su
@@ -594,7 +610,7 @@ impl Policy {
         {
             return None;
         }
-        (!inline_allowed(&d.value, kind, nonce, source)).then(|| self.violation(d))
+        (!inline_allowed(&d.value, kind, nonce, source)).then(|| self.violation(d, effective))
     }
 
     /// §4.4: ¿esta política impide compilar texto como código (`eval`, `new Function`,
@@ -603,7 +619,7 @@ impl Policy {
     pub fn eval_violation(&self) -> Option<Violation> {
         let d = self.directive_for("script-src")?;
         let allowed = d.value.iter().any(|t| is_keyword(t, "'unsafe-eval'"));
-        (!allowed).then(|| self.violation(d))
+        (!allowed).then(|| self.violation(d, "script-src"))
     }
 }
 

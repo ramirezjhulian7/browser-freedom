@@ -643,6 +643,7 @@ pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: FetchDone
         &params.url,
         bf_infra::Destination::Connect,
         None,
+        None,
     ) {
         Some(url) => params.url = url,
         None => {
@@ -715,6 +716,7 @@ pub fn fetch_blocking(agent: &mut Agent, req: &NetRequest) -> NetResult {
         None,
         &req.url,
         bf_infra::Destination::Connect,
+        None,
         None,
     )
     .is_none()

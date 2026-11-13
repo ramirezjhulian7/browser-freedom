@@ -1,7 +1,8 @@
 //! Las interfaces de evento cuyos datos son solo miembros de su diccionario (HTML §8.1.8,
 //! §7.4, §9.3, §12.2; UI Events §5.4, §5.7): `HashChangeEvent`, `PopStateEvent`,
 //! `PageTransitionEvent`, `MessageEvent`, `StorageEvent`, `CompositionEvent`, `WheelEvent`,
-//! `TouchEvent` (sin `Touch`: las listas son arrays), `AnimationEvent` y `TransitionEvent`.
+//! `TouchEvent` (sin `Touch`: las listas son arrays), `AnimationEvent`, `TransitionEvent` y
+//! (E6) `SecurityPolicyViolationEvent` (CSP 3 §5.1).
 //! Los miembros propios van en los slots del wrapper desde el índice 2, en el orden
 //! lexicográfico en que WebIDL lee el diccionario (§3.2.17).
 
@@ -31,6 +32,9 @@ enum Ty {
     ULong,
     /// `sequence<…>` con `[]` (un array nuevo).
     Seq,
+    /// E6: `SecurityPolicyViolationEventDisposition` (`"enforce"` o `"report"`) con
+    /// `"enforce"`.
+    Disposition,
 }
 
 /// Un miembro: nombre en el diccionario y en el atributo, y tipo.
@@ -71,6 +75,21 @@ const TRANSITION: &[Member] = &[
     ("propertyName", Ty::Str),
     ("pseudoElement", Ty::Str),
 ];
+/// E6: `SecurityPolicyViolationEventInit` (CSP 3 §5.1).
+const SECURITY_POLICY_VIOLATION: &[Member] = &[
+    ("blockedURI", Ty::Str),
+    ("columnNumber", Ty::ULong),
+    ("disposition", Ty::Disposition),
+    ("documentURI", Ty::Str),
+    ("effectiveDirective", Ty::Str),
+    ("lineNumber", Ty::ULong),
+    ("originalPolicy", Ty::Str),
+    ("referrer", Ty::Str),
+    ("sample", Ty::Str),
+    ("sourceFile", Ty::Str),
+    ("statusCode", Ty::ULong),
+    ("violatedDirective", Ty::Str),
+];
 /// `TouchEventInit`: los de `EventModifierInit` y luego los propios (WebIDL lee primero el
 /// diccionario heredado).
 const TOUCH: &[Member] = &[
@@ -83,8 +102,9 @@ const TOUCH: &[Member] = &[
     ("touches", Ty::Seq),
 ];
 
-/// Los getters de los slots 2 a 8.
-const SLOT_GETTERS: [bf_js::vm::function::NativeFn; 7] = [s2, s3, s4, s5, s6, s7, s8];
+/// Los getters de los slots 2 a 13.
+const SLOT_GETTERS: [bf_js::vm::function::NativeFn; 12] =
+    [s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13];
 
 fn s2(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     slot(agent, a, 2)
@@ -106,6 +126,21 @@ fn s7(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 fn s8(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     slot(agent, a, 8)
+}
+fn s9(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    slot(agent, a, 9)
+}
+fn s10(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    slot(agent, a, 10)
+}
+fn s11(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    slot(agent, a, 11)
+}
+fn s12(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    slot(agent, a, 12)
+}
+fn s13(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    slot(agent, a, 13)
 }
 
 /// Una clase con los atributos de `members`.
@@ -163,6 +198,41 @@ pub fn transition_event_class(event: HostClassId) -> HostClass {
     class("TransitionEvent", event, TRANSITION).constructor(transition_ctor, 1)
 }
 
+/// E6: `SecurityPolicyViolationEvent` (CSP 3 §5.1).
+pub fn security_policy_violation_event_class(event: HostClassId) -> HostClass {
+    class(
+        "SecurityPolicyViolationEvent",
+        event,
+        SECURITY_POLICY_VIOLATION,
+    )
+    .constructor(security_policy_violation_ctor, 1)
+}
+
+/// Los slots de un `SecurityPolicyViolationEvent` (desde el 2, en el orden de
+/// [`SECURITY_POLICY_VIOLATION`]) a partir de los datos de la violación.
+pub fn security_policy_violation_slots(
+    blocked: &str,
+    disposition: &str,
+    document: &str,
+    effective: &str,
+    policy: &str,
+) -> Vec<Value> {
+    vec![
+        Value::str(blocked),
+        Value::Number(0.0),
+        Value::str(disposition),
+        Value::str(document),
+        Value::str(effective),
+        Value::Number(0.0),
+        Value::str(policy),
+        Value::str(""),
+        Value::str(""),
+        Value::str(""),
+        Value::Number(0.0),
+        Value::str(effective),
+    ]
+}
+
 pub fn touch_event_class(ui: HostClassId) -> HostClass {
     class("TouchEvent", ui, TOUCH).constructor(touch_ctor, 1)
 }
@@ -176,6 +246,7 @@ fn convert(agent: &mut Agent, v: Value, ty: Ty) -> JsResult<Value> {
             Ty::Bool => Value::Boolean(false),
             Ty::Double | Ty::ULong => Value::Number(0.0),
             Ty::Seq => Value::Object(agent.create_array_from_list(&[])?),
+            Ty::Disposition => Value::str("enforce"),
         });
     }
     Ok(match ty {
@@ -189,6 +260,18 @@ fn convert(agent: &mut Agent, v: Value, ty: Ty) -> JsResult<Value> {
         Ty::Seq => {
             let items = bf_js::host::webidl::to_sequence(agent, &v, |_, x| Ok(x.clone()))?;
             Value::Object(agent.create_array_from_list(&items)?)
+        }
+        // Un enum de WebIDL (§3.2.18): otro valor es un `TypeError`.
+        Ty::Disposition => {
+            let s = agent.to_string(&v)?;
+            let text = s.to_string();
+            if text != "enforce" && text != "report" {
+                return agent.type_error(&format!(
+                    "The provided value '{text}' is not a valid enum value of type \
+                     SecurityPolicyViolationEventDisposition."
+                ));
+            }
+            Value::String(s)
         }
     })
 }
@@ -248,6 +331,17 @@ fn storage_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn animation_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let c = classes(agent).animation_event;
     plain_ctor(agent, a, "AnimationEvent", c, ANIMATION)
+}
+
+fn security_policy_violation_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let c = classes(agent).security_policy_violation_event;
+    plain_ctor(
+        agent,
+        a,
+        "SecurityPolicyViolationEvent",
+        c,
+        SECURITY_POLICY_VIOLATION,
+    )
 }
 
 fn transition_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
