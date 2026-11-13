@@ -322,6 +322,12 @@ struct Fetched {
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
     let loader = window_loader(agent, realm)?;
+    // E6: Mixed Content y CSP (`frame-src`) con la política de la ventana que contiene el
+    // marco; lo bloqueado queda en sus mensajes para la consola.
+    let url = &match crate::security::policy(agent, realm) {
+        Some(p) => p.check_request(url, bf_infra::Destination::Frame, None)?,
+        None => url.clone(),
+    };
     let res = loader.load(url)?;
     let xml = xml_type(res.content_type.as_deref(), &res.url);
     // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del

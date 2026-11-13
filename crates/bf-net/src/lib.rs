@@ -14,6 +14,7 @@ pub mod auth;
 pub mod blob; // E2: el almacén de URLs blob:
 pub mod cache;
 pub mod cookies;
+pub mod csp; // E6: Content Security Policy 3
 pub mod dns;
 mod error;
 mod eyeballs;
@@ -21,8 +22,10 @@ pub mod hpack;
 pub mod hsts;
 pub mod http;
 pub mod http2;
+pub mod mixed_content; // E6: Mixed Content 2
 pub mod psl;
 pub mod referrer;
+pub mod security; // E6: las políticas de un documento
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
 pub mod websocket; // E2: cliente WebSocket (RFC 6455)

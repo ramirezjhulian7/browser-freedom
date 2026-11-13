@@ -30,7 +30,25 @@ pub enum DynamicKind {
     AsyncGenerator,
 }
 
+/// E6: HostEnsureCanCompileStrings (§19.2.1.2): el embebedor decide si un realm puede
+/// compilar texto como código (`eval`, `new Function`). Es un dato del realm; HTML lo
+/// implementa con Content Security Policy ("EnsureCSPDoesNotBlockStringCompilation", CSP 3
+/// §4.4): `Err` con el mensaje lanza un `EvalError`.
+pub struct StringCompilationCheck(pub Box<dyn Fn() -> Result<(), String>>);
+
 impl Agent {
+    /// HostEnsureCanCompileStrings con el [`StringCompilationCheck`] del realm actual.
+    fn ensure_can_compile_strings(&mut self) -> JsResult<()> {
+        let realm = self.current_realm;
+        let verdict = self
+            .realm_data::<StringCompilationCheck>(realm)
+            .map(|check| (check.0)());
+        match verdict {
+            Some(Err(message)) => Err(self.error(crate::vm::ErrorType::EvalError, &message)),
+            _ => Ok(()),
+        }
+    }
+
     fn parse_options(&self) -> ParseOptions {
         ParseOptions {
             strict: false,
@@ -141,6 +159,8 @@ impl Agent {
         let Value::String(s) = x else {
             return Ok(x.clone());
         };
+        // §19.2.1.1 paso 5.
+        self.ensure_can_compile_strings()?;
         let text = s.to_string_lossy();
         let flags = if direct { flags } else { EvalFlags::default() };
         // El contexto del parser: los nombres privados visibles en los environments.
@@ -322,6 +342,8 @@ impl Agent {
         args: &[Value],
     ) -> JsResult<Value> {
         let new_target = new_target.unwrap_or(constructor);
+        // §20.2.1.1.1 paso 3 (HostEnsureCanCompileStrings, antes de convertir los argumentos).
+        self.ensure_can_compile_strings()?;
         let (params, body) = match args.split_last() {
             None => (&[][..], None),
             Some((b, ps)) => (ps, Some(b)),

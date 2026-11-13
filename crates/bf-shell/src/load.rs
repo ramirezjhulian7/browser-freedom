@@ -11,6 +11,7 @@ use bf_font::FontDb;
 use bf_infra::encoding::{self, Encoding};
 use bf_infra::{Resource, ResourceLoader, Url, url_from_arg};
 use bf_layout::Size;
+use bf_net::security::DocumentPolicy;
 use bf_net::{
     EncodingSource, FetchError, FetchOptions, MimeType, NetErrorKind, NetLoader, ReferrerPolicy,
     html_encoding_with_source,
@@ -30,6 +31,9 @@ pub struct CachedLoader {
     /// documento, Referrer Policy §8.3 paso 2) y la política de su *policy container* (HTML
     /// §7.1.2: la de la cabecera `Referrer-Policy`, cambiada luego por `<meta name=referrer>`).
     client: Mutex<Option<(Url, ReferrerPolicy)>>,
+    /// E6: las políticas de seguridad del documento (Mixed Content y CSP): las peticiones con
+    /// *destination* ([`ResourceLoader::load_for`]) pasan por ellas.
+    security: Mutex<Option<Arc<DocumentPolicy>>>,
 }
 
 impl CachedLoader {
@@ -38,7 +42,20 @@ impl CachedLoader {
             net,
             entries: Mutex::new(HashMap::new()),
             client: Mutex::new(None),
+            security: Mutex::new(None),
         }
+    }
+
+    /// E6: las políticas del documento que pide los subrecursos.
+    pub fn set_security(&self, policy: Arc<DocumentPolicy>) {
+        *self.security.lock().unwrap_or_else(|e| e.into_inner()) = Some(policy);
+    }
+
+    pub fn security(&self) -> Option<Arc<DocumentPolicy>> {
+        self.security
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// El documento que pide los subrecursos: su URL (el referente) y su política.
@@ -114,6 +131,15 @@ impl ResourceLoader for CachedLoader {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, result.clone());
         result
+    }
+
+    /// E6: Mixed Content (bloquear o pasar a `https:`) y CSP con la directiva del
+    /// `destination`; lo bloqueado queda en los mensajes de la política para la consola.
+    fn load_for(&self, url: &Url, destination: bf_infra::Destination) -> Option<Resource> {
+        match self.security() {
+            Some(p) => self.load(&p.check_request(url, destination, None)?),
+            None => self.load(url),
+        }
     }
 }
 
@@ -374,6 +400,18 @@ pub fn fetch_document_with(
         response.url.clone(),
         ReferrerPolicy::from_header(&header_policy).unwrap_or_default(),
     );
+    // E6: las políticas de seguridad del documento: Mixed Content (por su URL) y las de
+    // `Content-Security-Policy` y `Content-Security-Policy-Report-Only` (CSP 3 §3.1, §3.2).
+    let security = Arc::new(DocumentPolicy::new(response.url.clone()));
+    security.add_headers(
+        response
+            .headers
+            .0
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_str())),
+    );
+    loader.set_security(security.clone());
+    let scripted = engine.is_some();
     let content_type = response.content_type();
     let path = response.url.path_string().to_ascii_lowercase();
     let xml = match &content_type {
@@ -435,6 +473,13 @@ pub fn fetch_document_with(
     };
     // E10: `document.characterSet` (y el encoding de las URLs del documento).
     doc.character_set = encoding.name().into();
+    // E6: sin motor, las políticas de `<meta http-equiv="Content-Security-Policy">` se leen
+    // al terminar (con motor las lee `bf_web::security` a medida que el parser las inserta).
+    if !scripted {
+        for (_, content) in bf_web::security::meta_policies(&doc) {
+            security.add_meta(&content);
+        }
+    }
     // E6: `<meta name=referrer>` cambia la política (HTML §4.2.5.3). Se aplica al terminar el
     // parseo: los scripts que se piden durante el parseo van con la de la cabecera.
     if let Some(policy) = meta_referrer_policy(&doc) {
@@ -846,5 +891,251 @@ mod net_error_pages {
                 "es de otro sitio, no de otro.test",
             ],
         );
+    }
+}
+
+/// E6: Mixed Content y Content Security Policy de punta a punta: un documento servido por un
+/// servidor local, con sus scripts ejecutándose en el motor, y lo que dice la consola.
+#[cfg(test)]
+mod security_pages {
+    use super::*;
+    use bf_net::Fetcher;
+    use bf_net::dns::{Dns, Family, Resolver};
+    use std::cell::RefCell;
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Resuelve cualquier nombre a 127.0.0.1.
+    struct Loopback;
+
+    impl Resolver for Loopback {
+        fn lookup(&self, _host: &str, family: Family) -> io::Result<Vec<IpAddr>> {
+            Ok(match family {
+                Family::V4 => vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+                Family::V6 => Vec::new(),
+            })
+        }
+    }
+
+    /// La ruta de la petición (lee hasta la línea en blanco).
+    fn request_path(stream: impl Read) -> String {
+        let mut r = BufReader::new(stream);
+        let mut line = String::new();
+        let _ = r.read_line(&mut line);
+        loop {
+            let mut h = String::new();
+            if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                break;
+            }
+        }
+        line.split(' ').nth(1).unwrap_or("/").to_owned()
+    }
+
+    fn response(headers: &str, body: &str, ty: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nCache-Control: no-store\r\n\
+             Connection: close\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Un servidor HTTP: `/` responde `page` con las cabeceras `headers`; `/<x>.js`, un script
+    /// que escribe `<x>-corrió` en la consola. Cuenta las peticiones de scripts.
+    fn http_server(page: &'static str, headers: &'static str) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let scripts = Arc::new(AtomicUsize::new(0));
+        let count = scripts.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let path = request_path(stream.try_clone().unwrap());
+                let text = match path.strip_suffix(".js") {
+                    Some(name) => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let name = name.trim_start_matches('/');
+                        response(
+                            "",
+                            &format!(
+                                "console.log('{name}-corrió');\
+                                 try {{ eval('1'); console.log('{name}-eval-ok'); }} \
+                                 catch (e) {{ console.log('{name}-eval:' + e.name); }}"
+                            ),
+                            "text/javascript",
+                        )
+                    }
+                    None => response(headers, page, "text/html; charset=utf-8"),
+                };
+                let _ = stream.write_all(text.as_bytes());
+            }
+        });
+        (port, scripts)
+    }
+
+    /// Un servidor HTTPS con el certificado de prueba de `bf-net` que responde `page` a todo.
+    fn https_server(page: String) -> u16 {
+        let cert = rustls_pki_types::CertificateDer::from(
+            include_bytes!("../../bf-net/tests/data/server.der").to_vec(),
+        );
+        let key =
+            rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(
+                include_bytes!("../../bf-net/tests/data/server.key.der").to_vec(),
+            ));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(tcp) = stream else { break };
+                let conn = rustls::ServerConnection::new(config.clone()).unwrap();
+                let mut tls: rustls::StreamOwned<rustls::ServerConnection, TcpStream> =
+                    rustls::StreamOwned::new(conn, tcp);
+                let _ = request_path(&mut tls);
+                let _ = tls.write_all(response("", &page, "text/html; charset=utf-8").as_bytes());
+                let _ = tls.flush();
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            }
+        });
+        port
+    }
+
+    /// Carga `url` con sus scripts; devuelve la consola.
+    fn console_of(url: &str, fetcher: Fetcher) -> Vec<String> {
+        let net = Arc::new(NetLoader {
+            fetcher,
+            errors: Mutex::default(),
+        });
+        let ctx = LoadContext {
+            net: net.clone(),
+            fonts: FontDb::system(),
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            recent: Vec::new(),
+            theme: Theme::for_system(None),
+            post: None,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let sink = log.clone();
+        let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+            sink.borrow_mut().push(e.text)
+        }));
+        let env = PageEnv::cli(net);
+        let url = Url::parse(url, None).unwrap();
+        let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+        assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+        engine.run_due_tasks();
+        log.take()
+    }
+
+    fn has(log: &[String], needle: &str) -> bool {
+        log.iter().any(|l| l.contains(needle))
+    }
+
+    /// Una página `https:` no pide un script `http:` (y lo dice en la consola); uno de
+    /// `127.0.0.1` sí corre (es *potentially trustworthy*).
+    #[test]
+    fn mixed_content_blocks_insecure_scripts() {
+        let (http, scripts) = http_server("", "");
+        let page = format!(
+            "<!doctype html><script src='http://otro.test:{http}/inseguro.js'></script>\
+             <script src='http://127.0.0.1:{http}/local.js'></script>\
+             <script>console.log('en-línea-corrió')</script>"
+        );
+        let https = https_server(page);
+        let mut fetcher =
+            Fetcher::with_root_certificates(&[
+                include_bytes!("../../bf-net/tests/data/ca.der").to_vec()
+            ]);
+        fetcher.dns = Arc::new(Dns::new(Arc::new(Loopback)));
+        let log = console_of(&format!("https://localhost:{https}/"), fetcher);
+        assert!(!has(&log, "inseguro-corrió"), "{log:?}");
+        assert!(
+            log.iter().any(|l| l.contains("Contenido mixto")
+                && l.contains(&format!("http://otro.test:{http}/inseguro.js"))),
+            "{log:?}"
+        );
+        assert!(has(&log, "local-corrió"), "{log:?}");
+        assert!(has(&log, "en-línea-corrió"), "{log:?}");
+        // El script inseguro ni se pidió: solo el de 127.0.0.1.
+        assert_eq!(scripts.load(Ordering::SeqCst), 1);
+    }
+
+    /// `script-src 'self' 'nonce-abc'` por cabecera: el script en línea sin nonce no corre,
+    /// el que tiene el nonce sí; el externo del mismo origen corre pero no puede usar `eval`;
+    /// uno de otro origen no se pide.
+    #[test]
+    fn csp_header_nonce_self_and_eval() {
+        let page = "<!doctype html>\
+             <script>console.log('sin-nonce-corrió')</script>\
+             <script nonce='abc'>console.log('con-nonce-corrió')</script>\
+             <script nonce='otro'>console.log('nonce-malo-corrió')</script>\
+             <script src='/propio.js'></script>\
+             <script src='http://otro.test:1/ajeno.js'></script>";
+        let (port, scripts) = http_server(
+            page,
+            "Content-Security-Policy: script-src 'self' 'nonce-abc'\r\n",
+        );
+        let mut fetcher = Fetcher::new();
+        fetcher.dns = Arc::new(Dns::new(Arc::new(Loopback)));
+        let log = console_of(&format!("http://127.0.0.1:{port}/"), fetcher);
+        assert!(!has(&log, "sin-nonce-corrió"), "{log:?}");
+        assert!(!has(&log, "nonce-malo-corrió"), "{log:?}");
+        assert!(has(&log, "con-nonce-corrió"), "{log:?}");
+        assert!(has(&log, "propio-corrió"), "{log:?}");
+        assert!(has(&log, "propio-eval:EvalError"), "{log:?}");
+        assert!(!has(&log, "ajeno-corrió"), "{log:?}");
+        assert!(
+            has(&log, "se bloqueó un script en línea")
+                && has(&log, "script-src 'self' 'nonce-abc'"),
+            "{log:?}"
+        );
+        assert!(has(&log, "http://otro.test:1/ajeno.js"), "{log:?}");
+        assert_eq!(scripts.load(Ordering::SeqCst), 1, "solo se pidió propio.js");
+    }
+
+    /// `<meta http-equiv="Content-Security-Policy">` vale desde que el parser lo inserta.
+    #[test]
+    fn csp_meta() {
+        let page = "<!doctype html><head>\
+             <script>console.log('antes-del-meta-corrió')</script>\
+             <meta http-equiv='Content-Security-Policy' content=\"script-src 'nonce-m' 'unsafe-eval'\">\
+             <script>console.log('sin-nonce-corrió')</script>\
+             <script nonce='m'>console.log('con-nonce-corrió'); eval('console.log(\"eval-corrió\")')</script>\
+             </head>";
+        let (port, _) = http_server(page, "");
+        let log = console_of(&format!("http://127.0.0.1:{port}/"), Fetcher::new());
+        assert!(has(&log, "antes-del-meta-corrió"), "{log:?}");
+        assert!(!has(&log, "sin-nonce-corrió"), "{log:?}");
+        assert!(has(&log, "con-nonce-corrió"), "{log:?}");
+        assert!(has(&log, "eval-corrió"), "{log:?}");
+    }
+
+    /// `Content-Security-Policy-Report-Only` no bloquea: solo lo anota en la consola.
+    #[test]
+    fn csp_report_only() {
+        let page = "<!doctype html><script>console.log('en-línea-corrió')</script>\
+             <script src='/propio.js'></script>";
+        let (port, _) = http_server(
+            page,
+            "Content-Security-Policy-Report-Only: script-src 'none'\r\n",
+        );
+        let log = console_of(&format!("http://127.0.0.1:{port}/"), Fetcher::new());
+        assert!(has(&log, "en-línea-corrió"), "{log:?}");
+        assert!(has(&log, "propio-corrió"), "{log:?}");
+        assert!(has(&log, "propio-eval-ok"), "{log:?}");
+        assert!(has(&log, "solo informe"), "{log:?}");
     }
 }

@@ -634,6 +634,34 @@ pub type FetchDone = Box<dyn FnOnce(&mut Agent, Result<(NetResponse, cors::Taint
 /// [`cancel`].
 pub fn start_fetch(agent: &mut Agent, params: cors::FetchParams, done: FetchDone) -> u64 {
     let realm = WebContextHandle::current(agent).realm;
+    // E6: Mixed Content y CSP (`connect-src`): lo bloqueado es un network error.
+    let mut params = params;
+    match crate::security::check_request(
+        agent,
+        realm,
+        None,
+        &params.url,
+        bf_infra::Destination::Connect,
+        None,
+    ) {
+        Some(url) => params.url = url,
+        None => {
+            let href = params.url.href();
+            let s = state_of(agent, realm);
+            s.next_id += 1;
+            let id = s.next_id;
+            let done: Done = Box::new(move |agent: &mut Agent, r: NetResult| {
+                done(agent, r.map(|res| (res, cors::Tainting::Basic)));
+            });
+            queue_result(
+                agent,
+                realm,
+                done,
+                Err(format!("bloqueado por la política de seguridad: {href}")),
+            );
+            return id;
+        }
+    }
     let b = backend(agent);
     let s = state_of(agent, realm);
     s.next_id += 1;
@@ -679,6 +707,23 @@ pub fn cancel(agent: &mut Agent, id: u64) {
 
 /// Una petición bloqueante (XMLHttpRequest síncrono).
 pub fn fetch_blocking(agent: &mut Agent, req: &NetRequest) -> NetResult {
+    // E6: Mixed Content y CSP (`connect-src`).
+    let realm = WebContextHandle::current(agent).realm;
+    if crate::security::check_request(
+        agent,
+        realm,
+        None,
+        &req.url,
+        bf_infra::Destination::Connect,
+        None,
+    )
+    .is_none()
+    {
+        return Err(format!(
+            "bloqueado por la política de seguridad: {}",
+            req.url.href()
+        ));
+    }
     if is_bad_port(&req.url) {
         return Err(format!("bad port {}", req.url.href()));
     }

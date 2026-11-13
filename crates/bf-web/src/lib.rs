@@ -48,6 +48,7 @@ pub mod cssom;
 pub mod dom;
 pub mod html;
 pub mod net; // E2: fetch, XMLHttpRequest, FormData, Blob
+pub mod security; // E6: Mixed Content y Content Security Policy
 pub mod storage; // E2: IndexedDB y navigator.storage
 pub mod workers; // E3: Worker, SharedWorker, MessagePort entre hilos
 
