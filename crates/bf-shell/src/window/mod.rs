@@ -2233,8 +2233,20 @@ impl App {
     }
 
     /// Sesiones sin ventana: deja que el documento procese lo enviado y aplica lo que pida.
+    /// E6: espera a que el hilo de la pestaña haya atendido todo lo que se le mandó (con las
+    /// tareas que eso encoló y el cuadro que resultó) y a que la ventana reciba sus mensajes,
+    /// en lugar de un tiempo fijo que con la máquina cargada no alcanzaba. El tope solo se
+    /// agota si el documento no responde.
     fn settle_input(&mut self) {
-        std::thread::sleep(Duration::from_millis(150));
+        const LIMIT: Duration = Duration::from_secs(10);
+        let start = Instant::now();
+        loop {
+            self.receive();
+            if self.worker.caught_up(self.tab_key) || start.elapsed() >= LIMIT {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         self.receive();
         self.settle();
     }
