@@ -568,14 +568,15 @@ fn set_state(agent: &mut Agent, realm: RealmId, n: NodeRef, id: u64, outcome: &O
             }
             current
         });
-    if current && let Outcome::Loaded(url, size) = outcome {
-        if *size != (0, 0) {
-            let mut sizes = agent
-                .take_realm_data::<super::misc::ImageSizes>(realm)
-                .unwrap_or_default();
-            sizes.0.insert(url.clone(), *size);
-            agent.set_realm_data(realm, sizes);
-        }
+    if current
+        && let Outcome::Loaded(url, size) = outcome
+        && *size != (0, 0)
+    {
+        let mut sizes = agent
+            .take_realm_data::<super::misc::ImageSizes>(realm)
+            .unwrap_or_default();
+        sizes.0.insert(url.clone(), *size);
+        agent.set_realm_data(realm, sizes);
     }
     current
 }
