@@ -1117,9 +1117,19 @@ impl Cx<'_> {
         if let Some(b) = self.env.pseudo_content(n, false) {
             out.push_str(&b);
         }
-        let children: Vec<NodeId> = doc.children(n).collect();
+        // Los hijos en el árbol plano (AccName 1.2 §4.3.2 paso 2F.iii, con los shadow trees
+        // de w3c/accname#167): los del shadow root de un host y los nodos asignados de un
+        // `slot` (o su contenido por defecto).
+        let children: Vec<NodeId> = doc.flat_tree_children(n);
         for c in children {
             if doc.element(c).is_some() && is_hidden(doc, c, self.env) && !mode.allow_hidden {
+                continue;
+            }
+            // Un `slot` no tiene rol ni caja (`display: contents`): es transparente y su
+            // `aria-label` no cuenta; se toma lo que reparte.
+            if doc.is_slot(c) && doc.is_shadow_root(doc.tree_root(c)) {
+                let s = self.content(c, mode);
+                out.push_str(&s);
                 continue;
             }
             let is_el = doc.element(c).is_some();
@@ -1240,6 +1250,34 @@ mod tests {
                 "image"
             ]
         );
+    }
+
+    #[test]
+    fn names_through_shadow_slots() {
+        // `<button><div>slotted</div></button>` con el shadow root `foo <slot> bar`: el
+        // nombre recorre el árbol plano y el `aria-label` del slot no cuenta.
+        for (assigned, expected) in [(true, "foo slotted bar"), (false, "foo default bar")] {
+            let (mut d, ids) = doc_with(&[("button", &[], None)]);
+            let host = d.create_element(&"div".into()).expect("div");
+            d.append(ids[0], host);
+            if assigned {
+                let t = d.create_text_node("slotted".into());
+                d.append(host, t);
+            }
+            let sr = d
+                .attach_shadow(host, crate::shadow::ShadowRootInit::default())
+                .expect("shadow root");
+            let a = d.create_text_node("foo ".into());
+            d.append(sr, a);
+            let slot = d.create_element(&"slot".into()).expect("slot");
+            let _ = d.set_attribute(slot, &"aria-label".into(), "label".into());
+            let fallback = d.create_text_node("default".into());
+            d.append(slot, fallback);
+            d.append(sr, slot);
+            let b = d.create_text_node(" bar".into());
+            d.append(sr, b);
+            assert_eq!(accessible_name(&d, ids[0], &NoStyle), expected);
+        }
     }
 
     #[test]

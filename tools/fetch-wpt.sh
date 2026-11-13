@@ -3,14 +3,14 @@
 # mediciones: css, html y svg enteros (reftests y parsing), y los directorios de testharness.js
 # (resources, common, dom, url, encoding, fetch, xhr, streams, IndexedDB, workers,
 # service-workers, websockets, domparsing, quirks, images, webstorage, y los de
-# accesibilidad: html-aam, wai-aria, accname, core-aam…).
+# accesibilidad: html-aam, wai-aria, accname, core-aam; animaciones, CSP y mixed content…).
 # El commit pineado está en tools/wpt-commit.txt.
 # Uso (desde cualquier directorio): sh tools/fetch-wpt.sh
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WPT="$ROOT/tests/wpt"
-DIRS="fonts resources common dom url encoding console interfaces shadow-dom custom-elements css html svg fetch xhr streams IndexedDB workers service-workers websockets domparsing quirks images webstorage html-aam wai-aria accname core-aam"
+DIRS="fonts resources common dom url encoding console interfaces shadow-dom custom-elements css html svg fetch xhr streams IndexedDB workers service-workers websockets domparsing quirks images webstorage html-aam wai-aria accname core-aam web-animations content-security-policy mixed-content"
 COMMIT="$(tr -d ' \r\n' < "$ROOT/tools/wpt-commit.txt")"
 
 if [ -d "$WPT/.git" ]; then

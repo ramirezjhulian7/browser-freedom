@@ -1943,13 +1943,17 @@ fn fetch_reply(fetch: u64, outcome: FetchOutcome) {
 // --- Instalación en un realm ---
 
 /// Evalúa `service.js` en `realm` con sus funciones nativas (`mode`: `window` o `service`).
+///
+/// E1: dentro de un ámbito de enraizado ([`Agent::rooting_scope`]): crear los métodos y
+/// compilar `service.js` pueden recolectar antes de que `native` quede enlazado.
 fn install_js(agent: &mut Agent, realm: RealmId, mode: &str) {
+    agent.rooting_scope(|agent| install_js_rooted(agent, realm, mode));
+}
+
+fn install_js_rooted(agent: &mut Agent, realm: RealmId, mode: &str) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();
-    // E1: fijado mientras dura: crear los métodos y compilar `service.js` pueden recolectar, y
-    // nada más lo enraíza (el mismo fallo "Gc liberado" que en `storage/idb.rs`).
-    let native_pin = agent.host_pin(Value::Object(native));
     let fns: [(&str, u32, NativeFn); 22] = [
         ("fire", 2, n_fire),
         ("register", 5, n_register),
@@ -1988,7 +1992,6 @@ fn install_js(agent: &mut Agent, realm: RealmId, mode: &str) {
         let h = agent.host_pin(hooks);
         agent.set_realm_data(realm, ServiceJs { hooks: h });
     }
-    agent.host_unpin(native_pin);
     agent.current_realm = saved;
 }
 
