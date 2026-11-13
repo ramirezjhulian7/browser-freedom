@@ -942,7 +942,8 @@ mod security_pages {
     }
 
     /// Un servidor HTTP: `/` responde `page` con las cabeceras `headers`; `/<x>.js`, un script
-    /// que escribe `<x>-corrió` en la consola. Cuenta las peticiones de scripts.
+    /// que escribe `<x>-corrió` en la consola. Cuenta las peticiones de subrecursos (todo lo
+    /// que no es `/`).
     fn http_server(page: &'static str, headers: &'static str) -> (u16, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -952,9 +953,11 @@ mod security_pages {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
                 let path = request_path(stream.try_clone().unwrap());
+                if path != "/" {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
                 let text = match path.strip_suffix(".js") {
                     Some(name) => {
-                        count.fetch_add(1, Ordering::SeqCst);
                         let name = name.trim_start_matches('/');
                         response(
                             "",
@@ -1121,6 +1124,68 @@ mod security_pages {
         assert!(!has(&log, "sin-nonce-corrió"), "{log:?}");
         assert!(has(&log, "con-nonce-corrió"), "{log:?}");
         assert!(has(&log, "eval-corrió"), "{log:?}");
+    }
+
+    /// `img-src` (CSP 3 §6.1.6) en los dos caminos de las imágenes del shell: el `<img>` del
+    /// motor web (`bf-web`, por la red del motor) y el pintado (`bf_paint::load_images_in`, por
+    /// el `CachedLoader` con `ForDestination::Image`), también para `background-image`. El
+    /// servidor no recibe ninguna petición y la consola lo dice una vez por imagen.
+    #[test]
+    fn csp_img_src_in_engine_and_paint() {
+        let page = "<!doctype html><body>\
+             <img src='/foto.png' onerror=\"console.log('foto-error')\">\
+             <div style='width:10px;height:10px;background-image:url(/fondo.png)'></div>";
+        let (port, requests) = http_server(page, "Content-Security-Policy: img-src 'none'\r\n");
+        let net = Arc::new(NetLoader {
+            fetcher: Fetcher::new(),
+            errors: Mutex::default(),
+        });
+        let ctx = LoadContext {
+            net: net.clone(),
+            fonts: FontDb::system(),
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            recent: Vec::new(),
+            theme: Theme::for_system(None),
+            post: None,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let sink = log.clone();
+        let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+            sink.borrow_mut().push(e.text)
+        }));
+        let env = PageEnv::cli(net);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+        let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+        assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+        let doc = engine.render_copy().unwrap();
+        let pctx = bf_paint::PageContext {
+            base: &loaded.base,
+            encoding: loaded.encoding,
+            loader: loaded.loader.clone(),
+            fonts: ctx.fonts.clone(),
+            extra: &[],
+            text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
+        };
+        // Dos maquetas, como al cargar y al volver a pintar: sin mensajes repetidos.
+        for _ in 0..2 {
+            let page = bf_paint::prepare_page(&doc, &pctx, ctx.viewport);
+            engine.set_layout(&page, doc.version(), (0.0, 0.0), 1.0);
+            engine.run_due_tasks();
+        }
+        let log = log.take();
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "{log:?}");
+        assert!(has(&log, "foto-error"), "{log:?}");
+        for img in ["/foto.png", "/fondo.png"] {
+            let n = log
+                .iter()
+                .filter(|l| l.contains("Content Security Policy") && l.contains(img))
+                .count();
+            assert_eq!(n, 1, "{img}: {log:?}");
+        }
     }
 
     /// `Content-Security-Policy-Report-Only` no bloquea: solo lo anota en la consola.

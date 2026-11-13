@@ -716,6 +716,7 @@ impl bf_html::ScriptHost for WebScripts<'_> {
             &url,
             bf_infra::Destination::Script,
             Some(&nonce),
+            Some(crate::NodeRef::new(0, script)),
         ) else {
             return ScriptDisposition::Failed;
         };
@@ -749,6 +750,7 @@ impl bf_html::ScriptHost for WebScripts<'_> {
                 Some(doc.document()),
                 Some(&info.nonce.to_string()),
                 info.source_text.as_lossy_str(),
+                Some(crate::NodeRef::new(0, script)),
             )
         {
             return;

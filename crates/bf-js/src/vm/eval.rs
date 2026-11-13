@@ -33,16 +33,21 @@ pub enum DynamicKind {
 /// E6: HostEnsureCanCompileStrings (§19.2.1.2): el embebedor decide si un realm puede
 /// compilar texto como código (`eval`, `new Function`). Es un dato del realm; HTML lo
 /// implementa con Content Security Policy ("EnsureCSPDoesNotBlockStringCompilation", CSP 3
-/// §4.4): `Err` con el mensaje lanza un `EvalError`.
-pub struct StringCompilationCheck(pub Box<dyn Fn() -> Result<(), String>>);
+/// §4.4): `Err` con el mensaje lanza un `EvalError`. Recibe el agente para poder informar la
+/// violación (el evento `securitypolicyviolation`, CSP 3 §5.3).
+pub struct StringCompilationCheck(pub std::rc::Rc<StringCompilationFn>);
+
+/// La decisión de [`StringCompilationCheck`].
+pub type StringCompilationFn = dyn Fn(&mut Agent) -> Result<(), String>;
 
 impl Agent {
     /// HostEnsureCanCompileStrings con el [`StringCompilationCheck`] del realm actual.
     fn ensure_can_compile_strings(&mut self) -> JsResult<()> {
         let realm = self.current_realm;
-        let verdict = self
+        let check = self
             .realm_data::<StringCompilationCheck>(realm)
-            .map(|check| (check.0)());
+            .map(|check| check.0.clone());
+        let verdict = check.map(|check| check(self));
         match verdict {
             Some(Err(message)) => Err(self.error(crate::vm::ErrorType::EvalError, &message)),
             _ => Ok(()),

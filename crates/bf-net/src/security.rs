@@ -4,6 +4,7 @@
 //! cada decisión que bloquea o solo informa deja un mensaje para la consola, que recoge quien
 //! la tiene ([`DocumentPolicy::take_messages`]).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use bf_infra::{Destination, Url};
@@ -17,6 +18,41 @@ pub struct DocumentPolicy {
     url: Url,
     policies: Mutex<Vec<Policy>>,
     messages: Mutex<Vec<String>>,
+    reports: Mutex<Vec<Report>>,
+    /// Las decisiones ya tomadas sobre peticiones, con cuántas políticas había: la misma
+    /// petición (la imagen que pide el motor web y otra vez el pintado, o cada maqueta) no
+    /// repite el mensaje ni el evento mientras no se agreguen políticas.
+    decided: Mutex<HashMap<RequestKey, (usize, Option<Url>)>>,
+}
+
+/// Una petición para [`DocumentPolicy::check_request_by`]: URL, destino, `nonce` y si la
+/// insertó el parser.
+type RequestKey = (String, Destination, Option<String>, bool);
+
+/// Una violación de CSP para el evento `securitypolicyviolation` (CSP 3 §5.3: los datos de
+/// `SecurityPolicyViolationEventInit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// `blockedURI` (§5.2): la URL pedida (sin fragmento ni credenciales), `inline` o `eval`.
+    pub blocked: String,
+    /// `effectiveDirective` (y `violatedDirective`, su alias histórico).
+    pub effective: String,
+    /// `originalPolicy`: la política serializada.
+    pub policy: String,
+    pub disposition: Disposition,
+}
+
+/// "Strip URL for use in reports" (CSP 3 §5.4): sin fragmento ni credenciales; de un esquema
+/// que no es HTTP(S), solo el esquema.
+pub fn strip_for_report(url: &Url) -> String {
+    if !matches!(url.scheme.as_str(), "http" | "https") {
+        return url.scheme.clone();
+    }
+    let mut u = url.clone();
+    u.fragment = None;
+    u.username.clear();
+    u.password.clear();
+    u.href()
 }
 
 fn destination_name(d: Destination) -> &'static str {
@@ -50,6 +86,8 @@ impl DocumentPolicy {
             url,
             policies: Mutex::default(),
             messages: Mutex::default(),
+            reports: Mutex::default(),
+            decided: Mutex::default(),
         }
     }
 
@@ -107,10 +145,25 @@ impl DocumentPolicy {
         std::mem::take(&mut *self.messages.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Anota las violaciones; `true` si alguna se aplica (bloquea).
-    fn report(&self, violations: Vec<csp::Violation>, what: &str) -> bool {
+    /// Las violaciones de CSP desde la última vez, para `securitypolicyviolation`.
+    pub fn take_reports(&self) -> Vec<Report> {
+        std::mem::take(&mut *self.reports.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Anota las violaciones (mensaje y evento, con `blocked` como `blockedURI`); `true` si
+    /// alguna se aplica (bloquea).
+    fn report(&self, violations: Vec<csp::Violation>, what: &str, blocked_uri: &str) -> bool {
         let mut blocked = false;
         for v in violations {
+            self.reports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Report {
+                    blocked: blocked_uri.to_owned(),
+                    effective: v.effective.clone(),
+                    policy: v.policy.clone(),
+                    disposition: v.disposition,
+                });
             match v.disposition {
                 Disposition::Enforce => {
                     blocked = true;
@@ -151,6 +204,35 @@ impl DocumentPolicy {
         nonce: Option<&str>,
         parser_inserted: bool,
     ) -> Option<Url> {
+        let count = self
+            .policies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        let key = (
+            url.href(),
+            destination,
+            nonce.map(str::to_owned),
+            parser_inserted,
+        );
+        let mut decided = self.decided.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((n, r)) = decided.get(&key)
+            && *n == count
+        {
+            return r.clone();
+        }
+        let r = self.decide(url, destination, nonce, parser_inserted);
+        decided.insert(key, (count, r.clone()));
+        r
+    }
+
+    fn decide(
+        &self,
+        url: &Url,
+        destination: Destination,
+        nonce: Option<&str>,
+        parser_inserted: bool,
+    ) -> Option<Url> {
         let what = destination_name(destination);
         let url = match mixed_content::check(&self.url, url, destination) {
             Decision::Allow => url.clone(),
@@ -182,7 +264,11 @@ impl DocumentPolicy {
                 p.request_violation_by(&url, destination, &self.url, nonce, parser_inserted)
             })
             .collect();
-        let blocked = self.report(violations, &format!("{what} '{}'", url.href()));
+        let blocked = self.report(
+            violations,
+            &format!("{what} '{}'", url.href()),
+            &strip_for_report(&url),
+        );
         (!blocked).then_some(url)
     }
 
@@ -207,7 +293,7 @@ impl DocumentPolicy {
             .iter()
             .filter_map(|p| p.inline_violation_by(kind, nonce, source, parser_inserted))
             .collect();
-        !self.report(violations, inline_name(kind))
+        !self.report(violations, inline_name(kind), "inline")
     }
 
     /// §4.4 para `eval`/`new Function`: `Err` con el mensaje si alguna política lo prohíbe; las
@@ -224,7 +310,7 @@ impl DocumentPolicy {
             .iter()
             .find(|v| v.disposition == Disposition::Enforce)
             .map(|v| v.directive.clone());
-        self.report(violations, "evaluar texto como código (eval)");
+        self.report(violations, "evaluar texto como código (eval)", "eval");
         match enforced {
             Some(d) => Err(format!(
                 "Content Security Policy: no se permite evaluar texto como código (\"{d}\" no \
@@ -285,5 +371,53 @@ mod tests {
         assert!(p.allow_inline(Inline::Script, Some("k"), "x()"));
         assert!(p.check_eval().is_err());
         assert!(p.has_csp());
+    }
+
+    /// Los datos de `securitypolicyviolation` (CSP 3 §5.3): `blockedURI` sin fragmento,
+    /// `inline` o `eval`; la directiva efectiva aunque se aplicara `default-src`.
+    #[test]
+    fn violation_reports() {
+        let p = DocumentPolicy::new(url("https://sitio.test/"));
+        p.add_meta("default-src 'self'");
+        assert!(
+            p.check_request(
+                &url("https://u:c@otro.test/a.png#x"),
+                Destination::Image,
+                None
+            )
+            .is_none()
+        );
+        assert!(!p.allow_inline(Inline::Script, None, "x()"));
+        assert!(p.check_eval().is_err());
+        let r = p.take_reports();
+        let got: Vec<_> = r
+            .iter()
+            .map(|r| (r.blocked.as_str(), r.effective.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("https://otro.test/a.png", "img-src"),
+                ("inline", "script-src-elem"),
+                ("eval", "script-src"),
+            ]
+        );
+        assert!(
+            r.iter()
+                .all(|r| r.policy == "default-src 'self'" && r.disposition == Disposition::Enforce)
+        );
+        assert!(p.take_reports().is_empty());
+        // La misma petición otra vez (el pintado después del motor web): sin otro informe.
+        assert!(
+            p.check_request(
+                &url("https://u:c@otro.test/a.png#x"),
+                Destination::Image,
+                None
+            )
+            .is_none()
+        );
+        assert!(p.take_reports().is_empty());
+        assert!(p.take_messages().len() == 3);
+        assert_eq!(strip_for_report(&url("data:image/png,x")), "data");
     }
 }

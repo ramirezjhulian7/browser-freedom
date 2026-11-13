@@ -89,6 +89,11 @@ pub struct View {
     /// saltarse oportunidades de renderizado que no puede mostrar).
     pub frames_sent: u64,
     pub frames_taken: u64,
+    /// E6: trabajos y cambios de vista que la ventana mandó al hilo, y cuántos de ellos el
+    /// hilo ya atendió (con sus tareas y su cuadro). Iguales: el documento está al día con lo
+    /// que le mandaron ([`Documents::caught_up`], para las sesiones sin ventana).
+    pub msgs_sent: u64,
+    pub msgs_handled: u64,
 }
 
 impl Default for View {
@@ -103,6 +108,8 @@ impl Default for View {
             text_zoom: 1.0,
             frames_sent: 0,
             frames_taken: 0,
+            msgs_sent: 0,
+            msgs_handled: 0,
         }
     }
 }
@@ -158,7 +165,18 @@ impl Documents {
 
     /// Manda un trabajo al hilo de la pestaña `tab` (lo crea si hace falta).
     pub fn send(&mut self, tab: u64, job: Job) {
-        let _ = self.thread(tab).jobs.send(Msg::Job(job));
+        let t = self.thread(tab);
+        t.sent();
+        let _ = t.jobs.send(Msg::Job(job));
+    }
+
+    /// E6: ¿el hilo de la pestaña `tab` atendió todo lo que le mandó la ventana y la ventana
+    /// recibió todos sus cuadros? (Sin hilo, sí.)
+    pub fn caught_up(&self, tab: u64) -> bool {
+        self.threads.get(&tab).is_none_or(|t| {
+            let v = t.view.lock().unwrap_or_else(|e| e.into_inner());
+            v.msgs_handled >= v.msgs_sent && v.frames_taken >= v.frames_sent
+        })
     }
 
     pub fn set_viewport(&mut self, tab: u64, size: Size) {
@@ -209,6 +227,7 @@ impl Documents {
             changed
         };
         if changed {
+            t.sent();
             let _ = t.jobs.send(Msg::ViewChanged);
         }
     }
@@ -237,6 +256,7 @@ impl Documents {
     /// que todavía no se mostró no arranca uno para un aviso).
     pub fn send_existing(&mut self, tab: u64, job: Job) {
         if let Some(t) = self.threads.get(&tab) {
+            t.sent();
             let _ = t.jobs.send(Msg::Job(job));
         }
     }
@@ -256,6 +276,16 @@ struct DocumentThread {
     jobs: Sender<Msg>,
     /// Cómo ve la ventana la página; el hilo lee el viewport justo antes del layout.
     view: Arc<Mutex<View>>,
+}
+
+impl DocumentThread {
+    /// E6: cuenta un mensaje que la ventana va a mandar (ver [`View::msgs_sent`]).
+    fn sent(&self) {
+        self.view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .msgs_sent += 1;
+    }
 }
 
 fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
@@ -417,6 +447,14 @@ impl State {
     }
 
     /// E4: ¿la ventana todavía no recibió el último cuadro que se le mandó?
+    /// E6: el hilo atendió los primeros `received` mensajes de la ventana.
+    fn handled(&self, received: u64) {
+        self.view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .msgs_handled = received;
+    }
+
     fn window_behind(&self) -> bool {
         let v = self.view();
         v.frames_sent > v.frames_taken
@@ -516,8 +554,12 @@ impl State {
     /// El bucle del hilo: trabajos de la interfaz y, entre ellos, las tareas del documento.
     fn run(mut self, rx: Receiver<Msg>) {
         let mut queue: VecDeque<Job> = VecDeque::new();
+        // E6: los mensajes de la ventana recibidos (ver [`View::msgs_handled`]).
+        let mut received: u64 = 0;
         loop {
             if queue.is_empty() {
+                // Todo lo recibido ya se atendió.
+                self.handled(received);
                 // Dormir hasta el próximo temporizador, el próximo cuadro (si hay callbacks de
                 // `requestAnimationFrame`; sin ellos no hay cuadros y el hilo duerme) o el
                 // próximo mensaje.
@@ -555,6 +597,7 @@ impl State {
                         break;
                     }
                     Some(Msg::ViewChanged) => {
+                        received += 1;
                         self.view_changed();
                         continue;
                     }
@@ -562,7 +605,10 @@ impl State {
                         self.run_tasks();
                         continue;
                     }
-                    Some(Msg::Job(j)) => queue.push_back(j),
+                    Some(Msg::Job(j)) => {
+                        received += 1;
+                        queue.push_back(j);
+                    }
                     None => {
                         self.run_tasks();
                         continue;
@@ -572,8 +618,14 @@ impl State {
             let mut stop = false;
             while let Ok(next) = rx.try_recv() {
                 match next {
-                    Msg::Job(j) => queue.push_back(j),
-                    Msg::ViewChanged => self.view_changed(),
+                    Msg::Job(j) => {
+                        received += 1;
+                        queue.push_back(j);
+                    }
+                    Msg::ViewChanged => {
+                        received += 1;
+                        self.view_changed();
+                    }
                     Msg::NetWake => {}
                     Msg::Stop => stop = true,
                 }

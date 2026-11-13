@@ -8,6 +8,10 @@
 //! `<meta http-equiv="Content-Security-Policy">` se agregan cuando el parser las insertó
 //! (CSP 3 §3.3: valen desde ese momento, y solo en el `<head>`), revisando el documento antes
 //! de cada decisión ([`refresh_meta`]).
+//!
+//! Cada violación de CSP dispara además `securitypolicyviolation` (CSP 3 §5.3, "Report a
+//! violation"), en una tarea: en el elemento que hizo la petición si sigue conectado, si no en
+//! el documento (burbujea hasta la ventana). Sin `report-uri` ni `report-to`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,10 +20,10 @@ use bf_dom::{Document, NodeId};
 use bf_infra::{Destination, Url};
 use bf_js::host::ConsoleLevel;
 use bf_js::vm::{Agent, RealmId};
-use bf_net::csp::Inline;
-use bf_net::security::DocumentPolicy;
+use bf_net::csp::{Disposition, Inline};
+use bf_net::security::{DocumentPolicy, Report};
 
-use crate::WebContext;
+use crate::{NodeRef, WebContext};
 
 /// La política de la ventana y los `<meta>` ya leídos (dato del realm).
 pub struct WindowPolicy {
@@ -33,7 +37,11 @@ pub fn install(agent: &mut Agent, realm: RealmId, policy: Arc<DocumentPolicy>) {
     let check = policy.clone();
     agent.set_realm_data(
         realm,
-        bf_js::vm::eval::StringCompilationCheck(Box::new(move || check.check_eval())),
+        bf_js::vm::eval::StringCompilationCheck(std::rc::Rc::new(move |agent: &mut Agent| {
+            let r = check.check_eval();
+            flush(agent, realm);
+            r
+        })),
     );
     agent.set_realm_data(
         realm,
@@ -119,14 +127,85 @@ pub fn refresh_meta(agent: &mut Agent, realm: RealmId, doc: Option<&Document>) {
     }
 }
 
-/// Los mensajes pendientes de la política, a la consola de la ventana.
+/// Los mensajes pendientes de la política, a la consola de la ventana, y sus violaciones
+/// como `securitypolicyviolation` en el documento.
 pub fn flush(agent: &mut Agent, realm: RealmId) {
+    flush_at(agent, realm, None);
+}
+
+/// Como [`flush`]; las violaciones van a `element` si sigue conectado al disparar.
+fn flush_at(agent: &mut Agent, realm: RealmId, element: Option<NodeRef>) {
     let Some(p) = policy(agent, realm) else {
         return;
     };
     for m in p.take_messages() {
         agent.host.hooks.console(ConsoleLevel::Error, &m);
     }
+    for report in p.take_reports() {
+        // CSP 3 §5.3 paso 3: "queue a task to run the following steps" (la fuente de tareas
+        // de DOM manipulation, como en los navegadores).
+        agent.queue_task(
+            bf_js::host::TaskSource::DomManipulation,
+            Box::new(move |agent: &mut Agent| {
+                fire_violation(agent, realm, element, &report);
+            }),
+        );
+    }
+}
+
+/// CSP 3 §5.3 pasos 3.1 a 3.3: el destino (el elemento si está conectado; si no, el
+/// documento de la ventana) y "fire an event named `securitypolicyviolation` that uses
+/// `SecurityPolicyViolationEvent`", que burbujea y es *composed*.
+fn fire_violation(agent: &mut Agent, realm: RealmId, element: Option<NodeRef>, r: &Report) {
+    use bf_dom::events::{Event, EventInit, EventTarget};
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let Some(ctx) = agent.realm_data::<WebContext>(realm) else {
+        agent.current_realm = saved;
+        return;
+    };
+    let document = bf_net::security::strip_for_report(&ctx.url);
+    let connected = element
+        .filter(|e| (e.doc as usize) < ctx.documents.len() && ctx.doc(e.doc).is_connected(e.node));
+    let (doc, node) = match connected {
+        Some(e) => (e.doc, e.node),
+        None => (0, ctx.doc(0).root()),
+    };
+    let disposition = match r.disposition {
+        Disposition::Enforce => "enforce",
+        Disposition::Report => "report",
+    };
+    let slots = crate::dom::event_types::security_policy_violation_slots(
+        &r.blocked,
+        disposition,
+        &document,
+        &r.effective,
+        &r.policy,
+    );
+    let class = crate::dom::classes(agent).security_policy_violation_event;
+    let init = EventInit {
+        bubbles: true,
+        cancelable: false,
+        composed: true,
+    };
+    let mut event = Event::new("securitypolicyviolation", init);
+    event.is_trusted = true;
+    let o = crate::dom::events::create_event_object(
+        agent,
+        crate::dom::events::EventIface::Class(class),
+        std::rc::Rc::new(std::cell::RefCell::new(event)),
+        doc,
+    );
+    if let Some(s) = agent.host_slots_mut(o) {
+        s.extend(slots);
+    }
+    let pin = agent.host_pin(bf_js::value::Value::Object(o));
+    let r = crate::dom::events::dispatch_js_event(agent, doc, EventTarget::Node(node), o, false);
+    agent.host_unpin(pin);
+    if let Err(bf_js::vm::Throw::Value(e)) = r {
+        agent.report_exception(&e);
+    }
+    agent.current_realm = saved;
 }
 
 /// ¿Se puede pedir `url` para `destination` desde la ventana? `Some` con la URL que se pide
@@ -139,13 +218,14 @@ pub fn check_request(
     url: &Url,
     destination: Destination,
     nonce: Option<&str>,
+    element: Option<NodeRef>,
 ) -> Option<Url> {
     let Some(p) = ensure(agent, realm, doc) else {
         return Some(url.clone());
     };
     refresh_meta(agent, realm, doc);
     let r = p.check_request(url, destination, nonce);
-    flush(agent, realm);
+    flush_at(agent, realm, element);
     r
 }
 
@@ -156,13 +236,14 @@ pub fn check_inserted_script(
     realm: RealmId,
     url: &Url,
     nonce: Option<&str>,
+    element: Option<NodeRef>,
 ) -> Option<Url> {
     let Some(p) = ensure(agent, realm, None) else {
         return Some(url.clone());
     };
     refresh_meta(agent, realm, None);
     let r = p.check_request_by(url, Destination::Script, nonce, false);
-    flush(agent, realm);
+    flush_at(agent, realm, element);
     r
 }
 
@@ -173,13 +254,14 @@ pub fn allow_inline_script(
     doc: Option<&Document>,
     nonce: Option<&str>,
     source: &str,
+    element: Option<NodeRef>,
 ) -> bool {
     let Some(p) = ensure(agent, realm, doc) else {
         return true;
     };
     refresh_meta(agent, realm, doc);
     let ok = p.allow_inline(Inline::Script, nonce, source);
-    flush(agent, realm);
+    flush_at(agent, realm, element);
     ok
 }
 
@@ -190,12 +272,13 @@ pub fn allow_inserted_inline_script(
     realm: RealmId,
     nonce: Option<&str>,
     source: &str,
+    element: Option<NodeRef>,
 ) -> bool {
     let Some(p) = ensure(agent, realm, None) else {
         return true;
     };
     refresh_meta(agent, realm, None);
     let ok = p.allow_inline_by(Inline::Script, nonce, source, false);
-    flush(agent, realm);
+    flush_at(agent, realm, element);
     ok
 }
