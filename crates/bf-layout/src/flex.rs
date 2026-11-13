@@ -162,7 +162,10 @@ pub(crate) fn first_baseline(f: &Fragment) -> Option<f32> {
 
 /// Baseline de un contenedor flex (§8.5): la del primer ítem; si no tiene, sintetizada con
 /// el borde inferior de su border box. `None` si no hay ítems.
-pub(crate) fn container_baseline(f: &Fragment) -> Option<f32> {
+///
+/// E5: si el primer ítem no tiene baseline, se sintetiza de su border box (§8.5) con `synth`
+/// (de la altura a la baseline; ver `writing_mode::synthesized_baseline`).
+pub(crate) fn container_baseline(f: &Fragment, synth: &dyn Fn(f32) -> f32) -> Option<f32> {
     let item = f.children.iter().find(|c| {
         !matches!(
             c.style.position,
@@ -170,7 +173,7 @@ pub(crate) fn container_baseline(f: &Fragment) -> Option<f32> {
                 | bf_style::properties::types::Position::Fixed
         )
     })?;
-    Some(first_baseline(item).unwrap_or(item.rect.bottom()))
+    Some(first_baseline(item).unwrap_or(item.rect.y + synth(item.rect.height)))
 }
 
 /// E5: orientación de los ejes de un contenedor flex (§5.1), para alinear absolutos.
@@ -780,9 +783,16 @@ impl<'a> Layout<'a> {
                 item.cross = h;
                 if item.align == ItemAlign::Baseline {
                     let border_top = f.rect.y;
+                    // E5: sin baseline propia se sintetiza del border box (CSS Box Alignment 3
+                    // §9.1): el borde inferior o, en un flujo vertical con baseline central
+                    // (CSS Inline 3 §4.1), el centro.
+                    let synth = crate::writing_mode::synthesized_baseline(
+                        self.frame,
+                        &b.style,
+                        f.rect.height,
+                    );
                     item.baseline = Some(
-                        item.margin(2)
-                            + first_baseline(&f).map_or(f.rect.height, |b| b - border_top),
+                        item.margin(2) + first_baseline(&f).map_or(synth, |b| b - border_top),
                     );
                 }
             }

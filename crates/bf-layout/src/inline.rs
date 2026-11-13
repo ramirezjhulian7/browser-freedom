@@ -901,11 +901,9 @@ impl<'a> Layout<'a> {
             b.style.overflow_x == Overflow::Visible && b.style.overflow_y == Overflow::Visible;
         // E9: en un flujo vertical con baseline central, la baseline sintetizada de una caja
         // sin baseline propia es la central: la mitad de su margin box (CSS Inline 3 §4.1).
-        let synth = if self.frame.is_vertical() && crate::writing_mode::central_baseline(&b.style) {
-            outer.height / 2.0
-        } else {
-            outer.height
-        };
+        let frame = self.frame;
+        let synth_of = |h: f32| crate::writing_mode::synthesized_baseline(frame, &b.style, h);
+        let synth = synth_of(outer.height);
         // La baseline de un inline-block es la de su última line box; si no tiene o su
         // overflow no es visible, el borde inferior del margin box (§10.8.1).
         let baseline = match (&b.kind, visible) {
@@ -922,7 +920,7 @@ impl<'a> Layout<'a> {
             _ if b.control.is_some() => synth,
             // inline-flex: la baseline del contenedor es la de su primer ítem (Flexbox §8.5).
             (BoxKind::InlineBlock, _) if crate::flex::is_flex_container(b) => {
-                crate::flex::container_baseline(&fragment).map_or(synth, |y| y - outer.y)
+                crate::flex::container_baseline(&fragment, &synth_of).map_or(synth, |y| y - outer.y)
             }
             // E4: inline-grid (CSS Grid 2 §9.1) e inline-table (CSS 2.2 §17.5.3: la baseline de
             // la primera fila).
