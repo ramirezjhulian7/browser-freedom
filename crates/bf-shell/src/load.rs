@@ -398,6 +398,13 @@ pub fn fetch_document_with(
             None if path.ends_with(".svg") => "image/svg+xml".into(),
             None => "application/xhtml+xml".into(),
         };
+        doc.character_set = enc.name().into();
+        // E6: con motor, los scripts del documento corren durante la construcción, en orden
+        // de documento (HTML §13.4), como en HTML.
+        let doc = match engine {
+            Some((engine, env)) => engine.parse_xml(&doc, &response.url, loader.clone(), env),
+            None => doc,
+        };
         (doc, enc, source)
     } else {
         let ct = content_type

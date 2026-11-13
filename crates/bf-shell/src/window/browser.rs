@@ -6,6 +6,7 @@
 //! la opción `restore_session` está activa. Solo la guarda el navegador que se abrió sin URL:
 //! `freedom <url>` (pruebas, abrir un archivo) ni restaura ni pisa la sesión de la última vez.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -149,8 +150,82 @@ impl Browser {
     }
 }
 
+/// El mensaje de un pánico.
+fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "error interno".to_owned())
+}
+
+/// E6: corre `f` (un evento del bucle) capturando un pánico; si lo hubo, llama a `on_panic`
+/// con el mensaje.
+fn guarded(f: impl FnOnce(), on_panic: impl FnOnce(String)) {
+    if let Err(e) = catch_unwind(AssertUnwindSafe(f)) {
+        on_panic(panic_message(&*e));
+    }
+}
+
+impl Browser {
+    /// E6: un pánico en el hilo de la ventana. El estado de las ventanas puede haber quedado
+    /// a medias (un pánico dentro de `App::with_tab` deja intercambiado el estado de dos
+    /// pestañas), así que seguir no es seguro. Se guarda la sesión con lo que haya, se cierran
+    /// los hilos de documento y se sale del bucle; al abrir de nuevo se restaura la sesión.
+    /// Cada paso va protegido: un segundo pánico no impide salir.
+    fn crashed(&mut self, event_loop: &ActiveEventLoop, message: String) {
+        eprintln!(
+            "Freedom: error interno en la ventana ({message}); se guarda la sesión y se cierra"
+        );
+        let _ = catch_unwind(AssertUnwindSafe(|| self.save_session(true)));
+        for app in &mut self.windows {
+            let _ = catch_unwind(AssertUnwindSafe(|| app.shutdown()));
+        }
+        event_loop.exit();
+    }
+}
+
 impl ApplicationHandler<Wake> for Browser {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let mut crash = None;
+        guarded(|| self.resumed_inner(event_loop), |m| crash = Some(m));
+        if let Some(m) = crash {
+            self.crashed(event_loop, m);
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Wake) {
+        let mut crash = None;
+        guarded(
+            || self.user_event_inner(event_loop, event),
+            |m| crash = Some(m),
+        );
+        if let Some(m) = crash {
+            self.crashed(event_loop, m);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut crash = None;
+        guarded(|| self.about_to_wait_inner(event_loop), |m| crash = Some(m));
+        if let Some(m) = crash {
+            self.crashed(event_loop, m);
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let mut crash = None;
+        guarded(
+            || self.window_event_inner(event_loop, id, event),
+            |m| crash = Some(m),
+        );
+        if let Some(m) = crash {
+            self.crashed(event_loop, m);
+        }
+    }
+}
+
+impl Browser {
+    fn resumed_inner(&mut self, event_loop: &ActiveEventLoop) {
         if std::mem::replace(&mut self.started, true) {
             return;
         }
@@ -173,7 +248,7 @@ impl ApplicationHandler<Wake> for Browser {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Wake) {
+    fn user_event_inner(&mut self, event_loop: &ActiveEventLoop, event: Wake) {
         match event {
             Wake::Documents => {
                 for app in &mut self.windows {
@@ -189,7 +264,7 @@ impl ApplicationHandler<Wake> for Browser {
         self.serve_requests(event_loop);
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
         self.save_session(false);
         let next: Option<Instant> = self.windows.iter_mut().filter_map(App::next_deadline).min();
         event_loop.set_control_flow(match next {
@@ -198,7 +273,12 @@ impl ApplicationHandler<Wake> for Browser {
         });
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+    fn window_event_inner(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+    ) {
         let Some(i) = self.index_of(id) else {
             return;
         };
@@ -217,5 +297,21 @@ impl ApplicationHandler<Wake> for Browser {
         }
         self.windows[i].window_event(event);
         self.serve_requests(event_loop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_reports_panics() {
+        let mut got = None;
+        guarded(|| panic!("fallo de prueba"), |m| got = Some(m));
+        assert_eq!(got.as_deref(), Some("fallo de prueba"));
+        let mut called = false;
+        let mut ran = false;
+        guarded(|| ran = true, |_| called = true);
+        assert!(ran && !called);
     }
 }

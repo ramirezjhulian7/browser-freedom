@@ -144,6 +144,84 @@ fn matches(diff: (u32, u32), fuzzy: Option<Fuzzy>) -> bool {
     })
 }
 
+/// Por qué no se pudo pintar una referencia.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefError {
+    /// La referencia tiene `<script>` (este harness no corre JavaScript).
+    NeedsJs,
+    Other(String),
+}
+
+/// El veredicto de un reftest ya pintado.
+pub struct Verdict {
+    pub status: Status,
+    /// La peor comparación (`maxdiff=… pixels=…`) o el motivo.
+    pub detail: String,
+    /// La referencia `match` con la que no coincidió (para guardar las imágenes del fallo).
+    pub failed_match: Option<Arc<Pixmap>>,
+}
+
+/// Compara `actual` con cada referencia de `m`: pasa si coincide con todas las `match` y
+/// difiere de todas las `mismatch`, con la tolerancia de `<meta name=fuzzy>` (la de esa
+/// referencia o la general). `reference` pinta la referencia de un `href`; `about:blank` es
+/// una página en blanco. `Err` si una referencia no se pudo pintar.
+pub fn judge(
+    m: &Meta,
+    actual: &Pixmap,
+    reference: &mut dyn FnMut(&str) -> Result<Arc<Pixmap>, RefError>,
+) -> Result<Verdict, String> {
+    let mut worst = (0, 0);
+    let mut status = Status::Pass;
+    let mut failed_match = None;
+    let refs = m
+        .matches
+        .iter()
+        .map(|h| (h, true))
+        .chain(m.mismatches.iter().map(|h| (h, false)));
+    for (href, expect_match) in refs {
+        // E7: `about:blank` es una página en blanco.
+        let expected = if href.trim().eq_ignore_ascii_case("about:blank") {
+            let mut blank = Pixmap::new(actual.width(), actual.height()).expect("tamaño válido");
+            blank.fill(tiny_skia::Color::WHITE);
+            Arc::new(blank)
+        } else {
+            match reference(href) {
+                Ok(p) => p,
+                Err(RefError::NeedsJs) => {
+                    return Ok(Verdict {
+                        status: Status::NeedsJs,
+                        detail: "referencia con <script>".into(),
+                        failed_match: None,
+                    });
+                }
+                Err(RefError::Other(e)) => return Err(e),
+            }
+        };
+        let file = href.rsplit('/').next().unwrap_or(href);
+        let fuzzy = m
+            .fuzzy
+            .iter()
+            .find(|(r, _)| r.as_deref().is_some_and(|r| r.ends_with(file)))
+            .or_else(|| m.fuzzy.iter().find(|(r, _)| r.is_none()))
+            .map(|(_, f)| *f);
+        let diff = compare(actual, &expected);
+        if matches(diff, fuzzy) != expect_match {
+            status = Status::Fail;
+            if expect_match {
+                failed_match = Some(expected.clone());
+            }
+        }
+        if diff.1 >= worst.1 {
+            worst = diff;
+        }
+    }
+    Ok(Verdict {
+        status,
+        detail: format!("maxdiff={} pixels={}", worst.0, worst.1),
+        failed_match,
+    })
+}
+
 /// Imagen de diferencias: rojo donde difieren, el test atenuado donde no.
 pub fn diff_image(a: &Pixmap, b: &Pixmap) -> Pixmap {
     let mut out = Pixmap::new(a.width(), a.height()).expect("tamaño válido");
@@ -167,11 +245,20 @@ pub fn diff_image(a: &Pixmap, b: &Pixmap) -> Pixmap {
 }
 
 /// Lo que se necesita saber de un archivo antes de pintarlo.
-struct Meta {
-    matches: Vec<String>,
-    mismatches: Vec<String>,
-    fuzzy: Vec<(Option<String>, Fuzzy)>,
-    has_script: bool,
+#[derive(Debug, Clone, Default)]
+pub struct Meta {
+    pub matches: Vec<String>,
+    pub mismatches: Vec<String>,
+    pub fuzzy: Vec<(Option<String>, Fuzzy)>,
+    pub has_script: bool,
+}
+
+impl Meta {
+    /// ¿Tiene referencias (`rel=match` o `rel=mismatch`)? Si no, es un test de testharness.js
+    /// o manual.
+    pub fn is_reftest(&self) -> bool {
+        !self.matches.is_empty() || !self.mismatches.is_empty()
+    }
 }
 
 /// `.xht`, `.xhtml` y `.svg` son XML (`application/xhtml+xml`, `image/svg+xml`); el resto,
@@ -194,13 +281,15 @@ fn is_svg_ext(e: &std::ffi::OsStr) -> bool {
     e.eq_ignore_ascii_case("svg")
 }
 
-fn parse_file(path: &Path) -> Option<(Document, String)> {
+/// Lee y parsea un archivo de WPT (con [`parse_text`]): el documento y el texto.
+pub fn parse_file(path: &Path) -> Option<(Document, String)> {
     let bytes = std::fs::read(path).ok()?;
     let text = decode_text(&bytes);
     Some((parse_text(path, &text), text))
 }
 
-fn meta(doc: &Document) -> Meta {
+/// Referencias, tolerancias y si hay script en `doc`.
+pub fn meta(doc: &Document) -> Meta {
     let mut m = Meta {
         matches: Vec::new(),
         mismatches: Vec::new(),
@@ -282,7 +371,8 @@ pub fn is_test_file(path: &Path) -> bool {
         && !stem.contains("-print")
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Los tests (según [`is_test_file`]) bajo `dir`, recursivamente.
+pub fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -300,8 +390,13 @@ thread_local! {
     static LAST_PANIC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
+/// El mensaje del último pánico de este hilo (con [`install_panic_hook`]).
+pub fn last_panic() -> String {
+    LAST_PANIC.with(|p| p.borrow().clone())
+}
+
 /// Silencia los pánicos (se registran como `error` con su mensaje).
-fn install_panic_hook() {
+pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
             (*s).to_owned()
@@ -346,6 +441,11 @@ impl Harness {
         }
     }
 
+    /// Las fuentes del harness: las del sistema más Ahem.
+    pub fn fonts(&self) -> Arc<FontDb> {
+        self.db.clone()
+    }
+
     /// URL con la que se sirve un archivo de WPT (`http://web-platform.test/<ruta>`).
     fn base(&self, path: &Path) -> Url {
         let rel = path
@@ -357,7 +457,7 @@ impl Harness {
     }
 
     /// Archivo de una referencia `href` del documento `from`.
-    fn resolve(&self, href: &str, from: &Path) -> Option<PathBuf> {
+    pub fn resolve(&self, href: &str, from: &Path) -> Option<PathBuf> {
         let url = Url::parse(href, Some(&self.base(from))).ok()?;
         let prefix = wpt_origin().serialize(true);
         let href = url.serialize(true);
@@ -473,7 +573,8 @@ impl Harness {
         Ok(pixmap)
     }
 
-    fn save_failure(&self, test: &str, actual: &Pixmap, expected: &Pixmap) {
+    /// Guarda `<test>-{actual,expected,diff}.png` en la carpeta de salida (si hay).
+    pub fn save_failure(&self, test: &str, actual: &Pixmap, expected: &Pixmap) {
         let Some(out) = &self.out_dir else {
             return;
         };
@@ -497,7 +598,7 @@ impl Harness {
     }
 
     /// Ruta del test relativa a la raíz de WPT, con `/`.
-    fn test_name(&self, path: &Path) -> String {
+    pub fn test_name(&self, path: &Path) -> String {
         path.strip_prefix(&self.wpt)
             .unwrap_or(path)
             .to_string_lossy()
@@ -538,51 +639,22 @@ impl Harness {
         }
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Status, String), String> {
             let actual = self.render_doc(&doc, path);
-            let mut worst = (0, 0);
-            let mut status = Status::Pass;
-            let refs = m
-                .matches
-                .iter()
-                .map(|h| (h, true))
-                .chain(m.mismatches.iter().map(|h| (h, false)));
-            for (href, expect_match) in refs {
-                // E7: `about:blank` es una página en blanco.
-                let expected = if href.trim().eq_ignore_ascii_case("about:blank") {
-                    let mut blank = Pixmap::new(VIEWPORT.width as u32, VIEWPORT.height as u32)
-                        .expect("tamaño válido");
-                    blank.fill(tiny_skia::Color::WHITE);
-                    Arc::new(blank)
-                } else {
-                    let ref_path = self
-                        .resolve(href, path)
-                        .ok_or_else(|| format!("referencia no resoluble {href}"))?;
-                    match self.reference(&ref_path) {
-                        Ok(p) => p,
-                        Err(e) if e == "js" => {
-                            return Ok((Status::NeedsJs, "referencia con <script>".into()));
-                        }
-                        Err(e) => return Err(e),
+            let v = judge(&m, &actual, &mut |href| {
+                let ref_path = self
+                    .resolve(href, path)
+                    .ok_or_else(|| RefError::Other(format!("referencia no resoluble {href}")))?;
+                self.reference(&ref_path).map_err(|e| {
+                    if e == "js" {
+                        RefError::NeedsJs
+                    } else {
+                        RefError::Other(e)
                     }
-                };
-                let file = href.rsplit('/').next().unwrap_or(href);
-                let fuzzy = m
-                    .fuzzy
-                    .iter()
-                    .find(|(r, _)| r.as_deref().is_some_and(|r| r.ends_with(file)))
-                    .or_else(|| m.fuzzy.iter().find(|(r, _)| r.is_none()))
-                    .map(|(_, f)| *f);
-                let diff = compare(&actual, &expected);
-                if matches(diff, fuzzy) != expect_match {
-                    status = Status::Fail;
-                    if expect_match {
-                        self.save_failure(&test, &actual, &expected);
-                    }
-                }
-                if diff.1 >= worst.1 {
-                    worst = diff;
-                }
+                })
+            })?;
+            if let Some(expected) = &v.failed_match {
+                self.save_failure(&test, &actual, expected);
             }
-            Ok((status, format!("maxdiff={} pixels={}", worst.0, worst.1)))
+            Ok((v.status, v.detail))
         }));
         match result {
             Ok(Ok((status, detail))) => outcome(status, detail),

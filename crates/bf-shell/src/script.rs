@@ -510,6 +510,9 @@ pub struct Engine {
     /// Las cabeceras `Cross-Origin-Opener-Policy` y `Cross-Origin-Embedder-Policy` de la
     /// respuesta de la navegación ([`Engine::set_navigation_policies`]).
     navigation_policies: (Option<String>, Option<String>),
+    /// E6: el documento es XML ([`Engine::parse_xml`]): `load` lo dispara
+    /// [`Engine::resources_loaded`] sin parser HTML.
+    xml_load_pending: bool,
 }
 
 impl Engine {
@@ -537,6 +540,7 @@ impl Engine {
             reported_rejections: 0,
             images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
             navigation_policies: (None, None),
+            xml_load_pending: false,
         }
     }
 
@@ -738,9 +742,36 @@ impl Engine {
         self.document().cloned().unwrap_or_default()
     }
 
+    /// E6: un documento XML (XHTML, SVG) ya parseado como documento de la ventana, con sus
+    /// scripts ejecutados durante la construcción, en orden de documento
+    /// ([`crate::xml_scripts`]).
+    pub fn parse_xml(
+        &mut self,
+        parsed: &Document,
+        url: &Url,
+        loader: Arc<CachedLoader>,
+        env: &PageEnv,
+    ) -> Document {
+        if !self.has_window() {
+            self.install_window(url, loader, env);
+        }
+        crate::xml_scripts::parse(&mut self.rt.agent, self.realm, parsed, url);
+        bf_web::bom::frames::sync_frames(&mut self.rt.agent, self.realm);
+        self.xml_load_pending = true;
+        if !env.defer_load {
+            self.resources_loaded();
+        }
+        self.flush_rejections();
+        self.take_dirty();
+        self.document().cloned().unwrap_or_default()
+    }
+
     /// El navegador cargó las imágenes y hojas del documento: `load`.
     pub fn resources_loaded(&mut self) {
-        if self.has_window() {
+        if std::mem::take(&mut self.xml_load_pending) {
+            crate::xml_scripts::fire_load(&mut self.rt.agent, self.realm);
+            self.flush_rejections();
+        } else if self.has_window() {
             bf_web::bom::script::resources_loaded(&mut self.rt.agent, self.realm);
             self.flush_rejections();
         }
