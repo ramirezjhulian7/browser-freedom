@@ -1595,18 +1595,7 @@ pub fn render_scrolled(
             DisplayItem::PopOpacity => {
                 if canvas.layers.len() > 1 {
                     let (layer, opacity) = canvas.layers.pop().expect("capa abierta");
-                    let paint = PixmapPaint {
-                        opacity,
-                        ..PixmapPaint::default()
-                    };
-                    canvas.target().draw_pixmap(
-                        0,
-                        0,
-                        layer.as_ref(),
-                        &paint,
-                        Transform::identity(),
-                        None,
-                    );
+                    compose_layer(canvas.target(), &layer, opacity);
                 }
             }
             DisplayItem::PushMask => {
@@ -1658,15 +1647,54 @@ pub fn render_scrolled(
     }
     while canvas.layers.len() > 1 {
         let (layer, opacity) = canvas.layers.pop().expect("capa abierta");
-        let paint = PixmapPaint {
-            opacity,
-            ..PixmapPaint::default()
-        };
-        canvas
-            .target()
-            .draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+        compose_layer(canvas.target(), &layer, opacity);
     }
     canvas.layers.pop().expect("capa base").0
+}
+
+/// E4: compone una capa de opacidad (`source-over` con `opacity`) solo en la franja de filas
+/// donde tiene algo pintado. Las capas son del tamaño del cuadro y lo que pinta un elemento
+/// fuera de la vista las deja vacías: componerlas enteras era la mayor parte del raster al
+/// desplazar una página con varias capas. Encontrar la franja cuesta una lectura de memoria;
+/// componer, el pipeline de tiny-skia por píxel.
+fn compose_layer(target: &mut Pixmap, layer: &Pixmap, opacity: f32) {
+    let Some((y0, y1)) = painted_rows(layer) else {
+        return;
+    };
+    let paint = PixmapPaint {
+        opacity,
+        ..PixmapPaint::default()
+    };
+    if y0 == 0 && y1 == layer.height() {
+        target.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+        return;
+    }
+    let Some(band) = tiny_skia::IntRect::from_xywh(0, y0 as i32, layer.width(), y1 - y0)
+        .and_then(|r| layer.clone_rect(r))
+    else {
+        return;
+    };
+    target.draw_pixmap(
+        0,
+        y0 as i32,
+        band.as_ref(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Las filas `[y0, y1)` de `p` con algún píxel no transparente (`None` si está vacía).
+fn painted_rows(p: &Pixmap) -> Option<(u32, u32)> {
+    let stride = p.width() as usize * 4;
+    if stride == 0 {
+        return None;
+    }
+    let rows: Vec<&[u8]> = p.data().chunks_exact(stride).collect();
+    let empty = |r: &&[u8]| r.iter().all(|&b| b == 0);
+    let y0 = rows.iter().position(|r| !empty(r))?;
+    let y1 = rows.iter().rposition(|r| !empty(r))? + 1;
+    Some((y0 as u32, y1 as u32))
 }
 
 #[cfg(test)]

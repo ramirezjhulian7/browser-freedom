@@ -124,6 +124,9 @@ pub struct ScriptEnv {
     /// Scripts ejecutados y cuántos terminaron con una excepción.
     pub executed: usize,
     pub failed: usize,
+    /// E4: tiempo total ejecutando scripts del documento (compilar y evaluar; para las
+    /// mediciones de `BF_TRACE`).
+    pub run_time: std::time::Duration,
 }
 
 impl ScriptEnv {
@@ -151,6 +154,7 @@ pub fn install_frame_scripting(
             inline_modules: 0,
             executed: 0,
             failed: 0,
+            run_time: std::time::Duration::ZERO,
         },
     );
 }
@@ -180,6 +184,7 @@ pub fn install_scripting(
             inline_modules: 0,
             executed: 0,
             failed: 0,
+            run_time: std::time::Duration::ZERO,
         },
     );
 }
@@ -369,11 +374,15 @@ impl WebScripts<'_> {
         if let Some(env) = env_mut(self.agent, self.realm) {
             env.executed += 1;
         }
+        let start = std::time::Instant::now();
         let r = self.guarded(|agent| {
             agent
                 .compile_script_text(source, url)
                 .and_then(|code| agent.script_evaluation(code))
         });
+        if let Some(env) = env_mut(self.agent, self.realm) {
+            env.run_time += start.elapsed();
+        }
         if let Err(t) = r {
             self.report(t);
         }
@@ -385,6 +394,7 @@ impl WebScripts<'_> {
         if let Some(env) = env_mut(self.agent, self.realm) {
             env.executed += 1;
         }
+        let start = std::time::Instant::now();
         let r = self.guarded(|agent| {
             let m = agent.parse_module_record(url, source)?;
             agent.load_requested_modules(m)?;
@@ -396,6 +406,9 @@ impl WebScripts<'_> {
                 _ => Ok(()),
             }
         });
+        if let Some(env) = env_mut(self.agent, self.realm) {
+            env.run_time += start.elapsed();
+        }
         if let Err(t) = r {
             self.report(t);
         }

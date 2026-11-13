@@ -875,6 +875,251 @@ pub fn matching_declarations_in<'a>(
     collector.out
 }
 
+/// E4: índice de las reglas de estilo de un grupo de hojas para la cascada.
+///
+/// [`matching_declarations_in`] recorre todas las reglas de todas las hojas por cada nodo y
+/// prueba cada selector. El índice aplana una vez las reglas (resolviendo `@media`,
+/// `@supports` y `@layer` como el recorrido) con su origen, su capa y su orden de aparición, y
+/// las agrupa por el compound de más a la derecha de cada selector: por id, por clase, por
+/// nombre de tipo o, si no tiene ninguno, en el resto. Para un elemento solo se prueban las
+/// candidatas de sus grupos (un superconjunto de las que coinciden), en el orden original y
+/// con el mismo `matching_specificity_in`, así que el resultado es idéntico al del recorrido
+/// completo (CSS Cascade 5 §6: origen, capa, especificidad y orden de aparición salen igual).
+/// Las claves van en minúsculas ASCII (los id y clases del modo quirks y los nombres de tipo
+/// HTML no distinguen mayúsculas; para los demás, el grupo es un superconjunto).
+pub struct RuleIndex<'a> {
+    rules: Vec<IndexedRule<'a>>,
+    by_id: HashMap<String, Vec<u32>>,
+    by_class: HashMap<String, Vec<u32>>,
+    by_type: HashMap<String, Vec<u32>>,
+    rest: Vec<u32>,
+}
+
+struct IndexedRule<'a> {
+    origin: Origin,
+    layer_index: usize,
+    /// Orden de aparición de la primera declaración de la regla.
+    source_order: usize,
+    selectors: &'a SelectorList,
+    declarations: &'a [Declaration],
+}
+
+/// El grupo de un complex selector: el id, la clase o el tipo de su último compound.
+enum IndexKey {
+    Id(String),
+    Class(String),
+    Type(String),
+    Rest,
+}
+
+fn index_key(sel: &crate::selectors::ComplexSelector) -> IndexKey {
+    let Some(last) = sel.compounds.last() else {
+        return IndexKey::Rest;
+    };
+    let mut class = None;
+    let mut ty = None;
+    for simple in last {
+        match simple {
+            Simple::Id(id) => return IndexKey::Id(id.to_ascii_lowercase()),
+            Simple::Class(c) if class.is_none() => class = Some(c.to_ascii_lowercase()),
+            Simple::Type { lower, .. } if ty.is_none() => ty = Some(lower.to_ascii_lowercase()),
+            _ => {}
+        }
+    }
+    match (class, ty) {
+        (Some(c), _) => IndexKey::Class(c),
+        (None, Some(t)) => IndexKey::Type(t),
+        _ => IndexKey::Rest,
+    }
+}
+
+impl<'a> RuleIndex<'a> {
+    /// Indexa las reglas de `sheets` que aplican con `media` y `supports`.
+    pub fn new(
+        sheets: &[&'a Stylesheet],
+        media: &MediaContext,
+        supports: SupportsFn<'_>,
+    ) -> RuleIndex<'a> {
+        let layer_indexes = layer_indexes(sheets);
+        let mut index = RuleIndex {
+            rules: Vec::new(),
+            by_id: HashMap::new(),
+            by_class: HashMap::new(),
+            by_type: HashMap::new(),
+            rest: Vec::new(),
+        };
+        let mut source_order = 0;
+        for sheet in sheets {
+            let indexes = &layer_indexes[&sheet.origin];
+            index.flatten(
+                &sheet.rules,
+                sheet.origin,
+                &LayerName(Vec::new()),
+                indexes,
+                media,
+                supports,
+                &mut source_order,
+            );
+        }
+        index
+    }
+
+    /// El mismo recorrido que `Collector::rules`, sin probar selectores.
+    #[allow(clippy::too_many_arguments)]
+    fn flatten(
+        &mut self,
+        rules: &'a [Rule],
+        origin: Origin,
+        layer: &LayerName,
+        indexes: &HashMap<LayerName, usize>,
+        media: &MediaContext,
+        supports: SupportsFn<'_>,
+        source_order: &mut usize,
+    ) {
+        for rule in rules {
+            match rule {
+                Rule::Style(style) => {
+                    let id = self.rules.len() as u32;
+                    self.rules.push(IndexedRule {
+                        origin,
+                        layer_index: indexes.get(layer).copied().unwrap_or(usize::MAX),
+                        source_order: *source_order,
+                        selectors: &style.selectors,
+                        declarations: &style.declarations,
+                    });
+                    *source_order += style.declarations.len();
+                    for sel in &style.selectors.0 {
+                        let bucket = match index_key(sel) {
+                            IndexKey::Id(k) => self.by_id.entry(k).or_default(),
+                            IndexKey::Class(k) => self.by_class.entry(k).or_default(),
+                            IndexKey::Type(k) => self.by_type.entry(k).or_default(),
+                            IndexKey::Rest => &mut self.rest,
+                        };
+                        if bucket.last() != Some(&id) {
+                            bucket.push(id);
+                        }
+                    }
+                    self.flatten(
+                        &style.nested,
+                        origin,
+                        layer,
+                        indexes,
+                        media,
+                        supports,
+                        source_order,
+                    );
+                }
+                Rule::Media(m) => {
+                    if m.queries.evaluate(media) {
+                        self.flatten(
+                            &m.rules,
+                            origin,
+                            layer,
+                            indexes,
+                            media,
+                            supports,
+                            source_order,
+                        );
+                    }
+                }
+                Rule::Supports(s) => {
+                    if s.condition.evaluate(supports) {
+                        self.flatten(
+                            &s.rules,
+                            origin,
+                            layer,
+                            indexes,
+                            media,
+                            supports,
+                            source_order,
+                        );
+                    }
+                }
+                Rule::Layer(LayerRule::Block { name, rules }) => {
+                    self.flatten(rules, origin, name, indexes, media, supports, source_order);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// ¿No hay ninguna regla de estilo?
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// Las reglas que pueden aplicar a `node`, en orden de aparición. Fuera de los árboles
+    /// normales (`:host`, `::slotted()`, `::part()`, donde el nodo que se prueba no es el del
+    /// último compound) o para un nodo que no es elemento, todas.
+    fn candidates(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        shadow: crate::selectors::ShadowMatch,
+    ) -> Vec<u32> {
+        let el = match (shadow.mode, doc.element(node)) {
+            (crate::selectors::ShadowMode::Tree, Some(el)) => el,
+            _ => return (0..self.rules.len() as u32).collect(),
+        };
+        let mut out: Vec<u32> = self.rest.clone();
+        let mut key = String::new();
+        let mut add = |map: &HashMap<String, Vec<u32>>, k: &str, out: &mut Vec<u32>| {
+            key.clear();
+            key.extend(k.chars().map(|c| c.to_ascii_lowercase()));
+            if let Some(ids) = map.get(key.as_str()) {
+                out.extend_from_slice(ids);
+            }
+        };
+        add(&self.by_type, el.name.as_ref(), &mut out);
+        if let Some(id) = el.attr("id") {
+            add(&self.by_id, id, &mut out);
+        }
+        if let Some(classes) = el.attr("class") {
+            for c in classes
+                .split([' ', '\t', '\n', '\r', '\x0C'])
+                .filter(|c| !c.is_empty())
+            {
+                add(&self.by_class, c, &mut out);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Lo mismo que [`matching_declarations_in`] con las hojas del índice, probando solo las
+    /// reglas candidatas.
+    pub fn matching(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        pseudo: Option<PseudoElement>,
+        ctx: &MatchContext,
+        shadow: crate::selectors::ShadowMatch,
+    ) -> Vec<MatchedDeclaration<'a>> {
+        let mut out = Vec::new();
+        for id in self.candidates(doc, node, shadow) {
+            let rule = &self.rules[id as usize];
+            let Some(specificity) =
+                matching_specificity_in(rule.selectors, doc, node, pseudo, ctx, shadow)
+            else {
+                continue;
+            };
+            for (i, declaration) in rule.declarations.iter().enumerate() {
+                out.push(MatchedDeclaration {
+                    origin: rule.origin,
+                    layer_index: rule.layer_index,
+                    specificity,
+                    source_order: rule.source_order + i,
+                    important: declaration.important,
+                    declaration,
+                });
+            }
+        }
+        out
+    }
+}
+
 /// Orden de capas por origen: post-orden del árbol de capas (subcapas antes que los estilos
 /// directos de su capa padre); la raíz (estilos sin capa) queda última.
 fn layer_indexes(sheets: &[&Stylesheet]) -> HashMap<Origin, HashMap<LayerName, usize>> {

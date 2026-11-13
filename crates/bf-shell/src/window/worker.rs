@@ -743,6 +743,7 @@ impl State {
 
     /// Estilo, layout y lista de visualización del documento actual; `Done` a la ventana.
     fn layout(&mut self, id: u64, ctx: Option<LoadContext>) {
+        let is_load = ctx.is_some();
         let viewport = self.viewport();
         let view_zoom = self.view().text_zoom;
         let view_dpr = self.view().device_pixel_ratio;
@@ -809,6 +810,29 @@ impl State {
                 (shown, p)
             }
         };
+        // E4: el desglose de la carga para medir la primera pintura (`BF_TRACE`).
+        if is_load && super::tracing() {
+            let scripts = self
+                .current
+                .as_ref()
+                .and_then(|c| c.engine.as_ref())
+                .map_or(Duration::ZERO, Engine::script_time);
+            let t = page.timings;
+            super::trace(&format!(
+                "perf carga {}: red/caché {} · parseo {} · scripts {} · hojas {} · cascada {} \
+                 · imágenes {} · maqueta {} · lista {} ({} nodos)",
+                loaded.url,
+                super::ms(loaded.fetch),
+                super::ms(loaded.parse.saturating_sub(scripts)),
+                super::ms(scripts),
+                super::ms(t.style.saturating_sub(t.cascade)),
+                super::ms(t.cascade),
+                super::ms(t.images),
+                super::ms(t.layout),
+                super::ms(t.paint),
+                page.report.dom_nodes,
+            ));
+        }
         let view = self.view();
         // E12: las posiciones de scroll de los elementos y lo `sticky` del viewport.
         if let Some(engine) = self.current.as_mut().and_then(|c| c.engine.as_mut()) {

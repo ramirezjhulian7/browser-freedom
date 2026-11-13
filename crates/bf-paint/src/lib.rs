@@ -161,6 +161,8 @@ impl EngineReport {
 pub struct PageTimings {
     /// Hojas externas, `@font-face` y cascada.
     pub style: Duration,
+    /// E4: solo la cascada (parte de `style`).
+    pub cascade: Duration,
     /// Carga y decodificación de imágenes.
     pub images: Duration,
     pub layout: Duration,
@@ -258,6 +260,7 @@ pub fn prepare_page_animated(
     fonts.add_font_faces(&font_face_rules(&all, &media), loader.clone());
     let match_ctx = MatchContext::for_document(doc);
     let metrics = bf_layout::StyleMetrics(&fonts);
+    let cascade_start = Instant::now();
     let styles = std::sync::Arc::new(style_document_with_sheets(
         doc,
         &sheets,
@@ -266,6 +269,7 @@ pub fn prepare_page_animated(
         &match_ctx,
         Some(&metrics),
     ));
+    let cascade = cascade_start.elapsed();
     let shown = animate(&styles);
     let style = start.elapsed();
     let start = Instant::now();
@@ -313,6 +317,7 @@ pub fn prepare_page_animated(
         frames,
         timings: PageTimings {
             style,
+            cascade,
             images: images_time,
             layout,
             paint: start.elapsed(),
