@@ -14,6 +14,7 @@ mod history;
 mod internal;
 mod load;
 mod profile;
+mod reftest_js;
 mod restore;
 mod script;
 mod settings;
@@ -33,7 +34,8 @@ const USAGE: &str = "uso: freedom [<url|archivo>
                        | dump-layout <url|archivo> [--width <px>] [--height <px>] [--system-fonts]
                        | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>] [--wait <ms>]
                        | open [<url|archivo>]
-                       | session <url|archivo> <paso>... -o <prefijo>]
+                       | session <url|archivo> <paso>... -o <prefijo>
+                       | wpt-reftests-js [--wpt <dir>] [--out <dir>]]
 (<url> puede ser http(s)://, file://, data: o about:; sin argumentos, o open sin argumento,
 abre la página de inicio)";
 
@@ -46,6 +48,7 @@ const COMMANDS: &[&str] = &[
     "render",
     "open",
     "session",
+    "wpt-reftests-js",
 ];
 
 fn main() -> ExitCode {
@@ -68,6 +71,8 @@ fn main() -> ExitCode {
         [cmd] if cmd == "open" => window::open(None),
         [cmd, path] if cmd == "open" => window::open(Some(path)),
         [cmd, path, rest @ ..] if cmd == "session" => session(path, rest),
+        // Reftests de WPT con JavaScript (`REFTEST_GROUPS`, `REFTEST_FILTER`).
+        [cmd, rest @ ..] if cmd == "wpt-reftests-js" => reftest_js::command(rest),
         // «Abrir con…» o un archivo arrastrado sobre el ejecutable.
         [path] if !path.starts_with('-') && !COMMANDS.contains(&path.as_str()) => {
             window::open(Some(path))

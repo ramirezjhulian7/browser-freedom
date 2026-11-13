@@ -577,6 +577,8 @@ cargo test -p bf-layout --test layout       # 102 casos propios (BF_LAYOUT_PRINT
 cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPECTED=1 regenera)
 cargo test -p bf-paint --test wpt_reftests -- --ignored --nocapture  # reftests (~1,5 min)
 cargo run --release -p bf-paint --bin wpt-reftests -- css/css-flexbox   # un subconjunto
+REFTEST_GROUPS=fase1 cargo test --release -p bf-shell --test wpt_reftests_js -- --ignored --nocapture   # reftests con JavaScript (~30 s)
+cargo test --release -p bf-shell --test wpt_reftests_js -- --ignored --nocapture   # los mismos, en todos los grupos (~2 min)
 ```
 
 Sin la variable `BF_FULL`, los tests de `bf-js` que recorren corpus de test262
@@ -593,6 +595,29 @@ regresión de test262) siguen igual: se corren con `--ignored`.
 Los reftests no hacen fallar `cargo test`: escriben el resumen en
 [`docs/wpt-status.md`](docs/wpt-status.md) y dejan en `target/reftests/` las imágenes de cada
 fallo (`-actual`, `-expected`, `-diff`) y el detalle por test (`results.tsv`).
+
+**Reftests con JavaScript.** El harness de `bf-paint` salta los reftests con `<script>` o
+atributos `on*`, en el test o en una referencia, porque `bf-paint` no depende del motor de
+JavaScript. Los corre `freedom wpt-reftests-js` (`crates/bf-shell/src/reftest_js.rs`):
+- carga cada documento con sus scripts, sirviendo `tests/wpt` como `wptserve`;
+- corre el bucle de eventos con un reloj virtual;
+- dispara `TestRendered` y espera a que la raíz pierda `class="reftest-wait"`, con 10 s
+  reales y 60 s virtuales como límite;
+- pinta como la ventana y compara con las reglas de `bf_paint::reftest` (`match`,
+  `mismatch`, `fuzzy`).
+
+Un pánico o un tiempo agotado cuentan como `error`.
+
+Opciones:
+- `REFTEST_GROUPS`: directorios de `tests/wpt` separados por comas, o `fase1` para los 13 de
+  la fase 1. Sin la variable, todos los de `GROUPS`.
+- `REFTEST_FILTER`: solo las rutas que contienen ese texto.
+- `REFTEST_THREADS`: hilos (3 por defecto).
+
+La tabla separa los `needs-js` sin referencia (testharness.js o manuales, que este runner no
+corre) de los reftests con JavaScript. El detalle queda en `target/reftests-js/results.tsv`,
+con las imágenes de los fallos al lado. También se puede llamar directamente:
+`freedom wpt-reftests-js --wpt tests/wpt --out target/reftests-js`.
 
 Tablas generadas (con `python -I`):
 
