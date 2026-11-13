@@ -790,6 +790,26 @@ fn short_name(url: &Url) -> String {
     }
 }
 
+/// E4: copia `part`, opaco, en `frame` desde la fila `y` (sin componer: el raster de la página
+/// lleva fondo opaco, y componerlo con el pipeline de tiny-skia costaba tanto como un
+/// raster pequeño en cada cuadro).
+fn blit_opaque(frame: &mut Pixmap, part: &Pixmap, y: f32) {
+    let y = y.round().max(0.0) as usize;
+    let fw = frame.width() as usize * 4;
+    let pw = part.width() as usize * 4;
+    let w = fw.min(pw);
+    let rows = (frame.height() as usize)
+        .saturating_sub(y)
+        .min(part.height() as usize);
+    let src = part.data();
+    let dst = frame.data_mut();
+    for r in 0..rows {
+        let d = (y + r) * fw;
+        let s = r * pw;
+        dst[d..d + w].copy_from_slice(&src[s..s + w]);
+    }
+}
+
 fn blit(frame: &mut Pixmap, part: &Pixmap, x: f32, y: f32) {
     frame.draw_pixmap(
         x.round() as i32,
@@ -2794,7 +2814,7 @@ impl App {
                 }
             }
             if let Some((_, page)) = cache.as_ref() {
-                blit(&mut frame, page, 0.0, area.y * dpi);
+                blit_opaque(&mut frame, page, area.y * dpi);
             }
             drop(cache);
             self.paint_scrollbars(&mut frame, p, area.y * dpi);
@@ -4331,22 +4351,21 @@ impl App {
         let (f50, f95, fmax) = stats(&mut frames);
         let (r50, _, _) = stats(&mut rasters);
         // Cuántos ítems y cuántas capas (opacidad, máscara, efecto) tiene la lista.
-        let (items, layers) = self.page.as_ref().map_or((0, 0), |p| {
-            let l = &p.display_list.items;
-            let layers = l
-                .iter()
-                .filter(|i| {
-                    matches!(
-                        i,
-                        DisplayItem::PushOpacity(_)
-                            | DisplayItem::PushMask
-                            | DisplayItem::PushEffect
-                    )
-                })
-                .count();
-            (l.len(), layers)
-        });
-        trace(&format!("perf lista: {items} ítems, {layers} capas"));
+        let count = |f: fn(&DisplayItem) -> bool| {
+            self.page
+                .as_ref()
+                .map_or(0, |p| p.display_list.items.iter().filter(|i| f(i)).count())
+        };
+        trace(&format!(
+            "perf lista: {} ítems, {} capas, {} fixed, {} sticky",
+            count(|_| true),
+            count(|i| matches!(
+                i,
+                DisplayItem::PushOpacity(_) | DisplayItem::PushMask | DisplayItem::PushEffect
+            )),
+            count(|i| matches!(i, DisplayItem::PushFixed)),
+            count(|i| matches!(i, DisplayItem::PushSticky { .. })),
+        ));
         format!(
             "perf desplazamiento: {n} cuadros de {} px a escala {}: mediana {}, p95 {}, máx {}; \
              raster mediano {}; {slow} cuadros de más de 16,7 ms",

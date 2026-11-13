@@ -54,7 +54,11 @@ fn check(doc: &Document) {
     let index = RuleIndex::new(&sheets, &media, &supports_grid);
     let mut compared = 0;
     for node in doc.inclusive_descendants(doc.root()) {
-        for pseudo in [None, Some(PseudoElement::Before), Some(PseudoElement::Marker)] {
+        for pseudo in [
+            None,
+            Some(PseudoElement::Before),
+            Some(PseudoElement::Marker),
+        ] {
             let full = matching_declarations_in(
                 doc,
                 node,
@@ -70,15 +74,15 @@ fn check(doc: &Document) {
             compared += full.len();
         }
     }
-    assert!(compared > 20, "el documento debe coincidir con varias reglas");
+    assert!(
+        compared > 20,
+        "el documento debe coincidir con varias reglas"
+    );
 }
 
 #[test]
 fn index_matches_the_full_walk() {
-    let (doc, _) = parse_document(
-        &format!("<!doctype html>{HTML}"),
-        &ParseOptions::default(),
-    );
+    let (doc, _) = parse_document(&format!("<!doctype html>{HTML}"), &ParseOptions::default());
     check(&doc);
 }
 

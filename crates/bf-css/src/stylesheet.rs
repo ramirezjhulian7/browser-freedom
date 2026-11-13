@@ -1011,12 +1011,28 @@ impl<'a> RuleIndex<'a> {
                 }
                 Rule::Media(m) => {
                     if m.queries.evaluate(media) {
-                        self.flatten(&m.rules, origin, layer, indexes, media, supports, source_order);
+                        self.flatten(
+                            &m.rules,
+                            origin,
+                            layer,
+                            indexes,
+                            media,
+                            supports,
+                            source_order,
+                        );
                     }
                 }
                 Rule::Supports(s) => {
                     if s.condition.evaluate(supports) {
-                        self.flatten(&s.rules, origin, layer, indexes, media, supports, source_order);
+                        self.flatten(
+                            &s.rules,
+                            origin,
+                            layer,
+                            indexes,
+                            media,
+                            supports,
+                            source_order,
+                        );
                     }
                 }
                 Rule::Layer(LayerRule::Block { name, rules }) => {
@@ -1035,7 +1051,12 @@ impl<'a> RuleIndex<'a> {
     /// Las reglas que pueden aplicar a `node`, en orden de aparición. Fuera de los árboles
     /// normales (`:host`, `::slotted()`, `::part()`, donde el nodo que se prueba no es el del
     /// último compound) o para un nodo que no es elemento, todas.
-    fn candidates(&self, doc: &Document, node: NodeId, shadow: crate::selectors::ShadowMatch) -> Vec<u32> {
+    fn candidates(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        shadow: crate::selectors::ShadowMatch,
+    ) -> Vec<u32> {
         let el = match (shadow.mode, doc.element(node)) {
             (crate::selectors::ShadowMode::Tree, Some(el)) => el,
             _ => return (0..self.rules.len() as u32).collect(),
@@ -1055,7 +1076,7 @@ impl<'a> RuleIndex<'a> {
         }
         if let Some(classes) = el.attr("class") {
             for c in classes
-                .split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'))
+                .split([' ', '\t', '\n', '\r', '\x0C'])
                 .filter(|c| !c.is_empty())
             {
                 add(&self.by_class, c, &mut out);

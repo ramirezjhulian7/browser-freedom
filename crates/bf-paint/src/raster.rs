@@ -1674,7 +1674,14 @@ fn compose_layer(target: &mut Pixmap, layer: &Pixmap, opacity: f32) {
     else {
         return;
     };
-    target.draw_pixmap(0, y0 as i32, band.as_ref(), &paint, Transform::identity(), None);
+    target.draw_pixmap(
+        0,
+        y0 as i32,
+        band.as_ref(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Las filas `[y0, y1)` de `p` con algún píxel no transparente (`None` si está vacía).

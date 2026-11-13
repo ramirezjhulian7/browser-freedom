@@ -10,7 +10,9 @@ use std::sync::{Arc, OnceLock};
 
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch, ShadowMode, Specificity};
-use bf_css::stylesheet::{MatchedDeclaration, Origin, RuleIndex, Stylesheet};
+use bf_css::stylesheet::{
+    MatchedDeclaration, Origin, RuleIndex, Stylesheet, matching_declarations_in,
+};
 use bf_css::syntax::{
     ComponentValue, Declaration, Function, NestedItem, SimpleBlock, parse_block_contents,
     parse_declaration,
@@ -855,6 +857,20 @@ impl<'a> Styler<'a> {
         if sheets.is_empty() {
             return Vec::new();
         }
+        // `BF_NO_RULE_INDEX=1`: el recorrido completo (para medir el índice contra él).
+        static NO_INDEX: OnceLock<bool> = OnceLock::new();
+        if *NO_INDEX.get_or_init(|| std::env::var_os("BF_NO_RULE_INDEX").is_some()) {
+            return matching_declarations_in(
+                self.doc,
+                node,
+                pseudo,
+                sheets,
+                self.media,
+                &is_supported,
+                self.ctx,
+                shadow,
+            );
+        }
         let key: Vec<usize> = sheets
             .iter()
             .map(|s| std::ptr::from_ref::<Stylesheet>(s) as usize)
@@ -863,9 +879,7 @@ impl<'a> Styler<'a> {
             .indexes
             .borrow_mut()
             .entry(key)
-            .or_insert_with(|| {
-                std::rc::Rc::new(RuleIndex::new(sheets, self.media, &is_supported))
-            })
+            .or_insert_with(|| std::rc::Rc::new(RuleIndex::new(sheets, self.media, &is_supported)))
             .clone();
         index.matching(self.doc, node, pseudo, self.ctx, shadow)
     }
