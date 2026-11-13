@@ -50,7 +50,9 @@ use bf_paint::{
 };
 use bf_style::values::color::Rgba;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -143,6 +145,8 @@ struct Loading {
     /// E11: vuelve a abrir una entrada ya visitada (pestaña restaurada, vuelta tras una
     /// descarga); no cuenta otra visita en el historial global.
     reopen: bool,
+    /// Carga la página "Esta página falló" tras un pánico del hilo de la pestaña.
+    crash: bool,
 }
 
 /// Dónde está el puntero.
@@ -243,6 +247,11 @@ struct App {
     /// fuentes de las páginas, no la página.
     text_zoom: f32,
     modifiers: ModifiersState,
+    /// macOS: el botón principal se apretó con `Ctrl` (clic derecho del sistema); su
+    /// liberación no es un clic.
+    secondary_press: bool,
+    /// El gesto de pellizcar del trackpad (zoom de página).
+    pinch: keys::Pinch,
     /// Posición del puntero en px lógicos de la ventana.
     mouse: (f32, f32),
     hover_link: Option<String>,
@@ -721,6 +730,8 @@ impl App {
             zoom: 1.0,
             text_zoom: crate::settings::global().text_zoom,
             modifiers: ModifiersState::empty(),
+            secondary_press: false,
+            pinch: keys::Pinch::default(),
             mouse: (0.0, 0.0),
             hover_link: None,
             cursor: CursorIcon::Default,
@@ -1580,6 +1591,18 @@ impl App {
 
     /// Como [`Self::start_load`], con un cuerpo `POST` `(bytes, Content-Type)`.
     fn start_load_with(&mut self, url: Url, nav: Navigation, post: Option<(Vec<u8>, String)>) {
+        self.start_load_full(url, nav, post, None);
+    }
+
+    /// Como [`Self::start_load_with`]; con `crash`, el hilo nuevo de la pestaña muestra la
+    /// página "Esta página falló" para `url` con ese mensaje en lugar de cargarla.
+    fn start_load_full(
+        &mut self,
+        url: Url,
+        nav: Navigation,
+        post: Option<(Vec<u8>, String)>,
+        crash: Option<String>,
+    ) {
         // El scroll de la entrada actual, para volver a él.
         if let Some(e) = self.history.get_mut(self.index) {
             e.scroll = self.scroll;
@@ -1622,6 +1645,7 @@ impl App {
                 session_history,
                 referrer,
                 screen: self.screen_info(),
+                crash: crash.clone(),
             })),
         );
         self.loading = Some(Loading {
@@ -1630,6 +1654,7 @@ impl App {
             url,
             started: Instant::now(),
             reopen: false,
+            crash: crash.is_some(),
         });
         self.relayout = None;
         self.update_title();
@@ -1888,6 +1913,7 @@ impl App {
                 }
                 FromDoc::Console { tab, entry } => self.console_entry(tab, entry),
                 FromDoc::Request { tab, request } => self.page_request(tab, *request),
+                FromDoc::Crashed { tab, message } => self.tab_crashed(tab, message),
             }
         }
         // Si la ventana cambió mientras se maquetaba, se rehace con el viewport actual.
@@ -1912,6 +1938,42 @@ impl App {
     }
 
     /// La pestaña cuyo hilo de documento tiene la clave `key`.
+    /// El hilo de la pestaña `tab` entró en pánico y terminó: arranca otro que muestra
+    /// "Esta página falló" con la URL que tenía (la que cargaba, o la que mostraba) y el
+    /// mensaje; el botón de la página la recarga. Las demás pestañas no se tocan.
+    fn tab_crashed(&mut self, tab: u64, message: String) {
+        self.worker.crashed(tab);
+        let Some(i) = self.tab_with_key(tab) else {
+            return;
+        };
+        self.with_tab(i, |app| app.show_crash(message));
+        if i == self.active {
+            self.redraw_later();
+        }
+    }
+
+    /// La página de error tras un pánico en la pestaña actual.
+    fn show_crash(&mut self, message: String) {
+        // Si también falló la página de error, la pestaña se queda como está: otro intento
+        // sería un bucle.
+        if self.loading.as_ref().is_some_and(|l| l.crash) {
+            self.loading = None;
+            return;
+        }
+        self.relayout = None;
+        let (url, nav) = match self.loading.take() {
+            Some(l) => (l.url, l.nav),
+            None => match &self.current {
+                Some(c) => (c.url.clone(), Navigation::Reload),
+                None => (
+                    Url::parse("about:blank", None).expect("about:blank"),
+                    Navigation::Push,
+                ),
+            },
+        };
+        self.start_load_full(url, nav, None, Some(message));
+    }
+
     fn tab_with_key(&self, key: u64) -> Option<usize> {
         if self.tab_key == key {
             return Some(self.active);
@@ -3964,6 +4026,11 @@ impl App {
                 button,
                 ..
             } => match button {
+                // macOS: `Ctrl+clic` es el clic derecho del sistema.
+                MouseButton::Left if keys::secondary_click(self.modifiers, keys::MAC) => {
+                    self.secondary_press = true;
+                    self.context_menu();
+                }
                 MouseButton::Left => self.click(),
                 MouseButton::Middle => self.middle_click(),
                 MouseButton::Right => self.context_menu(),
@@ -3975,7 +4042,18 @@ impl App {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => self.release(),
+            } => {
+                if !std::mem::take(&mut self.secondary_press) {
+                    self.release();
+                }
+            }
+            // Pellizcar el trackpad (macOS): zoom de página por pasos.
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                let ended = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+                if let Some(up) = self.pinch.update(delta, ended) {
+                    self.zoom_step(up);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Modificador primario (`Ctrl`, `Cmd` en macOS) + `Mayús` + rueda: zoom de texto
                 // (E11); sin `Mayús`: zoom de página.
@@ -4050,6 +4128,10 @@ impl App {
                 }
                 FromDoc::Request { tab, request } => {
                     self.page_request(tab, *request);
+                    continue;
+                }
+                FromDoc::Crashed { tab, message } => {
+                    self.tab_crashed(tab, message);
                     continue;
                 }
             };
@@ -4436,6 +4518,64 @@ mod tests {
         assert_eq!(px[3], 0);
         assert_eq!(px[(n * n - 1) * 4 + 3], 0);
         assert!(px.chunks(4).any(|c| c == [0xF5, 0xA5, 0x24, 0xFF]));
+    }
+
+    /// Un pánico en el hilo de una pestaña (en segundo plano) no tumba la ventana: esa
+    /// pestaña muestra "Esta página falló" con su URL y el mensaje, la otra sigue con su
+    /// página, y la pestaña que falló vuelve a cargar con un hilo nuevo.
+    #[test]
+    fn tab_panic_shows_error_page() {
+        crate::profile::set_ephemeral();
+        let fonts = FontDb::system();
+        let worker = Documents::new(fonts.clone(), || {});
+        let net = Arc::new(NetLoader::new());
+        let mut app = App::new(worker, fonts, None, Theme::for_system(None), net);
+        app.headless = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let text = |app: &App| {
+            let doc = &app.current.as_ref().unwrap().doc;
+            doc.descendant_text_content(doc.root()).to_string()
+        };
+        let sana = Url::parse("data:text/html,<title>Sana</title><p>sigo viva", None).unwrap();
+        app.start_load(sana, Navigation::Push);
+        app.settle();
+        assert!(text(&app).contains("sigo viva"));
+
+        let crash = Url::parse(worker::crash_test::URL, None).unwrap();
+        app.new_tab(Some(crash), true);
+        app.settle();
+        // La pestaña activa no se enteró.
+        assert_eq!(app.active, 0);
+        assert!(text(&app).contains("sigo viva"));
+        assert!(app.current.as_ref().unwrap().meta.error.is_none());
+
+        app.activate_tab(1);
+        let current = app.current.as_ref().unwrap();
+        assert_eq!(
+            current.meta.error.as_ref().map(|e| e.kind),
+            Some(crate::load::ErrorKind::Crashed)
+        );
+        assert_eq!(current.url.href(), worker::crash_test::URL);
+        let shown = text(&app);
+        for needle in [
+            "Esta página falló",
+            "pánico de prueba en el hilo de la pestaña",
+            "Recargar",
+            "about:blank#panico-de-prueba",
+        ] {
+            assert!(shown.contains(needle), "falta {needle:?} en {shown:?}");
+        }
+        assert_eq!(app.history.len(), 1);
+
+        // La pestaña sigue sirviendo: un hilo nuevo carga lo siguiente.
+        let otra = Url::parse("data:text/html,<p>de nuevo", None).unwrap();
+        app.start_load(otra, Navigation::Push);
+        app.settle();
+        assert!(text(&app).contains("de nuevo"));
+        app.activate_tab(0);
+        assert!(text(&app).contains("sigo viva"));
     }
 
     #[test]

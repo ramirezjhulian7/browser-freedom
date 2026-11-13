@@ -406,9 +406,9 @@ cd ../browser-freedom-otro
 git submodule update --init                       # html5lib-tests, css-parsing-tests, test262-parser-tests
 ln -s "$(git rev-parse --path-format=absolute --git-common-dir)/../tests/wpt" tests/wpt
 ln -s "$(git rev-parse --path-format=absolute --git-common-dir)/../tests/test262" tests/test262
-# `.gitignore` ignora las carpetas `tests/wpt/` y `tests/test262/`, no un enlace con ese nombre:
-printf 'tests/wpt\ntests/test262\n' >> "$(git rev-parse --git-common-dir)/info/exclude"
 ```
+
+`.gitignore` cubre `tests/wpt` y `tests/test262` sean carpetas o enlaces, así que git no los ve.
 
 Los enlaces son de solo lectura en la práctica: el checkout principal es el que se actualiza
 con `tools/fetch-wpt.sh` y `tools/fetch-test262.sh`.

@@ -317,3 +317,26 @@ fn http_against_local_server() {
     let data = Url::parse("data:text/plain,hi", None).unwrap();
     assert_eq!(f.fetch(&data, &get).unwrap().body, b"hi");
 }
+
+/// `Fetcher::read_timeout`: un servidor que acepta y no responde da `Timeout` en ese tiempo
+/// (no en los 30 s por defecto), y su causa es [`bf_net::NetErrorKind::Timeout`].
+#[test]
+fn read_timeout_is_configurable() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut r = BufReader::new(stream);
+        read_request(&mut r);
+        thread::sleep(std::time::Duration::from_secs(2));
+    });
+    let mut f = Fetcher::new();
+    f.read_timeout = Some(std::time::Duration::from_millis(200));
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+    let start = std::time::Instant::now();
+    let err = f.fetch(&url, &FetchOptions::default()).unwrap_err();
+    assert!(matches!(err, FetchError::Timeout), "{err:?}");
+    assert_eq!(err.kind(), bf_net::NetErrorKind::Timeout);
+    assert!(start.elapsed() < std::time::Duration::from_millis(1500));
+    server.join().unwrap();
+}
