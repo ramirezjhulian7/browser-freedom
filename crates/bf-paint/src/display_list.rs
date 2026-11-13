@@ -289,9 +289,11 @@ pub struct StickyGroup {
 /// ([`crate::raster::scroll_frame`], [`crate::raster::render_parallel`]).
 #[derive(Debug, Clone, Default)]
 pub struct ScrollInfo {
-    /// Cuántos px CSS por encima y por debajo de una banda hay que rasterizar para que sus
-    /// filas salgan iguales que en el cuadro entero (los desenfoques leen píxeles vecinos).
+    /// Cuántos px CSS alrededor de un tile hay que rasterizar para que los desenfoques se vean
+    /// continuos de un tile al siguiente (leen píxeles vecinos).
     pub margin: f32,
+    /// El desenfoque más grande de la lista (px CSS; 0 si no hay).
+    pub blur: f32,
     /// Lo que pinta cada grupo `fixed`, en px CSS del viewport (no se mueve con el scroll).
     pub fixed: Vec<Rect>,
     /// Los grupos `sticky` del viewport (se mueven distinto que la página).
@@ -350,7 +352,7 @@ fn inflate(r: &Rect, d: f32) -> Rect {
 
 /// Lo que puede pintar `item` (px CSS en sus coordenadas), con margen para el antialiasing.
 /// `None`: no pinta nada por sí mismo (recortes, capas, transformaciones).
-fn item_bounds(item: &DisplayItem) -> Option<Rect> {
+pub(crate) fn item_bounds(item: &DisplayItem) -> Option<Rect> {
     let r = match item {
         DisplayItem::Rect { rect, .. }
         | DisplayItem::Border { rect, .. }
@@ -495,5 +497,6 @@ pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
     // antialiasing de lo que la banda corta y las regiones de sombra recortadas al lienzo
     // (medido: hasta 15 filas con un `text-shadow` de 3 px).
     info.margin = blur * 3.0 + 16.0;
+    info.blur = blur;
     Some(info)
 }

@@ -276,6 +276,9 @@ struct App {
     headless_scale: f32,
     /// E4: cuándo empezó la última navegación, hasta su primera pintura (`BF_TRACE`).
     nav_start: Cell<Option<Instant>>,
+    /// E4: cuadros de la página pintados por desplazamiento incremental, en tiles enteros y de
+    /// una pasada (para `scrollbench`).
+    raster_kinds: Cell<(u32, u32, u32)>,
     initial: Option<Url>,
     /// Superposición de depuración activa, y el fragmento bajo el puntero (rect, si es fijo y
     /// su descripción).
@@ -891,6 +894,7 @@ impl App {
             },
             headless_scale: 1.0,
             nav_start: Cell::new(None),
+            raster_kinds: Cell::new((0, 0, 0)),
             initial,
             overlay: false,
             overlay_hover: None,
@@ -2814,7 +2818,7 @@ impl App {
             if cache.as_ref().is_none_or(|(k, _, _)| *k != key) {
                 let start = Instant::now();
                 let dl = &p.display_list;
-                let threads = raster_threads();
+                bf_paint::raster::set_raster_threads(raster_threads());
                 // El cuadro anterior de la misma página, si se pintó en tiles: se mueve y se
                 // pintan solo los tiles nuevos y los de lo `fixed`/`sticky`.
                 let incremental = cache.as_ref().and_then(|(k, prev, tiled)| {
@@ -2834,26 +2838,35 @@ impl App {
                         scale,
                         Rgba::WHITE,
                         snapped,
-                        threads,
                     )
                 });
+                let (mut inc, mut til, mut one) = self.raster_kinds.get();
                 let (page, tiled) = match incremental {
-                    Some(page) => (page, Some(snapped)),
+                    Some(page) => {
+                        inc += 1;
+                        (page, Some(snapped))
+                    }
                     None => match bf_paint::raster::render_tiled(
                         dl,
                         viewport,
                         scale,
                         Rgba::WHITE,
                         snapped,
-                        threads,
                     ) {
-                        Some(page) => (page, Some(snapped)),
-                        None => (
-                            render_scrolled(dl, viewport, scale, Rgba::WHITE, snapped),
-                            None,
-                        ),
+                        Some(page) => {
+                            til += 1;
+                            (page, Some(snapped))
+                        }
+                        None => {
+                            one += 1;
+                            (
+                                render_scrolled(dl, viewport, scale, Rgba::WHITE, snapped),
+                                None,
+                            )
+                        }
                     },
                 };
+                self.raster_kinds.set((inc, til, one));
                 let raster = start.elapsed();
                 self.raster.set(Some(raster));
                 *cache = Some((key, page, tiled));
@@ -4382,6 +4395,7 @@ impl App {
     fn scroll_bench(&mut self, n: usize, dy: &mut f32) -> String {
         let mut frames = Vec::with_capacity(n);
         let mut rasters = Vec::with_capacity(n);
+        self.raster_kinds.set((0, 0, 0));
         for _ in 0..n {
             let start = Instant::now();
             let before = self.scroll;
@@ -4417,6 +4431,33 @@ impl App {
                 .as_ref()
                 .map_or(0, |p| p.display_list.items.iter().filter(|i| f(i)).count())
         };
+        if let Some(info) = self
+            .page
+            .as_ref()
+            .and_then(|p| bf_paint::display_list::scroll_info(&p.display_list))
+        {
+            let rects: Vec<String> = info
+                .fixed
+                .iter()
+                .map(|r| format!("fixed y={:.0} alto={:.0}", r.y, r.height))
+                .chain(
+                    info.sticky
+                        .iter()
+                        .map(|g| format!("sticky y={:.0} alto={:.0}", g.rect.y, g.rect.height)),
+                )
+                .collect();
+            trace(&format!(
+                "perf grupos: margen {:.0} px; {}",
+                info.margin,
+                rects.join(", ")
+            ));
+        }
+        let (inc, til, one) = self.raster_kinds.get();
+        trace(&format!(
+            "perf raster: {inc} cuadros incrementales, {til} en tiles enteros, {one} de una \
+             pasada ({} hilos)",
+            raster_threads()
+        ));
         trace(&format!(
             "perf lista: {} ítems, {} capas, {} fixed, {} sticky",
             count(|_| true),

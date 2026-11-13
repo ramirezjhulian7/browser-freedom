@@ -1514,22 +1514,33 @@ pub fn render_rows(
     rows: std::ops::Range<u32>,
 ) -> Pixmap {
     let n = rows.end.saturating_sub(rows.start);
-    render_rows_from(dl, size, scale, bg, scroll, rows.start as f32, n)
+    let width = frame_size(size, scale).0;
+    render_region(
+        dl,
+        scale,
+        bg,
+        scroll,
+        (0.0, rows.start as f32),
+        (width, n),
+        false,
+    )
 }
 
-/// [`render_rows`] desde la fila `start` del cuadro (puede ser negativa), `rows` filas.
-fn render_rows_from(
+/// La región del cuadro en `scroll` que empieza en `start` (px de dispositivo, puede ser
+/// negativa) y mide `pixels`. Con `cull`, los ítems de dibujo cuya caja (conservadora, ver
+/// `display_list::item_bounds`) no toca el pixmap no se pintan: no cambiarían ningún píxel.
+fn render_region(
     dl: &DisplayList,
-    size: Size,
     scale: f32,
     bg: Rgba,
     scroll: (f32, f32),
-    start: f32,
-    rows: u32,
+    start: (f32, f32),
+    pixels: (u32, u32),
+    cull: bool,
 ) -> Pixmap {
-    let width = frame_size(size, scale).0;
-    let height = rows.max(1);
-    let origin = Transform::from_translate(0.0, -start);
+    let width = pixels.0.max(1);
+    let height = pixels.1.max(1);
+    let origin = Transform::from_translate(-start.0, -start.1);
     let mut base = Pixmap::new(width, height).expect("tamaño de pixmap válido");
     base.fill(color(bg));
     let mut canvas = Canvas {
@@ -1545,6 +1556,12 @@ fn render_rows_from(
         height,
     };
     for item in &dl.items {
+        if cull
+            && let Some(b) = crate::display_list::item_bounds(item)
+            && !device_hits(&canvas.ts(), &b, width, height)
+        {
+            continue;
+        }
         match item {
             DisplayItem::Rect { rect, color, radii } => {
                 if let Some(p) = rounded_path(rect, radii) {
@@ -1718,9 +1735,32 @@ fn copy_rows(dst: &mut Pixmap, at: u32, src: &Pixmap, from: std::ops::Range<u32>
 // borde de un tile: tiny-skia corta los bordes de un camino en el borde del pixmap y eso
 // cambia cómo subdivide la curva (medido en `tests/scroll_raster.rs`).
 
-/// Alto de un tile en px de dispositivo.
-pub fn tile_height(scale: f32) -> u32 {
-    (64.0 * scale).ceil().max(16.0) as u32
+/// Tamaño de un tile en px de dispositivo (ancho, alto).
+pub fn tile_size(scale: f32) -> (u32, u32) {
+    (
+        (256.0 * scale).ceil().max(64.0) as u32,
+        (64.0 * scale).ceil().max(16.0) as u32,
+    )
+}
+
+/// ¿La caja `b` (px CSS), con la transformación `ts`, toca el pixmap de `w` × `h`?
+fn device_hits(ts: &Transform, b: &Rect, w: u32, h: u32) -> bool {
+    let mut pts = [
+        tiny_skia::Point::from_xy(b.x, b.y),
+        tiny_skia::Point::from_xy(b.x + b.width, b.y),
+        tiny_skia::Point::from_xy(b.x, b.y + b.height),
+        tiny_skia::Point::from_xy(b.x + b.width, b.y + b.height),
+    ];
+    ts.map_points(&mut pts);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in pts {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    // Un píxel de holgura por el antialiasing.
+    x1 >= -1.0 && y1 >= -1.0 && x0 <= w as f32 + 1.0 && y0 <= h as f32 + 1.0
 }
 
 /// El scroll en px de dispositivo, si es entero (si no, no hay tiles alineados).
@@ -1731,72 +1771,67 @@ fn device_scroll(scroll: (f32, f32), scale: f32) -> Option<(i64, i64)> {
     ((x - xi).abs() <= 1e-3 && (y - yi).abs() <= 1e-3).then_some((xi as i64, yi as i64))
 }
 
-/// Las filas de dispositivo `[r0, r0 + rows)` del cuadro en `scroll` (`r0` puede ser negativo:
-/// por encima del cuadro).
-#[allow(clippy::too_many_arguments)]
-fn render_device_rows(
-    dl: &DisplayList,
-    size: Size,
-    scale: f32,
-    bg: Rgba,
-    scroll: (f32, f32),
-    r0: i64,
-    rows: u32,
-) -> Pixmap {
-    render_rows_from(dl, size, scale, bg, scroll, r0 as f32, rows)
+/// Un rectángulo de px de dispositivo del cuadro: `(x, y, ancho, alto)`.
+type DevBox = (i64, i64, i64, i64);
+
+/// Copia el rectángulo `(sx, sy, w, h)` de `src` en `dst` en `(dx, dy)`.
+fn copy_box(
+    dst: &mut Pixmap,
+    (dx, dy): (u32, u32),
+    src: &Pixmap,
+    (sx, sy, w, h): (u32, u32, u32, u32),
+) {
+    let ds = dst.width() as usize * 4;
+    let ss = src.width() as usize * 4;
+    let n = w as usize * 4;
+    for r in 0..h as usize {
+        let d = (dy as usize + r) * ds + dx as usize * 4;
+        let s = (sy as usize + r) * ss + sx as usize * 4;
+        dst.data_mut()[d..d + n].copy_from_slice(&src.data()[s..s + n]);
+    }
 }
 
-/// Pinta el tile `k` (con `margin` filas de más arriba y abajo, para los desenfoques) y
-/// devuelve el pixmap y la fila del cuadro donde empieza su primera fila útil.
-#[allow(clippy::too_many_arguments)]
-fn render_tile(
-    dl: &DisplayList,
-    size: Size,
-    scale: f32,
-    bg: Rgba,
-    scroll: (f32, f32),
-    s_dev: i64,
-    k: i64,
-    margin: u32,
-) -> Pixmap {
-    let t = i64::from(tile_height(scale));
-    // En coordenadas del cuadro: la página está corrida `-s_dev` filas.
-    let r0 = k * t - s_dev - i64::from(margin);
-    render_device_rows(dl, size, scale, bg, scroll, r0, t as u32 + 2 * margin)
-}
+/// Lo que se pinta de un tile: su índice `(columna, fila)` en la página.
+type Tile = (i64, i64);
 
-/// Pinta los tiles `tiles` (en `threads` hilos) y copia en `out` las filas de cada uno que caen
-/// en `rows` (filas del cuadro).
+/// Pinta los tiles (en `threads` hilos) y copia cada uno, recortado al cuadro, en `out`.
 #[allow(clippy::too_many_arguments)]
 fn paint_tiles(
     out: &mut Pixmap,
     dl: &DisplayList,
-    size: Size,
     scale: f32,
     bg: Rgba,
     scroll: (f32, f32),
-    s_dev: i64,
-    tiles: &[(i64, std::ops::Range<u32>)],
+    s_dev: (i64, i64),
+    tiles: &[Tile],
     margin: u32,
-    threads: usize,
 ) {
-    let t = i64::from(tile_height(scale));
-    let render = |k: i64| render_tile(dl, size, scale, bg, scroll, s_dev, k, margin);
-    let pixmaps: Vec<Pixmap> = if threads <= 1 || tiles.len() <= 1 {
-        tiles.iter().map(|(k, _)| render(*k)).collect()
+    let (tw, th) = tile_size(scale);
+    let (tw, th) = (i64::from(tw), i64::from(th));
+    let m = i64::from(margin);
+    let render = |&(c, r): &Tile| {
+        // En coordenadas del cuadro: la página está corrida `-s_dev`.
+        let x0 = c * tw - s_dev.0 - m;
+        let y0 = r * th - s_dev.1 - m;
+        render_region(
+            dl,
+            scale,
+            bg,
+            scroll,
+            (x0 as f32, y0 as f32),
+            ((tw + 2 * m) as u32, (th + 2 * m) as u32),
+            true,
+        )
+    };
+    let threads = raster_threads_for(tiles.len());
+    let pixmaps: Vec<Pixmap> = if threads <= 1 {
+        tiles.iter().map(render).collect()
     } else {
         let per = tiles.len().div_ceil(threads);
         std::thread::scope(|s| {
             let handles: Vec<_> = tiles
                 .chunks(per)
-                .map(|chunk| {
-                    s.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|(k, _)| render(*k))
-                            .collect::<Vec<Pixmap>>()
-                    })
-                })
+                .map(|chunk| s.spawn(move || chunk.iter().map(render).collect::<Vec<Pixmap>>()))
                 .collect();
             handles
                 .into_iter()
@@ -1804,33 +1839,70 @@ fn paint_tiles(
                 .collect::<Vec<Pixmap>>()
         })
     };
-    for ((k, rows), tile) in tiles.iter().zip(&pixmaps) {
-        // Fila del cuadro donde empieza la parte útil del tile.
-        let start = k * t - s_dev;
-        let from = (rows.start as i64 - start + i64::from(margin)) as u32;
-        copy_rows(out, rows.start, tile, from..from + (rows.end - rows.start));
+    let (fw, fh) = (i64::from(out.width()), i64::from(out.height()));
+    for (&(c, r), tile) in tiles.iter().zip(&pixmaps) {
+        let x0 = c * tw - s_dev.0;
+        let y0 = r * th - s_dev.1;
+        let (ax, ay) = (x0.max(0), y0.max(0));
+        let (bx, by) = ((x0 + tw).min(fw), (y0 + th).min(fh));
+        if ax >= bx || ay >= by {
+            continue;
+        }
+        copy_box(
+            out,
+            (ax as u32, ay as u32),
+            tile,
+            (
+                (ax - x0 + m) as u32,
+                (ay - y0 + m) as u32,
+                (bx - ax) as u32,
+                (by - ay) as u32,
+            ),
+        );
     }
 }
 
-/// Los tiles que tocan las filas `rows` del cuadro, cada uno con la parte de `rows` que cubre.
-fn tiles_for(rows: std::ops::Range<u32>, s_dev: i64, t: i64) -> Vec<(i64, std::ops::Range<u32>)> {
-    if rows.start >= rows.end {
-        return Vec::new();
-    }
-    let first = (s_dev + i64::from(rows.start)).div_euclid(t);
-    let last = (s_dev + i64::from(rows.end) - 1).div_euclid(t);
-    (first..=last)
-        .map(|k| {
-            let a = (k * t - s_dev).max(i64::from(rows.start)) as u32;
-            let b = ((k + 1) * t - s_dev).min(i64::from(rows.end)) as u32;
-            (k, a..b)
-        })
-        .collect()
+thread_local! {
+    /// Los hilos que puede usar el raster en tiles (ver [`set_raster_threads`]).
+    static THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
-/// E4: el cuadro de [`render_scrolled`] pintado en tiles de la página, repartidos en `threads`
-/// hilos. `None` si el scroll no cae en px de dispositivo enteros o la lista no admite tiles
-/// (un `filter`, grupos `fixed`/`sticky` anidados: ver
+/// E4: cuántos hilos usan [`render_tiled`] y [`scroll_frame`] en este hilo (1 por defecto).
+pub fn set_raster_threads(n: usize) {
+    THREADS.with(|t| t.set(n.max(1)));
+}
+
+fn raster_threads_for(tiles: usize) -> usize {
+    THREADS.with(std::cell::Cell::get).min(tiles).max(1)
+}
+
+/// Los tiles que tocan el rectángulo `b` del cuadro.
+fn tiles_for(b: DevBox, s_dev: (i64, i64), tw: i64, th: i64) -> impl Iterator<Item = Tile> {
+    let (x, y, w, h) = b;
+    let (c0, c1) = (
+        (s_dev.0 + x).div_euclid(tw),
+        (s_dev.0 + x + w - 1).div_euclid(tw),
+    );
+    let (r0, r1) = (
+        (s_dev.1 + y).div_euclid(th),
+        (s_dev.1 + y + h - 1).div_euclid(th),
+    );
+    (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| (c, r)))
+}
+
+/// El margen de un tile en px de dispositivo: solo si la lista tiene desenfoques (para que
+/// se vean continuos de un tile al siguiente; los píxeles no dependen del margen).
+fn tile_margin(info: &crate::display_list::ScrollInfo, scale: f32) -> u32 {
+    if info.blur > 0.0 {
+        (info.margin * scale).ceil() as u32
+    } else {
+        0
+    }
+}
+
+/// E4: el cuadro de [`render_scrolled`] pintado en tiles de la página (en los hilos de
+/// [`set_raster_threads`]). `None` si el scroll no cae en px de dispositivo enteros o la lista
+/// no admite tiles (un `filter`, grupos `fixed`/`sticky` anidados: ver
 /// [`crate::display_list::scroll_info`]).
 pub fn render_tiled(
     dl: &DisplayList,
@@ -1838,16 +1910,28 @@ pub fn render_tiled(
     scale: f32,
     bg: Rgba,
     scroll: (f32, f32),
-    threads: usize,
 ) -> Option<Pixmap> {
-    let (_, s_dev) = device_scroll(scroll, scale)?;
+    let s_dev = device_scroll(scroll, scale)?;
     let info = crate::display_list::scroll_info(dl)?;
     let (width, height) = frame_size(size, scale);
-    let margin = (info.margin * scale).ceil() as u32;
-    let tiles = tiles_for(0..height, s_dev, i64::from(tile_height(scale)));
+    let (tw, th) = tile_size(scale);
+    let tiles: Vec<Tile> = tiles_for(
+        (0, 0, i64::from(width), i64::from(height)),
+        s_dev,
+        i64::from(tw),
+        i64::from(th),
+    )
+    .collect();
     let mut out = Pixmap::new(width, height)?;
     paint_tiles(
-        &mut out, dl, size, scale, bg, scroll, s_dev, &tiles, margin, threads,
+        &mut out,
+        dl,
+        scale,
+        bg,
+        scroll,
+        s_dev,
+        &tiles,
+        tile_margin(&info, scale),
     );
     Some(out)
 }
@@ -1858,7 +1942,6 @@ pub fn render_tiled(
 /// donde quedan). Da los mismos píxeles que [`render_tiled`] en `scroll`. `None` si no se puede:
 /// otro tamaño, desplazamiento horizontal o que no cae en px de dispositivo enteros, más de un
 /// cuadro de distancia, o una lista que no admite tiles.
-#[allow(clippy::too_many_arguments)]
 pub fn scroll_frame(
     dl: &DisplayList,
     prev: &Pixmap,
@@ -1867,64 +1950,48 @@ pub fn scroll_frame(
     scale: f32,
     bg: Rgba,
     scroll: (f32, f32),
-    threads: usize,
 ) -> Option<Pixmap> {
     let (width, height) = frame_size(size, scale);
     let (px, py) = device_scroll(prev_scroll, scale)?;
-    let (sx, sy) = device_scroll(scroll, scale)?;
-    if prev.width() != width || prev.height() != height || sx != px {
+    let s_dev = device_scroll(scroll, scale)?;
+    if prev.width() != width || prev.height() != height || s_dev.0 != px {
         return None;
     }
-    let di = sy - py;
-    let h = i64::from(height);
+    let di = s_dev.1 - py;
+    let (w, h) = (i64::from(width), i64::from(height));
     if di.abs() >= h {
         return None;
     }
     let info = crate::display_list::scroll_info(dl)?;
-    let margin = (info.margin * scale).ceil() as u32;
-    // Las filas (del cuadro nuevo) que hay que pintar.
-    let mut dirty: Vec<(i64, i64)> = Vec::new();
+    // Lo que hay que pintar (rectángulos del cuadro nuevo).
+    let mut dirty: Vec<DevBox> = Vec::new();
     if di > 0 {
-        dirty.push((h - di, h));
+        dirty.push((0, h - di, w, di));
     } else if di < 0 {
-        dirty.push((0, -di));
+        dirty.push((0, 0, w, -di));
     }
-    let rows_of = |y0: f32, y1: f32| -> (i64, i64) {
-        (
-            (f64::from(y0) * f64::from(scale)).floor() as i64 - 1,
-            (f64::from(y1) * f64::from(scale)).ceil() as i64 + 1,
-        )
+    let dev = |r: &Rect, dx: f32, dy: f32| -> DevBox {
+        let x0 = (f64::from(r.x + dx) * f64::from(scale)).floor() as i64 - 1;
+        let y0 = (f64::from(r.y + dy) * f64::from(scale)).floor() as i64 - 1;
+        let x1 = (f64::from(r.x + r.width + dx) * f64::from(scale)).ceil() as i64 + 1;
+        let y1 = (f64::from(r.y + r.height + dy) * f64::from(scale)).ceil() as i64 + 1;
+        (x0, y0, x1 - x0, y1 - y0)
     };
     for r in &info.fixed {
         // Quieto en el viewport: donde está y donde dejó la copia corrida del cuadro anterior.
-        let (a, b) = rows_of(r.y, r.y + r.height);
-        dirty.push((a, b));
-        dirty.push((a - di, b - di));
+        let (x, y, bw, bh) = dev(r, 0.0, 0.0);
+        dirty.push((x, y, bw, bh));
+        dirty.push((x, y - di, bw, bh));
     }
     for g in &info.sticky {
         let at = |s: (f32, f32)| {
             let view = Rect::new(s.0, s.1, g.viewport.width, g.viewport.height);
-            let (_, dy) = g.constraints.offset(view);
-            let y = g.rect.y + dy - g.applied.1 - s.1;
-            rows_of(y, y + g.rect.height)
+            let (dx, dy) = g.constraints.offset(view);
+            dev(&g.rect, dx - g.applied.0 - s.0, dy - g.applied.1 - s.1)
         };
-        let (a, b) = at(scroll);
-        dirty.push((a, b));
-        let (a, b) = at(prev_scroll);
-        dirty.push((a - di, b - di));
-    }
-    let mut bands: Vec<(u32, u32)> = dirty
-        .into_iter()
-        .map(|(a, b)| (a.clamp(0, h) as u32, b.clamp(0, h) as u32))
-        .filter(|(a, b)| a < b)
-        .collect();
-    bands.sort_unstable();
-    let mut merged: Vec<(u32, u32)> = Vec::new();
-    for (a, b) in bands {
-        match merged.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => merged.push((a, b)),
-        }
+        dirty.push(at(scroll));
+        let (x, y, bw, bh) = at(prev_scroll);
+        dirty.push((x, y - di, bw, bh));
     }
     let mut out = Pixmap::new(width, height)?;
     let (from, at) = if di >= 0 {
@@ -1933,13 +2000,32 @@ pub fn scroll_frame(
         (0..(h + di) as u32, (-di) as u32)
     };
     copy_rows(&mut out, at, prev, from);
-    let t = i64::from(tile_height(scale));
-    let tiles: Vec<(i64, std::ops::Range<u32>)> = merged
-        .into_iter()
-        .flat_map(|(a, b)| tiles_for(a..b, sy, t))
-        .collect();
+    let (tw, th) = tile_size(scale);
+    let mut tiles: Vec<Tile> = Vec::new();
+    for (x, y, bw, bh) in dirty {
+        // Recortado al cuadro.
+        let (ax, ay) = (x.max(0), y.max(0));
+        let (bx, by) = ((x + bw).min(w), (y + bh).min(h));
+        if ax < bx && ay < by {
+            tiles.extend(tiles_for(
+                (ax, ay, bx - ax, by - ay),
+                s_dev,
+                i64::from(tw),
+                i64::from(th),
+            ));
+        }
+    }
+    tiles.sort_unstable();
+    tiles.dedup();
     paint_tiles(
-        &mut out, dl, size, scale, bg, scroll, sy, &tiles, margin, threads,
+        &mut out,
+        dl,
+        scale,
+        bg,
+        scroll,
+        s_dev,
+        &tiles,
+        tile_margin(&info, scale),
     );
     Some(out)
 }

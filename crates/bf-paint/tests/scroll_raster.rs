@@ -12,7 +12,7 @@ use bf_html::{ParseOptions, parse_document};
 use bf_infra::Url;
 use bf_infra::encoding::Encoding;
 use bf_layout::Size;
-use bf_paint::raster::{render_tiled, scroll_frame};
+use bf_paint::raster::{render_tiled, scroll_frame, set_raster_threads};
 use bf_paint::{PageContext, Pixmap, prepare_page_with_frames, render_scrolled};
 use bf_style::values::color::Rgba;
 
@@ -78,8 +78,10 @@ fn diff(a: &Pixmap, b: &Pixmap) -> Option<String> {
     let w = a.width() as usize;
     let bad: Vec<usize> = a
         .data()
-        .chunks_exact(4)
-        .zip(b.data().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.data().as_chunks::<4>().0)
         .enumerate()
         .filter(|(_, (x, y))| x != y)
         .map(|(i, _)| i)
@@ -94,15 +96,9 @@ fn diff(a: &Pixmap, b: &Pixmap) -> Option<String> {
 }
 
 fn tiled(p: &bf_paint::Page, scale: f32, scroll: (f32, f32), threads: usize) -> Pixmap {
-    render_tiled(
-        &p.display_list,
-        VIEWPORT,
-        scale,
-        Rgba::WHITE,
-        scroll,
-        threads,
-    )
-    .unwrap_or_else(|| panic!("sin raster en tiles en {scroll:?} a escala {scale}"))
+    set_raster_threads(threads);
+    render_tiled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, scroll)
+        .unwrap_or_else(|| panic!("sin raster en tiles en {scroll:?} a escala {scale}"))
 }
 
 #[test]
@@ -111,6 +107,7 @@ fn incremental_scroll_matches_tiled_raster() {
     for scale in [1.0f32, 2.0] {
         let mut scroll = (0.0f32, 0.0f32);
         let mut frame = tiled(&p, scale, scroll, 1);
+        set_raster_threads(3);
         // Hacia abajo y hacia arriba, con pasos de varios tamaños.
         for dy in [
             7.0, 40.0, 23.5, 120.0, 1.0, -33.0, -80.0, 65.0, -12.5, 200.0, -64.0,
@@ -120,7 +117,7 @@ fn incremental_scroll_matches_tiled_raster() {
             // un cuadro así no hay incremental.
             if device_fraction(next.1, scale) {
                 assert!(
-                    render_tiled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next, 1).is_none()
+                    render_tiled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next).is_none()
                 );
                 frame = render_scrolled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next);
                 scroll = next;
@@ -135,7 +132,6 @@ fn incremental_scroll_matches_tiled_raster() {
                 scale,
                 Rgba::WHITE,
                 next,
-                3,
             );
             if device_fraction(scroll.1, scale) || (next.1 - scroll.1).abs() >= VIEWPORT.height {
                 assert!(fast.is_none(), "{scroll:?} → {next:?}");
@@ -231,7 +227,6 @@ fn incremental_scroll_falls_back() {
             scale,
             Rgba::WHITE,
             next,
-            1,
         )
     };
     assert!(
@@ -251,8 +246,7 @@ fn incremental_scroll_falls_back() {
             VIEWPORT,
             1.0,
             Rgba::WHITE,
-            (0.0, 0.0),
-            2
+            (0.0, 0.0)
         )
         .is_none(),
         "un filter"
