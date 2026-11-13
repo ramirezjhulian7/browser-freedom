@@ -457,6 +457,19 @@ impl Agent {
         true
     }
 
+    /// Corre `f` con un ámbito de enraizado abierto ([`crate::heap::Heap::open_rooting`]):
+    /// todo lo que se asigne dentro es raíz hasta que `f` vuelve. Es la forma de escribir el
+    /// código Rust que crea objetos y ejecuta JavaScript antes de enlazarlos (instalar las
+    /// clases de un realm, compilar y llamar a una fábrica): sin él, cada objeto intermedio
+    /// necesita su `host_pin`, y uno olvidado es un `Gc liberado` que solo aparece con el heap
+    /// grande (en un marco, por ejemplo).
+    pub fn rooting_scope<R>(&mut self, f: impl FnOnce(&mut Agent) -> R) -> R {
+        let scope = self.heap.open_rooting();
+        let r = f(self);
+        self.heap.close_rooting(scope);
+        r
+    }
+
     fn trace_roots(&self, t: &mut Tracer) {
         for r in &self.realms {
             r.trace(t);

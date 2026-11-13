@@ -271,12 +271,20 @@ pub fn install(agent: &mut Agent, realm: RealmId, ctx: WebContext) -> WebContext
 }
 
 /// Registra las clases de todas las áreas en `realm` (cada área agrega su línea).
+///
+/// Todo corre dentro de un ámbito de enraizado ([`Agent::rooting_scope`]): los instaladores
+/// crean objetos y después compilan y llaman a sus fábricas de JavaScript, que pueden
+/// recolectar; así lo que crean no se libera antes de quedar enlazado aunque no lo fijen a
+/// mano (los `Gc liberado` de `dataset.rs` y `idb.rs`, que salían al crear marcos con el heap
+/// ya grande).
 pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
-    dom::register(agent, realm, ctx); // E3
-    html::register(agent, realm, ctx); // E1
-    bom::register(agent, realm, ctx); // E4
-    cssom::register(agent, realm, ctx); // E2
-    net::register(agent, realm, ctx); // E2
-    storage::register(agent, realm, ctx); // E2
-    workers::register(agent, realm, ctx); // E3
+    agent.rooting_scope(|agent| {
+        dom::register(agent, realm, ctx); // E3
+        html::register(agent, realm, ctx); // E1
+        bom::register(agent, realm, ctx); // E4
+        cssom::register(agent, realm, ctx); // E2
+        net::register(agent, realm, ctx); // E2
+        storage::register(agent, realm, ctx); // E2
+        workers::register(agent, realm, ctx); // E3
+    });
 }

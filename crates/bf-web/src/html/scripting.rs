@@ -297,4 +297,72 @@ impl ScriptHost for PageHost<'_> {
             *doc = *p;
         }
     }
+
+    /// E3: un `script` SVG que cierra el parser (HTML §13.2.6.5, SVG 2 §15.2): su texto o el
+    /// recurso de su `href`, como script clásico, con el parser en el contexto.
+    fn process_svg_script(&mut self, doc: &mut Parser, script: NodeId) {
+        let (url, text) = match bf_html::svg_script_source(doc.document(), script) {
+            Some(bf_html::SvgScriptSource::Inline(text)) => {
+                (doc.document().url.serialize(false), text)
+            }
+            Some(bf_html::SvgScriptSource::External(href)) => {
+                let base = doc.document().base_url();
+                let Ok(url) = Url::parse(&href, Some(&base)) else {
+                    return;
+                };
+                match self.fetch_script(&url, "utf-8") {
+                    Some(text) => (url.serialize(false), text),
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        let real = std::mem::replace(doc, Parser::new(&ParseOptions::default()));
+        let saved = std::mem::replace(
+            &mut ctx(self.agent, self.realm).documents[0],
+            DocumentOwner::Parser(Box::new(real)),
+        );
+        self.run_classic_script(&text, &url);
+        let back = std::mem::replace(&mut ctx(self.agent, self.realm).documents[0], saved);
+        if let DocumentOwner::Parser(p) = back {
+            *doc = *p;
+        }
+    }
+
+    /// E3: el punto de control de microtasks antes de preparar cada `script` del parser
+    /// (HTML §13.2.6.4.8, paso 1), si la pila de JavaScript está vacía. El parser vuelve al
+    /// contexto mientras corren (un `MutationObserver` puede tocar el documento), como en
+    /// [`Self::execute`].
+    fn microtask_checkpoint(&mut self, doc: &mut Parser) {
+        if !self.agent.frames.is_empty() {
+            return;
+        }
+        let real = std::mem::replace(doc, Parser::new(&ParseOptions::default()));
+        let saved = std::mem::replace(
+            &mut ctx(self.agent, self.realm).documents[0],
+            DocumentOwner::Parser(Box::new(real)),
+        );
+        let saved_realm = self.agent.current_realm;
+        self.agent.current_realm = self.realm;
+        // Los records de lo que insertó el parser: bf-dom los encola, pero la entrega al
+        // `MutationObserver` solo se agenda sola tras una mutación desde script.
+        crate::dom::observer::schedule_delivery(self.agent, 0);
+        let r = match self.agent.perform_microtask_checkpoint() {
+            Err(Throw::Value(e)) => {
+                self.agent.report_exception(&e);
+                Ok(())
+            }
+            r => r,
+        };
+        if let Err(Throw::Terminate(_)) = r
+            && let Some(res) = self.resources()
+        {
+            res.terminated = true;
+        }
+        self.agent.current_realm = saved_realm;
+        let back = std::mem::replace(&mut ctx(self.agent, self.realm).documents[0], saved);
+        if let DocumentOwner::Parser(p) = back {
+            *doc = *p;
+        }
+    }
 }

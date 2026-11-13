@@ -300,13 +300,13 @@ Las causas más frecuentes de los archivos sin estado OK:
   8 documentos). Directorios enteros: `custom-elements/` 3096 / 3710 (83.5 %), `shadow-dom/`
   14617 / 15024 (97.3 %), `domparsing/` 497 / 2083 (23.9 %; sin `tentative/` 468 / 1099,
   42.6 %), `encoding/` sin `legacy-mb-*` 23039 / 23623 (97.5 %).
-- **3 documentos terminan en `CRASH`**: un pánico `Gc liberado` en `crates/bf-js/src/heap.rs`
+- (Resuelto: ver "E3, ronda 6" más abajo.) **3 documentos terminaban en `CRASH`**: un pánico `Gc liberado` en `crates/bf-js/src/heap.rs`
   (`Heap::get` con un `Gc` ya recolectado) en
   `custom-elements/form-associated/ElementInternals-setFormValue.html`,
   `html/webappapis/dynamic-markup-insertion/opening-the-input-stream/ignore-opens-during-unload.window.html`
   y `html/webappapis/scripting/processing-model-2/integration-with-the-javascript-job-queue/promise-job-detached-iframe.html`.
   Los dos últimos usan marcos que se descargan.
-- **`html/syntax/parsing/adoption-agency-reparenting-shadow-cycle.html` no termina**: el
+- (Resuelto: ver "E3, ronda 6" más abajo.) **`html/syntax/parsing/adoption-agency-reparenting-shadow-cycle.html` no terminaba**: el
   límite de 10 s no lo corta. Con todos los directorios en una sola corrida, su hilo siguió más de
   35 min de CPU dentro de `bf_web::bom::frames::sync_frames` → `load_document` → el
   tree builder (`adoption_agency`, `Document::shadow_including_root`), así que
@@ -337,6 +337,57 @@ Las causas más frecuentes de los archivos sin estado OK:
   Faltan además `DataTransfer` (archivos), `HTMLInputElement.labels` y `attachShadow`.
 - `html/semantics/interactive-elements`: `the-dialog-element` (sin `HTMLDialogElement`) es
   casi todo el directorio; en `details` falta la exclusividad por `name`.
+
+## E3, ronda 6: `html/syntax/parsing` y `event-loops` (2026-11-12)
+
+Medido en macOS sobre `army/e3` (`master` `d1148b8` más la ronda 6 de E3) con
+`target/release/wpt-testharness <dir> --threads 3`.
+
+| Directorio | documentos | archivos OK | subtests | pass | % pass |
+|---|---:|---:|---:|---:|---:|
+| `html/syntax/parsing` | 236 | 235 | 8166 | 8150 | 99.8 % |
+| `html/webappapis/scripting/event-loops` | 7 | 7 | 8 | 6 | 75.0 % |
+
+Cambios del runner (`crates/bf-web/src/bin/wpt-testharness.rs`):
+- **Variantes de los `.html`**: cada `<meta name="variant" content="?…">` es un documento con
+  esa query, como en WPT. Antes `html5lib_url.html`, `html5lib_write.html` y
+  `html5lib_write_single.html` corrían sin `?file=…` y daban `bad config` (3 subtests); ahora
+  son 173 documentos y 5423 subtests, que pasan todos. También corren las variantes de otros
+  directorios (`html/dom/elements/…/innertext-with-white-spaces.html`,
+  `html/semantics/forms/textfieldselection/selection-not-application.html`…).
+- **Tests manuales fuera** (`-manual` antes de la extensión): necesitan a una persona; antes
+  terminaban en `TIMEOUT` (`task_microtask_ordering-manual.html`, por ejemplo).
+- **Vigilante**: cada documento corre en su hilo y, si no termina en su límite más 10 s, el
+  runner lo da por `NORESULT` y sigue (el hilo abandonado termina con el proceso). El límite de
+  `run_doc` solo lo comprobaba el motor JS; un bucle en código Rust no lo veía.
+
+Lo que arregló el motor en esta ronda: el ciclo del adoption agency a través de un shadow
+root o del contenido de un template creado por script (el documento que no terminaba), los
+scripts SVG, CR LF partidos entre dos `document.write`, las URL `blob:` en `<iframe>`, el
+`load` del `<iframe>` tras `document.close()`, las excepciones de los scripts de un marco
+reportadas en el marco (antes en la ventana que lo contiene: el harness del documento de test
+terminaba en `ERROR`), el punto de control de microtasks antes de cada script del parser y
+*flush autofocus candidates*.
+
+Comparación con `master` `d1148b8` subtest por subtest en `html/dom`, `html/webappapis`,
+`html/semantics`, `custom-elements`, `shadow-dom`, `dom`, `css/cssom` y `domparsing` (4482
+documentos): **0 regresiones, 3416 subtests ganados**. Los tres `NodeList-static-length-getter-
+tampered-*` (timeout largo) se agotaron una vez con cada binario según la carga de la máquina
+(carga 197).
+
+Quedan en `html/syntax/parsing` (16): custom elements que mueven nodos durante el parseo (5:
+`custom-element-reparenting*`), foster parenting (4), adoption agency entre documentos (4,
+uno `PRECONDITION_FAILED` tentative) y "the end" (`the-end.html`, `pageshow`, 2 `TIMEOUT`;
+`DOMContentLoaded-defer.html`). En `event-loops`:
+`new-scroll-event-dispatched-at-next-updating-rendering-time.html` (media queries y `scroll`
+de un marco con su tamaño) y `raf-from-animation-event-serviced-in-same-rendering-update.html`
+(`element.animate`).
+
+Los tres `CRASH` (`Gc liberado`) de la línea base no se reproducen sobre `master`: E1 fijó
+con `host_pin` los objetos de `html/dataset.rs::register` y `storage/idb.rs::install`, que se
+creaban sin raíz al crear el realm de un marco. Para que el patrón no vuelva,
+`bf_web::register_all` corre dentro de `Agent::rooting_scope` (`bf-js/src/vm/mod.rs`): todo lo
+que se asigna dentro es raíz hasta que termina.
 
 ## Windows: testharness del 2026-11-07 al 2026-11-10 (histórico)
 

@@ -12,58 +12,48 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-12** (`master` `8917a5f`). Cada apartado lleva un bloque **Estado** con lo
-hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las cifras salen de
-[`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
+**Estado al 2026-11-12** (`master` `d1148b8` más la ronda 6 de E3). Cada apartado lleva un
+bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
+cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
 "Estado por bloque", al final); cuando un criterio no se ha medido, se dice. Un criterio
 "cumplido" lo está en la medición citada, no en una corrida completa de la fase. Cada cifra
-dice dónde se midió: **Mac** (línea base en macOS del 2026-11-12, Apple M4) o **Windows** (las
+dice dónde se midió: **Mac** (macOS, Apple M4, desde el 2026-11-12) o **Windows** (las
 mediciones anteriores, con su fecha).
 
 ## Avance por criterios
 
 Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
-está cerrada y no entra en la cuenta (con ella al 100 %, el total sería 60.3 %).
+está cerrada y no entra en la cuenta (con ella al 100 %, el total sería 74.4 %).
 
 | Fase | Criterios | Cumplidos | Sin medir | Avance |
 |---|---:|---:|---:|---:|
-| 2: JavaScript y la plataforma web dinámica | 19 | 9 | 4 | 47.4 % |
-| 3: completar CSS y el texto | 17 | 13 | 3 | 76.5 % |
+| 2: JavaScript y la plataforma web dinámica | 19 | 17 | 0 | 89.5 % |
+| 3: completar CSS y el texto | 17 | 15 | 0 | 88.2 % |
 | 4: red, medios y documentos | 9 | 7 | 1 | 77.8 % |
-| 5: navegador de uso diario | 6 | 0 | 4 | 0.0 % |
-| **Total** (media de las fases) | 51 | 29 | 12 | **50.4 %** |
+| 5: navegador de uso diario | 6 | 1 | 3 | 16.7 % |
+| **Total** (media de las fases) | 51 | 40 | 4 | **68.0 %** |
 
-Criterios no cumplidos, con su cifra actual y su meta:
+Criterios no cumplidos, con su cifra actual y su meta (todas del Mac, 2026-11-12):
 
 | Apartado | Criterio | Cifra actual | Meta |
 |---|---|---|---|
-| 2.2 | WPT `dom/nodes` | 82.9 % (Mac, `master` `5b9a230`; pendiente de actualizar, lo mide E1) | ≥ 85 % |
-| 2.2 | WPT `dom/events` | 72.4 % (Mac, `master` `5b9a230`; pendiente de actualizar, lo mide E1) | ≥ 80 % |
-| 2.2 | `idlharness` de DOM y HTML | sin medir (lo mide E1) | ≥ 80 % de las aserciones |
-| 2.3 | WPT `html/webappapis/scripting/event-loops` | 44.4 % (4 / 9 subtests, Mac, 2026-11-12) | ≥ 70 % |
-| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 2722 / 2742 subtests (99.3 %), 3 documentos en `ERROR` y 1 que no termina (Mac, 2026-11-12) | 0 fallos |
-| 2.3 | Reftests `needs-js` que pasan a ejecutarse | 0 de 8384 (el runner de reftests no ejecuta scripts; Mac, 2026-11-12) | ≥ 60 % |
-| 2.3 | Google, Wikipedia y Hacker News sin pánicos; buscar en Google | sin medir | sin pánicos; la búsqueda funciona |
-| 2.4 | WPT `html/semantics/forms` | 44.9 % (Mac, 2026-11-12) | ≥ 60 % |
-| 2.4 | Buscar en Google desde su caja | sin medir | funciona |
-| 2.4 | Envío POST a un servidor de prueba local (test en `bf-shell`) | sin medir: no hay ese test | el test pasa |
-| 3.3 | WPT `css/css-transitions` | 20.6 % (Mac, 2026-11-12) | ≥ 40 % |
-| 3.3 | Reftests de css-flexbox que fallan por `linear-gradient` | sin medir aparte | pasan |
-| 3.4 | Los ~80 reftests de css-flexbox por `writing-mode`/rtl | sin medir aparte (flexbox entero: 78.7 %, Mac) | ≥ 75 % |
-| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | sin medir aparte | pasan |
-| 4.1 | Peticiones nuevas al recargar Wikipedia | 8 (Windows, 2026-11-10) | ≤ 2 |
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8150 / 8166 subtests (99.8 %), 236 documentos | 0 fallos |
+| 2.3 | Reftests `needs-js` que pasan a ejecutarse | 55.6 % del total y 93.1 % de los no manuales con el runner de E6, que aún no está en `master`; reformulación pendiente de decisión del usuario | ≥ 60 % |
+| 3.3 | Reftests de css-flexbox que fallan por `linear-gradient` | 15 / 16 (el que falla no es por el gradiente) | pasan |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 74 / 108 | pasan |
+| 4.1 | Peticiones nuevas al recargar Wikipedia | 7 validaciones obligatorias (`must-revalidate`) y 0 descargas; reformulación pendiente de decisión del usuario | ≤ 2 |
 | 4.3 | `<textarea>` y list box se desplazan con la rueda | sin test que lo pruebe junto (hay uno de la rueda y otro de `textarea` como scroll container, `bf-layout/tests/scroll.rs`) | test |
 | 5 | WPT `html-aam` y `wai-aria` | sin medir (no están en el checkout de WPT) | ≥ 50 % |
 | 5 | Un lector de pantalla lee Wikipedia | no: no hay árbol de accesibilidad | lo lee |
-| 5 | Un pánico en una página no cierra la ventana | sin medir | no la cierra |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC | no escapa |
 | 5 | 60 fps al desplazar Wikipedia | sin medir | 60 fps |
 | 5 | Primera pintura de Wikipedia en release | sin medir | < 500 ms |
 
 Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
 en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
-Wikipedia y el logo de Hacker News (4.2), todas de E7 en Windows (2026-11-06).
+Wikipedia y el logo de Hacker News (4.2), todas de E7 en Windows (2026-11-06). Los de sitios
+reales de 2.3 y 2.4 (`real_sites.rs`) usan la red y están ignorados por defecto.
 
 ## Punto de partida (fin de la fase 1)
 
@@ -160,20 +150,20 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 - WPT `dom/nodes` ≥ 85%, `dom/events` ≥ 80%, `html/dom` ≥ 60% y `css/cssom` ≥ 50%.
 - `interfaces/*.idl`: el test `idlharness` de DOM y HTML pasa ≥ 80% de las aserciones.
 
-**Estado** (3 de 6 criterios cumplidos):
+**Estado** (6 de 6 criterios cumplidos):
 - **Hecho**: testharness.js corre en el motor (`bf-web/src/html/testharness.rs`, binario
   `wpt-testharness`; criterio cumplido). `html/dom` **97.2 %** (Mac, 2026-11-12; meta ≥ 60 %
-  cumplida; reflexión 99.9 % en Windows); `css/cssom` **81.6 %** (Mac, 2026-11-12; meta
-  ≥ 50 % cumplida). Más allá del apartado (Mac, 2026-11-12): Shadow DOM (`shadow-dom/`
-  97.3 %), custom elements (`custom-elements/` 83.5 %), `XMLSerializer` (E1,
-  `bf-dom/src/{shadow,custom}.rs`, `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
-- **Parcial**: `dom/nodes` **82.9 %** (meta 85 %) y `dom/events` **72.4 %** (meta 80 %), las
-  dos del Mac sobre `master` `5b9a230`, pendientes de actualizar (las mide E1);
-  `domparsing/` 23.9 % (Mac; sin `tentative/` 42.6 %): faltan los métodos posicionales y la
-  API Sanitizer.
-- **Sin medir**: `idlharness` de DOM y HTML (en Windows, 8 archivos terminaban en `ERROR
-  WebIDL2 is not defined`; lo mide E1); re-estilo y re-layout incrementales (no hay cifra).
-  Los bindings se escriben a mano por interfaz, no salen de un generador desde los `.idl`.
+  cumplida); `css/cssom` **81.6 %** (Mac, 2026-11-12; meta ≥ 50 % cumplida). E1, Mac,
+  2026-11-12 (`pendiente/mac/e1.md`): `dom/nodes` **92.8 %** (12060 / 12998; meta ≥ 85 %
+  cumplida), `dom/events` **80.2 %** (734 / 915; meta ≥ 80 % cumplida), `idlharness` de DOM
+  **86.9 %** (2058 / 2369) y de HTML **80.0 %** (5920 / 7398) (meta ≥ 80 % cumplida). Más
+  allá del apartado (Mac, 2026-11-12): Shadow DOM (`shadow-dom/` 97.3 %), custom elements
+  (`custom-elements/` 83.5 %), `XMLSerializer` (E1, `bf-dom/src/{shadow,custom}.rs`,
+  `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
+- **Parcial**: `domparsing/` 23.9 % (Mac; sin `tentative/` 42.6 %): faltan los métodos
+  posicionales y la API Sanitizer.
+- **Sin medir**: re-estilo y re-layout incrementales (no hay cifra). Los bindings se escriben
+  a mano por interfaz, no salen de un generador desde los `.idl`.
 
 ### 2.3 Event loop
 
@@ -200,29 +190,32 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 - Google, Wikipedia y Hacker News con su JavaScript cargan sin pánicos, y el buscador de
   Google funciona escribiendo en la caja y pulsando Intro.
 
-**Estado** (1 de 5 criterios cumplidos):
+**Estado** (3 de 5 criterios cumplidos):
 - **Hecho**: hilo por pestaña con motor JS, scripts del documento, `document.write`, módulos e
   import maps (`bf-web/src/bom/script.rs`), eventos de usuario despachados desde
   `bf-shell/src/window/events.rs`, `fetch()`/XHR con CORS, *mode* y *credentials*
   (`bf-web/src/net/cors.rs`, E2); `fetch()` por partes, streams, IndexedDB, WebSocket y
   EventSource (E2); workers, `SharedWorker`, `MessagePort` y `BroadcastChannel` entre agentes
-  (E3, `bf-web/src/workers/`). `requestAnimationFrame` integrado: el hilo de la pestaña corre
-  los callbacks en cada cuadro (`bf-shell/src/window/worker.rs` → `script.rs::run_animation_frames`,
-  E4, `master` `eb3b0ec`) y el runner de WPT carga marcos. El `TODO(bf-dom)` del tokenizador ya
-  no está.
+  (E3, `bf-web/src/workers/`). `requestAnimationFrame` integrado (E4). E3, ronda 6: el punto
+  de control de microtasks antes de cada script del parser (§13.2.6.4.8), *flush autofocus
+  candidates* en *update the rendering*, los scripts SVG (§13.2.6.5) y el `load` del
+  `<iframe>` tras `document.close()`.
 - **Criterios** (Mac, 2026-11-12): `fetch/api/basic` **89.4 %** (839 / 939; meta ≥ 70 %
-  cumplida; `fetch/api` entero 83.2 %). `html/webappapis/scripting/event-loops` **44.4 %**
-  (4 / 9 subtests en 8 documentos; meta 70 %; `html/webappapis` entero 78.1 %).
-  `html/syntax/parsing` con testharness: 2722 / 2742 subtests (99.3 %) con 17 `FAIL`;
-  `html5lib_url`, `html5lib_write` y `html5lib_write_single` terminan en `ERROR` (`runType`
-  de `undefined`) y `adoption-agency-reparenting-shadow-cycle.html` no termina (queda en
-  `bf_web::bom::frames::sync_frames`): criterio sin cumplir. El árbol de html5lib sin JS sigue
-  en 3900 pasan, 0 fallan.
-- **Falta**: los reftests `needs-js` siguen sin ejecutarse (8384 en la corrida del Mac de
-  `wpt-status.md`): criterio sin cumplir. `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`.
-  Google, Wikipedia y Hacker News sin pánicos: no hay una prueba formal; ver "Hallazgos de
-  pruebas reales". Tres documentos de testharness terminan en pánico (`Gc liberado`,
-  `bf-js/src/heap.rs`), dos de ellos con marcos que se descargan (`wpt-status.md`, notas).
+  cumplida). `html/webappapis/scripting/event-loops` **75.0 %** (6 / 8 subtests en 7
+  documentos, E3 ronda 6; meta ≥ 70 % cumplida; el runner ya no cuenta
+  `task_microtask_ordering-manual.html`, que es manual: con él serían 6 / 9). Google,
+  Wikipedia y Hacker News cargan sin pánicos con su JavaScript y la búsqueda de Google
+  funciona: `crates/bf-shell/tests/real_sites.rs` (E6; criterio cumplido).
+- **Parcial**: `html/syntax/parsing` **8150 / 8166 subtests (99.8 %)** en 236 documentos (E3
+  ronda 6, con las variantes `?file=…` de `html5lib_url`, `html5lib_write` y
+  `html5lib_write_single`, que antes no corrían: todas pasan). Quedan 16: custom elements que
+  mueven nodos durante el parseo (5), foster parenting (4), adoption agency entre documentos
+  (4) y "the end" (3). El árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0
+  fallos.
+- **Falta**: los reftests `needs-js`: el runner de E6 ejecuta el **55.6 %** del total y el
+  **93.1 %** de los no manuales (Mac, 2026-11-12), pero todavía no está en `master`; meta
+  ≥ 60 % del total, con una propuesta de reformulación ("60 % de los no manuales")
+  **pendiente de decisión del usuario**. `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`.
 
 ### 2.4 Interactividad de formularios
 
@@ -236,18 +229,17 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 **Aceptación**: WPT `html/semantics/forms` ≥ 60%. Buscar en Google desde su caja y enviar un
 formulario POST a un servidor de prueba local (test en `bf-shell`).
 
-**Estado** (0 de 3 criterios cumplidos):
-- **Parcial**: `html/semantics/forms` **44.9 %** (Mac, 2026-11-12; meta 60 %; 42.2 % en
-  Windows): la *activation behavior* (envío con `submit`/`formdata`/`invalid`, reset, `label`)
-  está; la mayoría de `form-submission-*` leen el resultado en un `<iframe>` con `target`
-  (`notrun`). Form-associated custom elements,
-  `HTMLFormControlsCollection` y `RadioNodeList` (E1, `bf-web/src/html/forms.rs`); `textarea`
-  y list box con scroll (E12). Envío POST desde la ventana (`LoadContext::post` en
-  `bf-shell/src/load.rs`).
-- **Falta**: `DataTransfer`, `HTMLInputElement.labels`; `TODO(forms)` sigue en
-  `bf-layout/src/controls.rs`. El test POST contra un servidor local en `bf-shell` no existe
-  (el único servidor local de `bf-shell/src/load.rs` prueba Referrer-Policy) y la búsqueda en
-  Google **no consta medida**.
+**Estado** (3 de 3 criterios cumplidos):
+- **Hecho**: `html/semantics/forms` **63.5 %** (3044 / 4791, E1, Mac, 2026-11-12; meta ≥ 60 %
+  cumplida; 44.9 % en la línea base del Mac y 42.2 % en Windows). La *activation behavior*
+  (envío con `submit`/`formdata`/`invalid`, reset, `label`), form-associated custom
+  elements, `HTMLFormControlsCollection` y `RadioNodeList` (E1, `bf-web/src/html/forms.rs`);
+  `textarea` y list box con scroll (E12). Envío POST contra un servidor local:
+  `crates/bf-shell/tests/forms.rs` (`post_urlencoded`, `post_multipart`, E6; criterio
+  cumplido). Buscar en Google escribiendo en la caja y pulsando Intro:
+  `crates/bf-shell/tests/real_sites.rs::google_search` (E6, Mac, 2026-11-12; ignorado por
+  defecto porque usa la red; criterio cumplido).
+- **Falta**: `DataTransfer`; `TODO(forms)` sigue en `bf-layout/src/controls.rs`.
 
 ---
 
@@ -296,22 +288,22 @@ pintura), subgrid dentro de lanes.
 - `css/css-transforms` ≥ 50%, `css/css-transitions` y `css/css-animations` ≥ 40%.
 - Los reftests de css-flexbox que fallan por `linear-gradient` en el fondo de control pasan.
 
-**Estado** (3 de 5 criterios cumplidos):
-- **Hecho**: `css/css-backgrounds` **87.2 %** (Mac, 2026-11-12; meta ≥ 70 % cumplida; el 42 %
-  y el 52 % de antes eran de otro recuento). `box-shadow` y `text-shadow`
+**Estado** (4 de 5 criterios cumplidos):
+- **Hecho**: `css/css-backgrounds` **94.5 %** (581 / 615, E2, Mac, 2026-11-12; meta ≥ 70 %
+  cumplida; el 42 % y el 52 % de antes eran de otro recuento). `box-shadow` y `text-shadow`
   (`bf-style/src/properties/mod.rs`); gradientes (`bf-style/src/properties/gradient.rs`);
-  `border-image` (`bf-paint/src/border_image.rs`, E7: 63 de 67 tests de `border-image*`, Mac);
-  `filter`, `clip-path` con formas básicas y `mix-blend-mode` en cajas HTML
-  (`bf-paint/src/filters.rs`, E7). `transform`, transiciones y animaciones integrados (E4,
-  `master` `eb3b0ec`): `css/css-transforms` **81.5 %** (reftests, Mac; meta ≥ 50 % cumplida),
-  `css/css-animations` **41.9 %** (testharness, Mac; meta ≥ 40 % cumplida). El `TODO(E4)` de
-  `bf-layout/src/positioned.rs` ya no está.
-- **Parcial**: `css/css-transitions` **20.6 %** (Mac, 2026-11-12; meta 40 %): 1950 de los
-  3347 subtests son `timeout` o `notrun`, casi todos de tres archivos
-  `properties-value-*.html` que no terminan dentro del límite (`pendiente/mac/e4.md`).
+  `border-image` (`bf-paint/src/border_image.rs`, E7); `filter`, `clip-path` con formas
+  básicas y `mix-blend-mode` en cajas HTML (`bf-paint/src/filters.rs`, E7). `transform`,
+  transiciones y animaciones (E4): `css/css-transforms` **81.5 %** (reftests, Mac,
+  2026-11-12; meta ≥ 50 % cumplida), `css/css-transitions` **71.6 %** (2397 / 3347) y
+  `css/css-animations` **51.8 %** (687 / 1325) (testharness, E4, Mac, 2026-11-12; metas
+  ≥ 40 % cumplidas). El `TODO(E4)` de `bf-layout/src/positioned.rs` ya no está.
+- **Parcial**: los reftests de css-flexbox con `linear-gradient`: **15 / 16** (Mac,
+  2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos). El que
+  falla, `align-self-016`, no es por el gradiente: un ítem `align-self: start` en un
+  contenedor `column wrap` recibe su ancho fit-content en vez del max-content.
 - **Falta**: `background-attachment: fixed` (`TODO(backgrounds)`, `bf-paint/src/builder.rs`);
-  `transform` 3D (se aplana, sin `perspective`); `url()` en `filter` y `clip-path` de HTML. Los
-  reftests de flexbox con `linear-gradient`: **sin medir aparte**.
+  `transform` 3D (se aplana, sin `perspective`); `url()` en `filter` y `clip-path` de HTML.
 
 ### 3.4 Texto internacional
 
@@ -324,7 +316,7 @@ pintura), subgrid dentro de lanes.
 - WPT `css/css-writing-modes` ≥ 40% y `css/CSS2/bidi-text` ≥ 70%.
 - Los ~80 reftests de css-flexbox que fallan por `writing-mode`/rtl pasan ≥ 75%.
 
-**Estado** (2 de 3 criterios cumplidos):
+**Estado** (3 de 3 criterios cumplidos):
 - **Hecho**: UAX #9 y UAX #14 completos (`bf-layout/src/{bidi,linebreak}.rs`; conformidad UCD
   17.0.0, Windows, E9, 2026-11-10: BidiTest 770241/770241, BidiCharacterTest 91707/91707,
   LineBreakTest 19338/19338);
@@ -334,9 +326,11 @@ pintura), subgrid dentro de lanes.
   (E5, `master` `7469c42`). Mac, 2026-11-12: `css/css-writing-modes` **77.4 %** (854 / 1104;
   meta ≥ 40 % cumplida), `css/CSS2/bidi-text` **79.0 %** (meta ≥ 70 % cumplida),
   `css/css-text` 59.2 %. Flexbox con `direction: rtl` y propiedades lógicas inline (E5).
+- **Hecho después**: los reftests de css-flexbox por `writing-mode`/rtl: **103 / 136
+  (75.7 %)** (Mac, 2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta ≥ 75 %
+  cumplida).
 - **Falta**: `hyphens: auto` con diccionario, propagación de `direction`/`writing-mode` del
-  `<body>` (`pendiente/e9.md`). El criterio de los ~80 reftests de flexbox por
-  `writing-mode`/rtl **no se ha medido aparte** (flexbox entero: 78.7 %, Mac).
+  `<body>` (`pendiente/e9.md`), `sideways-lr` y la baseline en flujos verticales.
 
 ### 3.5 Encodings multibyte
 
@@ -372,11 +366,14 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
   2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
   `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
-- **Parcial**: `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata un URI
-  vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros casos.
+- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **74 / 108** (Mac,
+  2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos). Fallan
+  `flex-wrap: balance` (8), el mínimo automático (8), tamaños intrínsecos de columnas con
+  wrap (5) y otros. `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata
+  un URI vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros
+  casos.
 - **Falta**: `lookupNamespaceURI`/`isDefaultNamespace`, `@namespace` y `ns|E` en selectores,
-  parser XML completo (bloques 2 y 3 de `pendiente/e10.md`). Los ~50 reftests de flexbox por
-  palabras clave: **sin medir aparte**.
+  parser XML completo (bloques 2 y 3 de `pendiente/e10.md`).
 
 ---
 
@@ -405,11 +402,13 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   cumplida; 90.4 % en Windows). Cookies en disco y PSL (`bf-net/src/{cookies,psl}.rs`); el `TODO(http-cache)`
   del shell se quitó (decisión del planificador: `CachedLoader` queda como memoria del
   documento). Además: HSTS, Referrer-Policy, Happy Eyeballs.
-- **Parcial**: recargar `es.wikipedia.org` (Windows, 2026-11-10): 49 entradas, 41 de la caché sin red,
-  6 validadas con 304 y **2 descargas** completas, es decir **8 peticiones** (las que llevan
-  `max-age=0, must-revalidate`, que RFC 9111 obliga a validar). Una de las descargas
-  (`Gadget-ReferenceTooltips.js`, `Vary: Cookie`) se arregló el 2026-11-12; la recarga no se
-  ha vuelto a medir.
+- **Parcial**: recargar `es.wikipedia.org/wiki/Navegador_web` (E6, Mac, 2026-11-12, `F5` con
+  la caché en disco): 41 entradas, 34 de la caché sin red, **7 validadas con 304 y 0
+  descargas**. Las 7 llevan `max-age=0, must-revalidate`, que RFC 9111 obliga a validar, así
+  que el criterio (≤ 2 peticiones) no se puede cumplir sin violar el estándar. Hay una
+  propuesta de reformulación ("no descarga nada; solo valida lo obligatorio") **pendiente de
+  decisión del usuario**; el texto del criterio no cambia hasta entonces (Windows,
+  2026-11-10: 8 peticiones, 2 de ellas descargas).
 - **Integrado** (`4bb212d`, `76d4eca`, ya en `master`): `immutable`,
   `stale-while-revalidate`, 6 conexiones por origen, coalescing h2, errores de red con causa,
   autenticación HTTP y caché de DNS (`pendiente/e6.md`).
@@ -458,8 +457,10 @@ y los list box se desplazan con la rueda.
 - **Parcial**: `<textarea>` y los list box son scroll containers y la rueda mueve el
   contenedor más interno (`bf-layout/tests/scroll.rs`), pero no hay un test de la rueda sobre
   un `<textarea>` o un list box: criterio sin medir.
-- **Falta**: `<picture>`/`srcset`/`sizes` y carga incremental de imágenes; `scroll-behavior:
-  smooth` es instantáneo; `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
+- **Hecho después** (E2, `master` `b2b2f0d`): `srcset`, `sizes` y `<picture>` eligen la imagen
+  con la densidad real de la pantalla (`bf_image::source`), con `currentSrc`.
+- **Falta**: carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
+  `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
 
 ---
 
@@ -487,12 +488,14 @@ y los list box se desplazan con la rueda.
   - Aceptación: 60 fps al desplazar Wikipedia; primera pintura de Wikipedia < 500 ms en
     release.
 
-**Estado** (0 de 6 criterios cumplidos):
-- **Accesibilidad**: falta el árbol y su exposición al sistema; solo la reflexión ARIA en el DOM
-  (`ARIAMixin`, E1) y el zoom de texto (E11). `html-aam` y `wai-aria`: sin medir (no están en
-  el checkout de WPT).
+**Estado** (1 de 6 criterios cumplidos):
+- **Accesibilidad**: falta el árbol y su exposición al sistema (E1 trabaja en ello en la
+  ronda 6); solo la reflexión ARIA en el DOM (`ARIAMixin`, E1) y el zoom de texto (E11).
+  `html-aam` y `wai-aria`: sin medir (no están en el checkout de WPT).
 - **Procesos y sandbox**: falta. Hoy cada pestaña es un hilo del mismo proceso
-  (`bf-shell/src/window/worker.rs`); "un pánico no cierra la ventana" no consta medido.
+  (`bf-shell/src/window/worker.rs`). Un pánico en una pestaña **no cierra la ventana**: la
+  pestaña muestra "Esta página falló" con la URL, el mensaje y "Recargar", y las demás siguen
+  (`window::tests::tab_panic_shows_error_page`, E6, Mac, 2026-11-12; criterio cumplido).
 - **Seguridad**: `Referrer-Policy` (`bf-net/src/referrer.rs`, con la política del documento en
   los subrecursos del shell) y HSTS (`bf-net/src/hsts.rs`) hechos (E6); COOP/COEP y
   `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las

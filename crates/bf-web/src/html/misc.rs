@@ -551,7 +551,99 @@ fn focus_event(agent: &mut Agent, n: NodeRef, type_: &str, related: Option<NodeR
 
 /// "Focusing steps" (§6.6.4), sin el *focus chain* de documentos anidados.
 pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let mut n = this_node(agent, a)?;
+    let n = this_node(agent, a)?;
+    focusing_steps(agent, n);
+    Ok(Value::Undefined)
+}
+
+/// E3: lo que hizo el documento con sus candidatos de autofocus (HTML §6.6.3).
+#[derive(Debug, Default, Clone, Copy)]
+struct Autofocus {
+    /// *Autofocus processed flag*.
+    processed: bool,
+    /// La versión del documento la última vez que se buscaron candidatos: sin cambios, no
+    /// hay candidatos nuevos y no se vuelve a recorrer el árbol.
+    seen_version: Option<u64>,
+}
+
+/// E3: "flush autofocus candidates" (HTML §6.6.3), del paso de *update the rendering* que va
+/// antes de las animaciones y los callbacks de `requestAnimationFrame` (§8.1.7.3). En vez de
+/// la lista de candidatos que llenan los insertion steps, se busca el primer elemento con
+/// `autofocus` en orden de árbol cuando el documento cambió: el primero que el parser inserta
+/// es también el primero en el árbol en un documento que solo crece. Si ya hay algo con el
+/// foco, el documento no lo roba (paso 4) y queda procesado.
+pub fn flush_autofocus_candidates(agent: &mut Agent, realm: bf_js::vm::RealmId) {
+    let Some(ctx) = agent.realm_data::<crate::WebContext>(realm) else {
+        return;
+    };
+    let version = ctx.document().version();
+    let state = agent
+        .realm_data::<Autofocus>(realm)
+        .copied()
+        .unwrap_or_default();
+    if state.processed || state.seen_version == Some(version) {
+        return;
+    }
+    agent.set_realm_data(
+        realm,
+        Autofocus {
+            processed: false,
+            seen_version: Some(version),
+        },
+    );
+    let name = DomString::from("autofocus");
+    let candidates: Vec<bf_dom::NodeId> = with_doc(agent, 0, |d| {
+        d.descendants(d.root())
+            .into_iter()
+            .filter(|&n| d.element(n).is_some() && d.has_attribute(n, &name))
+            .collect()
+    });
+    if candidates.is_empty() {
+        return;
+    }
+    // Paso 5: un candidato que no es una *focusable area* (sin caja: `display: none` en él o
+    // en un ancestro, como un popover cerrado) se salta.
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let styles = crate::cssom::current_styles(agent);
+    let rendered = |agent: &Agent, n: bf_dom::NodeId| {
+        let ancestors = with_doc(agent, 0, |d| d.inclusive_ancestors(n));
+        ancestors.into_iter().all(|a| {
+            with_doc(agent, 0, |d| d.element(a).is_none())
+                || (styles
+                    .get(&(a, None))
+                    .is_some_and(|s| s.display != bf_style::properties::types::Display::None)
+                    && !super::legacy::is_closed_popover(agent, NodeRef::new(0, a)))
+        })
+    };
+    let node = candidates
+        .into_iter()
+        .find(|&n| is_focusable(agent, NodeRef::new(0, n)) && rendered(agent, n));
+    agent.current_realm = saved;
+    let Some(node) = node else {
+        return;
+    };
+    agent.set_realm_data(
+        realm,
+        Autofocus {
+            processed: true,
+            seen_version: Some(version),
+        },
+    );
+    if agent
+        .realm_data::<Focus>(realm)
+        .is_some_and(|f| f.0.is_some())
+    {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    focusing_steps(agent, NodeRef::new(0, node));
+    agent.current_realm = saved;
+}
+
+/// "Focusing steps" (§6.6.4) sobre `n`.
+fn focusing_steps(agent: &mut Agent, mut n: NodeRef) {
     // E1: un shadow host con `delegatesFocus` pasa el foco al primer elemento enfocable de
     // su shadow tree (HTML §6.6.4 "focus delegate"); si el foco ya está dentro, se queda.
     if delegates_focus(agent, n) {
@@ -563,20 +655,20 @@ pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                     d.is_shadow_including_inclusive_ancestor(n.node, c.node)
                 })
         }) {
-            return Ok(Value::Undefined);
+            return;
         }
         match focus_delegate(agent, n) {
             Some(d) => n = d,
-            None => return Ok(Value::Undefined),
+            None => return,
         }
     }
     if !is_focusable(agent, n) {
-        return Ok(Value::Undefined);
+        return;
     }
     let realm = WebContextHandle::current(agent).realm;
     let old = agent.realm_data::<Focus>(realm).and_then(|f| f.0);
     if old == Some(n) {
-        return Ok(Value::Undefined);
+        return;
     }
     if let Some(o) = old {
         focus_event(agent, o, "blur", Some(n));
@@ -585,7 +677,6 @@ pub fn focus(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     agent.set_realm_data(realm, Focus(Some(n)));
     focus_event(agent, n, "focus", old);
     focus_event(agent, n, "focusin", old);
-    Ok(Value::Undefined)
 }
 
 /// E1: ¿Es un shadow host con `delegatesFocus`?

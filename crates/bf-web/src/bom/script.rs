@@ -355,7 +355,15 @@ impl WebScripts<'_> {
             env.failed += 1;
         }
         match t {
-            Throw::Value(v) => self.agent.report_exception(&v),
+            // E3: en el global del script (HTML §8.1.4.6, "report an exception" con el
+            // settings object del script), no en el de quien lo hizo correr: el error de un
+            // script de un marco no es del documento que contiene al marco.
+            Throw::Value(v) => {
+                let saved = self.agent.current_realm;
+                self.agent.current_realm = self.realm;
+                self.agent.report_exception(&v);
+                self.agent.current_realm = saved;
+            }
             Throw::Terminate(reason) => self.console_error(format!("Script terminado: {reason}")),
         }
     }
@@ -697,6 +705,56 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         }
         *doc = take_parser(self.agent, self.realm);
     }
+
+    /// E3: un `script` SVG que cierra el parser (HTML §13.2.6.5, SVG 2 §15.2): su texto o el
+    /// recurso de su `href`, como script clásico, con el parser en el contexto.
+    fn process_svg_script(&mut self, doc: &mut Parser, script: NodeId) {
+        let page = doc.document().url.href();
+        let (source, url) = match bf_html::svg_script_source(doc.document(), script) {
+            Some(bf_html::SvgScriptSource::Inline(text)) => (text, page),
+            Some(bf_html::SvgScriptSource::External(href)) => {
+                let base = doc.document().base_url();
+                let Ok(url) = Url::parse(&href, Some(&base)) else {
+                    return;
+                };
+                match self.fetch(&url, "utf-8") {
+                    Some(f) => (f.source, f.url),
+                    None => {
+                        self.console_error(format!("Failed to load resource: {}", url.href()));
+                        return;
+                    }
+                }
+            }
+            None => return,
+        };
+        let placeholder = Parser::new(&parse_options());
+        let parser = std::mem::replace(doc, placeholder);
+        put_parser(self.agent, self.realm, parser);
+        self.run_classic(&source, &url);
+        *doc = take_parser(self.agent, self.realm);
+    }
+
+    /// E3: el punto de control de microtasks antes de preparar cada `script` del parser
+    /// (HTML §13.2.6.4.8, paso 1), con la pila de JavaScript vacía. El parser vuelve al
+    /// contexto mientras corren, como en [`Self::execute`].
+    fn microtask_checkpoint(&mut self, doc: &mut Parser) {
+        if !self.agent.frames.is_empty() {
+            return;
+        }
+        let placeholder = Parser::new(&parse_options());
+        let parser = std::mem::replace(doc, placeholder);
+        put_parser(self.agent, self.realm, parser);
+        let saved = self.agent.current_realm;
+        self.agent.current_realm = self.realm;
+        // Los records de lo que insertó el parser (bf-dom los encola; la entrega al
+        // `MutationObserver` solo se agenda sola tras una mutación desde script).
+        crate::dom::observer::schedule_delivery(self.agent, 0);
+        if let Err(Throw::Value(e)) = self.agent.perform_microtask_checkpoint() {
+            self.agent.report_exception(&e);
+        }
+        self.agent.current_realm = saved;
+        *doc = take_parser(self.agent, self.realm);
+    }
 }
 
 // --- document.write/writeln/open/close (§8.4) ---
@@ -751,11 +809,23 @@ pub fn document_open(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// `document.close()`.
 pub fn document_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    parser_op(agent, a, |p, host| {
+    use bf_dom::script::DocumentReadiness;
+    let mut completed = false;
+    let r = parser_op(agent, a, |p, host| {
+        let before = p.document().scripts().readiness;
         p.close(host)?;
         p.run_tasks(host);
+        completed = before != DocumentReadiness::Complete
+            && p.document().scripts().readiness == DocumentReadiness::Complete;
         Ok(())
-    })
+    });
+    // E3: el documento de un marco que terminó de cargar con `close()` ("completely finish
+    // loading", HTML §7.4.1.4.6): el `<iframe>` recibe su `load`, como al navegar.
+    if completed {
+        let realm = WebContextHandle::current(agent).realm;
+        super::frames::queue_iframe_load(agent, realm);
+    }
+    r
 }
 
 // --- Eventos de la ventana ---
