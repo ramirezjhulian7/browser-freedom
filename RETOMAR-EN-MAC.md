@@ -136,31 +136,39 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
   - DOM con Shadow DOM y custom elements;
   - fetch, XHR, streams, IndexedDB, workers, Service Workers y Cache API;
   - transiciones, animaciones y `transform`;
-  - del ciclo del Mac: carga de imágenes con sus eventos y `loading=lazy`, CSS Font Loading
-    (`document.fonts`) y el `load` de `<iframe>` que espera a su documento.
-- **Red:** HTTP/2, caché HTTP en disco, HSTS y Referrer-Policy.
+  - del ciclo del Mac: carga de imágenes con sus eventos y `loading=lazy` (también al
+    desplazar la ventana), CSS Font Loading (`document.fonts`), el `load` de `<iframe>` que
+    espera a su documento y `pageshow` tras el `load`.
+- **Accesibilidad:** el motor calcula el rol y el nombre accesible de cada elemento
+  (`html-aam` 93.3 %, `wai-aria` 91.8 %). El árbol todavía no se expone a macOS.
+- **Red y seguridad:** HTTP/2, caché HTTP en disco, HSTS, Referrer-Policy, Content Security
+  Policy y bloqueo de contenido mixto.
+- **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental;
+  Wikipedia se desplaza a 53 fps a densidad 1. `monospace` y `<pre>` salen a 13 px.
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
+- **Empaquetado:** `Freedom.app` firmada ad hoc con su `.dmg`
+  (`sh packaging/macos/build.sh --native`; detalle en `packaging/README.md`).
 - **Runners de WPT:** `wpt-testharness` (testharness.js) y `freedom wpt-reftests-js`
   (reftests con JavaScript). `html/syntax/parsing` está en 99.9 % y `event-loops` en 75 %.
 
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
-fuente en cada apartado. **Avance por criterios: 76.4 %** de las fases 2 a 5 (81.1 % contando
-la fase 1). Lo que falta está en la lista "Criterios no cumplidos" del roadmap.
+fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
+criterios: 80.5 %** de las fases 2 a 5 (84.4 % contando la fase 1). Lo que falta está en la
+lista "Criterios no cumplidos" del roadmap; tres puntos esperan una decisión del usuario
+(roadmap, "Decisiones pendientes del usuario").
 
 ## 8. Ramas en integración
 
-Estas ramas tienen trabajo que `master` todavía no tiene. `git log --oneline master..army/e<n>`
-muestra cuál, y la nota de cada rama dice qué está hecho y qué falta:
+Esta rama tiene trabajo que `master` todavía no tiene. `git log --oneline master..army/e<n>`
+muestra cuál, y la nota de la rama dice qué está hecho y qué falta:
 
 | Rama | Qué trae | Nota (en esa rama) |
 |---|---|---|
-| `army/e4` | Raster en tiles de la página, en paralelo y con desplazamiento incremental; `monospace` con `medium` de 13 px | `docs/pendiente/mac/e4.md`, ronda 7 |
-| `army/e6` | `Freedom.app` firmada ad hoc con su `.dmg` (`packaging/macos/build.sh`), Mixed Content y Content Security Policy | `docs/pendiente/mac/e6.md`, ronda 7 |
-| `army/e1` | Accesibilidad: rol y nombre accesibles (en curso) | `docs/pendiente/mac/e1.md`, ronda 5 |
+| `army/e5` | Tamaños intrínsecos de flex (§9.9.1), porcentajes a través de bloques anónimos, baseline en columnas y `:popover-open`; 3.6 sube a 94 / 107. No entró porque choca con la de E1 en un archivo de tests | `docs/pendiente/mac/e5.md`, "Ciclo de cierre, ronda 1" |
 
-Para leer la nota de una rama sin cambiar de rama:
-`git show army/e6:docs/pendiente/mac/e6.md`.
+Para leer la nota de la rama sin cambiar de rama:
+`git show army/e5:docs/pendiente/mac/e5.md`.
 
 ## 9. Prompt para pegar en Claude Code
 

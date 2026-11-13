@@ -112,8 +112,20 @@ cualquier programa del Mac.
   - **Formularios:** buscar, escribir y enviar.
   - **Lo que se guarda:** historial, marcadores, descargas de archivos y abrir otra vez las
     pestañas de la última vez.
-- **Todavía no:** parte de las funciones de JavaScript que usan los sitios, video y audio
-  (no se reproducen), imágenes AVIF e imprimir. El plan está en
+  - **Seguridad:** las páginas `https` no cargan scripts ni otro contenido activo por `http`
+    (contenido mixto), y se respetan las reglas de Content Security Policy que manda el sitio
+    sobre qué scripts, conexiones y marcos puede usar.
+  - **En macOS:** se instala como `Freedom.app`.
+- **Todavía no:**
+  - parte de las funciones de JavaScript que usan los sitios;
+  - video y audio (no se reproducen);
+  - imágenes AVIF;
+  - imprimir;
+  - lectores de pantalla: Freedom calcula qué es cada elemento y cómo se llama para la
+    accesibilidad, pero todavía no se lo pasa al sistema, así que VoiceOver no puede leer las
+    páginas.
+
+  El plan está en
   [`docs/roadmap.md`](docs/roadmap.md).
 
 ### ¿Algo no funciona?
@@ -151,8 +163,13 @@ Lo que ya está:
   animaciones de CSS.
 - HTTP/2 con caché HTTP en disco, SVG y WebP, y scroll containers con `sticky`.
 
-La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está empezando. Las cifras
-son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
+La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está a medias:
+- el rol y el nombre accesible de cada elemento ya se calculan, pero no se exponen al sistema;
+- CSP y contenido mixto ya se aplican;
+- Wikipedia se desplaza a 53 fps a densidad 1 (meta: 60);
+- faltan los procesos separados con sandbox.
+
+Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
 [`docs/roadmap.md`](docs/roadmap.md) (tabla "Avance por criterios").
 
 ## Estado por subsistema
@@ -175,6 +192,8 @@ Sus recuentos son los de la última corrida con resumen y no se han vuelto a ano
 | APIs web | DOM, Shadow DOM, HTML, CSSOM, Fetch, Encoding | WPT testharness.js | `html/dom` **97.2 %**, `dom/nodes` **92.8 %**, `dom/events` **80.2 %**, `css/cssom` **81.6 %**, `fetch/api/basic` **89.4 %**, `encoding` **97.5 %** | [`docs/roadmap.md`](docs/roadmap.md), 2.2, 2.3 y 3.5 |
 | Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) | `cargo test -p bf-js --test parser_tests` |
 | Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) | [`docs/test262-status.md`](docs/test262-status.md) |
+| Accesibilidad | HTML-AAM, WAI-ARIA 1.2, AccName 1.2 | WPT `html-aam`, `wai-aria` | **93.3 %** (829 / 889) y **91.8 %** (540 / 588); el árbol no se expone al sistema | `docs/pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
+| Seguridad | CSP 3, Mixed Content 2 | WPT `content-security-policy`, `mixed-content` | **173 / 1782** subtests; casi todos los demás necesitan cabeceras o subdominios de `wptserve` | `docs/pendiente/mac/e6.md`, "Ciclo de cierre, ronda 1" |
 | Motor JavaScript | ECMA-262 2026 | test262 (ejecución) | `language/` **99.95 %**, `built-ins/` **99.99 %**; total **98.8 %** (50 594 / 51 220) | [`docs/test262-status.md`](docs/test262-status.md); `built-ins/` en [`docs/roadmap.md`](docs/roadmap.md), 2.1 |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
