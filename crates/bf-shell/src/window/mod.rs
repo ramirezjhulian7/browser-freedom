@@ -23,6 +23,7 @@ mod downloadbar;
 mod edit;
 mod events;
 mod findbar;
+mod form;
 mod hit;
 mod icons;
 pub(crate) mod keys;
@@ -184,7 +185,16 @@ struct TabState {
     focus: Option<Focus>,
     selection: Option<Selection>,
     text_index: RefCell<Option<(u64, Rc<TextIndex>)>>,
+    pending_values: PendingValues,
 }
+
+/// Los valores que la ventana escribió en los campos y que el hilo del documento quizá no
+/// reflejó todavía: por campo, el valor de partida y los que se le mandaron en orden.
+///
+/// Un cuadro de los scripts puede llegar con el documento de antes de esas ediciones (el
+/// hilo lo maquetó mientras el usuario seguía escribiendo); sin esto, el campo volvería a un
+/// valor viejo y lo que se escribiera después partiría de él.
+type PendingValues = HashMap<NodeId, (Editable, Vec<String>)>;
 
 struct App {
     net: Arc<NetLoader>,
@@ -197,6 +207,8 @@ struct App {
     selection: Option<Selection>,
     /// Los fragmentos de texto de la página, armados al primer uso tras cada maquetado.
     text_index: RefCell<Option<(u64, Rc<TextIndex>)>>,
+    /// Ediciones de campos en camino al hilo del documento ([`PendingValues`]).
+    pending_values: PendingValues,
     /// Arrastre en curso con el botón izquierdo.
     drag: Option<Drag>,
     /// E12: el elemento del último clic en la página; el teclado desplaza su scroll container.
@@ -479,6 +491,89 @@ fn form_of(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
     None
 }
 
+/// Un cuadro de los scripts con las ediciones que el hilo todavía no vio ([`PendingValues`]).
+///
+/// Si el campo del cuadro tiene uno de los valores mandados, el hilo ya procesó hasta ese:
+/// se olvidan los anteriores y, si quedan más nuevos, el cuadro muestra el último. Si tiene
+/// otro valor, lo cambió un script: gana el script y se olvidan las ediciones del campo.
+fn keep_pending_values(pending: &mut PendingValues, loaded: Arc<Loaded>) -> Arc<Loaded> {
+    let mut overlay = Vec::new();
+    pending.retain(|&node, (kind, values)| {
+        let shown = edit::value(&loaded.doc, node, *kind);
+        let Some(i) = values.iter().rposition(|v| *v == shown) else {
+            return false;
+        };
+        values.drain(..i);
+        if values.len() <= 1 {
+            return false;
+        }
+        overlay.push((node, *kind, values[values.len() - 1].clone()));
+        true
+    });
+    if overlay.is_empty() {
+        return loaded;
+    }
+    let mut l: Loaded = (*loaded).clone();
+    for (node, kind, value) in overlay {
+        edit::set_value(&mut l.doc, node, kind, &value);
+    }
+    Arc::new(l)
+}
+
+/// ¿`n` es un botón de envío (*submit button*, HTML §4.10.2)? `<button>` sin `type` o con un
+/// valor desconocido también lo es (§4.10.6: el estado por defecto es *Submit Button*).
+fn is_submit_button(doc: &bf_dom::Document, n: NodeId) -> bool {
+    let Some(el) = doc.element(n).filter(|e| e.ns == bf_infra::Namespace::Html) else {
+        return false;
+    };
+    let ty = el.attr("type").unwrap_or("").trim().to_ascii_lowercase();
+    match el.name.as_str().unwrap_or("") {
+        "input" => matches!(ty.as_str(), "submit" | "image"),
+        "button" => !matches!(ty.as_str(), "reset" | "button"),
+        _ => false,
+    }
+}
+
+/// El botón por defecto de `form` (HTML §4.10.21.2): el primer botón de envío en orden del
+/// árbol cuyo formulario dueño es `form` (por anidamiento o por el atributo `form`).
+fn default_button(doc: &bf_dom::Document, form: NodeId) -> Option<NodeId> {
+    doc.inclusive_descendants(doc.root())
+        .into_iter()
+        .find(|&n| is_submit_button(doc, n) && form_of(doc, n) == Some(form))
+}
+
+/// Los campos de `form` que bloquean el envío implícito (HTML §4.10.21.2): los `<input>` de
+/// texto, búsqueda, URL, teléfono, correo, contraseña, fecha y hora, y número.
+fn fields_blocking_implicit_submission(doc: &bf_dom::Document, form: NodeId) -> usize {
+    doc.inclusive_descendants(doc.root())
+        .into_iter()
+        .filter(|&n| {
+            doc.element(n).is_some_and(|e| {
+                e.is_html("input")
+                    && matches!(
+                        e.attr("type")
+                            .unwrap_or("text")
+                            .trim()
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "" | "text"
+                            | "search"
+                            | "url"
+                            | "tel"
+                            | "email"
+                            | "password"
+                            | "date"
+                            | "month"
+                            | "week"
+                            | "time"
+                            | "datetime-local"
+                            | "number"
+                    )
+            }) && form_of(doc, n) == Some(form)
+        })
+        .count()
+}
+
 /// El botón de envío que contiene a `node`, si lo hay.
 fn submit_button_at(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
     let mut cur = Some(node);
@@ -499,8 +594,8 @@ fn submit_button_at(doc: &bf_dom::Document, node: NodeId) -> Option<NodeId> {
     None
 }
 
-/// La navegación de un envío de formulario (HTML §4.10.21.3, GET y POST `urlencoded`): la URL
-/// y, para POST, el cuerpo con su `Content-Type`.
+/// La navegación de un envío de formulario (HTML §4.10.21.3): la URL y, para POST, el cuerpo
+/// con su `Content-Type` (`urlencoded`, `multipart/form-data` o `text/plain`, [`form`]).
 fn form_submission(
     doc: &bf_dom::Document,
     base: &Url,
@@ -523,27 +618,22 @@ fn form_submission(
         .and_then(|a| Url::parse(a.trim(), Some(base)).ok())
         .unwrap_or_else(|| url.clone());
     let data = form_data(doc, form, submitter);
-    let query = bf_url::form::serialize(&data);
     if method == "post" {
-        let body = (
-            query.into_bytes(),
-            "application/x-www-form-urlencoded".to_owned(),
-        );
-        (action, Some(body))
+        // "Submit as entity body" con el `enctype` (o `formenctype` del botón).
+        let enctype = form::Enctype::parse(attr("enctype").as_deref());
+        (action, Some(form::body(&data, enctype)))
     } else {
+        // "Mutate action URL": siempre `urlencoded`.
         let mut target = action;
-        target.query = Some(query);
+        target.query = Some(form::urlencoded(&data));
         target.fragment = None;
         (target, None)
     }
 }
 
-/// El conjunto de datos de un formulario (HTML §4.10.21.4, sin archivos).
-fn form_data(
-    doc: &bf_dom::Document,
-    form: NodeId,
-    submitter: Option<NodeId>,
-) -> Vec<(String, String)> {
+/// El conjunto de datos de un formulario (HTML §4.10.21.4; un `<input type=file>` va como
+/// archivo vacío, porque todavía no se eligen archivos).
+fn form_data(doc: &bf_dom::Document, form: NodeId, submitter: Option<NodeId>) -> Vec<form::Entry> {
     let mut out = Vec::new();
     for n in doc.inclusive_descendants(form) {
         let Some(el) = doc.element(n) else { continue };
@@ -553,7 +643,7 @@ fn form_data(
         let Some(name) = el.attr("name").filter(|s| !s.is_empty()) else {
             continue;
         };
-        let pair = |v: &str| (name.to_owned(), v.to_owned());
+        let pair = |v: &str| form::Entry::text(name, v);
         match el.name.as_str().unwrap_or("") {
             "input" => {
                 let ty = el.attr("type").unwrap_or("").to_ascii_lowercase();
@@ -568,7 +658,12 @@ fn form_data(
                             out.push(pair(el.attr("value").unwrap_or("")));
                         }
                     }
-                    "file" => {}
+                    "file" => out.push(form::Entry {
+                        name: name.to_owned(),
+                        value: form::Value::EmptyFile,
+                    }),
+                    // `_charset_` oculto: el nombre de la codificación (§4.10.21.4).
+                    "hidden" if name.eq_ignore_ascii_case("_charset_") => out.push(pair("UTF-8")),
                     _ => out.push(pair(el.attr("value").unwrap_or(""))),
                 }
             }
@@ -701,6 +796,7 @@ impl App {
             tabs: vec![None],
             active: 0,
             focus: None,
+            pending_values: PendingValues::new(),
             selection: None,
             text_index: RefCell::new(None),
             drag: None,
@@ -863,6 +959,7 @@ impl App {
         swap(&mut self.focus, &mut t.focus);
         swap(&mut self.selection, &mut t.selection);
         swap(&mut self.text_index, &mut t.text_index);
+        swap(&mut self.pending_values, &mut t.pending_values);
     }
 
     /// Ejecuta `f` con la pestaña `i` como activa (sin cambiar la pestaña visible).
@@ -1197,9 +1294,15 @@ impl App {
         let Some(cur) = &self.current else {
             return;
         };
+        let before = edit::value(&cur.doc, node, kind);
         let mut l: Loaded = (**cur).clone();
         edit::set_value(&mut l.doc, node, kind, &text);
         self.current = Some(Arc::new(l));
+        self.pending_values
+            .entry(node)
+            .or_insert_with(|| (kind, vec![before]))
+            .1
+            .push(text.clone());
         // El documento (con sus scripts) recibe el valor nuevo y el evento `input`.
         self.send_input(events::UserInput::SetValue {
             node,
@@ -1989,7 +2092,8 @@ impl App {
         if self.loading.is_some() || self.current.is_none() {
             return;
         }
-        self.current = Some(done.loaded);
+        let loaded = keep_pending_values(&mut self.pending_values, done.loaded);
+        self.current = Some(loaded);
         self.page = Some(done.page);
         self.page_generation += 1;
         self.selection = None;
@@ -2388,6 +2492,8 @@ impl App {
             crate::history::global().arrived(&url.href(), &shown, crate::profile::now(), how);
         }
         self.current = Some(loaded);
+        // Un documento nuevo: las ediciones pendientes eran del anterior.
+        self.pending_values.clear();
         self.page = Some(page);
         self.page_generation += 1;
         self.anim_epoch = Some(Instant::now());
@@ -4400,6 +4506,9 @@ impl App {
                     None => return Err(bad()),
                 }
                 self.modifiers = ModifiersState::empty();
+                // Como `click`: la tecla pudo ir al documento (Intro envía un formulario) y
+                // su respuesta llega desde el hilo de la pestaña.
+                self.settle_input();
             }
             _ => return Err(bad()),
         }
@@ -4576,6 +4685,76 @@ mod tests {
         assert!(text(&app).contains("de nuevo"));
         app.activate_tab(0);
         assert!(text(&app).contains("sigo viva"));
+    }
+
+    fn page(html: &str) -> Arc<Loaded> {
+        let url = Url::parse("https://example.test/", None).unwrap();
+        Arc::new(Loaded::generated(
+            &url,
+            html,
+            Arc::new(NetLoader::new()),
+            crate::load::Meta::default(),
+        ))
+    }
+
+    fn by_name(doc: &bf_dom::Document, name: &str) -> NodeId {
+        doc.inclusive_descendants(doc.root())
+            .into_iter()
+            .find(|&n| doc.element(n).is_some_and(|e| e.attr("name") == Some(name)))
+            .unwrap()
+    }
+
+    /// Un cuadro de los scripts que llega con un valor viejo del campo no deshace lo que el
+    /// usuario siguió escribiendo; uno al día lo libera; uno con otro valor (un script) gana.
+    #[test]
+    fn stale_script_frames_keep_typed_values() {
+        let base = page("<textarea name=t></textarea>");
+        let t = by_name(&base.doc, "t");
+        let with = |v: &str| {
+            let mut l = (*base).clone();
+            edit::set_value(&mut l.doc, t, Editable::TextArea, v);
+            Arc::new(l)
+        };
+        let value = |l: &Arc<Loaded>| edit::value(&l.doc, t, Editable::TextArea);
+        let mut pending = PendingValues::new();
+        pending.insert(
+            t,
+            (
+                Editable::TextArea,
+                vec![String::new(), "u".into(), "un".into(), "uno".into()],
+            ),
+        );
+        // El hilo solo vio la primera edición (o ninguna): se muestra la última.
+        assert_eq!(value(&keep_pending_values(&mut pending, with(""))), "uno");
+        assert_eq!(value(&keep_pending_values(&mut pending, with("u"))), "uno");
+        assert_eq!(pending[&t].1, ["u", "un", "uno"]);
+        // Ya vio todas: nada pendiente.
+        assert_eq!(
+            value(&keep_pending_values(&mut pending, with("uno"))),
+            "uno"
+        );
+        assert!(pending.is_empty());
+        // Un script cambió el valor: gana el script.
+        pending.insert(t, (Editable::TextArea, vec![String::new(), "a".into()]));
+        assert_eq!(value(&keep_pending_values(&mut pending, with("A!"))), "A!");
+        assert!(pending.is_empty());
+    }
+
+    /// HTML §4.10.21.2: el botón por defecto es el primer botón de envío del formulario (por
+    /// anidamiento o por `form=`), y los campos de texto bloquean el envío sin botón.
+    #[test]
+    fn default_button_and_blocking_fields() {
+        let l = page(
+            "<form id=f><input name=a><input name=b type=email><input type=checkbox name=c>\
+             <button type=button name=no>x</button><button name=si>y</button></form>\
+             <form id=g><input name=d></form><input type=submit name=fuera form=g>",
+        );
+        let doc = &l.doc;
+        let form = |id: &str| doc.get_element_by_id(&id.into()).unwrap();
+        assert_eq!(default_button(doc, form("f")), Some(by_name(doc, "si")));
+        assert_eq!(default_button(doc, form("g")), Some(by_name(doc, "fuera")));
+        assert_eq!(fields_blocking_implicit_submission(doc, form("f")), 2);
+        assert_eq!(fields_blocking_implicit_submission(doc, form("g")), 1);
     }
 
     #[test]

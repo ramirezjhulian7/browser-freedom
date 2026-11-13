@@ -702,12 +702,16 @@ impl Fetcher {
                 CacheUse::Revalidated => "caché validada (304)",
                 CacheUse::Unavailable => "caché vacía (504)",
             };
+            // Con `Cache-Control` y `Age`: qué obliga a validar en la próxima carga.
+            let header = |name: &str| r.headers.get(name).unwrap_or("-").to_owned();
             eprintln!(
-                "red: {} {} {} {} [{how}]",
+                "red: {} {} {} {} [{how}] cache-control={:?} age={}",
                 entry.method,
                 entry.url,
                 entry.status,
-                entry.protocol.name()
+                entry.protocol.name(),
+                header("cache-control"),
+                header("age")
             );
         }
         self.log
