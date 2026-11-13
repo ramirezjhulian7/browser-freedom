@@ -207,6 +207,67 @@ fn clip_radii(f: &Fragment, clip: &Rect) -> Radii {
     )
 }
 
+/// E2: el tamaño de una capa de fondo (CSS Backgrounds 3 §3.9, `background-size`) con las
+/// dimensiones naturales de la imagen (ancho, alto, proporción; cualquiera puede faltar) y el
+/// área de posicionamiento `area`. Con `auto` en los dos ejes es el *default sizing* de CSS
+/// Images 3 §5.3.2 con `area` como tamaño de objeto por defecto; con un solo eje dado, el otro
+/// sale de la proporción, si no del tamaño natural de ese eje y si no del área (§5.3.3).
+/// `cover` y `contain` sin proporción dan el área.
+fn background_tile_size(
+    natural: (Option<f32>, Option<f32>, Option<f32>),
+    size: &BgSize,
+    area: (f32, f32),
+) -> (f32, f32) {
+    let (pw, ph) = area;
+    let valid = |v: f32| v.is_finite() && v >= 0.0;
+    let (nw, nh) = (
+        natural.0.filter(|v| valid(*v)),
+        natural.1.filter(|v| valid(*v)),
+    );
+    let ratio = natural
+        .2
+        .or(match (nw, nh) {
+            (Some(w), Some(h)) if h > 0.0 => Some(w / h),
+            _ => None,
+        })
+        .filter(|r| *r > 0.0 && r.is_finite());
+    match size {
+        BgSize::Cover | BgSize::Contain => {
+            let Some(r) = ratio else {
+                return (pw, ph);
+            };
+            // El rectángulo de proporción `r` más pequeño que cubre el área, o el más grande
+            // que cabe en ella.
+            let wide = pw / ph.max(f32::EPSILON) > r;
+            if wide == matches!(size, BgSize::Cover) {
+                (pw, pw / r)
+            } else {
+                (ph * r, ph)
+            }
+        }
+        BgSize::Explicit(sw, sh) => {
+            let w = sw.as_ref().map(|l| l.resolve(pw));
+            let h = sh.as_ref().map(|l| l.resolve(ph));
+            match (w, h) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, ratio.map_or(nh.unwrap_or(ph), |r| w / r)),
+                (None, Some(h)) => (ratio.map_or(nw.unwrap_or(pw), |r| h * r), h),
+                (None, None) => match (nw, nh, ratio) {
+                    (Some(w), Some(h), _) => (w, h),
+                    (Some(w), None, Some(r)) => (w, w / r),
+                    (None, Some(h), Some(r)) => (h * r, h),
+                    (Some(w), None, None) => (w, ph),
+                    (None, Some(h), None) => (pw, h),
+                    (None, None, Some(r)) => {
+                        background_tile_size((None, None, Some(r)), &BgSize::Contain, area)
+                    }
+                    (None, None, None) => (pw, ph),
+                },
+            }
+        }
+    }
+}
+
 /// E12: el tamaño concreto del objeto de un reemplazado (CSS Images 3 §5.5) con sus
 /// dimensiones naturales (ancho, alto, proporción) en un content box `area`.
 fn object_size(
@@ -838,39 +899,14 @@ impl<'a> Builder<'a> {
             }
             let size = &s.background_size.0[pick(&s.background_size.0, i)];
             let (pw, ph) = (positioning.width, positioning.height);
-            // E7: los SVG completan su tamaño natural contra el área de posicionamiento.
+            // Dimensiones naturales (ancho, alto, proporción), cada una opcional: un SVG puede no
+            // tener ninguna; un gradiente no tiene ninguna (CSS Images 3 §3).
             let natural = match &source {
-                Source::Image(url) => self.images.natural_size(url, (pw, ph)),
+                Source::Image(url) => self.images.natural_dimensions(url),
                 Source::Gradient(_) => None,
-            };
-            // Sin tamaño natural (gradientes): el área de posicionamiento (§3.9).
-            let (iw, ih) = natural.unwrap_or((pw, ph));
-            let (mut w, mut h) = match size {
-                BgSize::Cover | BgSize::Contain if natural.is_none() => (pw, ph),
-                BgSize::Explicit(sw, sh) if natural.is_none() => (
-                    sw.as_ref().map_or(pw, |l| l.resolve(pw)),
-                    sh.as_ref().map_or(ph, |l| l.resolve(ph)),
-                ),
-                BgSize::Cover | BgSize::Contain => {
-                    let (sx, sy) = (pw / iw, ph / ih);
-                    let k = if matches!(size, BgSize::Cover) {
-                        sx.max(sy)
-                    } else {
-                        sx.min(sy)
-                    };
-                    (iw * k, ih * k)
-                }
-                BgSize::Explicit(sw, sh) => {
-                    let w = sw.as_ref().map(|l| l.resolve(pw));
-                    let h = sh.as_ref().map(|l| l.resolve(ph));
-                    match (w, h) {
-                        (Some(w), Some(h)) => (w, h),
-                        (Some(w), None) => (w, if iw > 0.0 { w * ih / iw } else { ih }),
-                        (None, Some(h)) => (if ih > 0.0 { h * iw / ih } else { iw }, h),
-                        (None, None) => (iw, ih),
-                    }
-                }
-            };
+            }
+            .unwrap_or((None, None, None));
+            let (mut w, mut h) = background_tile_size(natural, size, (pw, ph));
             let (rx, ry) = s.background_repeat.0[pick(&s.background_repeat.0, i)];
             // `round` (§3.5): se ajusta el tamaño para que entre un número entero de tiles.
             let round = |len: f32, t: f32| {
@@ -2105,9 +2141,16 @@ pub fn build_display_list_with_frames(
     let has_background = |s: &ComputedStyle| {
         background(s).a > 0.0 || s.background_image.0.iter().any(|i| *i != Image::None)
     };
+    // E2: con contención de layout, pintura o tamaño en la raíz o en el `body`, el fondo del
+    // `body` no se propaga (CSS Contain 2 §3: esas contenciones cortan la propagación especial
+    // de `html`/`body`; WPT `background-color-body-propagation-008`/`009`).
+    let contained = |f: &Fragment| {
+        let c = &f.style.contain;
+        c.layout || c.paint || c.size || c.inline_size
+    };
     let (canvas, source) = if has_background(&root.style) || !root_is_html {
         (background(&root.style), Some(root))
-    } else if let Some(body) = body {
+    } else if let Some(body) = body.filter(|b| !contained(root) && !contained(b)) {
         (background(&body.style), Some(body))
     } else {
         (Rgba::TRANSPARENT, None)
@@ -2133,9 +2176,12 @@ pub fn build_display_list_with_frames(
             radii: Radii::default(),
         });
     }
-    // Las imágenes del fondo propagado cubren el canvas, posicionadas respecto del elemento.
+    // Las imágenes del fondo propagado cubren el canvas, posicionadas respecto del elemento
+    // raíz aunque vengan del `body` (CSS Backgrounds 3 §2.11.2: "as if they were painted for
+    // that element alone", con los valores del `body` usados en la raíz).
     if let Some(src) = source {
-        builder.background_images(src, Some(extent), &Vec::new());
+        let style = src.style.clone();
+        builder.image_layers(root, &style, Some(extent), &Vec::new());
     }
     builder.stacking_context(root, &Vec::new());
     builder.set_clip(&Vec::new());

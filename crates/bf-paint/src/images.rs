@@ -325,6 +325,18 @@ impl PageImages {
         })
     }
 
+    /// Las dimensiones naturales de la imagen de `url` (CSS Images 3 §5.1): ancho, alto y
+    /// proporción, cada una opcional (un SVG puede no tener ninguna; un bitmap las tiene todas).
+    pub fn natural_dimensions(&self, url: &str) -> Option<(Option<f32>, Option<f32>, Option<f32>)> {
+        if let Some(svg) = self.svgs.get(url) {
+            let i = svg.intrinsic();
+            return Some((i.width, i.height, i.ratio));
+        }
+        let p = self.by_url.get(url)?;
+        let (w, h) = (p.width() as f32, p.height() as f32);
+        Some((Some(w), Some(h), Some(w / h)))
+    }
+
     /// El fotograma de `url` visible `t` después de empezar su animación (la imagen fija si
     /// no está animada).
     pub fn frame_at(&self, url: &str, t: Duration) -> Option<Arc<Pixmap>> {

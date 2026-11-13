@@ -21,8 +21,11 @@ use crate::effects::{GradientSampler, resolve_gradient, to_u8};
 use crate::images::PageImages;
 
 /// La imagen fuente ya rasterizada y su tamaño en las unidades de los cortes numéricos (§6.3:
-/// px de un bitmap o coordenadas de una imagen vectorial, las de su `viewBox` si lo tiene). Un
-/// `<gradient>` no tiene tamaño natural: toma el del área (§6.2, *default sizing*).
+/// px de un bitmap o coordenadas de una imagen vectorial). Un SVG se usa a su tamaño concreto
+/// (*default sizing* contra el área, CSS Images 3 §5.3.2) y sus coordenadas son px de ese
+/// tamaño, no unidades del `viewBox`: con un `viewBox` de 100 en un área de 200, `40` es el 20 %
+/// (como los navegadores; WPT `border-image-image-type-001`). Un `<gradient>` no tiene tamaño
+/// natural: toma el del área (§6.2).
 fn source(
     f: &Fragment,
     images: &PageImages,
@@ -37,12 +40,6 @@ fn source(
                 return None;
             }
             let image = images.image_at(u, w, h, Some(fonts))?;
-            let (w, h) = images
-                .svgs
-                .get(u.as_str())
-                .and_then(|s| s.view_box_size())
-                .filter(|&(vw, vh)| vw > 0.0 && vh > 0.0)
-                .unwrap_or((w, h));
             Some((image, w, h))
         }
         Image::Gradient(g) => {
