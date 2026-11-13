@@ -985,7 +985,21 @@ impl<'a> Layout<'a> {
             return Some((w, w));
         }
         let (min, max) = self.table_content_range(t);
-        let min = (min + bp).max(caption_min);
+        // E5: el `min-width` fijo de la tabla también es un mínimo de sus anchos intrínsecos
+        // (CSS Tables 3 §3.9.2, "used min-width of a table": el mayor de `min-width`, CAPMIN y
+        // GRIDMIN; WPT `css-flexbox/table-as-item-fixed-min-width-2`).
+        let min_width = match &s.min_width {
+            Size::LengthPercentage(lp) if !lp.has_percentage() => {
+                let w = lp.resolve(0.0);
+                if s.box_sizing == BoxSizing::BorderBox {
+                    w
+                } else {
+                    w + bp
+                }
+            }
+            _ => 0.0,
+        };
+        let min = (min + bp).max(caption_min).max(min_width);
         let max = (max + bp).max(min);
         Some(match spec {
             Some(w) => (w.max(min), w.max(min)),

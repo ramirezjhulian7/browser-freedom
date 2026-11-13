@@ -4,7 +4,8 @@
 //!   `designMode`, `execCommand` y los `queryCommand*` (sin editor: no hay comandos
 //!   habilitados), y `clear()`/`captureEvents()`/`releaseEvents()`, que no hacen nada.
 //! - `HTMLElement`: el atributo `popover` y `showPopover()`/`hidePopover()`/`togglePopover()`
-//!   (§6.12, sin capa superior: el estado abierto se lleva por elemento),
+//!   (§6.12, sin capa superior: la *popover visibility state* la guarda el DOM, ver
+//!   `bf_dom::Document::set_popover_showing`, y la usa `:popover-open`),
 //!   `autocapitalize`/`autocorrect` (§6.8.6-7), `writingSuggestions` (§6.8.8) y
 //!   `headingOffset`/`headingReset` (§4.3.11, niveles de encabezado).
 
@@ -26,11 +27,10 @@ fn js_str(s: &str) -> Value {
     Value::String(JsString::from(s))
 }
 
-/// Los documentos con `designMode` en `on` y los popovers abiertos de la ventana.
+/// Los documentos con `designMode` en `on`.
 #[derive(Debug, Default)]
 struct LegacyState {
     design_mode: HashSet<DocIndex>,
-    open_popovers: HashSet<NodeRef>,
 }
 
 fn legacy_state(agent: &mut Agent) -> &mut LegacyState {
@@ -121,13 +121,20 @@ pub fn noop(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 // --- HTMLElement: popover ---
 
 /// E3: ¿`n` tiene `popover` y está cerrado? (La hoja UA de HTML §15.3.1 los oculta con
-/// `[popover]:not(:popover-open):not(dialog[open]) { display: none }`; la del motor todavía
-/// no, así que quien necesita saber si se renderiza lo pregunta aquí.)
+/// `[popover]:not(:popover-open):not(dialog[open]) { display: none }`.)
 pub fn is_closed_popover(agent: &Agent, n: NodeRef) -> bool {
-    popover_state(agent, n).is_some()
-        && !agent
-            .realm_data::<LegacyState>(WebContextHandle::current(agent).realm)
-            .is_some_and(|st| st.open_popovers.contains(&n))
+    popover_state(agent, n).is_some() && !is_popover_showing(agent, n)
+}
+
+/// E5: ¿Está `n` en la *popover visibility state* `showing` (§6.12)?
+fn is_popover_showing(agent: &Agent, n: NodeRef) -> bool {
+    crate::with_doc(agent, n.doc, |d| d.is_popover_showing(n.node))
+}
+
+/// E5: cambia la *popover visibility state* de `n` en su documento (sube la versión si
+/// cambia, para que el estilo recalcule `:popover-open`).
+fn set_popover_showing(agent: &mut Agent, n: NodeRef, showing: bool) {
+    crate::with_doc_mut(agent, n.doc, |d| d.set_popover_showing(n.node, showing));
 }
 
 /// El estado del atributo `popover` (§6.12): `auto` (vacío o `auto`), `manual`, `hint`, o
@@ -175,14 +182,14 @@ fn check_popover(agent: &mut Agent, n: NodeRef) -> JsResult<()> {
 pub fn show_popover(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     check_popover(agent, n)?;
-    legacy_state(agent).open_popovers.insert(n);
+    set_popover_showing(agent, n, true);
     Ok(Value::Undefined)
 }
 
 pub fn hide_popover(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     check_popover(agent, n)?;
-    legacy_state(agent).open_popovers.remove(&n);
+    set_popover_showing(agent, n, false);
     Ok(Value::Undefined)
 }
 
@@ -201,13 +208,8 @@ pub fn toggle_popover(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         v => Some(webidl::to_boolean(agent, &v)),
     };
     check_popover(agent, n)?;
-    let st = legacy_state(agent);
-    let open = force.unwrap_or(!st.open_popovers.contains(&n));
-    if open {
-        st.open_popovers.insert(n);
-    } else {
-        st.open_popovers.remove(&n);
-    }
+    let open = force.unwrap_or(!is_popover_showing(agent, n));
+    set_popover_showing(agent, n, open);
     Ok(Value::Boolean(open))
 }
 

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- E5: CSS Flexbox 1 §9.9.1.2 y §9.9.3: la aportación de un ítem es la mayor entre su tamaño de contenido y su tamaño preferido (#a: "aa bb" mide 40px aunque width sea 4px, porque puede crecer); con base por contenido no se limita por la base (#b: min-content 10+20 de hueco+10 = 40, WPT gap-015); en varias líneas el max-content no baja del min-content (#c, WPT intrinsic-size/row-wrap-002). CSS 2 §9.2.1.1: el bloque anónimo no cuenta para el porcentaje del inline-block (#d: 50% de 100px). -->
+<style>
+body{margin:0} .f{display:flex;float:left;clear:left;height:10px}
+.ib{display:inline-block;width:10px;height:10px}
+</style>
+<div id=a class=f><div style="flex:auto;width:4px">aa bb</div></div>
+<div id=b class=f style="width:min-content;column-gap:20px"><div style="flex:0 0 auto"><span class=ib></span><span class=ib></span></div><div style="width:10px"></div></div>
+<div id=c class=f style="flex-wrap:wrap;width:max-content"><div style="width:50px"></div><div style="width:0;margin-left:-10px"></div></div>
+<div id=d style="clear:left;height:100px"><div></div><span style="display:inline-block;width:10px;height:50%"></span></div>
+<!-- expect
+Block <html> 0,0 800×130
+  Block <body> 0,0 800×130
+    Block <div#a.f> 0,0 40×10
+      Block <div> 0,0 40×10
+        Line 0,0 40×16
+          Text "aa bb" 0,0 40×16
+    Block <div#b.f> 0,10 40×10
+      Block <div> 0,10 20×10
+        Line 0,10 20×16
+          InlineBlock <span.ib> 0,12.8 10×10
+          InlineBlock <span.ib> 10,12.8 10×10
+      Block <div> 40,10 0×10
+    Block <div#c.f> 0,20 50×10
+      Block <div> 0,20 50×10
+      Block <div> 40,20 0×10
+    Block <div#d> 0,30 800×100
+      Block <div> 0,30 800×0
+      Block <anonymous> 0,30 800×53.2
+        Line 0,30 800×53.2
+          InlineBlock <span> 0,30 10×50
+-->

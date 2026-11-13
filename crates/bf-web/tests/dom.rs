@@ -1760,6 +1760,28 @@ fn media_and_legacy_members() {
     );
 }
 
+// E5: la hoja UA oculta los popovers cerrados (HTML §15.3.1,
+// `[popover]:not(:popover-open):not(dialog[open])`) y `:popover-open` sigue a
+// `showPopover()`/`hidePopover()`/`togglePopover()` (HTML §4.16.3, §6.12).
+#[test]
+fn closed_popovers_are_not_rendered() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           var e = document.createElement('div'); e.popover = 'auto'; document.body.append(e); \
+           function d() { return getComputedStyle(e).display; } \
+           out.push(d(), e.matches(':popover-open')); \
+           e.showPopover(); out.push(d(), e.matches(':popover-open')); \
+           e.hidePopover(); out.push(d()); \
+           e.togglePopover(); out.push(d(), getComputedStyle(e).position); \
+           e.togglePopover(false); out.push(d()); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(r, "none,false,block,true,none,block,fixed,none");
+}
+
 // E1 (ronda 5): el rol y el nombre accesibles con el estilo de la página
 // (`bf_web::html::accessibility`): `display: none` y `hidden` quedan fuera del nombre, el
 // `content` de `::before` entra, `aria-labelledby` llega a nodos ocultos, el valor actual de un

@@ -62,6 +62,9 @@ struct Item<'a> {
     align: ItemAlign,
     /// E5: alineación propia `safe` (CSS Box Alignment 3 §4.4).
     safe: bool,
+    /// E5: ¿Es definida la flex base size (no sale de maquetar el contenido)? Entonces el
+    /// tamaño principal flexionado también lo es (§9.8).
+    base_definite: bool,
 }
 
 impl Item<'_> {
@@ -138,13 +141,17 @@ fn flex_content_align(a: Aligned<ContentAlign>, free: f32) -> ContentAlign {
 }
 
 /// E5: copia de un reemplazado con su tamaño principal (`width` en filas, `height` en
-/// columnas) en `auto` y, si se da, `width` fijo en `w` (content box), para medir su sugerencia
-/// de tamaño por contenido (§4.5).
+/// columnas) en `auto` y, si se da, el tamaño cruzado fijo en `w` (content box), para medir su
+/// sugerencia de tamaño por contenido (§4.5).
 fn with_auto_main(b: &LayoutBox, row: bool, w: Option<f32>) -> LayoutBox {
     let mut probe = b.clone();
     let mut st = (*b.style).clone();
     if row {
         st.width = Size::Auto;
+        if let Some(h) = w {
+            st.height = Size::LengthPercentage(bf_style::values::LengthPercentage::px(h));
+            st.box_sizing = bf_style::properties::types::BoxSizing::ContentBox;
+        }
     } else {
         st.height = Size::Auto;
         if let Some(w) = w {
@@ -320,7 +327,8 @@ impl<'a> Layout<'a> {
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
-        self.flex_layout_pass(container, cb, None)
+        let pct_height_indefinite = std::mem::take(&mut self.flex_height_pct_indefinite);
+        self.flex_layout_pass(container, cb, None, pct_height_indefinite)
     }
 
     /// E5: una pasada del algoritmo. Con ítems `visibility: collapse` (§4.4), la primera
@@ -332,6 +340,7 @@ impl<'a> Layout<'a> {
         container: &'a LayoutBox,
         cb: Cb,
         struts: Option<&[f32]>,
+        pct_height_indefinite: bool,
     ) -> (Vec<Fragment>, f32) {
         let abs_mark = (self.abs_frames.last().map_or(0, Vec::len), self.fixed.len());
         let is_collapsed =
@@ -355,13 +364,17 @@ impl<'a> Layout<'a> {
         let cross_flip = wrap_reverse != (!row && rtl);
         // Espacio disponible: el ancho siempre es definido; el alto, si se especificó.
         let avail_main = if row { Some(cb.width) } else { cb.height };
+        // E5: `row-gap` en porcentaje se resuelve contra el alto del contenido; si no es
+        // definido, contra 0 (CSS Box Alignment 3 §8.3), también cuando el contenedor es un ítem
+        // flexionado en una columna de alto indefinido (§9.8; WPT `gap-percentage-wrap`).
+        let pct_height = cb.height.filter(|_| !pct_height_indefinite).unwrap_or(0.0);
         let main_gap = if row {
             gap_px(&cs.column_gap, cb.width)
         } else {
-            gap_px(&cs.row_gap, cb.height.unwrap_or(0.0))
+            gap_px(&cs.row_gap, pct_height)
         };
         let cross_gap = if row {
-            gap_px(&cs.row_gap, cb.height.unwrap_or(0.0))
+            gap_px(&cs.row_gap, pct_height)
         } else {
             gap_px(&cs.column_gap, cb.width)
         };
@@ -454,19 +467,22 @@ impl<'a> Layout<'a> {
                 BoxKind::Replaced { ratio, .. } => ratio.or(s.aspect_ratio.preferred()),
                 _ => s.aspect_ratio.preferred(),
             };
-            let ratio_main = ratio_main.or_else(|| {
-                let r = item_ratio?;
+            // E5: el alto (content box) de un ítem de una fila de una línea que se estira hasta
+            // un tamaño cruzado definido (§9.8 punto 1: se trata como definido).
+            let stretched_height = {
                 let stretched = row
                     && align == ItemAlign::Stretch
                     && !auto_cross_margin
                     && s.height == Size::Auto
                     && !wrap;
-                let h = cb.height.filter(|_| stretched)?;
-                let inner =
-                    (h - margins[2].unwrap_or(0.0) - margins[3].unwrap_or(0.0) - bp_v).max(0.0);
-                let (lo, hi) = height_limits(s, cb.height, bp_v);
-                Some(inner.min(hi).max(lo) * r)
-            });
+                cb.height.filter(|_| stretched).map(|h| {
+                    let inner =
+                        (h - margins[2].unwrap_or(0.0) - margins[3].unwrap_or(0.0) - bp_v).max(0.0);
+                    let (lo, hi) = height_limits(s, cb.height, bp_v);
+                    inner.min(hi).max(lo)
+                })
+            };
+            let ratio_main = ratio_main.or_else(|| Some(stretched_height? * item_ratio?));
             let content_main = |this: &mut Self| -> f32 {
                 if let Some(w) = ratio_main {
                     return w;
@@ -491,6 +507,16 @@ impl<'a> Layout<'a> {
             let indefinite = |lp: &bf_style::values::LengthPercentage| {
                 !row && cb.height.is_none() && lp.has_percentage()
             };
+            // E5: la base es definida con una longitud, con un tamaño principal especificado o
+            // si sale de una relación de aspecto (no de maquetar el contenido); en columnas con
+            // alto indefinido, el tamaño flexionado del ítem solo es definido entonces (§9.8;
+            // WPT `percentage-heights-007` y `css-sizing/aspect-ratio/flex-aspect-ratio-032`).
+            let base_definite = match &s.flex_basis {
+                FlexBasis::Size(Size::LengthPercentage(lp)) => !indefinite(lp),
+                FlexBasis::Size(Size::Auto) => spec_main.is_some(),
+                _ => false,
+            } || ratio_main.is_some()
+                || item_ratio.is_some();
             let base = match &s.flex_basis {
                 FlexBasis::Size(Size::LengthPercentage(lp)) if !indefinite(lp) => {
                     let basis = if row {
@@ -523,21 +549,19 @@ impl<'a> Layout<'a> {
             } else {
                 height_limits(s, cb.height, bp_v)
             };
-            // E5: en columnas, `min-height`/`max-height` con keyword intrínseca son el alto del
-            // contenido (CSS Sizing 3 §3.2).
-            if !row && (s.min_height.is_intrinsic() || s.max_height.as_size().is_intrinsic()) {
-                let h = self.item_content_height(b, cb, column_cross, bp_v);
-                if s.min_height.is_intrinsic() {
-                    min_main = min_main.max(h);
-                }
-                if s.max_height.as_size().is_intrinsic() {
-                    max_main = h;
-                }
+            // E5: en columnas, `max-height` con keyword intrínseca es el alto del contenido
+            // (CSS Sizing 3 §3.2). `min-height` con keyword intrínseca en el eje de bloque
+            // equivale a su tamaño automático (CSS Sizing 3 §3.2, "min-content": "for a box's
+            // block size, unless otherwise specified, this is equivalent to its automatic size"),
+            // así que lleva el mínimo automático de §4.5 (WPT
+            // `flex-minimum-height-flex-items-023`).
+            if !row && s.max_height.as_size().is_intrinsic() {
+                max_main = self.item_content_height(b, cb, column_cross, bp_v);
             }
             let min_auto = if row {
                 matches!(s.min_width, Size::Auto)
             } else {
-                matches!(s.min_height, Size::Auto)
+                matches!(s.min_height, Size::Auto) || s.min_height.is_intrinsic()
             };
             let overflow = if row { s.overflow_x } else { s.overflow_y };
             if min_auto && matches!(overflow, Overflow::Visible | Overflow::Clip) {
@@ -546,14 +570,16 @@ impl<'a> Layout<'a> {
                         // E5: la sugerencia por contenido es el min-content: el tamaño del
                         // reemplazado con su propio `width` en `auto` (ese es la sugerencia por
                         // tamaño especificado), así que sale del alto definido a través de la
-                        // relación de aspecto o del tamaño natural (§4.5).
+                        // relación de aspecto o del tamaño natural (§4.5). Con el alto estirado
+                        // definido, ese alto (csswg-drafts#5663; WPT
+                        // `flex-minimum-width-flex-items-013`).
                         let rcb = Cb {
                             x: 0.0,
                             y: 0.0,
                             width: cb.width,
                             height: cb.height,
                         };
-                        let probe = with_auto_main(b, true, None);
+                        let probe = with_auto_main(b, true, stretched_height);
                         self.replaced_size(&probe, *natural, *ratio, rcb).width
                     } else {
                         self.intrinsic_widths(b).0
@@ -601,6 +627,7 @@ impl<'a> Layout<'a> {
                 baseline: None,
                 align,
                 safe: align_is_safe(s, cs),
+                base_definite,
             });
         }
 
@@ -839,7 +866,7 @@ impl<'a> Layout<'a> {
                     frame.truncate(abs_mark.0);
                 }
                 self.fixed.truncate(abs_mark.1);
-                return self.flex_layout_pass(container, cb, Some(&s));
+                return self.flex_layout_pass(container, cb, Some(&s), pct_height_indefinite);
             }
             Some(s) => {
                 for line in &mut lines {
@@ -916,20 +943,24 @@ impl<'a> Layout<'a> {
                     matches!(it.b.style.width, Size::Auto)
                 };
                 if it.align == ItemAlign::Stretch && cross_auto && !auto_margin {
+                    let stretched = line.cross - it.bp_cross - it.margin(2) - it.margin(3);
+                    // E5: en columnas, `min-width`/`max-width` con keyword intrínseca
+                    // (`max-width: min-content`) también limitan el estiramiento (CSS Sizing 3
+                    // §3.2 y §5.1; WPT `flex-item-max-width-min-content-002`).
                     let (lo, hi) = if row {
                         height_limits(&it.b.style, cb.height, it.bp_cross)
                     } else {
-                        width_limits(&it.b.style, cb.width, it.bp_cross)
+                        let (b, bp) = (it.b, it.bp_cross);
+                        self.width_limits_for(b, cb.width, bp, stretched.max(0.0))
                     };
-                    let stretched = line.cross - it.bp_cross - it.margin(2) - it.margin(3);
-                    it.cross = stretched.min(hi).max(lo).max(0.0);
+                    items[i].cross = stretched.min(hi).max(lo).max(0.0);
                 } else if !row && wrap && cross_auto {
                     // E5: en una columna multilínea, un ítem que no se estira se vuelve a
                     // ajustar (fit-content) al tamaño cruzado final de su línea, sin cambiar su
                     // tamaño principal (csswg-drafts#11784; WPT `align-self-016`).
-                    let (lo, hi) = width_limits(&it.b.style, cb.width, it.bp_cross);
                     let avail = (line.cross - it.bp_cross - it.margin(2) - it.margin(3)).max(0.0);
-                    let b = it.b;
+                    let (b, bp) = (it.b, it.bp_cross);
+                    let (lo, hi) = self.width_limits_for(b, cb.width, bp, avail);
                     let fit = self.item_fit_width(b, avail);
                     items[i].cross = fit.min(hi).max(lo).max(0.0);
                 }
@@ -1015,6 +1046,22 @@ impl<'a> Layout<'a> {
                 ContentAlign::SpaceEvenly => {}
                 _ => {}
             }
+            // E5: en columnas, los ítems con `baseline` forman un grupo que comparte la
+            // baseline sintetizada de su borde izquierdo (CSS Box Alignment 3 §9.1 y §9.3): sus
+            // bordes izquierdos coinciden y el grupo entero va al cross-start de la línea (WPT
+            // `css-flexbox/align-baseline`). (lado izquierdo, lado derecho) del grupo.
+            let column_group = (!row).then(|| {
+                line.items
+                    .iter()
+                    .map(|&i| &items[i])
+                    .filter(|it| it.align == ItemAlign::Baseline && it.margins[2].is_some())
+                    .fold((0.0f32, 0.0f32), |(l, r), it| {
+                        (
+                            l.max(it.margin(2)),
+                            r.max(it.cross + it.bp_cross + it.margin(3)),
+                        )
+                    })
+            });
             // `pos` se mide desde el main-start; con `main_rev`, desde el borde físico alto.
             let mut pos = start;
             for &i in &line.items {
@@ -1071,11 +1118,9 @@ impl<'a> Layout<'a> {
                                 line.baseline - it.baseline.unwrap_or(line.baseline)
                             }
                             (None, ItemAlign::Baseline) => {
-                                if cross_flip {
-                                    line_free
-                                } else {
-                                    0.0
-                                }
+                                let (gl, gr) = column_group.unwrap_or((m, outer - m));
+                                let border_start = if cross_flip { line.cross - gr } else { gl };
+                                border_start - m
                             }
                             _ => line_free / 2.0,
                         };
@@ -1112,7 +1157,10 @@ impl<'a> Layout<'a> {
                     }
                 };
                 let b = it.b;
+                self.forced_height_indefinite =
+                    !row && avail_main.is_none() && !items[i].base_definite;
                 let f = self.layout_item(b, cb, (x, y), content_w, height, margins);
+                self.forced_height_indefinite = false;
                 out.push(f);
             }
             // Los ítems colapsados quedan sin tamaño al inicio de su línea.
@@ -1284,12 +1332,22 @@ impl<'a> Layout<'a> {
         {
             let (mut cmin, mut cmax) = self.outer_intrinsic_widths(c);
             let content_min = cmin;
-            // E5: en filas, la aportación de un ítem que no puede crecer (encoger) no pasa de
-            // (no baja de) su flex base size, y luego queda entre su min/max-width (§9.9.1).
+            // E5: en filas, la aportación de un ítem (§9.9.3, "Flex Item Intrinsic Size
+            // Contributions") es la mayor entre su tamaño min-content (max-content) exterior y
+            // su tamaño preferido exterior si no es `auto`; si no puede crecer (encoger) no pasa
+            // de (no baja de) su flex base size, y luego queda entre su min/max-width.
             if row {
                 let s = &c.style;
                 let bp = border_edges(s).horizontal() + padding_edges(s, 0.0).horizontal();
                 let mh = crate::block::margin_edges(s, 0.0).horizontal();
+                // El tamaño de contenido cuenta aunque el ancho preferido sea menor.
+                if matches!(&s.width, Size::LengthPercentage(lp) if !lp.has_percentage())
+                    && !matches!(c.kind, BoxKind::Replaced { .. })
+                {
+                    let (imin, imax) = self.intrinsic_widths(c);
+                    cmin = cmin.max(imin + bp + mh);
+                    cmax = cmax.max(imax + bp + mh);
+                }
                 let fixed = |lp: &bf_style::values::LengthPercentage| {
                     (!lp.has_percentage()).then(|| {
                         let v = lp.resolve(0.0);
@@ -1312,14 +1370,25 @@ impl<'a> Layout<'a> {
                     }
                     _ => None,
                 };
+                // Con una base por contenido (`flex-basis: content`, o `auto` con ancho `auto`),
+                // la base ya es el tamaño max-content del ítem y los navegadores no la usan como
+                // límite: la aportación min-content de un ítem que no encoge sigue siendo su
+                // min-content (`gap-015` e `intrinsic-size/row-001` de WPT, algoritmo
+                // compatible con la web de §9.9.1.2). Los límites de min/max-width sí se aplican.
+                let content_based = matches!(
+                    (&s.flex_basis, &s.width),
+                    (FlexBasis::Size(Size::Auto), Size::Auto) | (FlexBasis::Content, _)
+                );
                 if let Some(ob) = outer_base {
-                    if s.flex_shrink.0 == 0.0 {
-                        cmin = cmin.max(ob);
-                        cmax = cmax.max(ob);
-                    }
-                    if s.flex_grow.0 == 0.0 {
-                        cmin = cmin.min(ob);
-                        cmax = cmax.min(ob);
+                    if let Some(ob) = (!content_based).then_some(ob) {
+                        if s.flex_shrink.0 == 0.0 {
+                            cmin = cmin.max(ob);
+                            cmax = cmax.max(ob);
+                        }
+                        if s.flex_grow.0 == 0.0 {
+                            cmin = cmin.min(ob);
+                            cmax = cmax.min(ob);
+                        }
                     }
                     let (lo, hi) = width_limits(s, 0.0, bp);
                     let pct_min =
@@ -1360,6 +1429,10 @@ impl<'a> Layout<'a> {
                 min += g;
             }
         }
-        (min, max)
+        // E5: el tamaño max-content nunca es menor que el min-content (CSS Sizing 3 §2.1: el
+        // min-content es el menor tamaño sin desbordar; en varias líneas, con márgenes
+        // negativos, la suma de §9.9.1.2 puede quedar por debajo de la aportación más grande;
+        // `intrinsic-size/row-wrap-002`).
+        (min, max.max(min))
     }
 }

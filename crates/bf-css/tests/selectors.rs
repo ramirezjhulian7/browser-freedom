@@ -592,3 +592,38 @@ fn namespace_prefixes_serialize_as_written() {
     assert_eq!(select_in(&s, "*|a", &ctx, &html), ["svga", "htmla"]);
     assert_eq!(select_in(&s, "a", &ctx, &html), ["htmla"]);
 }
+
+/// E5: `:popover-open` (HTML §4.16.3) contra la *popover visibility state* que guarda `bf_dom`.
+#[test]
+fn popover_open_pseudo_class() {
+    let ns = NamespaceMap::default();
+    let list = parse_selector_list("[popover]:not(:popover-open)", &ns).unwrap();
+    assert_eq!(list.to_string(), "[popover]:not(:popover-open)");
+    let mut d = doc(
+        "<!DOCTYPE html><div id=a popover></div><div id=b popover=manual></div><div id=c></div>",
+    );
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, ":popover-open", &ctx, &ns),
+        Vec::<String>::new()
+    );
+    let (a, c) = (node_by_id(&d, "a"), node_by_id(&d, "c"));
+    let v = d.version();
+    assert!(d.set_popover_showing(a, true));
+    assert!(!d.set_popover_showing(a, true));
+    assert!(d.version() > v, "abrir un popover invalida el estilo");
+    // Sin el atributo `popover` no casa aunque el estado sea `showing`.
+    d.set_popover_showing(c, true);
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(select_in(&d, ":popover-open", &ctx, &ns), ["a"]);
+    assert_eq!(
+        select_in(&d, "[popover]:not(:popover-open)", &ctx, &ns),
+        ["b"]
+    );
+    assert!(d.set_popover_showing(a, false));
+    let ctx = MatchContext::for_document(&d);
+    assert_eq!(
+        select_in(&d, ":popover-open", &ctx, &ns),
+        Vec::<String>::new()
+    );
+}
