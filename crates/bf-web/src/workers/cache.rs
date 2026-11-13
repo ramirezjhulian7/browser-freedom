@@ -124,6 +124,9 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();
+    // E1: fijado mientras dura: crear los métodos y compilar `cache.js` pueden recolectar, y
+    // nada más lo enraíza (el mismo fallo "Gc liberado" que en `storage/idb.rs`).
+    let native_pin = agent.host_pin(Value::Object(native));
     let fns: [(&str, u32, NativeFn); 14] = [
         ("queueTask", 1, queue_task),
         ("opaque", 0, opaque),
@@ -147,6 +150,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     if let Ok(f) = agent.eval_script(CACHE_JS, "bf-web:cache.js") {
         let _ = agent.call(&f, Value::Undefined, &[g, Value::Object(native)]);
     }
+    agent.host_unpin(native_pin);
     agent.current_realm = saved;
 }
 

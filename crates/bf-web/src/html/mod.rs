@@ -1,6 +1,7 @@
 //! Interfaces `HTML*Element` (HTML §3–4: reflexión de atributos) y el runner de
 //! testharness.js. **Dueño: E1.**
 
+pub mod accessibility; // E1
 pub mod activation;
 pub mod canvas;
 pub mod custom_elements;

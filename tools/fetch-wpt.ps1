@@ -1,14 +1,15 @@
 # Descarga (clon parcial y sparse) la parte de web-platform-tests que usan los harness y las
 # mediciones: css, html y svg enteros (reftests y parsing), y los directorios de testharness.js
 # (resources, common, dom, url, encoding, fetch, xhr, streams, IndexedDB, workers,
-# service-workers, websockets, domparsing, quirks, images, webstorage…).
+# service-workers, websockets, domparsing, quirks, images, webstorage, y los de
+# accesibilidad: html-aam, wai-aria, accname, core-aam…).
 # El commit pineado está en tools/wpt-commit.txt.
 # Uso (desde cualquier directorio): powershell -File tools/fetch-wpt.ps1
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Wpt = Join-Path $Root 'tests/wpt'
-$Dirs = @('fonts', 'resources', 'common', 'dom', 'url', 'encoding', 'console', 'interfaces', 'shadow-dom', 'custom-elements', 'css', 'html', 'svg', 'fetch', 'xhr', 'streams', 'IndexedDB', 'workers', 'service-workers', 'websockets', 'domparsing', 'quirks', 'images', 'webstorage')
+$Dirs = @('fonts', 'resources', 'common', 'dom', 'url', 'encoding', 'console', 'interfaces', 'shadow-dom', 'custom-elements', 'css', 'html', 'svg', 'fetch', 'xhr', 'streams', 'IndexedDB', 'workers', 'service-workers', 'websockets', 'domparsing', 'quirks', 'images', 'webstorage', 'html-aam', 'wai-aria', 'accname', 'core-aam')
 $Commit = (Get-Content (Join-Path $Root 'tools/wpt-commit.txt') -Raw).Trim()
 
 function Invoke-Git {
