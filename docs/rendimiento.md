@@ -436,5 +436,15 @@ corridas cada uno, con la máquina mucho más cargada (carga de 1 minuto 64-72, 
   tokenizador sobre el HTML de Wikipedia pasa de 8,5 a 7,6 ms y el parser completo (`feed`
   y `finish`) de 13,1 a 12,0 ms (medianas de 21, alternados).
 
+### Compilar JavaScript fuera del camino (E3, ciclo nuevo, ronda 1)
+
+`bf_js::code_cache` guarda el código compilado. La recarga (segunda navegación del mismo
+hilo) ya no recompila el JavaScript propio de `bf-web` ni los scripts de la página. Con
+`BF_TRACE`, `perf ventana` dice cuánto se compiló y cuánto se copió. A/B contra `276fa07`, 5
+corridas alternadas, carga 41-57, medianas: ventana en la recarga de 63.9 a 17.1 ms y scripts
+de la página en la recarga de 32.5 a 23.6 ms. En la primera navegación de un proceso no cambia
+todavía: falta llamar a `bf_web::precompile_window_scripts` mientras se espera a la red, que
+deja la instalación en unos 22 ms (`pendiente/mac/e3.md`, "Ciclo nuevo, ronda 1").
+
 **red/caché** es ahora la parte mayor de la primera pintura: 620-710 ms en estas corridas
 (287 ms en la medida de E4) con la caché de disco caliente.

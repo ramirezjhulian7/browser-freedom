@@ -230,7 +230,7 @@ fn execute(
         crate::bom::script::run_script(agent, realm, source, url, module);
     } else {
         let r = agent
-            .compile_script_text(source, url)
+            .compile_script_cached(source, url)
             .and_then(|code| agent.script_evaluation(code));
         if let Err(Throw::Value(e)) = r {
             report_exception(agent, &e);
