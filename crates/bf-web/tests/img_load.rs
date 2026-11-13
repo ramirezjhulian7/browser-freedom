@@ -56,6 +56,17 @@ impl Page {
         }
     }
 
+    /// Los `id` de los elementos que el documento tiene anotados como imagen aplazada
+    /// (`loading=lazy`), en orden de documento.
+    fn deferred(&self) -> Vec<String> {
+        let doc = self.ctx.get(&self.rt.agent).document();
+        doc.inclusive_descendants(doc.root())
+            .into_iter()
+            .filter(|&n| doc.image_deferred(n))
+            .filter_map(|n| doc.element(n)?.attr("id").map(str::to_owned))
+            .collect()
+    }
+
     fn idle(&mut self) {
         self.rt.run_until_idle().expect("tareas");
     }
@@ -196,12 +207,16 @@ fn lazy_images_wait_for_the_viewport() {
         p.show("[lejos.complete, lejos.naturalWidth].join()"),
         "false,0"
     );
+    // Lo que ve el pintado (`bf-paint`, sobre una copia del documento): la lejana y la oculta
+    // están anotadas como aplazadas y no las pide; la cercana, que ya llegó, no.
+    assert_eq!(p.deferred(), ["lejos", "oculta"]);
     p.show("scrollTo(0, 9500)");
     let realm = p.ctx.realm;
     bom::frames::sync_frames(&mut p.rt.agent, realm);
     p.idle();
     assert_eq!(p.show("log.join()"), "cerca,lejos");
     assert_eq!(p.show("lejos.naturalWidth"), "3");
+    assert_eq!(p.deferred(), ["oculta"]);
 }
 
 /// E3: un proveedor de maquetas (el del navegador) que cuenta cuántas veces maqueta.

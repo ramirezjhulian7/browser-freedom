@@ -414,6 +414,31 @@ fn will_lazy_load(agent: &Agent, n: NodeRef) -> bool {
         })
 }
 
+/// E2: anota en el documento de la ventana que la imagen de `n` espera (`loading=lazy`,
+/// HTML §4.8.4.3.9) o ya no: el pintado (`bf-paint`, sobre una copia del documento) no pide
+/// las anotadas. Así hay un solo criterio de cercanía al viewport, el de
+/// [`check_lazy_images`], para los scripts y para el pintado.
+fn mark_deferred(agent: &mut Agent, n: NodeRef, on: bool) {
+    if n.doc != 0 {
+        return;
+    }
+    with_doc_mut(agent, n.doc, |d| d.set_image_deferred(n.node, on));
+}
+
+/// E2: deja la imagen que llegó en la caché del loader de la ventana (el del navegador, con
+/// el que pinta): el pintado no la descarga otra vez.
+fn remember_image(agent: &Agent, realm: RealmId, url: &bf_infra::Url, r: &crate::net::NetResponse) {
+    let Some(env) = crate::bom::script::script_env(agent, realm) else {
+        return;
+    };
+    let resource = bf_infra::Resource {
+        bytes: r.body.clone(),
+        url: r.url_list.last().cloned().unwrap_or_else(|| url.clone()),
+        content_type: r.headers.get("content-type"),
+    };
+    bf_infra::ResourceLoader::remember(&*env.loader(), url, &resource);
+}
+
 /// E2: pide las imágenes `loading=lazy` aplazadas de la ventana `realm` cuya caja está a menos
 /// de [`LAZY_MARGIN`] del viewport ("lazy load intersection observer", HTML §4.8.4.3.9). Las
 /// que ya no son perezosas (cambió `loading`) también; las que no se pintan (`display: none`)
@@ -503,7 +528,13 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
             reqs.lazy.push(n);
         }
         agent.set_realm_data(realm, reqs);
+        mark_deferred(agent, n, true);
         return;
+    }
+    // Una petición que no viene de reanudar una perezosa: el pintado ya puede pedirla. La
+    // reanudada sigue anotada hasta que llegue (`finish`): así el pintado no la pide a la vez.
+    if may_defer {
+        mark_deferred(agent, n, false);
     }
     // Una petición nueva: los `decode()` de la anterior se rechazan.
     settle_decodes(agent, n, false);
@@ -572,6 +603,7 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
     };
     delay_load(agent, n, true);
     let started = crate::bom::performance_observer::now_ms(agent);
+    let requested = url.clone();
     let req = crate::net::NetRequest {
         url,
         options: bf_net::RequestOptions::default(),
@@ -596,10 +628,14 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
                     r.body.len(),
                 );
             }
-            let outcome = match result.ok().and_then(|r| image_size(&r)) {
+            let response = result.ok();
+            let outcome = match response.as_ref().and_then(image_size) {
                 Some(size) => Outcome::Loaded(key, size),
                 None => Outcome::Broken { event: true },
             };
+            if let (Outcome::Loaded(..), Some(r)) = (&outcome, &response) {
+                remember_image(agent, realm, &requested, r);
+            }
             finish(agent, n, id, pin, outcome);
             release_delay(agent, realm, n);
             agent.current_realm = saved;
@@ -751,6 +787,8 @@ fn finish(agent: &mut Agent, n: NodeRef, id: u64, pin: HostHandle, outcome: Outc
     if let Some(r) = agent.realm_data_mut::<ImageRequests>(realm) {
         r.current.remove(&n);
     }
+    // Llegó (o falló): el pintado ya puede pedirla, y la encuentra en la caché del navegador.
+    mark_deferred(agent, n, false);
     let event = match outcome {
         Outcome::Loaded(..) => Some("load"),
         Outcome::Broken { event } => event.then_some("error"),

@@ -28,6 +28,7 @@ pub mod collections;
 mod constraint_validity; // E10
 pub mod custom; // E1
 mod custom_states; // E10
+mod deferred_images; // E2
 mod document;
 mod element;
 pub mod events;
@@ -260,6 +261,8 @@ pub struct Document {
     custom_states: HashMap<NodeId, Vec<DomString>>,
     /// E10: la validez que anota el host (`:valid`/`:invalid`, ver `constraint_validity`).
     constraint_validity: HashMap<NodeId, bool>,
+    /// E2: las imágenes `loading=lazy` que el host aplazó (ver `deferred_images`).
+    deferred_images: HashSet<NodeId>,
     /// E5: los elementos en la *popover visibility state* `showing` (ver `popover`).
     popover_showing: HashSet<NodeId>,
     pub(crate) shadow: shadow::ShadowState, // E1
@@ -295,6 +298,7 @@ impl Document {
             live_ranges: range::LiveRanges::default(), // E3
             custom_states: HashMap::new(),
             constraint_validity: HashMap::new(),    // E10
+            deferred_images: HashSet::new(),        // E2
             popover_showing: HashSet::new(),        // E5
             shadow: shadow::ShadowState::default(), // E1
             custom: custom::CustomState::default(), // E1
