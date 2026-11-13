@@ -12,12 +12,58 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-12** (`master` `9a10f87`). Cada apartado lleva un bloque **Estado** con lo
+**Estado al 2026-11-12** (`master` `8917a5f`). Cada apartado lleva un bloque **Estado** con lo
 hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las cifras salen de
 [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
-[`perf.md`](perf.md) y los `docs/pendiente/e*.md` (sección "Estado por bloque", al final);
-cuando un criterio no se ha medido, se dice. Un criterio "cumplido" lo está en la medición
-citada, no en una corrida completa de la fase.
+[`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
+"Estado por bloque", al final); cuando un criterio no se ha medido, se dice. Un criterio
+"cumplido" lo está en la medición citada, no en una corrida completa de la fase. Cada cifra
+dice dónde se midió: **Mac** (línea base en macOS del 2026-11-12, Apple M4) o **Windows** (las
+mediciones anteriores, con su fecha).
+
+## Avance por criterios
+
+Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
+está cerrada y no entra en la cuenta (con ella al 100 %, el total sería 60.3 %).
+
+| Fase | Criterios | Cumplidos | Sin medir | Avance |
+|---|---:|---:|---:|---:|
+| 2: JavaScript y la plataforma web dinámica | 19 | 9 | 4 | 47.4 % |
+| 3: completar CSS y el texto | 17 | 13 | 3 | 76.5 % |
+| 4: red, medios y documentos | 9 | 7 | 1 | 77.8 % |
+| 5: navegador de uso diario | 6 | 0 | 4 | 0.0 % |
+| **Total** (media de las fases) | 51 | 29 | 12 | **50.4 %** |
+
+Criterios no cumplidos, con su cifra actual y su meta:
+
+| Apartado | Criterio | Cifra actual | Meta |
+|---|---|---|---|
+| 2.2 | WPT `dom/nodes` | 82.9 % (Mac, `master` `5b9a230`; pendiente de actualizar, lo mide E1) | ≥ 85 % |
+| 2.2 | WPT `dom/events` | 72.4 % (Mac, `master` `5b9a230`; pendiente de actualizar, lo mide E1) | ≥ 80 % |
+| 2.2 | `idlharness` de DOM y HTML | sin medir (lo mide E1) | ≥ 80 % de las aserciones |
+| 2.3 | WPT `html/webappapis/scripting/event-loops` | 44.4 % (4 / 9 subtests, Mac, 2026-11-12) | ≥ 70 % |
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 2722 / 2742 subtests (99.3 %), 3 documentos en `ERROR` y 1 que no termina (Mac, 2026-11-12) | 0 fallos |
+| 2.3 | Reftests `needs-js` que pasan a ejecutarse | 0 de 8384 (el runner de reftests no ejecuta scripts; Mac, 2026-11-12) | ≥ 60 % |
+| 2.3 | Google, Wikipedia y Hacker News sin pánicos; buscar en Google | sin medir | sin pánicos; la búsqueda funciona |
+| 2.4 | WPT `html/semantics/forms` | 44.9 % (Mac, 2026-11-12) | ≥ 60 % |
+| 2.4 | Buscar en Google desde su caja | sin medir | funciona |
+| 2.4 | Envío POST a un servidor de prueba local (test en `bf-shell`) | sin medir: no hay ese test | el test pasa |
+| 3.3 | WPT `css/css-transitions` | 20.6 % (Mac, 2026-11-12) | ≥ 40 % |
+| 3.3 | Reftests de css-flexbox que fallan por `linear-gradient` | sin medir aparte | pasan |
+| 3.4 | Los ~80 reftests de css-flexbox por `writing-mode`/rtl | sin medir aparte (flexbox entero: 78.7 %, Mac) | ≥ 75 % |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | sin medir aparte | pasan |
+| 4.1 | Peticiones nuevas al recargar Wikipedia | 8 (Windows, 2026-11-10) | ≤ 2 |
+| 4.3 | `<textarea>` y list box se desplazan con la rueda | sin test que lo pruebe junto (hay uno de la rueda y otro de `textarea` como scroll container, `bf-layout/tests/scroll.rs`) | test |
+| 5 | WPT `html-aam` y `wai-aria` | sin medir (no están en el checkout de WPT) | ≥ 50 % |
+| 5 | Un lector de pantalla lee Wikipedia | no: no hay árbol de accesibilidad | lo lee |
+| 5 | Un pánico en una página no cierra la ventana | sin medir | no la cierra |
+| 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC | no escapa |
+| 5 | 60 fps al desplazar Wikipedia | sin medir | 60 fps |
+| 5 | Primera pintura de Wikipedia en release | sin medir | < 500 ms |
+
+Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
+en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
+Wikipedia y el logo de Hacker News (4.2), todas de E7 en Windows (2026-11-06).
 
 ## Punto de partida (fin de la fase 1)
 
@@ -72,27 +118,30 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 - Un benchmark propio (`richards`, `deltablue` y `navier-stokes` portados) corre sin
   errores. Su tiempo queda registrado, sin meta todavía.
 
-**Estado**:
+**Estado** (5 de 5 criterios cumplidos):
 - **Hecho**: parser (test262 solo parsing: 51 490 pasan, 0 fallan, 527 omitidos por
-  propuestas; test262-parser-tests 3332, 0 fallan); bytecode, VM e intérprete
+  propuestas; test262-parser-tests 3332, 0 fallan; Windows, sin fecha en
+  `test262-status.md`); bytecode, VM e intérprete
   (`bf-js/src/{compiler,vm}/`); GC propio de marcado y barrido con umbral adaptativo y pausas
-  medidas (`perf.md`, sección GC); builtins de ES2026 completos en `built-ins/` (Temporal
-  4605/4605, Explicit Resource Management, `Array.fromAsync`, `Uint8Array` base64/hex);
-  Atomics multi-agente con `$262.agent` y `SharedArrayBuffer` real entre hilos
-  (`bf-js/src/host/agents.rs`, `built-ins/Atomics` 380/380, E3); el `TODO(bf-dom)` de
+  medidas (`perf.md`, sección GC); builtins de ES2026 completos en `built-ins/` (Mac, 2026-11-12: Temporal
+  4605/4605, Explicit Resource Management, `Array.fromAsync`, `Uint8Array` base64/hex,
+  ShadowRealm 64/64); Atomics multi-agente con `$262.agent` y `SharedArrayBuffer` real entre
+  hilos (`bf-js/src/host/agents.rs`, `built-ins/Atomics` 389/389); el `TODO(bf-dom)` de
   `DomString` ya no está en `bf-infra/src/lib.rs`.
-- **Criterios**: test262 en ejecución (2026-11-07, `test262-status.md`): `language/` 23 183
-  pasan, 11 fallan (**99.95 %**, meta ≥ 90 % cumplida); `built-ins/` 23 491 pasan, 67 fallan
-  (**99.7 %**, meta ≥ 80 % cumplida); total 48 791 / 51 220 (**95.3 %**). Pánicos en todo
-  test262: el estado no los cuenta aparte (la tabla tiene `failed` y `timeout`), así que el
-  criterio **no consta medido**.
-- **Parcial**: `intl402/` 30.5 % (1033 / 3382, 2026-11-07, antes de `Intl.Segmenter`,
-  `DurationFormat`, `DisplayNames` y los datos de `de`/`pl` de E8, que no tienen corrida global
-  nueva); faltan calendarios no ISO y zonas IANA de Temporal (fuera de alcance por ahora,
-  `pendiente/e8.md`).
-- **Falta**: `richards`, `deltablue` y `navier-stokes` no están portados. Hay 17 benchmarks
-  propios en `crates/bf-js/bench/` con tiempos en `perf.md`: `fib(30)` 363 ms (E8,
-  2026-11-12, primera vez bajo la meta interna de 400 ms). GC generacional o incremental.
+- **Criterios**, test262 completo en ejecución (**Mac, 2026-11-12**, `master` `5b9a230`,
+  `test262-status.md`): `language/` 23 183 pasan, 11 fallan (**99.95 %**, meta ≥ 90 %
+  cumplida); `built-ins/` 23 554 pasan, 3 fallan (**99.99 %**, meta ≥ 80 % cumplida); total
+  50 594 / 51 220 (**98.8 %**; Windows, 2026-11-07: 95.3 %). **0 pánicos** en todo test262
+  (el runner los anota como `pánico: …`; criterio cumplido) y 1 timeout por la carga de la
+  máquina. `richards` y `deltablue` (implementación propia: el original es GPL) y
+  `navier-stokes` en `crates/bf-js/bench/`, con su comprobación en verde: 590.6, 460.8 y
+  9 551.7 ms (Mac, 2026-11-12, máquina cargada; `perf.md`): criterio cumplido.
+- **Parcial**: `intl402/` **82.0 %** (2 773 / 3 382, Mac, 2026-11-12; con `Intl.Segmenter`,
+  `DurationFormat`, `DisplayNames` y los datos de `de`/`pl`). Faltan zonas IANA y los
+  calendarios `chinese`/`dangi` (`pendiente/mac/e3.md`).
+- **Falta**: GC generacional o incremental. `navier-stokes` es el benchmark más lento (unos
+  640 ms por cuadro, Mac). `fib(30)` 363 ms en Windows (E8, 2026-11-12); los 20 benchmarks en
+  el Mac se midieron con la máquina cargada y hay que repetirlos.
 
 ### 2.2 Bindings DOM y WebIDL
 
@@ -111,20 +160,20 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 - WPT `dom/nodes` ≥ 85%, `dom/events` ≥ 80%, `html/dom` ≥ 60% y `css/cssom` ≥ 50%.
 - `interfaces/*.idl`: el test `idlharness` de DOM y HTML pasa ≥ 80% de las aserciones.
 
-**Estado**:
+**Estado** (3 de 6 criterios cumplidos):
 - **Hecho**: testharness.js corre en el motor (`bf-web/src/html/testharness.rs`, binario
-  `wpt-testharness`; criterio cumplido). `html/dom` **96.9 %** (meta ≥ 60 % cumplida;
-  reflexión 99.9 %); `css/cssom` **78.0 %** (E2, 2026-11-07; meta ≥ 50 % cumplida). Más allá
-  del apartado: Shadow DOM (`shadow-dom/` 97.3 %), custom elements (`custom-elements/`
-  82.9 %), `XMLSerializer` (E1, `bf-dom/src/{shadow,custom}.rs`, `bf-web/src/dom/`);
-  `css/cssom-view` 50.0 % (E2, 2026-11-06).
-- **Parcial**: `dom/nodes` **81.4 %** (meta 85 %; casi todo lo que falta de `*NS*` lee
-  `<iframe>` con documentos XML); `dom/events` **71.5 %** (meta 80 %; E1 midió después 599
-  pasan frente a 584); `domparsing/` 21.8 % (faltan los métodos posicionales y la API
-  Sanitizer).
-- **Sin medir**: `idlharness` de DOM y HTML (8 archivos terminan en `ERROR WebIDL2 is not
-  defined`); re-estilo y re-layout incrementales (no hay cifra). Los bindings se escriben a
-  mano por interfaz, no salen de un generador desde los `.idl`.
+  `wpt-testharness`; criterio cumplido). `html/dom` **97.2 %** (Mac, 2026-11-12; meta ≥ 60 %
+  cumplida; reflexión 99.9 % en Windows); `css/cssom` **81.6 %** (Mac, 2026-11-12; meta
+  ≥ 50 % cumplida). Más allá del apartado (Mac, 2026-11-12): Shadow DOM (`shadow-dom/`
+  97.3 %), custom elements (`custom-elements/` 83.5 %), `XMLSerializer` (E1,
+  `bf-dom/src/{shadow,custom}.rs`, `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
+- **Parcial**: `dom/nodes` **82.9 %** (meta 85 %) y `dom/events` **72.4 %** (meta 80 %), las
+  dos del Mac sobre `master` `5b9a230`, pendientes de actualizar (las mide E1);
+  `domparsing/` 23.9 % (Mac; sin `tentative/` 42.6 %): faltan los métodos posicionales y la
+  API Sanitizer.
+- **Sin medir**: `idlharness` de DOM y HTML (en Windows, 8 archivos terminaban en `ERROR
+  WebIDL2 is not defined`; lo mide E1); re-estilo y re-layout incrementales (no hay cifra).
+  Los bindings se escriben a mano por interfaz, no salen de un generador desde los `.idl`.
 
 ### 2.3 Event loop
 
@@ -151,22 +200,29 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 - Google, Wikipedia y Hacker News con su JavaScript cargan sin pánicos, y el buscador de
   Google funciona escribiendo en la caja y pulsando Intro.
 
-**Estado**:
+**Estado** (1 de 5 criterios cumplidos):
 - **Hecho**: hilo por pestaña con motor JS, scripts del documento, `document.write`, módulos e
   import maps (`bf-web/src/bom/script.rs`), eventos de usuario despachados desde
   `bf-shell/src/window/events.rs`, `fetch()`/XHR con CORS, *mode* y *credentials*
   (`bf-web/src/net/cors.rs`, E2); `fetch()` por partes, streams, IndexedDB, WebSocket y
   EventSource (E2); workers, `SharedWorker`, `MessagePort` y `BroadcastChannel` entre agentes
-  (E3, `bf-web/src/workers/`). El `TODO(bf-dom)` del tokenizador ya no está.
-- **Criterios**: `fetch/api` 81.0 % entero (`fetch/api/cors` 86.4 %, E2) y
-  `html/webappapis` 53.8 % entero; `event-loops` y `fetch/api/basic` **no se han medido por
-  separado**. `html/syntax/parsing`: 3900 pasan, 0 fallan (README); no consta si incluye ya
-  los tests de `document.write`.
-- **Falta**: los reftests `needs-js` siguen sin ejecutarse (6144 en `wpt-status.md`): criterio
-  sin cumplir. `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`. *Update the rendering* y
-  `requestAnimationFrame` sincronizados con el repintado: rAF existe en `bf-js` pero nadie lo
-  llama (bucle de cuadros de E4 sin integrar, `pendiente/e4.md`). Google, Wikipedia y
-  Hacker News sin pánicos: no hay una prueba formal; ver "Hallazgos de pruebas reales".
+  (E3, `bf-web/src/workers/`). `requestAnimationFrame` integrado: el hilo de la pestaña corre
+  los callbacks en cada cuadro (`bf-shell/src/window/worker.rs` → `script.rs::run_animation_frames`,
+  E4, `master` `eb3b0ec`) y el runner de WPT carga marcos. El `TODO(bf-dom)` del tokenizador ya
+  no está.
+- **Criterios** (Mac, 2026-11-12): `fetch/api/basic` **89.4 %** (839 / 939; meta ≥ 70 %
+  cumplida; `fetch/api` entero 83.2 %). `html/webappapis/scripting/event-loops` **44.4 %**
+  (4 / 9 subtests en 8 documentos; meta 70 %; `html/webappapis` entero 78.1 %).
+  `html/syntax/parsing` con testharness: 2722 / 2742 subtests (99.3 %) con 17 `FAIL`;
+  `html5lib_url`, `html5lib_write` y `html5lib_write_single` terminan en `ERROR` (`runType`
+  de `undefined`) y `adoption-agency-reparenting-shadow-cycle.html` no termina (queda en
+  `bf_web::bom::frames::sync_frames`): criterio sin cumplir. El árbol de html5lib sin JS sigue
+  en 3900 pasan, 0 fallan.
+- **Falta**: los reftests `needs-js` siguen sin ejecutarse (8384 en la corrida del Mac de
+  `wpt-status.md`): criterio sin cumplir. `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`.
+  Google, Wikipedia y Hacker News sin pánicos: no hay una prueba formal; ver "Hallazgos de
+  pruebas reales". Tres documentos de testharness terminan en pánico (`Gc liberado`,
+  `bf-js/src/heap.rs`), dos de ellos con marcos que se descargan (`wpt-status.md`, notas).
 
 ### 2.4 Interactividad de formularios
 
@@ -180,16 +236,18 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 **Aceptación**: WPT `html/semantics/forms` ≥ 60%. Buscar en Google desde su caja y enviar un
 formulario POST a un servidor de prueba local (test en `bf-shell`).
 
-**Estado**:
-- **Parcial**: `html/semantics/forms` **42.2 %** (meta 60 %): la *activation behavior* (envío
-  con `submit`/`formdata`/`invalid`, reset, `label`) está; la mayoría de `form-submission-*`
-  leen el resultado en un `<iframe>` con `target` (`notrun`). Form-associated custom elements,
+**Estado** (0 de 3 criterios cumplidos):
+- **Parcial**: `html/semantics/forms` **44.9 %** (Mac, 2026-11-12; meta 60 %; 42.2 % en
+  Windows): la *activation behavior* (envío con `submit`/`formdata`/`invalid`, reset, `label`)
+  está; la mayoría de `form-submission-*` leen el resultado en un `<iframe>` con `target`
+  (`notrun`). Form-associated custom elements,
   `HTMLFormControlsCollection` y `RadioNodeList` (E1, `bf-web/src/html/forms.rs`); `textarea`
   y list box con scroll (E12). Envío POST desde la ventana (`LoadContext::post` en
   `bf-shell/src/load.rs`).
 - **Falta**: `DataTransfer`, `HTMLInputElement.labels`; `TODO(forms)` sigue en
-  `bf-layout/src/controls.rs`. El test POST contra un servidor local en `bf-shell` y la
-  búsqueda en Google **no constan medidos**.
+  `bf-layout/src/controls.rs`. El test POST contra un servidor local en `bf-shell` no existe
+  (el único servidor local de `bf-shell/src/load.rs` prueba Referrer-Policy) y la búsqueda en
+  Google **no consta medida**.
 
 ---
 
@@ -205,9 +263,10 @@ formulario POST a un servidor de prueba local (test en `bf-shell`).
 **Aceptación**: WPT `css/CSS2/tables` ≥ 75% y `css/css-tables` ≥ 50%. Hacker News se ve con
 sus columnas (hoy cada celda cae en su propia línea).
 
-**Estado**: **hecho**. `css/CSS2/tables` **98.4 %** y `css/css-tables` **73.9 %** (2026-10-20,
-`wpt-status.md`; las dos metas cumplidas). Hacker News con columnas: no hay medición escrita,
-pero las capturas de E7 (2026-11-06) muestran su página bien.
+**Estado**: **hecho** (3 de 3). `css/CSS2/tables` **95.2 %** y `css/css-tables` **76.8 %** (Mac,
+2026-11-12; las dos metas cumplidas; en Windows, 2026-10-20: 98.4 % y 73.9 %; la bajada de
+`CSS2/tables` está sin investigar, ver `wpt-status.md`). Hacker News con columnas: no hay
+medición escrita, pero las capturas de E7 (Windows, 2026-11-06) muestran su página bien.
 
 ### 3.2 Grid
 
@@ -218,10 +277,10 @@ pero las capturas de E7 (2026-11-06) muestran su página bien.
 
 **Aceptación**: WPT `css/css-grid` ≥ 60%.
 
-**Estado**: **hecho**. `css/css-grid` **67.3 %** (1054 / 1567, E5, 2026-11-12; meta cumplida;
-la tabla principal de `wpt-status.md` aún muestra 40.5 % de la corrida completa anterior).
-Subgrid 56/88; grid lanes (Grid 3) 518/851 (`bf-layout/src/grid.rs`, `grid/lanes.rs`). Falta:
-baseline, `z-index` en ítems (necesita pintura), subgrid dentro de lanes.
+**Estado**: **hecho** (1 de 1). `css/css-grid` **72.4 %** (1135 / 1567, Mac, 2026-11-12; meta
+cumplida). Grid lanes (Grid 3) 584 / 851 (Mac); subgrid 56 / 88 (Windows, 2026-11-06)
+(`bf-layout/src/grid.rs`, `grid/lanes.rs`). Falta: baseline, `z-index` en ítems (necesita
+pintura), subgrid dentro de lanes.
 
 ### 3.3 Efectos visuales y animación
 
@@ -233,22 +292,26 @@ baseline, `z-index` en ítems (necesita pintura), subgrid dentro de lanes.
 - Transitions y animations (`@keyframes` ya se parsea), sincronizadas con el event loop.
 
 **Aceptación**:
-- WPT `css/css-backgrounds` ≥ 70% (hoy 42.0%).
+- WPT `css/css-backgrounds` ≥ 70% (42.0 % al escribir el criterio).
 - `css/css-transforms` ≥ 50%, `css/css-transitions` y `css/css-animations` ≥ 40%.
 - Los reftests de css-flexbox que fallan por `linear-gradient` en el fondo de control pasan.
 
-**Estado**:
-- **Parcial**: `css/css-backgrounds` **52.0 %** (meta 70 %). `box-shadow` y `text-shadow`
-  existen (`bf-style/src/properties/mod.rs`); gradientes en `bf-style/src/properties/gradient.rs`
-  (el `TODO(backgrounds)` de `bf-paint/src/builder.rs` ya solo habla de
-  `background-attachment: fixed`). Filtros solo en SVG (`filter: url(#id)`, E7).
-- **Falta**: `border-image` (unos 50 fallos de `css-backgrounds`); `background-attachment:
-  fixed`; `transform`, transitions y animations: el código de E4
-  (`bf-style/src/properties/{transform,animations}.rs`, `bf-style/src/animation.rs`) existe pero
-  no está registrado en ningún `mod`, y el containing block de `transform` de E12 está inactivo
-  (`TODO(E4)` en `bf-layout/src/positioned.rs`); `mix-blend-mode`. `css-transforms`,
-  `css-transitions`, `css-animations` y los reftests de flexbox con `linear-gradient`: **sin
-  medir**.
+**Estado** (3 de 5 criterios cumplidos):
+- **Hecho**: `css/css-backgrounds` **87.2 %** (Mac, 2026-11-12; meta ≥ 70 % cumplida; el 42 %
+  y el 52 % de antes eran de otro recuento). `box-shadow` y `text-shadow`
+  (`bf-style/src/properties/mod.rs`); gradientes (`bf-style/src/properties/gradient.rs`);
+  `border-image` (`bf-paint/src/border_image.rs`, E7: 63 de 67 tests de `border-image*`, Mac);
+  `filter`, `clip-path` con formas básicas y `mix-blend-mode` en cajas HTML
+  (`bf-paint/src/filters.rs`, E7). `transform`, transiciones y animaciones integrados (E4,
+  `master` `eb3b0ec`): `css/css-transforms` **81.5 %** (reftests, Mac; meta ≥ 50 % cumplida),
+  `css/css-animations` **41.9 %** (testharness, Mac; meta ≥ 40 % cumplida). El `TODO(E4)` de
+  `bf-layout/src/positioned.rs` ya no está.
+- **Parcial**: `css/css-transitions` **20.6 %** (Mac, 2026-11-12; meta 40 %): 1950 de los
+  3347 subtests son `timeout` o `notrun`, casi todos de tres archivos
+  `properties-value-*.html` que no terminan dentro del límite (`pendiente/mac/e4.md`).
+- **Falta**: `background-attachment: fixed` (`TODO(backgrounds)`, `bf-paint/src/builder.rs`);
+  `transform` 3D (se aplana, sin `perspective`); `url()` en `filter` y `clip-path` de HTML. Los
+  reftests de flexbox con `linear-gradient`: **sin medir aparte**.
 
 ### 3.4 Texto internacional
 
@@ -261,18 +324,19 @@ baseline, `z-index` en ítems (necesita pintura), subgrid dentro de lanes.
 - WPT `css/css-writing-modes` ≥ 40% y `css/CSS2/bidi-text` ≥ 70%.
 - Los ~80 reftests de css-flexbox que fallan por `writing-mode`/rtl pasan ≥ 75%.
 
-**Estado**:
+**Estado** (2 de 3 criterios cumplidos):
 - **Hecho**: UAX #9 y UAX #14 completos (`bf-layout/src/{bidi,linebreak}.rs`; conformidad UCD
-  17.0.0: BidiTest 770241/770241, BidiCharacterTest 91707/91707, LineBreakTest 19338/19338);
+  17.0.0, Windows, E9, 2026-11-10: BidiTest 770241/770241, BidiCharacterTest 91707/91707,
+  LineBreakTest 19338/19338);
   IFC con niveles bidi, `text-justify`, `text-align-last`, `line-break`, `hyphens` manual
-  (`bf-layout/src/inline.rs`); shaping por script con fallback (`bf-font`). `css/CSS2/bidi-text`
-  **79.0 %** (E9, 2026-11-10; meta ≥ 70 % cumplida); `css/css-text` 59.2 %. Flexbox con
-  `direction: rtl` y propiedades lógicas inline (E5).
-- **Parcial**: `css/css-writing-modes` **17.8 %** (meta 40 %): las propiedades `writing-mode` y
-  `text-orientation` existen en `bf-style`, pero no hay layout vertical.
-- **Falta**: Writing Modes 4 vertical, `hyphens: auto` con diccionario, propagación de
-  `direction`/`writing-mode` del `<body>` (`pendiente/e9.md`). El criterio de los ~80 reftests
-  de flexbox por `writing-mode`/rtl **no se ha medido aparte** (flexbox entero: 73.7 %, E5).
+  (`bf-layout/src/inline.rs`); shaping por script con fallback (`bf-font`). Escritura vertical
+  (`writing-mode: vertical-rl`/`vertical-lr`), flujos ortogonales e ítems de grid ortogonales
+  (E5, `master` `7469c42`). Mac, 2026-11-12: `css/css-writing-modes` **77.4 %** (854 / 1104;
+  meta ≥ 40 % cumplida), `css/CSS2/bidi-text` **79.0 %** (meta ≥ 70 % cumplida),
+  `css/css-text` 59.2 %. Flexbox con `direction: rtl` y propiedades lógicas inline (E5).
+- **Falta**: `hyphens: auto` con diccionario, propagación de `direction`/`writing-mode` del
+  `<body>` (`pendiente/e9.md`). El criterio de los ~80 reftests de flexbox por
+  `writing-mode`/rtl **no se ha medido aparte** (flexbox entero: 78.7 %, Mac).
 
 ### 3.5 Encodings multibyte
 
@@ -283,12 +347,13 @@ baseline, `z-index` en ítems (necesita pintura), subgrid dentro de lanes.
 - WPT `encoding/` ≥ 90% de los tests sin JS (los de testharness, en la fase 2).
 - Los 7 casos omitidos de `url/resources/percent-encoding.json` pasan.
 
-**Estado**: **hecho** (E10). Decodificadores y encoders en streaming en
+**Estado**: **hecho** (2 de 2, E10). Decodificadores y encoders en streaming en
 `bf-infra/src/encoding_codec.rs` con los índices generados (`encoding_mb_tables.rs`). WPT
-`encoding/` **96.8 %** (testharness, 2026-11-07); sin `legacy-mb-*`, 90.9 % de los subtests;
-los `legacy-mb-*` que fallan cargan un `<iframe>` o envían un formulario a uno. Los 7 casos de
-`percent-encoding.json` pasan (16/16, 0 omitidos). El `TODO(roadmap)` de
-`bf-infra/src/encoding.rs` ya no está.
+`encoding` **97.5 %** (fila del directorio y también todo `encoding/` sin `legacy-mb-*`:
+23 039 / 23 623; testharness, Mac, 2026-11-12); los `legacy-mb-*` que no pasan decodifican
+por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
+`percent-encoding.json` pasan (16/16, 0 omitidos, `cargo test -p bf-url --test wpt_url`, Mac,
+2026-11-12). El `TODO(roadmap)` de `bf-infra/src/encoding.rs` ya no está.
 
 ### 3.6 Palabras clave de tamaño intrínseco y `Namespace::Other`
 
@@ -302,15 +367,16 @@ los `legacy-mb-*` que fallan cargan un `<iframe>` o envían un formulario a uno.
 - Los ~50 reftests de css-flexbox que fallan por las palabras clave de tamaño pasan.
 - `css/selectors/of-type-selectors.xhtml` pasa.
 
-**Estado**:
+**Estado** (2 de 3 criterios cumplidos):
 - **Hecho**: palabras clave de tamaño, `aspect-ratio`, `contain` y `contain-intrinsic-size`
-  (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **64.3 %** (338 / 526, E5,
-  2026-11-06, runner propio: no está en `GROUPS`; meta cumplida).
+  (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
+  2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
+  `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
 - **Parcial**: `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata un URI
   vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros casos.
 - **Falta**: `lookupNamespaceURI`/`isDefaultNamespace`, `@namespace` y `ns|E` en selectores,
-  parser XML completo (bloques 2 y 3 de `pendiente/e10.md`). `of-type-selectors.xhtml` **no
-  pasa**. Los ~50 reftests de flexbox por palabras clave: **sin medir aparte**.
+  parser XML completo (bloques 2 y 3 de `pendiente/e10.md`). Los ~50 reftests de flexbox por
+  palabras clave: **sin medir aparte**.
 
 ---
 
@@ -329,22 +395,22 @@ los `legacy-mb-*` que fallan cargan un `<iframe>` o envían un formulario a uno.
 - WPT `fetch/http-cache` ≥ 70%.
 - Recargar Wikipedia hace ≤ 2 peticiones de red nuevas.
 
-**Estado**:
+**Estado** (2 de 3 criterios cumplidos):
 - **Hecho** (E6): HTTP/2 y HPACK propios (`bf-net/src/{http2,hpack}.rs`); tests contra un
   servidor h2 local en `bf-net/tests/h2.rs` (frames, `CONTINUATION`, control de flujo,
   `GOAWAY`/`REFUSED_STREAM`, ALPN) y los vectores C.1–C.6 de RFC 7541 en ambos sentidos; los
   frames `PRIORITY` se ignoran con `SETTINGS_NO_RFC7540_PRIORITIES` (RFC 9218): criterio
   cumplido. Caché en memoria y disco (`bf-net/src/cache.rs`) con variantes por `Vary`, rangos
-  y parciales; WPT `fetch/http-cache` **90.4 %** (377 / 417, `army/e6`, 2026-11-12; meta
-  cumplida). Cookies en disco y PSL (`bf-net/src/{cookies,psl}.rs`); el `TODO(http-cache)`
+  y parciales; WPT `fetch/http-cache` **92.8 %** (387 / 417, Mac, 2026-11-12; meta
+  cumplida; 90.4 % en Windows). Cookies en disco y PSL (`bf-net/src/{cookies,psl}.rs`); el `TODO(http-cache)`
   del shell se quitó (decisión del planificador: `CachedLoader` queda como memoria del
   documento). Además: HSTS, Referrer-Policy, Happy Eyeballs.
-- **Parcial**: recargar `es.wikipedia.org` (2026-11-10): 49 entradas, 41 de la caché sin red,
+- **Parcial**: recargar `es.wikipedia.org` (Windows, 2026-11-10): 49 entradas, 41 de la caché sin red,
   6 validadas con 304 y **2 descargas** completas, es decir **8 peticiones** (las que llevan
   `max-age=0, must-revalidate`, que RFC 9111 obliga a validar). Una de las descargas
   (`Gadget-ReferenceTooltips.js`, `Vary: Cookie`) se arregló el 2026-11-12; la recarga no se
   ha vuelto a medir.
-- **Aceptado, pendiente de integrar** (`4bb212d`, `76d4eca`): `immutable`,
+- **Integrado** (`4bb212d`, `76d4eca`, ya en `master`): `immutable`,
   `stale-while-revalidate`, 6 conexiones por origen, coalescing h2, errores de red con causa,
   autenticación HTTP y caché de DNS (`pendiente/e6.md`).
 
@@ -360,13 +426,13 @@ los `legacy-mb-*` que fallan cargan un `<iframe>` o envían un formulario a uno.
 - Los iconos (hoy cuadrados negros por `mask-image`) y el gráfico de torta de Wikipedia se ven.
 - El logo SVG de Hacker News se ve.
 
-**Estado**:
+**Estado** (3 de 3 criterios cumplidos):
 - **Hecho** (E7): `crates/bf-svg` y `bf-paint/src/images/svg.rs` (SVG en `<img>`,
   `background-image`, `mask-image` y en línea; `pattern`, `mask`, filtros, `textPath`,
-  `<image>`, `foreignObject` básico, recursos externos); WPT `svg/` **70.5 %** (318 / 451,
-  2026-11-12; meta ≥ 40 % cumplida). WebP (VP8, VP8L, `ALPH`), BMP e ICO/CUR propios
+  `<image>`, `foreignObject` básico, recursos externos); WPT `svg/` **71.8 %** (324 / 451,
+  Mac, 2026-11-12; meta ≥ 40 % cumplida). WebP (VP8, VP8L, `ALPH`), BMP e ICO/CUR propios
   (`bf-image/src/`); animación de GIF y APNG en la ventana. `mask-image`: los iconos de
-  Wikipedia y el logo y las flechas de Hacker News se ven (capturas de E7, 2026-11-06); la torta
+  Wikipedia y el logo y las flechas de Hacker News se ven (capturas de E7, Windows, 2026-11-06); la torta
   de `Pie_chart` llega como PNG en miniatura.
 - **Falta**: AVIF (diseño en `pendiente/e7.md`; queda el `TODO(roadmap)` de `bf-image/src/lib.rs`),
   WebP animado (solo el primer fotograma), `mix-blend-mode` en SVG, texto vertical y RTL en SVG.
@@ -382,16 +448,18 @@ los `legacy-mb-*` que fallan cargan un `<iframe>` o envían un formulario a uno.
 **Aceptación**: WPT `css/css-overflow` ≥ 50% y `css/css-position/sticky` ≥ 50%. `<textarea>`
 y los list box se desplazan con la rueda.
 
-**Estado**:
+**Estado** (2 de 3 criterios cumplidos):
 - **Hecho** (E12): scroll containers con barras superpuestas, rueda, arrastre y teclado
   (`bf-layout/src/scroll.rs`, `bf-paint/src/scrollbars.rs`); `position: sticky`; `line-clamp`,
-  `text-overflow` y `overflow-clip-margin`. `css/css-overflow` **61.8 %** (2026-11-12) y
-  `css/css-position/sticky` **90.9 %** (10/11 ejecutables, 99 `needs-js`): metas cumplidas.
-  `<textarea>` y los list box son scroll containers y la rueda los mueve (el test con la
-  rueda no consta aparte).
-- **Falta**: `object-fit`/`object-position`, `<picture>`/`srcset`/`sizes` y carga incremental
-  de imágenes (sin empezar); `scroll-behavior: smooth` es instantáneo; `scroll-snap`,
-  `overscroll-behavior`, scroll containers RTL.
+  `text-overflow` y `overflow-clip-margin`. Mac, 2026-11-12: `css/css-overflow` **65.1 %** y
+  `css/css-position/sticky` **100 %** (11 / 11 ejecutables, 98 `needs-js`): metas cumplidas.
+  `object-fit`/`object-position` (`bf-style/src/properties/object.rs`, `bf-paint/src/images.rs`):
+  179 de 182 tests `object-fit*`/`object-position*` (98.4 %, Mac).
+- **Parcial**: `<textarea>` y los list box son scroll containers y la rueda mueve el
+  contenedor más interno (`bf-layout/tests/scroll.rs`), pero no hay un test de la rueda sobre
+  un `<textarea>` o un list box: criterio sin medir.
+- **Falta**: `<picture>`/`srcset`/`sizes` y carga incremental de imágenes; `scroll-behavior:
+  smooth` es instantáneo; `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
 
 ---
 
@@ -419,40 +487,45 @@ y los list box se desplazan con la rueda.
   - Aceptación: 60 fps al desplazar Wikipedia; primera pintura de Wikipedia < 500 ms en
     release.
 
-**Estado**:
+**Estado** (0 de 6 criterios cumplidos):
 - **Accesibilidad**: falta el árbol y su exposición al sistema; solo la reflexión ARIA en el DOM
-  (`ARIAMixin`, E1). `html-aam` y `wai-aria`: sin medir.
+  (`ARIAMixin`, E1) y el zoom de texto (E11). `html-aam` y `wai-aria`: sin medir (no están en
+  el checkout de WPT).
 - **Procesos y sandbox**: falta. Hoy cada pestaña es un hilo del mismo proceso
   (`bf-shell/src/window/worker.rs`); "un pánico no cierra la ventana" no consta medido.
 - **Seguridad**: `Referrer-Policy` (`bf-net/src/referrer.rs`, con la política del documento en
   los subrecursos del shell) y HSTS (`bf-net/src/hsts.rs`) hechos (E6); COOP/COEP y
   `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las
   cabeceras). Faltan CSP, mixed content, Permissions Policy y Safe Browsing.
-- **Interfaz**: pestañas hechas; historial persistente, marcadores y descargas son de E11, que
-  todavía no está en `master`; impresión, falta.
+- **Interfaz**: pestañas; historial persistente, marcadores, descargas con su barra, buscar en
+  la página, zoom de texto, opciones, varias ventanas y sesión restaurada (E11, en `master`
+  desde `9d64fdd`; `bf-shell/src/{history,bookmarks,downloads,find,settings,restore}.rs`).
+  Atajos con `Cmd` en macOS (E6, `bf-shell/src/window/keys.rs`). Impresión (`@page`), falta.
 - **Rendimiento**: falta GPU y raster en tiles. 60 fps y primera pintura de Wikipedia: sin medir.
 
 ---
 
 ## Deuda técnica anotada en el código
 
-Salida de `grep -rn "TODO(" crates` al cierre de la fase 1, agrupada por crate. Cada
-`TODO(etiqueta)` cita la fase que lo resuelve. La columna "Estado" es del 2026-11-12 (si el
-`TODO` sigue en el archivo).
+Salida de `grep -rn "TODO(" crates` agrupada por crate. Cada `TODO(etiqueta)` cita la fase
+que lo resuelve. La tabla de arriba es la de hoy (`master` `8917a5f`, 2026-11-12); la de
+abajo, los `TODO` del cierre de la fase 1 que ya no están.
 
-| Crate | Ubicación | Pendiente | Fase | Estado |
-|---|---|---|---|---|
-| `bf-dom` | `src/forms.rs:27` | `TODO(event-loop)`: la cola de microtasks de `option` es provisional; pasa al event loop real con `bf-js`. | 2.3 | sigue |
-| `bf-html` | `src/tokenizer/mod.rs:62` | `TODO(bf-dom)`: la entrada del tokenizador como code points, para los surrogates de `document.write`. | 2.1 / 2.3 | ya no está |
-| `bf-infra` | `src/lib.rs:8` | `TODO(bf-dom)`: `DomString` es un alias de `String`; pasa a WTF-8. | 2.1 | ya no está |
-| `bf-infra` | `src/encoding.rs:5` | `TODO(roadmap)`: encodings multibyte (GBK, gb18030, Big5, EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR). | 3.5 | hecho (E10) |
-| `bf-image` | `src/lib.rs:4` | `TODO(roadmap)`: SVG, WebP, AVIF, ICO/BMP y animación de GIF/APNG. | 4.2 | queda AVIF |
-| `bf-layout` | `src/controls.rs:9` | `TODO(forms)`: interactividad de formularios, `::placeholder` y scroll interno de `textarea` y list box. | 2.4 / 4.3 | sigue (el scroll ya está, E12) |
-| `bf-layout` | `src/positioned.rs:3` | `TODO(sticky)`: `position: sticky` necesita scroll containers reales. | 4.3 | hecho (E12); ahora `TODO(E4)` de `transform` |
-| `bf-net` | `src/lib.rs:5` | `TODO(roadmap)`: HTTP/2, caché HTTP, CORS y políticas de seguridad de Fetch. | 2.3 / 4.1 | queda "CORS y políticas de seguridad de Fetch" (CORS está en `bf-web`, E2) |
-| `bf-paint` | `src/builder.rs:472` | `TODO(backgrounds)`: `background-attachment: fixed` se pinta como `scroll`; los gradientes no se dibujan. | 3.3 | queda `fixed` |
-| `bf-shell` | `src/load.rs:17` | `TODO(http-cache)`: el `CachedLoader` en memoria se reemplaza por la caché HTTP de `bf-net`. | 4.1 | quitado (decisión, ver 4.1) |
-| `bf-style` | `src/cascade.rs:610` | `TODO(cascade)`: las reglas UA de quirks ganan por especificidad máxima; debería ser un origen "UA quirks" explícito. | 3 | sigue |
+| Crate | Ubicación | Pendiente | Fase |
+|---|---|---|---|
+| `bf-dom` | `src/forms.rs:32` | `TODO(event-loop)`: la cola de microtasks de `option` es provisional; pasa al event loop real con `bf-js`. | 2.3 |
+| `bf-layout` | `src/controls.rs:9` | `TODO(forms)`: interactividad de formularios y `::placeholder` (el scroll interno de `textarea` y list box ya está, E12). | 2.4 |
+| `bf-net` | `src/lib.rs:9` | `TODO(roadmap)`: CORS y políticas de seguridad de Fetch (CORS está en `bf-web`, E2). | 2.3 / 5 |
+| `bf-paint` | `src/builder.rs:744` | `TODO(backgrounds)`: `background-attachment: fixed` se pinta como `scroll`. | 3.3 |
+| `bf-image` | `src/lib.rs:8` | `TODO(roadmap)`: AVIF (diseño en `docs/pendiente/e7.md`). | 4.2 |
+| `bf-svg` | `src/lib.rs:27` | `TODO(svg)`: el resto de primitivas de filtro (`feImage`, `feTurbulence`, luces…). | 4.2 |
+| `bf-style` | `src/cascade.rs:971` | `TODO(cascade)`: las reglas UA de quirks ganan por especificidad máxima; debería ser un origen "UA quirks" explícito. | 3 |
+| `bf-style` | `src/values/color.rs:499` | `TODO(E2)`: `currentcolor` como argumento (de `color-mix()`) necesita un `Color` sin resolver. | 3 |
+
+Ya no están: `TODO(bf-dom)` del tokenizador (`bf-html`) y de `DomString` (`bf-infra`),
+`TODO(roadmap)` de encodings multibyte (`bf-infra/src/encoding.rs`, E10), `TODO(sticky)` y el
+`TODO(E4)` de `transform` (`bf-layout/src/positioned.rs`), `TODO(http-cache)` del shell
+(decisión, ver 4.1) y la parte de gradientes de `TODO(backgrounds)`.
 
 Pendientes que no tienen `TODO(` en el código pero están medidos en
 [`wpt-status.md`](wpt-status.md):
@@ -479,11 +552,11 @@ Pruebas del usuario con el navegador del 2026-11-12:
   se resolvía contra la arena equivocada y tumbaba el motor. Arreglado por E1 en `eb29fa4`:
   ahora da `NotSupportedError` o el resultado que define el DOM (`pendiente/e1.md`); la
   adopción real entre ventanas sigue pendiente.
-- **`Image` y `PerformanceObserver` ausentes**: `new Image()` lanza `ReferenceError` y corta el
-  script (anotado en [`faltantes-web.md`](faltantes-web.md)); `PerformanceObserver` no existe.
-  E3, en curso.
-- **`TypeError` sin mensaje**: errores que llegan a la consola sin texto, lo que impide saber
-  qué falló. E3, en curso.
+- **`Image` y `PerformanceObserver` ausentes**: hecho (E3, `89a46c3`, en `master`): `Image`,
+  `Audio` y `Option` (`bf-web/src/html/legacy_factories.rs`) y `PerformanceObserver`
+  (`bf-web/src/bom/performance_observer.rs`).
+- **`TypeError` sin mensaje**: hecho (E3 y E8): los errores dicen la operación y el valor
+  (`describe()` y `HostState::current_op` en `bf-js/src/host/mod.rs`).
 
 ## Estado por bloque
 
@@ -494,13 +567,16 @@ Lo hecho, lo medido y lo que falta de cada bloque del ciclo army:
 - [E2](pendiente/e2.md): red desde JS (`fetch` por partes, CORS, streams), IndexedDB y CSSOM.
 - [E3](pendiente/e3.md): workers, agentes, `BroadcastChannel` entre agentes, COOP/COEP.
 - [E4](pendiente/e4.md): hilo por pestaña, BOM, iframes con pintado anidado, cookies de terceros;
-  `transform` y animaciones sin enlazar.
+  `transform`, animaciones, transiciones y `requestAnimationFrame` (integrados en el Mac).
 - [E5](pendiente/e5.md): sizing, grid, subgrid, grid lanes y flexbox rtl.
 - [E6](pendiente/e6.md): HTTP/2, caché HTTP, PSL, HSTS, Referrer-Policy, conexiones, autenticación
   y DNS.
 - [E7](pendiente/e7.md): formatos de imagen propios, animación de GIF/APNG y SVG.
-- [E8](pendiente/e8.md): test262 (95.3 %), Intl y rendimiento de la VM.
+- [E8](pendiente/e8.md): test262 (95.3 % en Windows; 98.8 % en el Mac), Intl y rendimiento de la VM.
 - [E9](pendiente/e9.md): bidi (UAX #9), cortes de línea (UAX #14) y shaping por script.
 - [E10](pendiente/e10.md): encodings multibyte; namespaces y parser XML pendientes.
-- E11: historial, marcadores y descargas; todavía sin `docs/pendiente/e11.md` en `master`.
+- [E11](pendiente/e11.md): historial, marcadores, descargas, buscar, zoom de texto, ventanas y
+  sesión restaurada.
 - [E12](pendiente/e12.md): scroll containers, sticky, `line-clamp`, `text-overflow`.
+- En el Mac (rondas del 2026-11-12): [`pendiente/mac/`](pendiente/mac/), un archivo por
+  ejecutor (E1 a E6).

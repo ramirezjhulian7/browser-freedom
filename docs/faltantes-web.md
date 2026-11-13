@@ -9,19 +9,23 @@ investigarla.
 
 | Falta | Síntoma en los sitios | Spec | Dónde va |
 |---|---|---|---|
-| Constructor `Image` (`new Image()`) | `ReferenceError: Image is not defined` al precargar imágenes; el script se corta. Visto en un sitio de videos. | HTML §4.8.3 (legacy factory function de `HTMLImageElement`) | 2.2, `bf-web` html |
-| `indexedDB` | `ReferenceError: indexedDB is not defined` en una promesa al arrancar. Visto en un sitio de videos. | Indexed Database API 3.0 | 2.2, `bf-web` bom (storage) |
-| `innerWidth`/`innerHeight` y `documentElement.clientWidth` fijos en 800×600 | En una ventana de 1180×704 los scripts ven 800×600: los diseños que se adaptan con JavaScript calculan mal. | CSSOM View §7, §6 | 2.2, `bf-web` cssom (el viewport real de la pestaña) |
 | `IntersectionObserver` | `undefined`: carga diferida de imágenes y listas infinitas no arrancan. | Intersection Observer | 2.2 |
 | `ResizeObserver` | `undefined`. | Resize Observer | 2.2 |
-| `customElements` | `undefined`: los sitios con componentes web no se definen. | HTML §4.13 | 2.2 |
-| `Worker` | `undefined`. | HTML §10 | 2.3 |
 | `crypto.subtle` | `undefined` (sí existe `crypto`). | Web Cryptography API | 2.2 |
 | `localStorage` en páginas `file:` | `SecurityError: The operation is insecure`. Chrome y Firefox lo permiten (origen opaco con almacenamiento propio por archivo o carpeta). | HTML §12.2 | 2.2, `bf-web` bom |
 
 Ya funcionan (verificado en la misma prueba): eventos de clic al DOM, `fetch`,
 `XMLHttpRequest`, `querySelectorAll`, `classList`, `innerHTML`, `document.currentScript`,
 `location`, `history.pushState`, `MutationObserver` y `WebSocket` (al menos como interfaz).
+
+Resueltos después, en `master` `8917a5f` (2026-11-12, comprobado en el código, no con los
+sitios):
+- Constructor `Image` (y `Audio` y `Option`): `bf-web/src/html/legacy_factories.rs` (E3).
+- `indexedDB`: `bf-web/src/storage/idb.rs` (E2).
+- `innerWidth`/`innerHeight` y `clientWidth` salen del viewport real que pasa el shell
+  (`bf-web/src/cssom/mod.rs::window_metrics`).
+- `customElements`: `bf-web/src/html/custom_elements.rs` (E1).
+- `Worker` (y `SharedWorker`): `bf-web/src/workers/` (E3).
 
 ## Errores en sitios por investigar
 
@@ -35,12 +39,13 @@ Ya funcionan (verificado en la misma prueba): eventos de clic al DOM, `fetch`,
 
 ## Mensajes de error
 
-`bf-js` lanza `TypeError: Type error.` sin decir la operación ni la propiedad (reCAPTCHA y la
-aplicación Vite). Con mensajes como los de los demás motores (`x is not a function`,
-`Cannot read properties of undefined (reading 'y')`) estos casos se diagnostican desde la
-consola, sin reproducirlos a mano.
+Resuelto (E3 y E8, en `master`): los `TypeError` dicen la operación y el valor, como en los
+demás motores (`x is not a function`, `Cannot read properties of undefined (reading 'y')`).
+Antes `bf-js` lanzaba `TypeError: Type error.` (reCAPTCHA y la aplicación Vite); hay que volver
+a probar esos sitios para ver el mensaje real.
 
 ## Pruebas que fallan en `master`
 
-- `bf-web`, `tests/cssom.rs`, `snapshot_from_the_shell_is_used`: `devicePixelRatio` da 1 donde
-  el test espera 2 (desde el merge de CSSOM).
+- Ninguna: `master` `8917a5f` pasa la suite completa en el Mac (verificado por el
+  planificador el 2026-11-12). La que estaba anotada aquí,
+  `bf-web/tests/cssom.rs::snapshot_from_the_shell_is_used` (`devicePixelRatio`), ya pasa.
