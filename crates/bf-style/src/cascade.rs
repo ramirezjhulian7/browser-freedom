@@ -1163,6 +1163,15 @@ impl<'a> Styler<'a> {
             let px = style.font_size_px() * zoom;
             style.set(Value::FontSize(crate::properties::types::FontSize::Px(px)));
         }
+        // E4: el tamaño de `medium` con `monospace` como única familia (13 px en vez de 16).
+        let family = self.cascaded_value(
+            LonghandId::FontFamily,
+            &per_property,
+            parent,
+            &ctx(len),
+            &custom,
+        );
+        self.keyword_font_size(&mut style, &family, &per_property, parent);
         len.font_size = style.font_size_px();
         for id in [
             LonghandId::FontFamily,
@@ -1229,6 +1238,81 @@ impl<'a> Styler<'a> {
             };
         }
         style
+    }
+
+    /// E4: el tamaño de las palabras clave de `font-size` según la familia genérica: con
+    /// `font-family: monospace` sola, `medium` es 13 px y no 16 px (y el resto de las palabras
+    /// clave escalan igual), como en Gecko y Blink. Un tamaño que sale de una palabra clave
+    /// (heredado o relativo: `em`, `%`, `smaller`, `larger`) lleva su factor en
+    /// `ComputedStyle::font_size_keyword`; al cambiar la familia genérica entre el padre y el
+    /// elemento se escala por la razón de los dos `medium`.
+    fn keyword_font_size(
+        &self,
+        style: &mut ComputedStyle,
+        family: &Value,
+        per_property: &[Vec<Entry>],
+        parent: Option<&ComputedStyle>,
+    ) {
+        use crate::properties::types::{FamilyName, FontSize};
+        use crate::values::{LengthPercentage, LengthUnit};
+        const MONOSPACE_MEDIUM: f32 = 13.0;
+        let medium_of = |f: &crate::properties::types::FontFamily| match f.0.as_slice() {
+            [FamilyName::Generic(g)] if g.eq_ignore_ascii_case("monospace") => MONOSPACE_MEDIUM,
+            _ => crate::properties::types::MEDIUM_FONT_SIZE,
+        };
+        let own = match family {
+            Value::FontFamily(f) => medium_of(f),
+            _ => crate::properties::types::MEDIUM_FONT_SIZE,
+        };
+        let parent_medium = parent.map_or(crate::properties::types::MEDIUM_FONT_SIZE, |p| {
+            medium_of(&p.font_family)
+        });
+        let parent_kw = parent.map_or(Some(1.0), |p| p.font_size_keyword);
+        let winner = cascaded(
+            &per_property[LonghandId::FontSize as usize],
+            |e| (&e.prec, e.origin, e.layer),
+            |e| match e.value {
+                DeclValue::Wide(w) => Some(w),
+                _ => None,
+            },
+        );
+        // (factor de palabra clave, razón que se aplica al tamaño computado)
+        let (kw, ratio) = match winner.map(|e| &e.value) {
+            None | Some(DeclValue::Wide(CssWide::Inherit | CssWide::Unset)) => {
+                (parent_kw, parent_kw.map_or(1.0, |_| own / parent_medium))
+            }
+            Some(DeclValue::Wide(CssWide::Initial)) => (Some(1.0), own / 16.0),
+            Some(DeclValue::Value(Value::FontSize(fs))) => match fs {
+                FontSize::Absolute(k) => (Some(*k), own / 16.0),
+                FontSize::Smaller => (parent_kw.map(|f| f / 1.2), 1.0),
+                FontSize::Larger => (parent_kw.map(|f| f * 1.2), 1.0),
+                FontSize::LengthPercentage(LengthPercentage::Percentage(p)) => {
+                    (parent_kw.map(|f| f * p / 100.0), 1.0)
+                }
+                FontSize::LengthPercentage(LengthPercentage::Length(l))
+                    if l.unit == LengthUnit::Em =>
+                {
+                    (parent_kw.map(|f| f * l.value), 1.0)
+                }
+                _ => (None, 1.0),
+            },
+            Some(_) => (None, 1.0),
+        };
+        // `em`, `%`, `smaller` y `larger` ya parten del tamaño del padre, que llevaba su
+        // `medium`; con otra familia genérica se escalan por la razón de los dos.
+        let ratio = match (winner.map(|e| &e.value), kw) {
+            (Some(DeclValue::Value(Value::FontSize(fs))), Some(_))
+                if !matches!(fs, FontSize::Absolute(_)) =>
+            {
+                own / parent_medium
+            }
+            _ => ratio,
+        };
+        style.font_size_keyword = kw;
+        if ratio != 1.0 {
+            let px = style.font_size_px() * ratio;
+            style.set(Value::FontSize(FontSize::Px(px)));
+        }
     }
 
     /// ¿El zoom de texto escala el `font-size` de este elemento? Sí cuando el valor que gana

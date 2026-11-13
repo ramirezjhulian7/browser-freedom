@@ -174,7 +174,7 @@ struct TabState {
     relayout: Option<u64>,
     hover_link: Option<String>,
     overlay_hover: Option<(Rect, bool, String)>,
-    page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
+    page_cache: RefCell<Option<PageRaster>>,
     page_generation: u64,
     anim_epoch: Option<Instant>,
     image_frame: u64,
@@ -286,7 +286,7 @@ struct App {
     panel_raster: Option<Duration>,
     /// Raster de la página en caché; se reutiliza mientras no cambien página, scroll, zoom,
     /// DPI ni viewport, así mover el ratón o animar la barra no vuelve a pintar la página.
-    page_cache: RefCell<Option<(RasterKey, Pixmap)>>,
+    page_cache: RefCell<Option<PageRaster>>,
     page_generation: u64,
     /// E7: inicio de las animaciones de GIF/APNG de la página (al mostrarse la navegación;
     /// los relayouts y los cuadros de scripts lo conservan).
@@ -387,6 +387,21 @@ fn timestamp() -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// E4: el raster de la página en caché: su clave, el pixmap y, si se pintó en tiles de la
+/// página (`bf_paint::raster::render_tiled`), el scroll (en px de dispositivo enteros) con que
+/// se pintó: de ahí sale el próximo cuadro por desplazamiento incremental.
+type PageRaster = (RasterKey, Pixmap, Option<(f32, f32)>);
+
+/// E4: los hilos del raster en tiles (los núcleos, hasta 8).
+fn raster_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(8)
+    })
 }
 
 /// Clave de una capa rasterizada en caché. Si no cambia, el pixmap anterior sirve tal cual.
@@ -2786,22 +2801,62 @@ impl App {
         let area = self.page_area();
         let viewport = self.viewport();
         if let Some(p) = &self.page {
-            let mut key =
-                RasterKey::new(self.page_generation, self.scroll, dpi * self.zoom, viewport);
+            let scale = dpi * self.zoom;
+            // E4: el scroll ajustado a px de dispositivo enteros (como los navegadores), para
+            // pintar en tiles de la página y desplazar moviendo el cuadro anterior.
+            let snapped = (
+                (self.scroll.0 * scale).round() / scale,
+                (self.scroll.1 * scale).round() / scale,
+            );
+            let mut key = RasterKey::new(self.page_generation, snapped, scale, viewport);
             key.frame = self.image_frame;
             let mut cache = self.page_cache.borrow_mut();
-            if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            if cache.as_ref().is_none_or(|(k, _, _)| *k != key) {
                 let start = Instant::now();
-                let page = render_scrolled(
-                    &p.display_list,
-                    viewport,
-                    dpi * self.zoom,
-                    Rgba::WHITE,
-                    self.scroll,
-                );
+                let dl = &p.display_list;
+                let threads = raster_threads();
+                // El cuadro anterior de la misma página, si se pintó en tiles: se mueve y se
+                // pintan solo los tiles nuevos y los de lo `fixed`/`sticky`.
+                let incremental = cache.as_ref().and_then(|(k, prev, tiled)| {
+                    let prev_scroll = (*tiled)?;
+                    let same = k.generation == key.generation
+                        && k.scale == key.scale
+                        && k.size == key.size
+                        && k.frame == key.frame;
+                    if !same {
+                        return None;
+                    }
+                    bf_paint::raster::scroll_frame(
+                        dl,
+                        prev,
+                        prev_scroll,
+                        viewport,
+                        scale,
+                        Rgba::WHITE,
+                        snapped,
+                        threads,
+                    )
+                });
+                let (page, tiled) = match incremental {
+                    Some(page) => (page, Some(snapped)),
+                    None => match bf_paint::raster::render_tiled(
+                        dl,
+                        viewport,
+                        scale,
+                        Rgba::WHITE,
+                        snapped,
+                        threads,
+                    ) {
+                        Some(page) => (page, Some(snapped)),
+                        None => (
+                            render_scrolled(dl, viewport, scale, Rgba::WHITE, snapped),
+                            None,
+                        ),
+                    },
+                };
                 let raster = start.elapsed();
                 self.raster.set(Some(raster));
-                *cache = Some((key, page));
+                *cache = Some((key, page, tiled));
                 // E4: la primera pintura de la navegación (el primer raster de su página).
                 if self.loading.is_none()
                     && let Some(nav) = self.nav_start.take()
@@ -2813,7 +2868,7 @@ impl App {
                     ));
                 }
             }
-            if let Some((_, page)) = cache.as_ref() {
+            if let Some((_, page, _)) = cache.as_ref() {
                 blit_opaque(&mut frame, page, area.y * dpi);
             }
             drop(cache);
@@ -3548,8 +3603,14 @@ impl App {
         let (Some(page), Some(current)) = (self.page.as_mut(), self.current.as_ref()) else {
             return;
         };
+        let list = page.display_list.items.as_ptr();
         if page.apply_scroll(&current.doc, changes, self.scroll) {
-            self.page_generation += 1;
+            // E4: si solo se movió lo `sticky` del viewport, la lista es la misma (lleva
+            // `PushSticky`) y el raster ya lo coloca con el scroll del cuadro: sin generación
+            // nueva, el cuadro siguiente puede salir por desplazamiento incremental.
+            if page.display_list.items.as_ptr() != list {
+                self.page_generation += 1;
+            }
             self.redraw_later();
         }
     }
