@@ -1981,6 +1981,8 @@ impl App {
     /// Entrega un resultado del hilo de carga a la pestaña que lo pidió. Devuelve el viewport
     /// usado si era para la pestaña activa.
     fn deliver(&mut self, done: Done) -> Option<Size> {
+        // E4: el hilo de la pestaña no corre otro cuadro de animación hasta que llegue este.
+        self.worker.frame_taken(done.tab);
         if done.id == 0 {
             // Un cuadro producido por los scripts del documento de la pestaña `done.tab`.
             let i = self.tab_with_key(done.tab)?;
@@ -2007,7 +2009,11 @@ impl App {
 
     fn receive(&mut self) {
         let mut laid_out = None;
-        while let Ok(msg) = self.worker.rx.try_recv() {
+        // E4: solo los mensajes que ya llegaron: con animaciones CSS el hilo de la pestaña
+        // manda un cuadro cada 16 ms, y procesarlos de a uno mientras siguen llegando podría
+        // no terminar nunca.
+        let pending: Vec<FromDoc> = self.worker.rx.try_iter().collect();
+        for msg in pending {
             match msg {
                 FromDoc::Done(done) => {
                     if let Some(v) = self.deliver(*done) {

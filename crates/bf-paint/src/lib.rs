@@ -38,7 +38,8 @@ pub use tiny_skia::{Pixmap, PixmapPaint, Transform};
 /// Un documento estilado, maquetado y listo para pintar.
 pub struct Page {
     pub fonts: Fonts,
-    /// Los estilos computados con que se maquetó (el CSSOM de la página los reutiliza).
+    /// Los estilos computados de la cascada (el CSSOM de la página los reutiliza). Con
+    /// [`prepare_page_animated`] se maquetó con los animados, que salen de estos.
     pub styles: std::sync::Arc<bf_style::StyleMap>,
     pub tree: FragmentTree,
     pub display_list: DisplayList,
@@ -210,6 +211,25 @@ pub fn prepare_page_with_frames(
     canvases: &[(bf_dom::NodeId, std::sync::Arc<tiny_skia::Pixmap>)],
     frames: &[FrameDoc],
 ) -> Page {
+    prepare_page_animated(doc, ctx, viewport, canvases, frames, &mut |s| s.clone())
+}
+
+/// E4: los estilos que se muestran a partir de los de la cascada (las animaciones y
+/// transiciones CSS en la hora del cuadro, el "style change event" del motor de scripts).
+pub type StyleHook<'a> =
+    &'a mut dyn FnMut(&std::sync::Arc<bf_style::StyleMap>) -> std::sync::Arc<bf_style::StyleMap>;
+
+/// [`prepare_page_with_frames`] con los estilos de la cascada pasados por `animate` antes de
+/// cargar imágenes, maquetar y pintar (E4). [`Page::styles`] guarda los de la cascada, que son
+/// la entrada del próximo "style change event" (CSS Transitions 1 §3).
+pub fn prepare_page_animated(
+    doc: &Document,
+    ctx: &PageContext<'_>,
+    viewport: Size,
+    canvases: &[(bf_dom::NodeId, std::sync::Arc<tiny_skia::Pixmap>)],
+    frames: &[FrameDoc],
+    animate: StyleHook<'_>,
+) -> Page {
     let (base, extra, loader, db) = (ctx.base, ctx.extra, ctx.loader.clone(), ctx.fonts.clone());
     let start = Instant::now();
     let media = MediaContext {
@@ -233,11 +253,18 @@ pub fn prepare_page_with_frames(
     fonts.add_font_faces(&font_face_rules(&all, &media), loader.clone());
     let match_ctx = MatchContext::for_document(doc);
     let metrics = bf_layout::StyleMetrics(&fonts);
-    let styles =
-        style_document_with_sheets(doc, &sheets, extra, &media, &match_ctx, Some(&metrics));
+    let styles = std::sync::Arc::new(style_document_with_sheets(
+        doc,
+        &sheets,
+        extra,
+        &media,
+        &match_ctx,
+        Some(&metrics),
+    ));
+    let shown = animate(&styles);
     let style = start.elapsed();
     let start = Instant::now();
-    let mut images = load_images(doc, &styles, base, &*loader);
+    let mut images = load_images(doc, &shown, base, &*loader);
     // E7: contenido HTML de los `foreignObject` de los SVG en línea.
     images::foreign_objects(doc, ctx, &mut images.svg_resources);
     for (node, pixmap) in canvases {
@@ -245,8 +272,7 @@ pub fn prepare_page_with_frames(
     }
     let images_time = start.elapsed();
     let start = Instant::now();
-    let tree =
-        bf_layout::layout_document_with_images(doc, &styles, viewport, &fonts, &images.sizes);
+    let tree = bf_layout::layout_document_with_images(doc, &shown, viewport, &fonts, &images.sizes);
     let layout = start.elapsed();
     let frames = prepare_frames(&tree, ctx, frames);
     let start = Instant::now();
@@ -272,7 +298,7 @@ pub fn prepare_page_with_frames(
     };
     Page {
         fonts,
-        styles: std::sync::Arc::new(styles),
+        styles,
         tree,
         display_list,
         images,
