@@ -42,6 +42,9 @@ pub struct LoadJob {
     pub referrer: String,
     /// La pantalla (`window.screen`).
     pub screen: bf_web::bom::ScreenInfo,
+    /// El hilo anterior de la pestaña entró en pánico con este mensaje: en lugar de cargar
+    /// `url`, se muestra la página "Esta página falló" ([`ErrorKind::Crashed`]).
+    pub crash: Option<String>,
 }
 
 pub enum Job {
@@ -109,6 +112,12 @@ pub enum FromDoc {
     Request {
         tab: u64,
         request: Box<PageRequest>,
+    },
+    /// El hilo de la pestaña `tab` entró en pánico y terminó; la ventana llama a
+    /// [`Documents::crashed`] y vuelve a cargar la pestaña con la página de error.
+    Crashed {
+        tab: u64,
+        message: String,
     },
 }
 
@@ -201,6 +210,12 @@ impl Documents {
         }
     }
 
+    /// El hilo de la pestaña `tab` terminó por un pánico ([`FromDoc::Crashed`]): se olvida,
+    /// y el próximo trabajo de la pestaña arranca uno nuevo.
+    pub fn crashed(&mut self, tab: u64) {
+        self.threads.remove(&tab);
+    }
+
     /// Manda un trabajo solo si la pestaña `tab` ya tiene hilo (E11: una pestaña restaurada
     /// que todavía no se mostró no arranca uno para un aviso).
     pub fn send_existing(&mut self, tab: u64, job: Job) {
@@ -284,6 +299,8 @@ impl DocumentThread {
         let view = Arc::new(Mutex::new(View::default()));
         let shared = view.clone();
         let me = jobs.clone();
+        // Para avisar a la ventana si el hilo entra en pánico (el estado se pierde con él).
+        let (crash_tx, crash_wake) = (tx.clone(), wake.clone());
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
@@ -304,7 +321,17 @@ impl DocumentThread {
                     last_scroll: (0.0, 0.0),
                     frame_scroll: HashMap::new(),
                 };
-                state.run(rx);
+                // Un pánico fuera de la carga y del layout (un evento, un temporizador, un
+                // cuadro) terminaría el hilo y dejaría la pestaña muerta: se captura aquí y la
+                // ventana muestra "Esta página falló" con otro hilo. El resto de las pestañas
+                // y la ventana no se enteran.
+                if let Err(e) = catch_unwind(AssertUnwindSafe(|| state.run(rx))) {
+                    let message = panic_message(&*e);
+                    eprintln!("[pestaña {tab}] el hilo falló: {message}");
+                    if crash_tx.send(FromDoc::Crashed { tab, message }).is_ok() {
+                        crash_wake();
+                    }
+                }
             })
             .expect("no se pudo crear el hilo de la pestaña");
         DocumentThread { jobs, view }
@@ -594,6 +621,7 @@ impl State {
             session_history,
             referrer,
             screen,
+            crash,
         } = job;
         let net_waker: Arc<dyn Fn() + Send + Sync> = {
             let me = Mutex::new(self.me.clone());
@@ -632,13 +660,26 @@ impl State {
         // pestaña (RFC 6265bis §5.2).
         set_cookie_site(&url);
         let mut engine = Engine::new(self.console_sink());
-        let loaded = catch_unwind(AssertUnwindSafe(|| {
-            load_with(&url, &ctx, Some((&mut engine, &env)))
-        }))
-        .unwrap_or_else(|e| {
-            let err = engine_error(panic_message(&*e));
-            internal::error_page(&url, &err, &ctx)
-        });
+        let loaded = match crash {
+            Some(message) => {
+                let err = LoadError {
+                    kind: ErrorKind::Crashed,
+                    message,
+                };
+                internal::error_page(&url, &err, &ctx)
+            }
+            None => {
+                #[cfg(test)]
+                crash_test::maybe_panic(&url);
+                catch_unwind(AssertUnwindSafe(|| {
+                    load_with(&url, &ctx, Some((&mut engine, &env)))
+                }))
+                .unwrap_or_else(|e| {
+                    let err = engine_error(panic_message(&*e));
+                    internal::error_page(&url, &err, &ctx)
+                })
+            }
+        };
         set_cookie_site(&loaded.url);
         let version = loaded.doc.version();
         self.current = Some(Current {
@@ -806,6 +847,19 @@ pub fn set_cookie_site(url: &Url) {
     }));
 }
 
+/// Para los tests: una URL que hace entrar en pánico al hilo de la pestaña fuera de las
+/// capturas de la carga y del layout, como un fallo en un evento o un temporizador.
+#[cfg(test)]
+pub mod crash_test {
+    pub const URL: &str = "about:blank#panico-de-prueba";
+
+    pub fn maybe_panic(url: &bf_infra::Url) {
+        if url.href() == URL {
+            panic!("pánico de prueba en el hilo de la pestaña");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,6 +878,7 @@ mod tests {
                 session_history: (1, 0),
                 referrer: String::new(),
                 screen: bf_web::bom::ScreenInfo::default(),
+                crash: None,
             }))
         };
         let mut q: VecDeque<Job> = VecDeque::from([

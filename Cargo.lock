@@ -428,6 +428,8 @@ dependencies = [
  "bf-url",
  "bf-web",
  "rfd",
+ "rustls",
+ "rustls-pki-types",
  "softbuffer",
  "unicode-normalization",
  "winit",

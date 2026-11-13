@@ -945,13 +945,21 @@ fn home(ctx: &LoadContext) -> String {
 }
 
 fn sample_error(query: &str) -> LoadError {
+    use bf_net::{NetErrorKind as N, TlsReason as T};
     let kind = match query {
-        "dns" => ErrorKind::Dns,
-        "tls" => ErrorKind::Tls,
-        "timeout" => ErrorKind::Timeout,
-        "conexion" | "connection" => ErrorKind::Connection,
+        "dns" => ErrorKind::Net(N::Dns),
+        "offline" | "sin-conexion" => ErrorKind::Net(N::Unreachable),
+        "refused" | "rechazada" => ErrorKind::Net(N::ConnectionRefused),
+        "reset" | "cortada" | "conexion" | "connection" => ErrorKind::Net(N::ConnectionReset),
+        "timeout" => ErrorKind::Net(N::Timeout),
+        "tls" => ErrorKind::Net(N::Tls(T::UnknownIssuer)),
+        "expired" | "vencido" => ErrorKind::Net(N::Tls(T::Expired)),
+        "name" | "nombre" => ErrorKind::Net(N::Tls(T::NameMismatch)),
+        "handshake" => ErrorKind::Net(N::Tls(T::Handshake)),
+        "redirects" | "redirecciones" => ErrorKind::Net(N::TooManyRedirects),
+        "crash" | "fallo" => ErrorKind::Crashed,
         q if q.parse::<u16>().is_ok() => ErrorKind::Http(q.parse().unwrap_or(500)),
-        _ => ErrorKind::Dns,
+        _ => ErrorKind::Net(N::Dns),
     };
     LoadError {
         kind,
@@ -959,81 +967,185 @@ fn sample_error(query: &str) -> LoadError {
     }
 }
 
-/// Título, etiqueta y explicación de un tipo de error.
-fn describe(kind: ErrorKind) -> (String, String, &'static str) {
+/// Qué dice la página de error: título, etiqueta, explicación en lenguaje llano y el texto
+/// del botón que vuelve a intentar.
+struct Described {
+    title: String,
+    kind: String,
+    explanation: String,
+    action: &'static str,
+}
+
+/// Qué pasó con la carga de `url`, para la página de error.
+fn describe(kind: ErrorKind, url: &Url) -> Described {
+    use bf_net::{NetErrorKind as N, TlsReason as T};
+    // El nombre sin el puerto: la dirección completa está en la tarjeta de abajo.
+    let host = url.hostname();
+    let host = if host.is_empty() {
+        "este sitio".to_owned()
+    } else {
+        host
+    };
+    let d = |title: &str, kind: &str, explanation: String| Described {
+        title: title.to_owned(),
+        kind: kind.to_owned(),
+        explanation,
+        action: "Reintentar",
+    };
     match kind {
-        ErrorKind::Dns => (
-            "No se encontró el sitio".into(),
-            "DNS".into(),
-            "No se encontró ese sitio. Revisa que la dirección esté bien escrita y que tengas conexión a internet.",
-        ),
-        ErrorKind::Tls => (
-            "La conexión segura falló".into(),
-            "Conexión segura".into(),
-            "No se pudo comprobar que el sitio sea quien dice ser: su certificado no es válido o la conexión segura no se completó.",
-        ),
-        ErrorKind::Timeout => (
-            "El sitio tardó demasiado".into(),
-            "Tiempo agotado".into(),
-            "El sitio no respondió a tiempo. Puede estar caído o tu conexión ser lenta; prueba de nuevo en un momento.",
-        ),
-        ErrorKind::Connection => (
-            "No se pudo conectar".into(),
-            "Conexión".into(),
-            "El sitio rechazó la conexión o la cortó antes de responder.",
-        ),
-        ErrorKind::Http(code) => (
-            format!("El sitio respondió con un error ({code})"),
-            format!("HTTP {code}"),
-            if code < 500 {
+        ErrorKind::Net(net) => match net {
+            N::Dns => d(
+                "No se encontró el sitio",
+                "El nombre no existe",
+                format!(
+                    "No existe ningún sitio con el nombre {host}. Revisa que la dirección esté \
+                     bien escrita."
+                ),
+            ),
+            N::Unreachable => d(
+                "Sin conexión a internet",
+                "Sin conexión",
+                "Tu equipo no está conectado a ninguna red. Revisa el Wi-Fi o el cable y vuelve \
+                 a intentarlo."
+                    .into(),
+            ),
+            N::ConnectionRefused => d(
+                "El servidor rechazó la conexión",
+                "Conexión rechazada",
+                format!(
+                    "{host} existe, pero nadie atiende en esa dirección: el servidor está apagado \
+                     o el puerto no es el correcto."
+                ),
+            ),
+            N::ConnectionReset => d(
+                "Se cortó la conexión",
+                "Conexión cortada",
+                format!("{host} cerró la conexión antes de terminar de responder."),
+            ),
+            N::Timeout => d(
+                "El sitio tardó demasiado",
+                "Tiempo agotado",
+                format!(
+                    "{host} no respondió a tiempo. Puede estar caído o tu conexión ser lenta; \
+                     prueba de nuevo en un momento."
+                ),
+            ),
+            N::Tls(reason) => {
+                let why = match reason {
+                    T::UnknownIssuer => format!(
+                        "El certificado de {host} no lo emitió una autoridad de confianza (puede \
+                         estar firmado por el mismo sitio)."
+                    ),
+                    T::Expired => format!(
+                        "El certificado de {host} venció. Si la fecha de tu equipo es correcta, \
+                         el sitio tiene que renovarlo."
+                    ),
+                    T::NotYetValid => format!(
+                        "El certificado de {host} todavía no es válido. Revisa que la fecha y la \
+                         hora de tu equipo sean correctas."
+                    ),
+                    T::NameMismatch => {
+                        format!("El certificado es de otro sitio, no de {host}.")
+                    }
+                    T::Revoked => format!("Quien emitió el certificado de {host} lo revocó."),
+                    T::BadCertificate => format!(
+                        "El certificado de {host} está dañado o su firma no es válida."
+                    ),
+                    T::Handshake | T::Other => format!(
+                        "Freedom y {host} no lograron acordar una conexión segura."
+                    ),
+                };
+                let title = if matches!(reason, T::Handshake | T::Other) {
+                    "La conexión segura falló"
+                } else {
+                    "El certificado del sitio no es válido"
+                };
+                d(
+                    title,
+                    "Conexión segura",
+                    format!(
+                        "{why} Freedom no abrió la página para que nadie pueda hacerse pasar por \
+                         el sitio."
+                    ),
+                )
+            }
+            N::InvalidResponse => d(
+                "Respuesta no válida",
+                "Respuesta",
+                format!("{host} respondió algo que no es una página web válida."),
+            ),
+            N::TooManyRedirects => d(
+                "Demasiadas redirecciones",
+                "Redirecciones",
+                "La página redirige a otra una y otra vez (más de 20 veces) y nunca termina de \
+                 cargar."
+                    .into(),
+            ),
+            N::InvalidUrl => d(
+                "La dirección no es válida",
+                "URL",
+                "Lo escrito no tiene el formato de una dirección web.".into(),
+            ),
+            N::UnsupportedScheme => d(
+                "Esquema no soportado",
+                "Esquema",
+                "Freedom abre direcciones http, https, file, data y about.".into(),
+            ),
+            N::NotFound => d(
+                "No se encontró el archivo",
+                "Archivo",
+                "Ese archivo no existe en tu equipo o no se puede leer.".into(),
+            ),
+            N::Other => d(
+                "No se pudo conectar",
+                "Conexión",
+                format!("No se pudo hablar con {host}."),
+            ),
+        },
+        ErrorKind::Http(code) => Described {
+            title: format!("El sitio respondió con un error ({code})"),
+            kind: format!("HTTP {code}"),
+            explanation: if code < 500 {
                 "La página no existe o no tienes permiso para verla."
             } else {
                 "El sitio tuvo un problema al responder. No es un error de Freedom; prueba más tarde."
-            },
+            }
+            .into(),
+            action: "Reintentar",
+        },
+        ErrorKind::Engine => d(
+            "El motor falló con esta página",
+            "Motor",
+            "Es un error de Freedom, no de la página. El detalle de abajo sirve para reportarlo."
+                .into(),
         ),
-        ErrorKind::NotFound => (
-            "No se encontró el archivo".into(),
-            "Archivo".into(),
-            "Ese archivo no existe en tu equipo o no se puede leer.",
-        ),
-        ErrorKind::InvalidUrl => (
-            "La dirección no es válida".into(),
-            "URL".into(),
-            "Lo escrito no tiene el formato de una dirección web.",
-        ),
-        ErrorKind::UnsupportedScheme => (
-            "Esquema no soportado".into(),
-            "Esquema".into(),
-            "Freedom abre direcciones http, https, file, data y about.",
-        ),
-        ErrorKind::TooManyRedirects => (
-            "Demasiadas redirecciones".into(),
-            "Redirecciones".into(),
-            "La página redirige a otra una y otra vez (más de 20 veces) y nunca termina de cargar.",
-        ),
-        ErrorKind::Engine => (
-            "El motor falló con esta página".into(),
-            "Motor".into(),
-            "Es un error de Freedom, no de la página. El detalle de abajo sirve para reportarlo.",
-        ),
-        ErrorKind::UnknownInternal => (
-            "Página interna desconocida".into(),
-            "about:".into(),
-            "Las páginas internas están listadas en about:.",
+        ErrorKind::Crashed => Described {
+            title: "Esta página falló".into(),
+            kind: "Pestaña".into(),
+            explanation: "Freedom tuvo un error interno con esta pestaña y la detuvo. Las demás \
+                          pestañas siguen funcionando. El detalle de abajo sirve para reportarlo."
+                .into(),
+            action: "Recargar",
+        },
+        ErrorKind::UnknownInternal => d(
+            "Página interna desconocida",
+            "about:",
+            "Las páginas internas están listadas en about:.".into(),
         ),
     }
 }
 
 /// `about:error` para `url` con el error `err`.
 pub fn error_page(url: &Url, err: &LoadError, ctx: &LoadContext) -> Loaded {
-    let (title, kind, explanation) = describe(err.kind);
+    let d = describe(err.kind, url);
     let html = themed(
         ERROR,
         &ctx.theme,
         &[
-            ("title", escape(&title)),
-            ("kind", escape(&kind)),
-            ("explanation", escape(explanation)),
+            ("title", escape(&d.title)),
+            ("kind", escape(&d.kind)),
+            ("explanation", escape(&d.explanation)),
+            ("action", d.action.to_owned()),
             ("url", escape(&url.href())),
             ("detail", escape(&err.message)),
         ],

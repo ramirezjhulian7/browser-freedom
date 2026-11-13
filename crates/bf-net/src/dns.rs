@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -62,6 +62,17 @@ impl Resolver for SystemResolver {
         }
         Ok(out)
     }
+}
+
+/// ¿Tiene el equipo alguna ruta hacia fuera? Distingue "sin conexión" de "el nombre no
+/// existe" cuando falla la resolución: `getaddrinfo` da el mismo error en los dos casos.
+///
+/// `connect` de un socket UDP solo consulta la tabla de rutas (no manda ningún paquete) y
+/// falla con `NetworkUnreachable` si no hay ruta. Se prueba con direcciones reservadas para
+/// documentación (RFC 5737 §3, RFC 3849), que nunca reciben tráfico.
+pub fn has_route() -> bool {
+    let probe = |bind: &str, to: &str| UdpSocket::bind(bind).and_then(|s| s.connect(to)).is_ok();
+    probe("0.0.0.0:0", "192.0.2.1:9") || probe("[::]:0", "[2001:db8::1]:9")
 }
 
 /// Lo resuelto de un host: la familia que llegó primero (o las dos) y, si la otra no llegó a
