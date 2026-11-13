@@ -15,7 +15,7 @@
 
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    Direction, Hyphens, Overflow, OverflowWrap, TextAlign, TextAlignLast, TextJustify,
+    Direction, Hyphens, Overflow, OverflowWrap, Size, TextAlign, TextAlignLast, TextJustify,
     TextLineBreak, TextTransform, UnicodeBidi, VerticalAlign, VerticalAlignKeyword, WhiteSpace,
     WordBreak,
 };
@@ -318,8 +318,8 @@ fn justification_slot(c: char, mode: TextJustify) -> bool {
 /// E5: todo lo que decide las líneas de un block container salvo su posición: la caja, el ancho
 /// y el alto del containing block de sus hijos, el estado de `Layout` que leen las líneas y
 /// sus cajas atómicas (base de los porcentajes de alto para los tamaños intrínsecos, `max-height`
-/// del flujo ortogonal y el marco) y los floats del contexto que pueden tocarlas. Los `f32` del
-/// containing block van como bits; los floats, relativos al containing block en 1/64 px.
+/// del flujo ortogonal y el marco) y los floats del contexto que pueden tocarlas, relativos al
+/// containing block. Los `f32` van como bits: solo se reutiliza lo idéntico.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InlineKey {
     b: usize,
@@ -330,22 +330,15 @@ pub(crate) struct InlineKey {
     frame: u8,
     /// Floats que terminan por debajo del inicio de las líneas (los demás no las tocan: las
     /// bandas y `clear` se miden desde ahí, CSS 2.2 §9.5.1), con su lado.
-    floats: Vec<(i32, i32, i32, i32, bool)>,
+    floats: Vec<(u32, u32, u32, u32, bool)>,
     /// `last_top` (regla 5) por debajo del inicio de las líneas, o 0.
-    last_top: i32,
+    last_top: u32,
 }
 
-/// Posición relativa en 1/64 px (la precisión de las fuentes).
-fn rel(v: f32) -> i32 {
-    (v * 64.0).round() as i32
-}
-
-/// E5: las líneas maquetadas de una caja con su containing block en `(x, y)`, su altura, las
-/// cajas absolutas y fijas que registraron (con su posición estática) y los floats que
-/// colocaron.
+/// E5: las líneas maquetadas de una caja en coordenadas relativas a su containing block, su
+/// altura, las cajas absolutas y fijas que registraron (con su posición estática) y los floats
+/// que colocaron.
 pub(crate) struct InlineResult<'a> {
-    x: f32,
-    y: f32,
     frags: Vec<Fragment>,
     height: f32,
     abs: Vec<crate::block::PendingAbs<'a>>,
@@ -355,94 +348,144 @@ pub(crate) struct InlineResult<'a> {
 }
 
 impl<'a> Layout<'a> {
-    /// [`Self::inline_content`] con las líneas de una maqueta anterior de la misma caja cuando
-    /// nada de lo que las decide cambió (solo optimización: el resultado es el mismo, movido a
-    /// la nueva posición). Un ítem flex o grid se maqueta una vez para medirlo y otra para
-    /// colocarlo (CSS Flexbox 1 §9.4, CSS Grid 2 §12.1), y en los contenedores anidados eso se
-    /// multiplica.
+    /// [`Self::inline_content`] maquetado siempre con el containing block en el origen (y los
+    /// floats movidos a esas coordenadas), y luego llevado a su posición. Así una maqueta
+    /// anterior de la misma caja con las mismas entradas se puede reutilizar y da exactamente
+    /// los mismos bits que maquetarla otra vez: las dos suman el origen al mismo resultado
+    /// relativo. Solo optimización: un ítem flex o grid se maqueta una vez para medirlo y otra
+    /// para colocarlo (CSS Flexbox 1 §9.4, CSS Grid 2 §12.1), y en los contenedores anidados eso
+    /// se multiplica.
     pub(crate) fn inline_content_cached(
         &mut self,
         b: &'a LayoutBox,
         cb: Cb,
         floats: &mut FloatContext,
     ) -> (Vec<Fragment>, f32) {
-        if !self.caches {
-            return self.inline_content_measured(b, cb, floats);
-        }
-        let key = InlineKey {
+        let (ox, oy) = (cb.x, cb.y);
+        let rel_cb = Cb {
+            x: 0.0,
+            y: 0.0,
+            ..cb
+        };
+        let mut rel_floats = floats.relative_to(ox, oy);
+        let key = self.caches.then(|| InlineKey {
             b: b as *const LayoutBox as usize,
             width: cb.width.to_bits(),
-            height: cb.height.map(f32::to_bits),
+            // Sin nada que lo lea, el alto del containing block no cambia las líneas: el de un
+            // ítem estirado es definido en la segunda pasada y no en la primera.
+            height: cb
+                .height
+                .filter(|_| self.reads_cb_height(b))
+                .map(f32::to_bits),
             pct_height_basis: self.pct_height_basis.map(f32::to_bits),
             cb_max_height: self.cb_max_height.map(f32::to_bits),
             frame: self.frame as u8,
-            floats: floats
+            floats: rel_floats
                 .floats
                 .iter()
-                .filter(|f| f.rect.bottom() > cb.y)
+                .filter(|f| f.rect.bottom() > 0.0)
                 .map(|f| {
                     (
-                        rel(f.rect.x - cb.x),
-                        rel(f.rect.y - cb.y),
-                        rel(f.rect.width),
-                        rel(f.rect.height),
+                        f.rect.x.to_bits(),
+                        f.rect.y.to_bits(),
+                        f.rect.width.to_bits(),
+                        f.rect.height.to_bits(),
                         f.left,
                     )
                 })
                 .collect(),
-            last_top: rel((floats.last_top() - cb.y).max(0.0)),
-        };
-        if let Some(r) = self.inline_cache.get(&key).cloned() {
-            let (dx, dy) = (cb.x - r.x, cb.y - r.y);
-            let mut frags = r.frags.clone();
-            if dx != 0.0 || dy != 0.0 {
-                for f in &mut frags {
-                    f.translate(dx, dy);
-                }
-            }
-            let shift = |p: &crate::block::PendingAbs<'a>| crate::block::PendingAbs {
-                static_x: p.static_x + dx,
-                static_y: p.static_y + dy,
-                ..*p
-            };
-            if let Some(frame) = self.abs_frames.last_mut() {
-                frame.extend(r.abs.iter().map(shift));
-            }
-            self.fixed.extend(r.fixed.iter().map(shift));
-            if !r.floats.is_empty() {
-                let placed = r.floats.iter().map(|f| {
-                    let mut f = *f;
-                    f.rect.translate(dx, dy);
-                    f
-                });
-                floats.restore(placed, r.last_top + dy);
-            }
-            return (frags, r.height);
-        }
-        let abs_mark = self.abs_frames.last().map_or(0, Vec::len);
-        let fixed_mark = self.fixed.len();
-        let floats_mark = floats.floats.len();
-        let (frags, height) = self.inline_content_measured(b, cb, floats);
-        let abs = self.abs_frames.last().map_or(Vec::new(), |f| {
-            f.get(abs_mark..).unwrap_or_default().to_vec()
+            last_top: rel_floats.last_top().max(0.0).to_bits(),
         });
-        let fixed = self.fixed.get(fixed_mark..).unwrap_or_default().to_vec();
-        let r = InlineResult {
-            x: cb.x,
-            y: cb.y,
-            frags: frags.clone(),
-            height,
-            abs,
-            fixed,
-            floats: floats
-                .floats
-                .get(floats_mark..)
-                .unwrap_or_default()
-                .to_vec(),
-            last_top: floats.last_top(),
+        let cached = key.as_ref().and_then(|k| self.inline_cache.get(k).cloned());
+        let r = match cached {
+            Some(r) => r,
+            None => {
+                let abs_mark = self.abs_frames.last().map_or(0, Vec::len);
+                let fixed_mark = self.fixed.len();
+                let floats_mark = rel_floats.floats.len();
+                let (frags, height) = self.inline_content_measured(b, rel_cb, &mut rel_floats);
+                // Lo que registraron las líneas sale de las listas: se vuelve a añadir abajo,
+                // ya en su posición, igual que desde la caché.
+                let abs = match self.abs_frames.last_mut() {
+                    Some(f) if f.len() > abs_mark => f.split_off(abs_mark),
+                    _ => Vec::new(),
+                };
+                let fixed = if self.fixed.len() > fixed_mark {
+                    self.fixed.split_off(fixed_mark)
+                } else {
+                    Vec::new()
+                };
+                let r = std::rc::Rc::new(InlineResult {
+                    frags,
+                    height,
+                    abs,
+                    fixed,
+                    floats: rel_floats.floats.split_off(floats_mark),
+                    last_top: rel_floats.last_top(),
+                });
+                if let Some(k) = key {
+                    self.inline_cache.insert(k, r.clone());
+                }
+                r
+            }
         };
-        self.inline_cache.insert(key, std::rc::Rc::new(r));
-        (frags, height)
+        let mut frags = r.frags.clone();
+        for f in &mut frags {
+            f.translate(ox, oy);
+        }
+        let place = |p: &crate::block::PendingAbs<'a>| crate::block::PendingAbs {
+            static_x: p.static_x + ox,
+            static_y: p.static_y + oy,
+            ..*p
+        };
+        if let Some(frame) = self.abs_frames.last_mut() {
+            frame.extend(r.abs.iter().map(place));
+        }
+        self.fixed.extend(r.fixed.iter().map(place));
+        if !r.floats.is_empty() {
+            let placed = r.floats.iter().map(|f| {
+                let mut f = *f;
+                f.rect.translate(ox, oy);
+                f
+            });
+            floats.restore(placed, r.last_top + oy);
+        }
+        (frags, r.height)
+    }
+
+    /// E5: ¿Puede algo dentro de `b` leer el alto de su containing block? Las líneas solo lo
+    /// pasan a las cajas atómicas y a los floats, que lo usan para los altos en porcentaje y
+    /// `stretch` (CSS 2.2 §10.5, CSS Sizing 4 §6.1), `top`/`bottom` en porcentaje (§9.4.3), los
+    /// tamaños intrínsecos con porcentajes (CSS Sizing 3 §5.2.1), las tablas (que pasan el alto
+    /// a su caja de tabla) y los flujos ortogonales (CSS Writing Modes 4 §7.3; cualquier modo
+    /// vertical, para no depender del marco en curso). Se mira todo el
+    /// subárbol (de más: un descendiente con alto propio definido no lo leería) y se guarda.
+    fn reads_cb_height(&mut self, b: &LayoutBox) -> bool {
+        let key = b as *const LayoutBox as usize;
+        if let Some(&r) = self.cb_height_readers.get(&key) {
+            return r;
+        }
+        let s = &b.style;
+        let pct = |size: &Size| match size {
+            Size::LengthPercentage(lp) | Size::FitContentFn(lp) => lp.has_percentage(),
+            Size::Stretch => true,
+            _ => false,
+        };
+        let inset_pct = |v: &bf_style::properties::types::LengthPercentageAuto| {
+            matches!(v, bf_style::properties::types::LengthPercentageAuto::LengthPercentage(lp)
+                if lp.has_percentage())
+        };
+        let own = pct(&s.height)
+            || pct(&s.min_height)
+            || pct(&s.max_height.as_size())
+            || inset_pct(&s.top)
+            || inset_pct(&s.bottom)
+            || matches!(b.kind, BoxKind::Table)
+            || crate::table::is_table_wrapper(b)
+            || crate::writing_mode::Frame::of(s) != crate::writing_mode::Frame::Horizontal;
+        let r = own || b.children.iter().any(|c| self.reads_cb_height(c));
+        self.cb_height_readers.insert(key, r);
+        r
     }
 
     fn inline_content_measured(
