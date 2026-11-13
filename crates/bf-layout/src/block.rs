@@ -1037,8 +1037,8 @@ impl<'a> Layout<'a> {
             _ if crate::flex::is_flex_container(b) => {
                 // E5: un contenedor flex flexionado en una columna de alto indefinido usa ese
                 // alto para sus líneas, pero no es definido para los porcentajes (§9.8).
-                self.flex_height_pct_indefinite = forced_indefinite
-                    && specified_height(style, cb.height, edges_v).is_none();
+                self.flex_height_pct_indefinite =
+                    forced_indefinite && specified_height(style, cb.height, edges_v).is_none();
                 self.flex_layout(b, child_cb)
             }
             // E4: grid y tablas.
