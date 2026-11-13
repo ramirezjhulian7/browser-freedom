@@ -114,9 +114,17 @@ pub fn generic_candidates(generic: &str) -> &'static [&'static str] {
         ("monospace", &["Menlo", "Courier", "Courier New"]),
         ("cursive", &["Apple Chancery", "Snell Roundhand"]),
         ("fantasy", &["Papyrus", "Herculanum"]),
+        // E5: `.SF NS` es la fuente del sistema de macOS (`SFNS.ttf`, variable); su nombre
+        // empieza por punto porque Apple no la ofrece por familia en los menús.
         (
             "system-ui",
-            &["SF Pro", "SF Pro Text", "Helvetica Neue", "Helvetica"],
+            &[
+                ".SF NS",
+                "SF Pro",
+                "SF Pro Text",
+                "Helvetica Neue",
+                "Helvetica",
+            ],
         ),
         ("ui-serif", &["New York", "Times"]),
         ("ui-sans-serif", &["SF Pro", "Helvetica Neue"]),
@@ -250,6 +258,9 @@ pub fn script_fallback(script: &str) -> &'static [&'static str] {
             "Noto Sans SC",
             "PingFang SC",
             "Hiragino Sans",
+            // E5: los caracteres solo simplificados (们, 简) no están en Hiragino Sans; sin
+            // esto caían en Arial Unicode, de un solo peso, y un texto en negrita los mezclaba.
+            "Hiragino Sans GB",
         ],
         "Hira" | "Kana" => &[
             "Yu Gothic",

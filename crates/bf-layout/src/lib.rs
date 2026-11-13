@@ -29,8 +29,8 @@ use bf_style::StyleMap;
 
 pub use box_tree::{ImageSizes, ImageState, LayoutReport};
 pub use font::{
-    FontKey, FontMetrics, FontProvider, FontRequest, Glyph, Outline, PathCommand, StyleMetrics,
-    TestFont, font_request,
+    FontKey, FontMetrics, FontProvider, FontRequest, Glyph, GlyphBitmap, Outline, PathCommand,
+    StyleMetrics, TestFont, font_request,
 };
 pub use fragment::{Fragment, FragmentKind, FragmentTree, MeterLevel, Rect, Size, Widget};
 

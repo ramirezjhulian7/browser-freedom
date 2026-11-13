@@ -10,7 +10,7 @@ bf-infra = { path = "../bf-infra" }
 bf-layout = { path = "../bf-layout" }
 bf-style = { path = "../bf-style" }
 rustybuzz = "0.20"
-ttf-parser = "0.25"
+ttf-parser = { version = "0.25", features = ["gvar-alloc"] }
 
 [dev-dependencies]
 bf-html = { path = "../bf-html" }

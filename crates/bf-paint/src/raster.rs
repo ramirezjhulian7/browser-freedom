@@ -847,6 +847,7 @@ impl Canvas {
                 v
             }
         };
+        let mut bitmaps = Vec::new();
         for g in glyphs {
             let Some(outline) = &g.outline else {
                 continue;
@@ -854,6 +855,11 @@ impl Canvas {
             let k = size / outline.units_per_em;
             let ox = snap(origin.0 + g.x, ts.sx, ts.tx);
             let oy = snap(origin.1 + g.y, ts.sy, ts.ty);
+            // E5: glifo de mapa de bits (emoji en color): se pinta como imagen.
+            if !outline.bitmaps.is_empty() {
+                bitmaps.push((ox, oy, outline));
+                continue;
+            }
             let map = |x: f32, y: f32| {
                 let fit = if y >= 0.0 { y_fit.0 } else { y_fit.1 };
                 (ox + x * k, oy - y * k * fit)
@@ -886,7 +892,60 @@ impl Canvas {
         if let Some(path) = pb.finish() {
             self.fill(&path, color, true, FillRule::Winding);
         }
+        // Tamaño en píxeles de dispositivo, para elegir el mapa de bits más cercano.
+        let device_ppem = size * ts.sx.hypot(ts.ky).max(ts.sy.hypot(ts.kx));
+        for (ox, oy, outline) in bitmaps {
+            let Some(b) = nearest_bitmap(&outline.bitmaps, device_ppem) else {
+                continue;
+            };
+            let Some(image) = bitmap_pixmap(&b.png) else {
+                continue;
+            };
+            // OpenType `sbix`: la esquina inferior izquierda de la imagen en
+            // (originOffsetX, originOffsetY) píxeles del tamaño, escalados al de la fuente.
+            let s = size / f32::from(b.ppem.max(1));
+            let (w, h) = (image.width() as f32 * s, image.height() as f32 * s);
+            let rect = Rect::new(ox + b.x * s, oy - b.y * s - h, w, h);
+            self.image(&rect, &image);
+        }
     }
+}
+
+/// E5: el mapa de bits de un glifo para `ppem` píxeles por em: el menor que no sea más pequeño
+/// (se reduce) o, si no hay, el mayor. `bitmaps` va de menor a mayor.
+fn nearest_bitmap(
+    bitmaps: &[bf_layout::GlyphBitmap],
+    ppem: f32,
+) -> Option<&bf_layout::GlyphBitmap> {
+    bitmaps
+        .iter()
+        .find(|b| f32::from(b.ppem) >= ppem)
+        .or_else(|| bitmaps.last())
+}
+
+/// E5: decodifica (con caché) el PNG de un mapa de bits de glifo. La caché guarda el `Arc` de
+/// los bytes, así que su dirección no se reutiliza mientras la entrada exista.
+fn bitmap_pixmap(png: &std::sync::Arc<[u8]>) -> Option<std::sync::Arc<Pixmap>> {
+    type Cache =
+        std::collections::HashMap<usize, (std::sync::Arc<[u8]>, Option<std::sync::Arc<Pixmap>>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let key = std::sync::Arc::as_ptr(png).cast::<u8>() as usize;
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((_, p)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return p.clone();
+    }
+    let pixmap = bf_image::decode(png, Some("image/png"))
+        .ok()
+        .and_then(|img| {
+            let size = tiny_skia::IntSize::from_wh(img.width, img.height)?;
+            Pixmap::from_vec(img.rgba, size).map(std::sync::Arc::new)
+        });
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 2048 {
+        cache.clear();
+    }
+    cache.insert(key, (png.clone(), pixmap.clone()));
+    pixmap
 }
 
 // --- E7: máscaras ---
@@ -1608,4 +1667,28 @@ pub fn render_scrolled(
             .draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
     }
     canvas.layers.pop().expect("capa base").0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nearest_bitmap;
+
+    #[test]
+    fn nearest_glyph_bitmap() {
+        let b = |ppem| bf_layout::GlyphBitmap {
+            ppem,
+            x: 0.0,
+            y: 0.0,
+            width: ppem,
+            height: ppem,
+            png: std::sync::Arc::from(&b""[..]),
+        };
+        let strikes = [b(20), b(40), b(160)];
+        // El menor que no sea más pequeño; si no hay, el mayor.
+        assert_eq!(nearest_bitmap(&strikes, 16.0).map(|b| b.ppem), Some(20));
+        assert_eq!(nearest_bitmap(&strikes, 40.0).map(|b| b.ppem), Some(40));
+        assert_eq!(nearest_bitmap(&strikes, 41.0).map(|b| b.ppem), Some(160));
+        assert_eq!(nearest_bitmap(&strikes, 400.0).map(|b| b.ppem), Some(160));
+        assert!(nearest_bitmap(&[], 16.0).is_none());
+    }
 }
