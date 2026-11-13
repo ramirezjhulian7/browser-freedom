@@ -3,6 +3,8 @@
 //! reasigna a la copia la identidad de los wrappers, los listeners y los event handlers, así
 //! JavaScript sigue viendo el mismo objeto.
 
+use std::collections::HashMap;
+
 use bf_dom::events::EventTarget;
 use bf_dom::{DomException, NodeData, NodeId};
 use bf_js::value::Value;
@@ -32,6 +34,13 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
     // `before()`/`after()`/`replaceWith()` cuando el propio nodo es un argumento (§4.2.8).
     if n.doc == to {
         return Ok(n);
+    }
+    // E1: la raíz viva de un espejo vuelve al documento del parser con su original.
+    if to == 0
+        && let Some(stale) = reclaim_by_script(agent, n)
+    {
+        mutated(agent);
+        return Ok(NodeRef::new(0, stale));
     }
     let from = n.doc;
     // Paso 2 de "adopt": quitarlo de su padre (o de su elemento, si es un `Attr`).
@@ -68,6 +77,26 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         old.extend(ao);
         new.extend(an);
     }
+    transfer(agent, (from, &old), (to, &new));
+    retarget_mirror(agent, n, NodeRef::new(to, copy), &old, &new);
+    // E1: si el nodo sale del documento que el parser está construyendo, el parser sigue con
+    // el original: queda emparejado con la copia (ver [`mirror_sync_to_live`]).
+    if from == 0 && parser_active(agent) {
+        start_mirror(agent, n.node, NodeRef::new(to, copy), &old, &new);
+    }
+    mutated(agent);
+    Ok(NodeRef::new(to, copy))
+}
+
+/// La identidad de cada nodo de `old` (en `from`) pasa a su par de `new` (en `to`): el
+/// wrapper de JavaScript, los listeners, los event handlers y el estado de custom element (con
+/// `adoptedCallback`).
+fn transfer(
+    agent: &mut Agent,
+    (from, old): (DocIndex, &[NodeId]),
+    (to, new): (DocIndex, &[NodeId]),
+) {
+    let ctx = WebContextHandle::current(agent);
     let realm = ctx.realm;
     for (&o, &nw) in old.iter().zip(new.iter()) {
         let (old_ref, new_ref) = (NodeRef::new(from, o), NodeRef::new(to, nw));
@@ -90,8 +119,6 @@ pub fn adopt_into(agent: &mut Agent, n: NodeRef, to: DocIndex) -> JsResult<NodeR
         // E1: la definición y `adoptedCallback` de los custom elements.
         crate::html::custom_elements::adopted(agent, old_ref, new_ref);
     }
-    mutated(agent);
-    Ok(NodeRef::new(to, copy))
 }
 
 /// E1: un argumento `Node` que puede ser de otra ventana (para las operaciones que lo adoptan).
@@ -493,4 +520,375 @@ pub fn retire_window_document(agent: &mut Agent, realm: bf_js::vm::RealmId) {
     }
     crate::cssom::document_replaced(agent, realm, to);
     agent.current_realm = saved;
+}
+
+// --- E1: los nodos que el parser tiene abiertos y un script lleva a otro documento ---
+//
+// HTML §13.2.6.1 ("appropriate place for inserting a node") y el adoption agency
+// (§13.2.6.4.7) trabajan sobre los nodos vivos de la pila de elementos abiertos: si un script
+// lleva uno a otro documento (DOM §4.5, *adopt*), el parser sigue insertando donde esté ahora.
+// `bf-dom` tiene una arena por documento y el tree builder (`bf-html`) solo escribe en la del
+// suyo, así que adoptar copia el subárbol y el parser seguiría con el original suelto.
+//
+// En vez de una arena compartida, el original y la copia quedan **emparejados** nodo a nodo
+// mientras dure el parseo, y en cada frontera de script se copia la estructura del lado que
+// pudo cambiar al otro:
+//
+// - al devolver el parser al contexto (antes de correr JavaScript o al ceder el control,
+//   [`mirror_sync_to_live`]): lo que hizo el parser en los originales pasa a los nodos vivos;
+//   lo que insertó junto a la raíz (el foster parenting delante de una `table` que ahora está
+//   en otro documento) se inserta junto al nodo vivo con la validez de *pre-insert*, y si no
+//   cabe (un `Document` que ya tiene elemento) se descarta, como pide "insert an element at the
+//   adjusted insertion location"; si el parser volvió a meter la raíz en su documento (el
+//   adoption agency la inserta en el *common ancestor*), el nodo vivo vuelve con él;
+// - al sacarlo para seguir parseando ([`mirror_sync_from_live`]): lo que hizo el script en los
+//   nodos vivos pasa a los originales, y la raíz original cuelga de un fragmento suplente si
+//   la viva tiene padre (así el parser ve "la tabla tiene padre" y hace foster parenting hacia
+//   él), o queda suelta si no.
+//
+// Entre dos fronteras solo escribe un lado (el parser o el script), y JavaScript solo ve los
+// nodos en las fronteras, ya sincronizados. Lo que no se copia: los atributos (el parser solo
+// los añade a `html`/`body`), las raíces shadow y el contenido de `template` de los nodos
+// emparejados, y los registros de `MutationObserver` de esas copias.
+
+/// Un subárbol emparejado: la raíz original (en el documento del parser, el 0) y la viva.
+#[derive(Debug)]
+struct Mirror {
+    stale: NodeId,
+    live: NodeRef,
+    /// Original → vivo y vivo → original.
+    to_live: HashMap<NodeId, NodeId>,
+    to_stale: HashMap<NodeId, NodeId>,
+    /// El fragmento del documento del parser del que cuelga la raíz original mientras la viva
+    /// tiene padre.
+    standin: Option<NodeId>,
+}
+
+#[derive(Debug, Default)]
+struct Mirrors(Vec<Mirror>);
+
+/// ¿El documento 0 de la ventana actual tiene un parser que todavía construye el árbol?
+fn parser_active(agent: &Agent) -> bool {
+    let ctx = WebContextHandle::current(agent);
+    matches!(
+        &ctx.get(agent).documents[0],
+        crate::DocumentOwner::Parser(p) if matches!(
+            p.status(),
+            bf_html::ParserStatus::Parsing | bf_html::ParserStatus::Blocked(_)
+        )
+    )
+}
+
+fn mirrors(agent: &mut Agent) -> Option<&mut Mirrors> {
+    let realm = WebContextHandle::current(agent).realm;
+    agent.realm_data_mut::<Mirrors>(realm)
+}
+
+fn start_mirror(agent: &mut Agent, stale: NodeId, live: NodeRef, old: &[NodeId], new: &[NodeId]) {
+    let realm = WebContextHandle::current(agent).realm;
+    if agent.realm_data::<Mirrors>(realm).is_none() {
+        agent.set_realm_data(realm, Mirrors::default());
+    }
+    let mut m = Mirror {
+        stale,
+        live,
+        to_live: HashMap::new(),
+        to_stale: HashMap::new(),
+        standin: None,
+    };
+    for (&o, &n) in old.iter().zip(new) {
+        m.to_live.insert(o, n);
+        m.to_stale.insert(n, o);
+    }
+    if let Some(ms) = mirrors(agent) {
+        // Si la raíz ya estaba emparejada (el script la vuelve a llevar), manda la nueva.
+        ms.0.retain(|x| x.stale != stale);
+        ms.0.push(m);
+    }
+}
+
+/// `n` (vivo) vuelve al documento del parser: es la raíz viva de un espejo, así que vuelve su
+/// original (con lo que el script hizo en el vivo) en vez de una copia nueva. Devuelve el
+/// original, suelto; `None` si `n` no es la raíz viva de ningún espejo.
+fn reclaim_by_script(agent: &mut Agent, n: NodeRef) -> Option<NodeId> {
+    let i = mirrors(agent)?.0.iter().position(|m| m.live == n)?;
+    let mut m = mirrors(agent)?.0.remove(i);
+    sync_tree(agent, &mut m, Direction::FromLive);
+    with_doc_mut(agent, n.doc, |d| {
+        if d.parent(n.node).is_some() {
+            d.remove(n.node);
+        }
+    });
+    with_doc_mut(agent, 0, |d| {
+        if d.parent(m.stale).is_some() {
+            d.remove(m.stale);
+        }
+    });
+    give_back(agent, &m);
+    Some(m.stale)
+}
+
+/// La identidad de los nodos vivos vuelve a sus originales.
+fn give_back(agent: &mut Agent, m: &Mirror) {
+    let (live, stale): (Vec<NodeId>, Vec<NodeId>) =
+        m.to_stale.iter().map(|(&l, &s)| (l, s)).unzip();
+    transfer(agent, (m.live.doc, &live), (0, &stale));
+}
+
+/// `n` (la raíz viva de un espejo) se fue a un tercer documento: el espejo sigue a la copia.
+fn retarget_mirror(agent: &mut Agent, n: NodeRef, copy: NodeRef, old: &[NodeId], new: &[NodeId]) {
+    let Some(ms) = mirrors(agent) else {
+        return;
+    };
+    let Some(m) = ms.0.iter_mut().find(|m| m.live == n) else {
+        return;
+    };
+    let moved: HashMap<NodeId, NodeId> = old.iter().copied().zip(new.iter().copied()).collect();
+    m.live = copy;
+    let pairs: Vec<(NodeId, NodeId)> = m
+        .to_live
+        .iter()
+        .filter_map(|(&s, l)| moved.get(l).map(|&nl| (s, nl)))
+        .collect();
+    m.to_live = pairs.iter().copied().collect();
+    m.to_stale = pairs.iter().map(|&(s, l)| (l, s)).collect();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    /// Del original (el parser escribió) al vivo.
+    ToLive,
+    /// Del vivo (escribió un script) al original.
+    FromLive,
+}
+
+/// Antes de que corra JavaScript, o al ceder el control: lo que el parser hizo en los
+/// originales pasa a los nodos vivos (ver la explicación de la sección).
+pub fn mirror_sync_to_live(agent: &mut Agent, realm: RealmId) {
+    if agent
+        .realm_data::<Mirrors>(realm)
+        .is_none_or(|m| m.0.is_empty())
+    {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let active = parser_active(agent);
+    let all = std::mem::take(&mut mirrors(agent).expect("espejos").0);
+    let mut keep = Vec::new();
+    for mut m in all {
+        let parent = with_doc(agent, 0, |d| d.parent(m.stale));
+        if parent.is_some() && parent != m.standin {
+            // El parser la volvió a insertar en su documento (el adoption agency, en el
+            // *common ancestor*): insertar el nodo vivo allí lo adopta de vuelta.
+            with_doc_mut(agent, m.live.doc, |d| {
+                if d.parent(m.live.node).is_some() {
+                    d.remove(m.live.node);
+                }
+            });
+            give_back(agent, &m);
+            continue;
+        }
+        sync_tree(agent, &mut m, Direction::ToLive);
+        place_fostered(agent, &mut m);
+        if active {
+            keep.push(m);
+        }
+    }
+    if let Some(ms) = mirrors(agent) {
+        ms.0 = keep;
+    }
+    mutated(agent);
+    agent.current_realm = saved;
+}
+
+/// Al sacar el parser del contexto para seguir parseando: lo que un script hizo en los nodos
+/// vivos pasa a los originales, y la raíz original cuelga del suplente si la viva tiene padre.
+pub fn mirror_sync_from_live(agent: &mut Agent, realm: RealmId) {
+    if agent
+        .realm_data::<Mirrors>(realm)
+        .is_none_or(|m| m.0.is_empty())
+    {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let mut all = std::mem::take(&mut mirrors(agent).expect("espejos").0);
+    for m in &mut all {
+        sync_tree(agent, m, Direction::FromLive);
+        let live_parent = with_doc(agent, m.live.doc, |d| d.parent(m.live.node));
+        let stale = m.stale;
+        if live_parent.is_some() {
+            let standin = match m.standin {
+                Some(f) => f,
+                None => {
+                    let f = with_doc_mut(agent, 0, |d| d.create_document_fragment());
+                    m.standin = Some(f);
+                    f
+                }
+            };
+            with_doc_mut(agent, 0, |d| {
+                if d.parent(stale) != Some(standin) {
+                    d.append(standin, stale);
+                }
+            });
+        } else {
+            with_doc_mut(agent, 0, |d| {
+                if d.parent(stale).is_some() {
+                    d.remove(stale);
+                }
+            });
+        }
+    }
+    if let Some(ms) = mirrors(agent) {
+        ms.0 = all;
+    }
+    agent.current_realm = saved;
+}
+
+/// Copia sin hijos de `n` de `src` en `dst` (los elementos, con sus atributos; un `template`
+/// recibe contents nuevos vacíos).
+fn shallow_copy(src: &bf_dom::Document, dst: &mut bf_dom::Document, n: NodeId) -> NodeId {
+    let mut data = src.get(n).data.clone();
+    if let NodeData::Element(e) = &mut data {
+        e.template_contents = None;
+    }
+    dst.create(data)
+}
+
+/// Iguala la estructura del subárbol de destino a la del de origen, reusando los pares y
+/// creando (y emparejando) los nodos nuevos.
+fn sync_tree(agent: &mut Agent, m: &mut Mirror, dir: Direction) {
+    let (sd, dd) = match dir {
+        Direction::ToLive => (0, m.live.doc),
+        Direction::FromLive => (m.live.doc, 0),
+    };
+    let (sroot, droot) = match dir {
+        Direction::ToLive => (m.stale, m.live.node),
+        Direction::FromLive => (m.live.node, m.stale),
+    };
+    let ctx = WebContextHandle::current(agent);
+    let mut created: Vec<(NodeId, NodeId)> = Vec::new();
+    {
+        let wc = ctx.get_mut(agent);
+        let mut dst = std::mem::take(wc.doc_mut(dd));
+        let src = wc.doc(sd);
+        let (fwd, back) = match dir {
+            Direction::ToLive => (&mut m.to_live, &mut m.to_stale),
+            Direction::FromLive => (&mut m.to_stale, &mut m.to_live),
+        };
+        let mut stack = vec![(sroot, droot)];
+        while let Some((s, d)) = stack.pop() {
+            match (&src.get(s).data, &dst.get(d).data) {
+                (NodeData::Text(a), NodeData::Text(b))
+                | (NodeData::Comment(a), NodeData::Comment(b))
+                    if a != b =>
+                {
+                    let a = a.clone();
+                    dst.set_data(d, &a);
+                    continue;
+                }
+                (NodeData::Element(_) | NodeData::DocumentFragment, _) => {}
+                _ => continue,
+            }
+            let mut desired = Vec::new();
+            for sc in src.children(s).collect::<Vec<_>>() {
+                let dc = match fwd.get(&sc) {
+                    Some(&dc) => dc,
+                    None => {
+                        let dc = shallow_copy(src, &mut dst, sc);
+                        fwd.insert(sc, dc);
+                        back.insert(dc, sc);
+                        created.push((sc, dc));
+                        dc
+                    }
+                };
+                // Un par que acabaría conteniendo a su propio padre (no debería pasar con el
+                // árbol del parser): se deja.
+                if dst.is_inclusive_ancestor(dc, d) {
+                    continue;
+                }
+                desired.push(dc);
+                stack.push((sc, dc));
+            }
+            let current: Vec<NodeId> = dst.children(d).collect();
+            if current == desired {
+                continue;
+            }
+            // Los hijos de destino sin par (no deberían existir: el otro lado no escribió) van
+            // al final.
+            let extras: Vec<NodeId> = current
+                .iter()
+                .copied()
+                .filter(|c| !back.contains_key(c))
+                .collect();
+            for c in &current {
+                if back.contains_key(c) && !desired.contains(c) {
+                    dst.remove(*c);
+                }
+            }
+            for c in desired.iter().chain(extras.iter()) {
+                dst.insert_before(d, *c, None);
+            }
+        }
+        *ctx.get_mut(agent).doc_mut(dd) = dst;
+    }
+    if !created.is_empty() {
+        let (s, d): (Vec<NodeId>, Vec<NodeId>) = created.into_iter().unzip();
+        crate::dom::insertion::copy_script_state(agent, (sd, &s), (dd, &d));
+    }
+}
+
+/// Lo que el parser insertó en el suplente junto a la raíz original (foster parenting hacia
+/// el padre de una `table` que ahora vive en otro documento) va junto al nodo vivo, en su
+/// orden: "insert an element at the adjusted insertion location" (HTML §13.2.6.1) inserta si
+/// se puede y si no lo descarta (DOM §4.2.3, *ensure pre-insert validity*).
+fn place_fostered(agent: &mut Agent, m: &mut Mirror) {
+    let Some(standin) = m.standin else {
+        return;
+    };
+    let siblings: Vec<NodeId> = with_doc(agent, 0, |d| d.children(standin).collect());
+    let Some(at) = siblings.iter().position(|&c| c == m.stale) else {
+        return;
+    };
+    let live = m.live;
+    for (i, &sib) in siblings.iter().enumerate() {
+        if sib == m.stale || m.to_live.contains_key(&sib) {
+            continue;
+        }
+        let ctx = WebContextHandle::current(agent);
+        let wc = ctx.get_mut(agent);
+        let mut dst = std::mem::take(wc.doc_mut(live.doc));
+        let src = wc.doc(0);
+        let copy = shallow_copy(src, &mut dst, sib);
+        let placed = dst.parent(live.node).and_then(|parent| {
+            let reference = if i < at {
+                Some(live.node)
+            } else {
+                dst.next_sibling(live.node)
+            };
+            dst.ensure_pre_insertion_validity(copy, parent, reference)
+                .ok()
+                .map(|()| dst.insert_before(parent, copy, reference))
+        });
+        *ctx.get_mut(agent).doc_mut(live.doc) = dst;
+        if placed.is_some() {
+            m.to_live.insert(sib, copy);
+            m.to_stale.insert(copy, sib);
+            // Su contenido, como el de la raíz.
+            let mut sub = Mirror {
+                stale: sib,
+                live: NodeRef::new(live.doc, copy),
+                to_live: std::mem::take(&mut m.to_live),
+                to_stale: std::mem::take(&mut m.to_stale),
+                standin: None,
+            };
+            sync_tree(agent, &mut sub, Direction::ToLive);
+            m.to_live = sub.to_live;
+            m.to_stale = sub.to_stale;
+        } else {
+            // No cabe: se descarta (queda suelto, como el nodo que el estándar no inserta).
+            with_doc_mut(agent, 0, |d| d.remove(sib));
+        }
+    }
 }

@@ -1,6 +1,7 @@
 //! E4: el índice de reglas de la cascada (`RuleIndex`) da exactamente las mismas declaraciones
 //! que el recorrido completo (`matching_declarations_in`) en cada nodo: el mismo orden, origen,
-//! capa, especificidad y orden de aparición (CSS Cascade 5 §6).
+//! capa, especificidad y orden de aparición (CSS Cascade 5 §6), también para los
+//! pseudoelementos (el índice los agrupa aparte).
 
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch};
@@ -34,6 +35,14 @@ const AUTHOR: &str = "
     *|p { line-height: 2 }
     [data-k] { order: 1 }
     #y.c.d { z-index: 4 }
+    .a p + div span { order: 2 }
+    #x > p ~ div { order: 3 }
+    ul li { order: 4 }
+    DIV#X SPAN { order: 5 }
+    .A .C { order: 6 }
+    .nada span, .a span { order: 7 }
+    .nada span { order: 8 }
+    div p > span::before { content: 'y' }
 ";
 
 const HTML: &str = "<div class='a b' id=x><p>uno<span class='c d' id=y>dos</span></p>\
