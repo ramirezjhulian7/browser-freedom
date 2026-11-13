@@ -567,6 +567,20 @@ impl Policy {
         nonce: Option<&str>,
         source: &str,
     ) -> Option<Violation> {
+        self.inline_violation_by(kind, nonce, source, true)
+    }
+
+    /// Como [`Policy::inline_violation`]; `parser_inserted` es falso para un `<script>` en
+    /// línea que insertó otro script. Con `'strict-dynamic'` (§8.2) ese script hereda la
+    /// confianza del que lo insertó y se permite aunque no tenga nonce, como hacen los
+    /// navegadores y espera WPT (`script-src/script-src-strict_dynamic_meta_tag.html`).
+    pub fn inline_violation_by(
+        &self,
+        kind: Inline,
+        nonce: Option<&str>,
+        source: &str,
+        parser_inserted: bool,
+    ) -> Option<Violation> {
         let effective = match kind {
             Inline::Script => "script-src-elem",
             Inline::ScriptAttribute => "script-src-attr",
@@ -574,6 +588,12 @@ impl Policy {
             Inline::StyleAttribute => "style-src-attr",
         };
         let d = self.directive_for(effective)?;
+        if kind == Inline::Script
+            && !parser_inserted
+            && d.value.iter().any(|t| is_keyword(t, "'strict-dynamic'"))
+        {
+            return None;
+        }
         (!inline_allowed(&d.value, kind, nonce, source)).then(|| self.violation(d))
     }
 
@@ -782,6 +802,24 @@ mod tests {
             let v = policy(p).inline_violation(*kind, *nonce, source);
             assert_eq!(v.is_none(), *allowed, "{p} {kind:?} {nonce:?}");
         }
+        // `'strict-dynamic'`: el script en línea que insertó otro script corre sin nonce; el
+        // del parser, no.
+        let strict = policy("script-src 'nonce-a' 'strict-dynamic'");
+        assert!(
+            strict
+                .inline_violation_by(Inline::Script, None, src, false)
+                .is_none()
+        );
+        assert!(
+            strict
+                .inline_violation_by(Inline::Script, Some("x"), src, true)
+                .is_some()
+        );
+        assert!(
+            strict
+                .inline_violation_by(Inline::ScriptAttribute, None, src, false)
+                .is_some()
+        );
         let with_hash = policy(&format!("script-src 'sha256-{h256}'"));
         assert!(
             with_hash

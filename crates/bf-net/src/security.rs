@@ -188,12 +188,24 @@ impl DocumentPolicy {
 
     /// ¿Se puede ejecutar o aplicar en línea `source` (con el `nonce` de su elemento)?
     pub fn allow_inline(&self, kind: Inline, nonce: Option<&str>, source: &str) -> bool {
+        self.allow_inline_by(kind, nonce, source, true)
+    }
+
+    /// Como [`DocumentPolicy::allow_inline`]; `parser_inserted` es falso para un script en
+    /// línea que insertó otro script (`'strict-dynamic'` lo permite).
+    pub fn allow_inline_by(
+        &self,
+        kind: Inline,
+        nonce: Option<&str>,
+        source: &str,
+        parser_inserted: bool,
+    ) -> bool {
         let violations: Vec<_> = self
             .policies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter_map(|p| p.inline_violation(kind, nonce, source))
+            .filter_map(|p| p.inline_violation_by(kind, nonce, source, parser_inserted))
             .collect();
         !self.report(violations, inline_name(kind))
     }

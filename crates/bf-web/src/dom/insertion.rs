@@ -176,11 +176,11 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
         .url
         .serialize(false);
     let source = info.source_text.to_string();
-    // E6: CSP para los scripts en línea (`'unsafe-inline'`, `nonce` o hash).
-    if !crate::security::allow_inline_script(
+    // E6: CSP para los scripts en línea (`'unsafe-inline'`, `nonce` o hash; `'strict-dynamic'`
+    // permite los que inserta un script).
+    if !crate::security::allow_inserted_inline_script(
         agent,
         realm,
-        None,
         Some(&info.nonce.to_string()),
         &source,
     ) {

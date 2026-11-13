@@ -182,3 +182,20 @@ pub fn allow_inline_script(
     flush(agent, realm);
     ok
 }
+
+/// Como [`allow_inline_script`] para un `<script>` en línea que insertó otro script (no el
+/// parser): con `'strict-dynamic'` (CSP 3 §8.2) se permite aunque no tenga nonce.
+pub fn allow_inserted_inline_script(
+    agent: &mut Agent,
+    realm: RealmId,
+    nonce: Option<&str>,
+    source: &str,
+) -> bool {
+    let Some(p) = ensure(agent, realm, None) else {
+        return true;
+    };
+    refresh_meta(agent, realm, None);
+    let ok = p.allow_inline_by(Inline::Script, nonce, source, false);
+    flush(agent, realm);
+    ok
+}
