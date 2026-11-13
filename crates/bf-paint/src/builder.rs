@@ -1642,6 +1642,8 @@ impl Builder<'_> {
             std::sync::Arc::new(Outline {
                 units_per_em: o.units_per_em,
                 commands,
+                // E5: sin mapas de bits de emoji (van erguidos en vertical, UTR #50).
+                bitmaps: Vec::new(),
             })
         };
         let column = f.rect.width;

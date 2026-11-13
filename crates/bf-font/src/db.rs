@@ -32,6 +32,9 @@ pub struct FaceInfo {
     pub stretch: u16,
     /// `ulUnicodeRange` de OS/2: filtro previo del fallback por carácter.
     pub unicode_ranges: u128,
+    /// E5: en una fuente variable, el valor del eje `wght` de esta instancia (ver
+    /// [`variable_instances`]).
+    pub wght: Option<f32>,
 }
 
 /// Contornos cacheados por (cara, glifo); `None` si el glifo no tiene contorno.
@@ -147,7 +150,7 @@ fn scan_file_inner(path: &Path) -> Option<Vec<FaceInfo>> {
             raw.table_records
                 .into_iter()
                 .filter(|r| {
-                    [b"name", b"OS/2"]
+                    [b"name", b"OS/2", b"fvar"]
                         .iter()
                         .any(|t| r.tag == Tag::from_bytes(t))
                 })
@@ -161,7 +164,7 @@ fn scan_file_inner(path: &Path) -> Option<Vec<FaceInfo>> {
             continue;
         };
         if let Some(info) = face_info(path, index, &raw) {
-            faces.push(info);
+            faces.extend(variable_instances(info, &raw));
         }
     }
     Some(faces)
@@ -269,7 +272,36 @@ fn face_info(path: &Path, index: u32, raw: &RawFace<'_>) -> Option<FaceInfo> {
         style,
         stretch,
         unicode_ranges,
+        wght: None,
     })
+}
+
+/// E5: una fuente variable con eje `wght` (como `SFNS.ttf`, la del sistema en macOS) se
+/// registra como una cara por cada peso CSS de 100 a 900 dentro del rango del eje (CSS Fonts 4
+/// §5.2 elige entre ellas como entre caras estáticas). Los demás ejes quedan en su valor por
+/// defecto. Sin ese eje, la cara tal cual.
+fn variable_instances(info: FaceInfo, raw: &RawFace<'_>) -> Vec<FaceInfo> {
+    let axis = raw
+        .table(Tag::from_bytes(b"fvar"))
+        .and_then(ttf_parser::fvar::Table::parse)
+        .and_then(|fvar| fvar.axes.into_iter().find(|a| a.tag == crate::face::WGHT));
+    let Some(axis) = axis else {
+        return vec![info];
+    };
+    let instances: Vec<FaceInfo> = (1..=9)
+        .map(|w| w as f32 * 100.0)
+        .filter(|w| (axis.min_value..=axis.max_value).contains(w))
+        .map(|w| FaceInfo {
+            weight: w,
+            wght: Some(w),
+            ..info.clone()
+        })
+        .collect();
+    if instances.is_empty() {
+        vec![info]
+    } else {
+        instances
+    }
 }
 
 impl FontDb {
@@ -364,7 +396,7 @@ impl FontDb {
         self.loaded[i]
             .get_or_init(|| {
                 let data = self.file(&info.path)?;
-                LoadedFace::new(data, info.index).map(Arc::new)
+                LoadedFace::new(data, info.index).map(|f| Arc::new(f.with_wght(info.wght)))
             })
             .clone()
     }
