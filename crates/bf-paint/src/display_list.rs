@@ -277,12 +277,23 @@ impl DisplayList {
 
 /// Un grupo `sticky` del viewport: su rectángulo (px CSS de página, sin el desplazamiento
 /// `sticky`) y lo que hace falta para saber dónde se pinta con cada scroll.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StickyGroup {
     pub rect: Rect,
     pub constraints: StickyConstraints,
     pub applied: (f32, f32),
     pub viewport: Size,
+    /// Los índices de sus ítems en la lista, de `PushSticky` a `PopSticky` incluidos.
+    pub items: std::ops::Range<usize>,
+    /// La traslación de la página en `PushSticky` (px CSS; `rect` ya la incluye).
+    pub translate: (f32, f32),
+    /// Solo está dentro de recortes rectangulares sin esquinas redondeadas (no de una capa de
+    /// opacidad, una máscara, un efecto ni una sombra): se puede pintar en su propia capa y
+    /// componerla encima de la página, recortada a `clip`.
+    pub own_layer: bool,
+    /// La intersección de los recortes que lo encierran, en px CSS de la página (no se mueven
+    /// con el desplazamiento `sticky`).
+    pub clip: Option<Rect>,
 }
 
 /// Lo que necesitan el desplazamiento incremental y el raster por bandas
@@ -298,6 +309,11 @@ pub struct ScrollInfo {
     pub fixed: Vec<Rect>,
     /// Los grupos `sticky` del viewport (se mueven distinto que la página).
     pub sticky: Vec<StickyGroup>,
+    /// Lo que pintan los ítems de fuera de los grupos `sticky` que van detrás del primero en
+    /// la lista: índice, caja conservadora (px CSS de la página, o del viewport si `true`:
+    /// dentro de un grupo `fixed`) y la transformación del ítem (para [`ink_bounds`]). Si algo
+    /// de eso cae sobre un `sticky`, el `sticky` no va en capa propia.
+    pub after_sticky: Vec<(usize, Rect, bool, [f32; 6])>,
 }
 
 /// Una transformación afín `[a, b, c, d, e, f]` (como `matrix()`).
@@ -407,6 +423,58 @@ pub(crate) fn item_bounds(item: &DisplayItem) -> Option<Rect> {
     Some(inflate(&r, 2.0))
 }
 
+/// E4: la caja de lo que pinta `item` con la transformación `m` (px CSS), más ajustada que
+/// [`item_bounds`] para el texto: la de los puntos de los contornos de sus glifos (encierran
+/// la curva), con 2 px de margen por el ajuste a la rejilla y el antialiasing. Los glifos de
+/// mapa de bits y el resto de los ítems usan [`item_bounds`].
+pub fn ink_bounds(item: &DisplayItem, m: &[f32; 6]) -> Option<Rect> {
+    let DisplayItem::Text {
+        glyphs,
+        size,
+        origin,
+        y_fit,
+        ..
+    } = item
+    else {
+        return item_bounds(item).map(|b| map_rect(m, &b));
+    };
+    let mut b: Option<Rect> = None;
+    for g in glyphs {
+        let Some(o) = &g.outline else {
+            continue;
+        };
+        if !o.bitmaps.is_empty() {
+            return item_bounds(item).map(|b| map_rect(m, &b));
+        }
+        let k = size / o.units_per_em;
+        for cmd in &o.commands {
+            let pts: &[(f32, f32)] = &match *cmd {
+                bf_layout::PathCommand::MoveTo(x, y) | bf_layout::PathCommand::LineTo(x, y) => {
+                    vec![(x, y)]
+                }
+                bf_layout::PathCommand::QuadTo(a, b, x, y) => vec![(a, b), (x, y)],
+                bf_layout::PathCommand::CurveTo(a, b, c, d, x, y) => vec![(a, b), (c, d), (x, y)],
+                bf_layout::PathCommand::Close => vec![],
+            };
+            for &(x, y) in pts {
+                let fit = if y >= 0.0 { y_fit.0 } else { y_fit.1 };
+                let p = Rect::new(
+                    origin.0 + g.x + x * k,
+                    origin.1 + g.y - y * k * fit,
+                    0.0,
+                    0.0,
+                );
+                b = Some(union(b, p));
+            }
+        }
+    }
+    // Sin contornos no pinta nada: una caja vacía no toca nada.
+    let b = b.map_or(Rect::new(origin.0, origin.1, 0.0, 0.0), |r| {
+        inflate(&r, 2.0)
+    });
+    Some(map_rect(m, &b))
+}
+
 /// Analiza la lista para el raster en tiles y el desplazamiento incremental
 /// ([`crate::raster::render_tiled`]). `None` si algo lo impide: un `filter` (puede leer
 /// cualquier píxel de su capa, así que un tile no basta), un grupo `fixed` o `sticky` dentro
@@ -422,8 +490,34 @@ pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
     let mut stack: Vec<Affine> = vec![IDENTITY];
     // El grupo abierto: su clase, la profundidad de la pila al abrirlo y lo que pinta.
     let mut group: Option<(Group, usize, Option<Rect>)> = None;
-    for item in &dl.items {
+    // Dónde abrió el grupo `sticky` en curso: índice, traslación, si puede ir en capa propia y
+    // el recorte que lo encierra.
+    let mut opened = (0usize, (0.0f32, 0.0f32), false, None::<Rect>);
+    // Recortes, capas, máscaras, efectos y sombras abiertos: el rectángulo (px CSS de la
+    // página) de los recortes rectangulares bajo una traslación, `None` el resto.
+    let mut scopes: Vec<Option<Rect>> = Vec::new();
+    for (index, item) in dl.items.iter().enumerate() {
         let top = *stack.last().unwrap_or(&IDENTITY);
+        let translation = top[0] == 1.0 && top[1] == 0.0 && top[2] == 0.0 && top[3] == 1.0;
+        match item {
+            DisplayItem::PushClip { rect, radii } => {
+                scopes.push((radii.is_zero() && translation).then(|| map_rect(&top, rect)))
+            }
+            DisplayItem::PushClipBorder { .. }
+            | DisplayItem::PushClipText { .. }
+            | DisplayItem::PushOpacity(_)
+            | DisplayItem::PushMask
+            | DisplayItem::PushEffect
+            | DisplayItem::PushShadow { .. } => scopes.push(None),
+            DisplayItem::PopClip
+            | DisplayItem::PopOpacity
+            | DisplayItem::PopMask { .. }
+            | DisplayItem::PopEffect(_)
+            | DisplayItem::PopShadow => {
+                scopes.pop();
+            }
+            _ => {}
+        }
         match item {
             DisplayItem::PopEffect(fx) if fx.filter.is_some() => return None,
             DisplayItem::BoxShadow { shadow, .. } => blur = blur.max(shadow.blur),
@@ -454,6 +548,16 @@ pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
                     return None;
                 }
                 stack.push(top);
+                let own = scopes.iter().all(Option::is_some);
+                let clip = scopes.iter().flatten().fold(None, |acc: Option<Rect>, r| {
+                    Some(acc.map_or(*r, |a| {
+                        let (x0, y0) = (a.x.max(r.x), a.y.max(r.y));
+                        let x1 = (a.x + a.width).min(r.x + r.width);
+                        let y1 = (a.y + a.height).min(r.y + r.height);
+                        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+                    }))
+                });
+                opened = (index, (top[4], top[5]), own, clip);
                 group = Some((
                     Group::Sticky(*constraints, *applied, *viewport),
                     stack.len(),
@@ -474,6 +578,10 @@ pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
                                     constraints,
                                     applied,
                                     viewport,
+                                    items: opened.0..index + 1,
+                                    translate: opened.1,
+                                    own_layer: opened.2,
+                                    clip: opened.3,
                                 });
                             }
                         }
@@ -484,8 +592,22 @@ pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
                 }
             }
             other => {
-                if let (Some((_, _, acc)), Some(b)) = (&mut group, item_bounds(other)) {
-                    *acc = Some(union(*acc, map_rect(&top, &b)));
+                let Some(b) = item_bounds(other) else {
+                    continue;
+                };
+                let b = map_rect(&top, &b);
+                match &mut group {
+                    Some((Group::Sticky(..), _, acc)) => *acc = Some(union(*acc, b)),
+                    Some((Group::Fixed, _, acc)) => {
+                        *acc = Some(union(*acc, b));
+                        if !info.sticky.is_empty() {
+                            info.after_sticky.push((index, b, true, top));
+                        }
+                    }
+                    None if !info.sticky.is_empty() => {
+                        info.after_sticky.push((index, b, false, top));
+                    }
+                    None => {}
                 }
             }
         }
