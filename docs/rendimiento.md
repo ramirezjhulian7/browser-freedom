@@ -37,8 +37,25 @@ Imprime tres líneas (los tiempos entre corchetes son segundos desde la navegaci
 - `perf primera pintura: X desde la navegación (raster R)`: el final del primer raster de la
   página nueva en la ventana (`App::frame`), incluido el raster.
 
+Otras líneas de la carga, con `BF_TRACE=1`:
+
+- `perf red <url>: T ms (caché, estado protocolo, N peticiones, C conexiones nuevas): dns ·
+  tcp · tls · h2 inicio · espera · cuerpo · h2 · descompresión · caché · resto (B bytes)` (E6,
+  `bf-shell/src/load.rs::trace_fetch` con `bf_net::timing`): la petición del documento por
+  partes. **h2 inicio** es el prefacio y los `SETTINGS` de una conexión HTTP/2 nueva;
+  **espera** y **cuerpo**, en HTTP/1.1, van de escribir la petición a la cabecera y de ahí al
+  final del cuerpo; **h2**, en HTTP/2, es la petición entera; **caché**, buscar, leer y guardar
+  en la caché HTTP sin la red; **resto**, lo que no cae en ninguna. La caché es `Revalidated`
+  cuando el documento se validó con el servidor (Wikipedia lo pide siempre: `max-age=0,
+  must-revalidate`). Ejemplo (13 de noviembre): 405,7 ms, dns 5,6 · tcp 125,9 · tls 127,8 · h2
+  135,8: tres viajes de ida y vuelta de unos 125 ms.
+- `perf imágenes pedidas`: la línea de E2 para las imágenes que la página pide; su rama no
+  entró en `master` en este ciclo (`0995c60` no la tiene), así que aún no se puede describir
+  aquí con su formato real.
+
 Para comparar la cascada con y sin el índice de reglas en el mismo binario y con la misma
-carga: `BF_NO_RULE_INDEX=1` usa el recorrido completo de antes.
+carga: `BF_NO_RULE_INDEX=1` usa el recorrido completo de antes. `BF_NO_ANCESTOR_FILTER=1`
+apaga solo el filtro de ancestros del índice (ronda 6).
 
 Con `BF_TRACE=1` cada cascada completa imprime además `perf cascada: emparejar … (índices …,
 N reglas) · declaraciones … · valores …; de eso, pseudoelementos … (E elementos, P llamadas de
@@ -104,6 +121,16 @@ Con `BF_TRACE=1`, `scrollbench` imprime además:
   los sticky en capa propia`: cómo se pintó cada cuadro (ver abajo).
 - `perf grupos: margen … ; fixed x=… y=… ancho×alto, sticky x=… y=… ancho×alto`: los grupos
   que se tratan aparte al desplazar (px CSS de la página).
+- `perf raster por partes (ms sumados entre hilos, N cuadros): texto · rectángulos · bordes ·
+  imágenes · fondos · sombras · caminos · capas · recortes · otros · tiles enteros · copias ·
+  capas sticky · composición sticky` (`bf_paint::raster::profile`): el tiempo de cada clase de
+  ítem dentro de los tiles, sumado entre los hilos (puede pasar del tiempo de pared); **tiles
+  enteros** es cada tile de principio a fin (lo de las clases más crear el pixmap y recorrer la
+  lista); **copias**, pasar los tiles al cuadro.
+- `perf cuadros lentos: T (cómo, raster R, antes A, N tiles, K capas sticky); …`: los ocho
+  cuadros de más de 16,7 ms más lentos, con cómo se pintaron, cuántos tiles y cuántas capas
+  `sticky` se pintaron en ellos. Con N y K normales y un raster largo, es la máquina (hilos sin
+  CPU), no el trabajo.
 
 ## Cómo pinta la ventana (desde la ronda 7)
 
@@ -133,6 +160,25 @@ en la página** (`bf_paint::raster`, 256 × 64 px CSS por tile, en px de disposi
 El cuadro de la ventana reutiliza su pixmap (`App::spare_frame`), copia la página encima y
 rellena con el color del cromo solo lo que la página no cubre (`fill_outside`); la barra opaca
 se copia sin componer.
+
+Desde la ronda 6:
+
+- **Grupos fuera del tile**: cada grupo de la lista (opacidad, máscara, recorte, sombra,
+  transformación) lleva la caja de lo que pinta (`display_list::group_spans`); un tile que no
+  la toca salta el grupo entero. Antes cada tile creaba y recorría una capa del tamaño del
+  tile por cada grupo de opacidad de la página (12 en Wikipedia), aunque no pintara nada en
+  él: era el 80 % del raster a escala 2. Los grupos con un efecto (`filter`) o con `fixed` o
+  `sticky` dentro o fuera no se saltan.
+- **Anillo de filas**: la página del cuadro (`TiledFrame`) es un anillo; desplazar mueve el
+  principio del anillo y no copia píxeles; el cuadro de la ventana la copia una vez.
+- **Capas `sticky` estables**: la fracción de px de su desplazamiento se redondea a 1/256 px
+  (los dos caminos igual), porque las restas en f32 con scrolls grandes la cambiaban de un
+  cuadro a otro y la capa se volvía a pintar.
+- Lo que se sabe de la lista (grupos `fixed`/`sticky`, cajas de los grupos, contornos de los
+  textos que se miraron) se calcula una vez por lista y se guarda con el cuadro.
+- La barra y la línea de estado se vuelven a maquetar solo si cambia su HTML o el ancho
+  (cada cuadro que manda el hilo del documento refrescaba el cromo y rehacía las dos), y la
+  línea de estado se guarda pintada (`App::status_cache`).
 
 Encima de la página, el cuadro de la ventana lleva las barras de desplazamiento, los
 resaltados de buscar y de la selección y el cursor: se pintan con `render_over`, que
@@ -172,6 +218,24 @@ Mediana por cuadro de 120 cuadros de 40 px en `https://es.wikipedia.org/wiki/Nav
 (área de página 1180 × 704 px CSS). La máquina estuvo muy cargada todo el tiempo: las cifras
 absolutas cambian mucho con la carga, por eso el A/B se midió con los dos binarios seguidos.
 
+**Ronda 6, A/B** contra `master` `0995c60` (dos binarios, el de antes compilado en un
+`CARGO_TARGET_DIR` aparte; 10 rondas alternando, `scrollbench:120:40 scale:2
+scrollbench:120:40`; solo las corridas que cargaron el artículo: 10 de antes y 8 de después,
+las otras dos fueron páginas de error por la red; carga 6-16; mínimo / mediana):
+
+| | antes (`0995c60`) | después |
+|---|---:|---:|
+| escala 1, mediana por cuadro | 4,2 / 5,85 ms | **1,8 / 2,7 ms** |
+| escala 1, cuadros de más de 16,7 ms | 0 / 1 | **0 / 0** |
+| escala 2, mediana por cuadro | 8,8 / 12,9 ms | **2,8 / 4,1 ms** |
+| escala 2, p95 | 15,6 / 23,85 ms | **4,4 / 6,8 ms** |
+| escala 2, raster mediano | 5,8 / 7,95 ms | 1,3 / 1,9 ms |
+| escala 2, cuadros de más de 16,7 ms | 3 / 23 | **1 / 2** |
+| CPU de la sesión (`/usr/bin/time -l`, user + sys) | 6,25 / 7,66 s | 2,18 / 3,06 s |
+
+Con la máquina cargada (carga 33-38, 5 rondas): escala 2, mediana 19,9 → 7,45 ms y cuadros de
+más de 16,7 ms 91 → 2; escala 1, 9,8 → 4,9 ms y 6 → 0.
+
 **Cuadros por segundo** al cierre 3: con la máquina a carga 21-36, **125 fps a escala 1**
 (8,0 ms) y **56 fps a escala 2** (17,7 ms); en el A/B final, con los otros ejecutores ya
 parados (carga 17-57 bajando), 370 y 159 fps (2,7 y 6,3 ms, mediana de 3 corridas alternando
@@ -208,6 +272,30 @@ pintura 2143 → 1954 ms. Por partes, después y con carga 16: emparejar 46-50 m
 10, valores 19-21; los pseudoelementos, 13-14 ms (4034 de 4444 sin `content`, sin calcular).
 La meta de 500 ms no se cumple: solo la red se lleva ~660 ms (ver la nota de E4,
 `docs/pendiente/mac/e4.md`, cierre 3, para el reparto por funciones).
+
+**Primera pintura, cascada y hojas, ronda 6** (el mismo A/B de arriba, mínimo / mediana):
+
+| | antes (`0995c60`) | después |
+|---|---:|---:|
+| primera pintura | 908,2 / 1179,7 ms | 842,4 / 925,9 ms |
+| red/caché | 379,0 / 464,0 | 407,7 / 461,6 |
+| parseo | 185,5 / 192,5 | 183,2 / 196,1 |
+| **hojas** | **53,7 / 59,2** | **16,5 / 17,4** |
+| **cascada** | **93,9 / 97,2** | **75,2 / 76,6** |
+| maqueta | 93,4 / 96,9 | 92,8 / 95,5 |
+
+- **Hojas**: el parser de CSS intentaba cada regla de un bloque (`@media { … }`, reglas
+  anidadas) como declaración, como pide CSS Syntax 3 §5.4.4, y al fallar consumía como restos
+  todas las reglas que la siguen en el bloque antes de volver atrás: cuadrático en el número
+  de reglas del bloque. Ahora el intento vuelve en cuanto sabe que no hay declaración (mismo
+  resultado; `syntax::parser::shortcut_tests`).
+- **Cascada**: la expansión de cada declaración de hoja se guarda (antes se volvía a analizar
+  en cada elemento), y el índice de reglas tiene un filtro de Bloom de los ancestros
+  (`AncestorBloom`): las reglas más caras de Wikipedia
+  (`.skin-theme-clientpref-night … :not(.notheme):not(a)`, `*.center *`) se probaban en todos
+  los elementos y fallaban subiendo hasta la raíz. A/B del filtro solo, en el mismo binario
+  (`BF_NO_ANCESTOR_FILTER`, 7 rondas, carga 150-190): emparejar 167,3 / 203,4 → 76,7 / 116,2 ms,
+  cascada 327,1 / 393,3 → 193,7 / 292,0 ms.
 
 ## Parseo de la primera pintura (E3, cierre ronda 5)
 

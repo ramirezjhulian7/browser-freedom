@@ -1,11 +1,13 @@
 //! E4: el índice de reglas de la cascada (`RuleIndex`) da exactamente las mismas declaraciones
 //! que el recorrido completo (`matching_declarations_in`) en cada nodo: el mismo orden, origen,
 //! capa, especificidad y orden de aparición (CSS Cascade 5 §6), también para los
-//! pseudoelementos (el índice los agrupa aparte).
+//! pseudoelementos (el índice los agrupa aparte) y con el filtro de ancestros
+//! (`AncestorBloom`): combinadores de hermanos entre ancestros, mayúsculas y selectores que
+//! no coinciden por un ancestro que falta.
 
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch};
-use bf_css::stylesheet::{Origin, RuleIndex, Stylesheet, matching_declarations_in};
+use bf_css::stylesheet::{AncestorBloom, Origin, RuleIndex, Stylesheet, matching_declarations_in};
 use bf_dom::Document;
 use bf_html::{ParseOptions, parse_document};
 
@@ -80,6 +82,10 @@ fn check(doc: &Document) {
             );
             let fast = index.matching(doc, node, pseudo, &ctx, shadow);
             assert_eq!(full, fast, "nodo {node:?} {pseudo:?}");
+            // Con el filtro de ancestros (E4), lo mismo.
+            let bloom = AncestorBloom::of_ancestors(doc, node);
+            let filtered = index.matching_filtered(doc, node, pseudo, &ctx, shadow, Some(&bloom));
+            assert_eq!(full, filtered, "con filtro: nodo {node:?} {pseudo:?}");
             compared += full.len();
         }
     }

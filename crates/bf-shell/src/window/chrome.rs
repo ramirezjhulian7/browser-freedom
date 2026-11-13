@@ -346,6 +346,11 @@ pub struct Chrome {
     bar: Option<UiDoc>,
     /// E4: cambia con cada maqueta nueva de la barra (la ventana guarda su raster con ella).
     bar_generation: u64,
+    /// E4: cambia con cada maqueta nueva de la línea de estado (la ventana guarda su raster).
+    status_generation: u64,
+    /// E4: el HTML y el ancho de la última maqueta de la barra y de la línea de estado.
+    bar_src: Option<(String, u32)>,
+    status_src: Option<(String, u32)>,
     regions: Vec<(Region, Rect)>,
     /// Los iconos de la barra ya con su color, y los huecos de los indicadores de carga.
     icons: Vec<(Icon, Rect, Rgba)>,
@@ -385,6 +390,9 @@ impl Chrome {
             width: 0.0,
             bar: None,
             bar_generation: 0,
+            status_generation: 0,
+            bar_src: None,
+            status_src: None,
             regions: Vec::new(),
             icons: Vec::new(),
             spinners: Vec::new(),
@@ -711,14 +719,25 @@ impl Chrome {
     }
 
     fn build_bar(&mut self) -> UiDoc {
-        UiDoc::build(
-            &self.bar_html(),
+        // E4: con el mismo HTML y el mismo ancho, la maqueta es la misma: se reutiliza (cada
+        // cuadro que manda el hilo del documento refresca el cromo).
+        let html = self.bar_html();
+        if self.bar_src.as_ref() == Some(&(html.clone(), self.width.to_bits()))
+            && let Some(bar) = self.bar.take()
+        {
+            return bar;
+        }
+        let bar = UiDoc::build(
+            &html,
             Size {
                 width: self.width,
                 height: BAR,
             },
             self.fonts.clone(),
-        )
+        );
+        self.bar_src = Some((html, self.width.to_bits()));
+        self.bar_generation += 1;
+        bar
     }
 
     /// Vuelve a maquetar la barra y la línea de estado con `width` px lógicos de ancho.
@@ -822,11 +841,14 @@ impl Chrome {
                 found.push((Icon::Close, r, color));
             }
         }
+        // Los iconos y los indicadores se pintan aparte de la maqueta (dependen de `hover`).
+        if self.icons != found || self.spinners != spinners {
+            self.bar_generation += 1;
+        }
         self.icons = found;
         self.spinners = spinners;
         let field = bar.rect("field");
         self.bar = Some(bar);
-        self.bar_generation += 1;
         if let Some(field) = field {
             self.layout_suggestions(field);
         }
@@ -848,14 +870,26 @@ impl Chrome {
             ("left", escape(&self.status_left)),
             ("right", right),
         ];
+        let html = fill(internal::STATUS, &vars);
+        // E4: como la barra: con el mismo HTML y ancho, la misma maqueta.
+        if self.status.is_some() && self.status_src == Some((html.clone(), self.width.to_bits())) {
+            return;
+        }
         self.status = Some(UiDoc::build(
-            &fill(internal::STATUS, &vars),
+            &html,
             Size {
                 width: self.width,
                 height: STATUS,
             },
             self.fonts.clone(),
         ));
+        self.status_src = Some((html, self.width.to_bits()));
+        self.status_generation += 1;
+    }
+
+    /// E4: la generación de la línea de estado (ver `App::status_cache`).
+    pub fn status_generation(&self) -> u64 {
+        self.status_generation
     }
 
     /// Maqueta el panel del motor con el cuerpo `body` y `height` px de alto.

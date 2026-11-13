@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch, ShadowMode, Specificity};
 use bf_css::stylesheet::{
-    MatchedDeclaration, Origin, RuleIndex, Stylesheet, matching_declarations_in,
+    AncestorBloom, MatchedDeclaration, Origin, RuleIndex, Stylesheet, matching_declarations_in,
 };
 use bf_css::syntax::{
     ComponentValue, Declaration, Function, NestedItem, SimpleBlock, parse_block_contents,
@@ -130,6 +130,9 @@ struct Source<'a> {
     specificity: Specificity,
     order: u64,
     decl: &'a Declaration,
+    /// De una hoja: vive toda la cascada y su expansión se guarda (las generadas, del
+    /// atributo `style` y los hints, son de cada elemento).
+    shared: bool,
 }
 
 impl Source<'_> {
@@ -368,78 +371,98 @@ struct CustomEntry {
     value: CustomValue,
 }
 
-/// Expande una declaración en entradas por longhand. Las inválidas o desconocidas se
-/// descartan.
-fn expand(
-    source: &Source<'_>,
-    longhands: &mut Vec<(LonghandId, Entry)>,
-    customs: &mut Vec<CustomEntry>,
-) {
-    let decl = source.decl;
+/// E4: lo que da una declaración al expandirla, sin su precedencia: no depende del elemento,
+/// así que se calcula una vez por declaración de hoja ([`Styler::expanded`]).
+enum Expanded {
+    Custom(String, CustomValue),
+    /// Los longhands con su valor y si la declaración es de una propiedad lógica.
+    Longhands(Vec<(LonghandId, DeclValue)>, bool),
+}
+
+/// Expande una declaración en valores por longhand. Las inválidas o desconocidas se
+/// descartan (quedan sin longhands).
+fn expand_declaration(decl: &Declaration) -> Expanded {
     let value = trim(&decl.value);
-    let prec = source.precedence();
-    let logical = is_logical(&decl.name);
-    let entry = |value: DeclValue| Entry {
-        prec,
-        origin: source.origin,
-        layer: source.layer,
-        value,
-        logical,
-        from: None,
-    };
     if decl.name.starts_with("--") {
         let value = match CssWide::parse(value) {
             Some(w) => CustomValue::Wide(w),
             None => CustomValue::Raw(Arc::new(decl.value.clone())),
         };
-        customs.push(CustomEntry {
-            prec,
-            origin: source.origin,
-            layer: source.layer,
-            name: decl.name.clone(),
-            value,
-        });
-        return;
+        return Expanded::Custom(decl.name.clone(), value);
     }
+    let logical = is_logical(&decl.name);
+    let mut out = Vec::new();
     let wide = CssWide::parse(value);
     let pending = contains_var(value).then(|| Arc::new(value.to_vec()));
     if let Some(id) = longhand_by_name(&decl.name) {
         let v = match (wide, pending) {
-            (Some(w), _) => DeclValue::Wide(w),
-            (None, Some(values)) => DeclValue::Pending {
+            (Some(w), _) => Some(DeclValue::Wide(w)),
+            (None, Some(values)) => Some(DeclValue::Pending {
                 shorthand: None,
                 values,
-            },
-            (None, None) => match (id.def().parse)(value) {
-                Some(v) => DeclValue::Value(v),
-                None => return,
-            },
+            }),
+            (None, None) => (id.def().parse)(value).map(DeclValue::Value),
         };
-        longhands.push((id, entry(v)));
+        out.extend(v.map(|v| (id, v)));
     } else if let Some(sh) = shorthand_by_name(&decl.name) {
         match (wide, pending) {
             (Some(w), _) => {
                 for &id in sh.longhands {
-                    longhands.push((id, entry(DeclValue::Wide(w))));
+                    out.push((id, DeclValue::Wide(w)));
                 }
             }
             (None, Some(values)) => {
                 for &id in sh.longhands {
-                    longhands.push((
+                    out.push((
                         id,
-                        entry(DeclValue::Pending {
+                        DeclValue::Pending {
                             shorthand: Some(sh),
                             values: values.clone(),
-                        }),
+                        },
                     ));
                 }
             }
             (None, None) => {
                 if let Some(values) = (sh.expand)(value) {
                     for v in values {
-                        longhands.push((v.id(), entry(DeclValue::Value(v))));
+                        out.push((v.id(), DeclValue::Value(v)));
                     }
                 }
+            }
+        }
+    }
+    Expanded::Longhands(out, logical)
+}
+
+/// Las entradas de `source` (ya expandida en `expanded`) con su precedencia.
+fn push_expanded(
+    source: &Source<'_>,
+    expanded: &Expanded,
+    longhands: &mut Vec<(LonghandId, Entry)>,
+    customs: &mut Vec<CustomEntry>,
+) {
+    let prec = source.precedence();
+    match expanded {
+        Expanded::Custom(name, value) => customs.push(CustomEntry {
+            prec,
+            origin: source.origin,
+            layer: source.layer,
+            name: name.clone(),
+            value: value.clone(),
+        }),
+        Expanded::Longhands(values, logical) => {
+            for (id, value) in values {
+                longhands.push((
+                    *id,
+                    Entry {
+                        prec,
+                        origin: source.origin,
+                        layer: source.layer,
+                        value: value.clone(),
+                        logical: *logical,
+                        from: None,
+                    },
+                ));
             }
         }
     }
@@ -834,6 +857,11 @@ struct Styler<'a> {
     timings: Option<std::cell::RefCell<Timings>>,
     /// E4: la base del último padre (ver `Styler::base`).
     base: std::cell::RefCell<Option<(usize, ComputedStyle)>>,
+    /// E4: la expansión de cada declaración de hoja (por su dirección: las hojas viven toda la
+    /// cascada), para no volver a analizar su valor en cada elemento.
+    expanded: std::cell::RefCell<HashMap<usize, std::rc::Rc<Expanded>>>,
+    /// E4: el filtro de ancestros de cada nodo (ver `Styler::ancestor_bloom`).
+    blooms: std::cell::RefCell<HashMap<NodeId, AncestorBloom>>,
 }
 
 /// E4: en qué se va la cascada (con `BF_TRACE=1`, una línea `perf cascada` al terminar).
@@ -922,7 +950,31 @@ impl<'a> Styler<'a> {
                 std::rc::Rc::new(index)
             })
             .clone();
-        index.matching(self.doc, node, pseudo, self.ctx, shadow)
+        // `BF_NO_ANCESTOR_FILTER=1`: sin el filtro de ancestros (para medirlo).
+        static NO_FILTER: OnceLock<bool> = OnceLock::new();
+        let filter =
+            !*NO_FILTER.get_or_init(|| std::env::var_os("BF_NO_ANCESTOR_FILTER").is_some());
+        let bloom = (filter && !self.doc.has_shadow_roots()).then(|| self.ancestor_bloom(node));
+        index.matching_filtered(self.doc, node, pseudo, self.ctx, shadow, bloom.as_ref())
+    }
+
+    /// E4: el filtro de los ancestros de `node` ([`AncestorBloom`]): el del padre más las claves
+    /// del padre, guardado por nodo (cada elemento lo usa en varias llamadas y sus hijos parten
+    /// de él).
+    fn ancestor_bloom(&self, node: NodeId) -> AncestorBloom {
+        if let Some(b) = self.blooms.borrow().get(&node) {
+            return *b;
+        }
+        let bloom = match self.doc.parent(node) {
+            Some(p) if let Some(el) = self.doc.element(p) => {
+                let mut b = self.ancestor_bloom(p);
+                b.add_element(el);
+                b
+            }
+            _ => AncestorBloom::default(),
+        };
+        self.blooms.borrow_mut().insert(node, bloom);
+        bloom
     }
 
     /// E1: las hojas de autor del árbol con raíz `root` (el documento o un shadow root) y su
@@ -1018,6 +1070,7 @@ impl<'a> Styler<'a> {
                 },
                 order: (group << 40) | m.source_order as u64,
                 decl: m.declaration,
+                shared: true,
             });
         }
         for (i, (origin, attached, decl)) in owned.iter().enumerate() {
@@ -1044,6 +1097,7 @@ impl<'a> Styler<'a> {
                 specificity,
                 order: (group << 40) | i as u64,
                 decl,
+                shared: false,
             });
         }
         sources
@@ -1176,7 +1230,18 @@ impl<'a> Styler<'a> {
         let mut longhands: Vec<(LonghandId, Entry)> = Vec::new();
         let mut customs: Vec<CustomEntry> = Vec::new();
         for s in sources {
-            expand(s, &mut longhands, &mut customs);
+            if s.shared {
+                let key = std::ptr::from_ref(s.decl) as usize;
+                let cached = self.expanded.borrow().get(&key).cloned();
+                let e = cached.unwrap_or_else(|| {
+                    let e = std::rc::Rc::new(expand_declaration(s.decl));
+                    self.expanded.borrow_mut().insert(key, e.clone());
+                    e
+                });
+                push_expanded(s, &e, &mut longhands, &mut customs);
+            } else {
+                push_expanded(s, &expand_declaration(s.decl), &mut longhands, &mut customs);
+            }
         }
         longhands.sort_by_key(|e| e.1.prec);
         let any_logical = longhands.iter().any(|e| e.1.logical);
@@ -1590,6 +1655,8 @@ pub fn style_document_with_sheets(
         indexes: std::cell::RefCell::new(HashMap::new()),
         timings: std::env::var_os("BF_TRACE").map(|_| std::cell::RefCell::default()),
         base: std::cell::RefCell::new(None),
+        expanded: std::cell::RefCell::new(HashMap::new()),
+        blooms: std::cell::RefCell::new(HashMap::new()),
     };
     let mut map = StyleMap::new();
     let mut stack: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = doc
