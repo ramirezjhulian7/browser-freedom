@@ -52,17 +52,26 @@ Otras líneas de la carga, con `BF_TRACE=1`:
   cuando el documento se validó con el servidor (Wikipedia lo pide siempre: `max-age=0,
   must-revalidate`). Ejemplo (13 de noviembre): 405,7 ms, dns 5,6 · tcp 125,9 · tls 127,8 · h2
   135,8: tres viajes de ida y vuelta de unos 125 ms.
-- `perf imágenes pedidas`: la línea de E2 para las imágenes que la página pide; su rama no
-  entró en `master` en este ciclo (`0995c60` no la tiene), así que aún no se puede describir
-  aquí con su formato real.
+- `perf imágenes pedidas: N (M <img> perezosas aplazadas)` (E2, `bf-paint/src/images.rs`,
+  en `load_images_in`): sale en cada maqueta, antes de pedir las imágenes. **N** son las
+  direcciones distintas que esa maqueta pide (los `src` de los `<img>` que se piden y las
+  imágenes de `background-image`, `mask-image`, `list-style-image` y `border-image-source`,
+  de un `image-set()` solo la elegida); **M** son los `<img loading=lazy>` lejos del viewport
+  que quedan para después (HTML §4.8.4.3.9). Ver la descripción de arriba.
+- `perf hojas: H de la caché, P parseadas (T ms de parseo)` (E4, `bf_paint::prepare_page`
+  con `bf_style::sheet_cache`): de las hojas externas de esa maqueta, cuántas salieron ya
+  parseadas de la caché del proceso y cuántas se parsearon (y cuánto tardó). Sale también en
+  las maquetas de la interfaz, sin hojas externas (`0 de la caché, 0 parseadas`).
 
 Para comparar la cascada con y sin el índice de reglas en el mismo binario y con la misma
 carga: `BF_NO_RULE_INDEX=1` usa el recorrido completo de antes. `BF_NO_ANCESTOR_FILTER=1`
-apaga solo el filtro de ancestros del índice (ronda 6).
+apaga solo el filtro de ancestros del índice (ronda 6), `BF_NO_STYLE_SHARING=1` el estilo
+compartido y `BF_CASCADE_THREADS=1` la cascada en varios hilos (ciclo nuevo, ronda 1).
 
 Con `BF_TRACE=1` cada cascada completa imprime además `perf cascada: emparejar … (índices …,
 N reglas) · declaraciones … · valores …; de eso, pseudoelementos … (E elementos, P llamadas de
-pseudoelementos, K sin content)` (`bf_style::cascade::Timings`):
+pseudoelementos, K sin content); S estilos compartidos; H hilos` (`bf_style::cascade::Timings`;
+con varios hilos, los tiempos van sumados entre ellos):
 
 - **emparejar**: `RuleIndex::matching` en cada grupo de hojas (con `:host`, `::slotted()` y
   los hints), y armar los índices.
@@ -72,6 +81,7 @@ pseudoelementos, K sin content)` (`bf_style::cascade::Timings`):
 - **pseudoelementos**: lo que de todo eso fue para `::before`, `::after` y `::marker`;
   *sin content* son los `::before`/`::after` a los que no les aplica ninguna declaración
   `content` ni `all` y no se calculan.
+- **estilos compartidos**: elementos que tomaron el estilo de otro (ver abajo).
 
 Y cada maqueta completa imprime `perf maqueta: T ms; árbol de cajas … (N cajas) · bloques … ·
 líneas … · shaping … · intrínsecos … · tablas … · flex … · grid … · flotantes … ·
@@ -302,6 +312,58 @@ La meta de 500 ms no se cumple: solo la red se lleva ~660 ms (ver la nota de E4,
   A/B de la caché de la expansión sola (un interruptor temporal en el mismo binario, quitado
   después; 7 rondas alternando, carga 14): declaraciones 23,1 / 23,8 → 12,7 / 14,4 ms,
   cascada 103,8 / 109,5 → 85,2 / 96,5 ms.
+
+**Medida del planificador sobre `276fa07`** (no es de E4: release, Wikipedia, caché caliente,
+ejecutores casi parados). Desplazamiento (`scrollbench:120:40`): escala 1, mediana 3,7-4,0
+ms; escala 2, mediana 5,2-6,1 ms y p95 9,4-11,2 ms, con 2-3 cuadros de 120 por encima de
+16,7 ms; el criterio de 60 fps se da por cumplido. Primera pintura: 542-665 ms en cinco
+corridas. Desglose de dos corridas con traza (ms):
+
+| | corrida 1 | corrida 2 |
+|---|---:|---:|
+| red y caché | 247 | 315 |
+| parseo | 54 | 62 |
+| scripts | 22 | 27 |
+| hojas | 23 | 27 |
+| cascada | 90 | 126 |
+| maqueta | 85 | 55 |
+| lista de pintado | 15 | 10 |
+| raster | 27 | 21 |
+
+**Cascada y hojas fuera del camino, ciclo nuevo, ronda 1** (E4). A/B contra `276fa07` (el
+binario de antes en un `CARGO_TARGET_DIR` aparte; 6 rondas alternando, solo la carga;
+carga 104-116, la máquina muy ocupada; mínimo / mediana):
+
+| | antes (`276fa07`) | después |
+|---|---:|---:|
+| primera pintura | 754,1 / 841,2 ms | **562,0 / 672,7 ms** |
+| red/caché | 244,2 / 322,8 | 239,6 / 290,9 |
+| parseo | 84,5 / 91,2 | 79,5 / 84,0 |
+| hojas | 32,7 / 46,3 | 33,1 / 42,2 |
+| **cascada** | **117,9 / 160,9** | **42,8 / 50,3** |
+| maqueta | 71,1 / 86,5 | 55,5 / 71,7 |
+| CPU de la sesión (user + sys) | 0,56 / 0,63 s | 0,58 / 0,61 s |
+
+- **Estilo compartido** (`Styler::style_if`): un elemento sin declaraciones propias (atributo
+  `style`, hints, las de quirks, la regla de `th`) tiene los mismos valores computados que
+  otro con la misma lista de declaraciones emparejadas y el mismo estilo del padre (CSS
+  Cascade 5 §4 no cambia: `compute` solo depende de eso); se comparte el mismo `Arc`, así que
+  sus hijos también comparten padre y se comparte entre primos. En Wikipedia, 1494 de 2064
+  elementos. A/B en el mismo binario (`BF_NO_STYLE_SHARING`, 7 rondas, carga 84-87):
+  valores 49,3 / 60,8 → 25,2 / 32,0 ms, cascada 133,1 / 159,3 → 106,0 / 112,3 ms.
+- **Cascada en varios hilos** (`bf_style::style_document_parallel`, la usa
+  `bf_paint::prepare_page`): se calculan en orden la raíz y los subárboles más grandes hasta
+  tener unos cuatro subárboles por hilo con el estilo del padre ya calculado, y se reparten por
+  tamaño entre los hilos (hasta 4), cada uno con su `Styler`. Con shadow roots, en un hilo. A/B
+  en el mismo binario (`BF_CASCADE_THREADS=1` frente a 4, 7 rondas, carga 89-93): cascada
+  107,7 / 143,1 → 32,4 / 61,9 ms.
+- **Hojas** (`bf_style::sheet_cache`): una caché por proceso de hojas ya parseadas, con clave
+  URL final + hash de los bytes y contexto modo quirks + encoding de respaldo, `Send + Sync`
+  (`warm` desde cualquier hilo, `get`). En una carga nueva no cambia nada (nadie la calienta
+  todavía; la precarga de E6 la llamará): `perf hojas: 0 de la caché, 3 parseadas`. Al
+  recargar en la misma sesión (`key:f5`): `perf hojas: 3 de la caché, 0 parseadas` y la parte
+  **hojas** baja de 43,9 a 6,4 ms. También la usan las maquetas que siguen a la carga (los
+  eventos `scroll` de Wikipedia rehacen la maqueta): antes cada una volvía a parsear las hojas.
 
 ## Parseo de la primera pintura (E3, cierre ronda 5)
 

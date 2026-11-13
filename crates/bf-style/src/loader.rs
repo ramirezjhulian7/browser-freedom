@@ -85,6 +85,7 @@ pub fn document_stylesheets(
     media: &MediaContext,
     resources: Option<Resources<'_>>,
 ) -> Vec<Stylesheet> {
+    let quirks = doc.mode == bf_dom::QuirksMode::Quirks;
     let mut sheets = Vec::new();
     for node in doc.inclusive_descendants(doc.root()) {
         let Some(el) = doc.element(node) else {
@@ -106,6 +107,7 @@ pub fn document_stylesheets(
                     &mut sheet,
                     res.base,
                     res,
+                    quirks,
                     &mut vec![res.base.serialize(true)],
                 );
             }
@@ -126,7 +128,7 @@ pub fn document_stylesheets(
             let (Some(res), Some(href)) = (resources, el.attr("href")) else {
                 continue;
             };
-            if let Some(sheet) = load_sheet(href, res.base, res, &mut Vec::new()) {
+            if let Some(sheet) = load_sheet(href, res.base, res, quirks, &mut Vec::new()) {
                 sheets.push(sheet);
             }
         }
@@ -143,11 +145,13 @@ pub fn document_stylesheets(
     sheets
 }
 
-/// Carga, parsea y procesa (imports y URLs) una hoja externa.
+/// Carga una hoja externa: parseada (E4: de [`crate::sheet_cache`] si ya lo estaba) y con sus
+/// imports resueltos.
 fn load_sheet(
     href: &str,
     base: &Url,
     res: Resources<'_>,
+    quirks: bool,
     chain: &mut Vec<String>,
 ) -> Option<Stylesheet> {
     let url = Url::parse(href, Some(base)).ok()?;
@@ -156,9 +160,14 @@ fn load_sheet(
     if chain.contains(&key) || chain.len() > MAX_IMPORT_DEPTH {
         return None;
     }
-    let mut sheet = Stylesheet::parse(&decode_css(&resource.bytes, res.encoding), Origin::Author);
+    let ctx = crate::sheet_cache::SheetContext {
+        quirks,
+        encoding: res.encoding,
+    };
+    // Parseada y con las `url()` ya resueltas contra `resource.url`.
+    let mut sheet = (*crate::sheet_cache::warm(&resource.url, &resource.bytes, &ctx)).clone();
     chain.push(key);
-    process(&mut sheet, &resource.url, res, chain);
+    resolve_imports(&mut sheet, &resource.url, res, quirks, chain);
     chain.pop();
     Some(sheet)
 }
@@ -189,8 +198,25 @@ fn charset_rule(bytes: &[u8]) -> Option<Encoding> {
 }
 
 /// Resuelve las URLs de `sheet` contra `base` e inserta las hojas importadas.
-fn process(sheet: &mut Stylesheet, base: &Url, res: Resources<'_>, chain: &mut Vec<String>) {
+fn process(
+    sheet: &mut Stylesheet,
+    base: &Url,
+    res: Resources<'_>,
+    quirks: bool,
+    chain: &mut Vec<String>,
+) {
     sheet.rewrite_urls(&mut |u| Url::parse(u, Some(base)).ok().map(|u| u.href()));
+    resolve_imports(sheet, base, res, quirks, chain);
+}
+
+/// Inserta las hojas que `sheet` importa (con sus URLs ya resueltas contra `base`).
+fn resolve_imports(
+    sheet: &mut Stylesheet,
+    base: &Url,
+    res: Resources<'_>,
+    quirks: bool,
+    chain: &mut Vec<String>,
+) {
     let rules = std::mem::take(&mut sheet.rules);
     let mut out = Vec::with_capacity(rules.len());
     for rule in rules {
@@ -198,7 +224,7 @@ fn process(sheet: &mut Stylesheet, base: &Url, res: Resources<'_>, chain: &mut V
             out.push(rule);
             continue;
         };
-        let imported = load_sheet(&import.url, base, res, chain);
+        let imported = load_sheet(&import.url, base, res, quirks, chain);
         let wrapped = imported.map(|s| wrap_import(&import, s, chain.len()));
         out.push(Rule::Import(import));
         out.extend(wrapped);
