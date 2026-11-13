@@ -201,6 +201,9 @@ fn env_mut(agent: &mut Agent, realm: RealmId) -> Option<&mut ScriptEnv> {
 /// Saca el parser del documento de la ventana (lo crea sobre el documento si no había); el
 /// contexto queda con un documento vacío hasta [`put_parser`].
 fn take_parser(agent: &mut Agent, realm: RealmId) -> Parser {
+    // E1: lo que un script hizo en nodos que el parser tiene abiertos y viven en otro
+    // documento vuelve a los originales del parser (`dom::adopt`, HTML §13.2.6.1).
+    crate::dom::adopt::mirror_sync_from_live(agent, realm);
     let ctx = WebContextHandle { realm }.get_mut(agent);
     let owner = std::mem::replace(
         &mut ctx.documents[0],
@@ -216,6 +219,8 @@ fn take_parser(agent: &mut Agent, realm: RealmId) -> Parser {
 fn put_parser(agent: &mut Agent, realm: RealmId, parser: Parser) {
     let ctx = WebContextHandle { realm }.get_mut(agent);
     ctx.documents[0] = DocumentOwner::Parser(Box::new(parser));
+    // E1: y lo que el parser hizo en esos originales pasa a los nodos vivos.
+    crate::dom::adopt::mirror_sync_to_live(agent, realm);
 }
 
 /// Corre `f` con el parser de la ventana y un [`WebScripts`].
