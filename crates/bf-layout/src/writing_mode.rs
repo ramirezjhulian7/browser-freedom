@@ -331,7 +331,19 @@ impl<'a> Layout<'a> {
         content_w: f32,
         height: Option<f32>,
     ) -> Fragment {
-        self.orthogonal_fragment_with(b, cb, cb.width, (height, Some(content_w)))
+        self.orthogonal_sized_fragment(b, cb, Some(content_w), height)
+    }
+
+    /// E5: [`Layout::orthogonal_fragment`] con el ancho y el alto de contenido (en el marco en
+    /// curso) que se conozcan de antemano, como el de una absoluta con `left` y `right`.
+    pub(crate) fn orthogonal_sized_fragment(
+        &mut self,
+        b: &LayoutBox,
+        cb: Cb,
+        width: Option<f32>,
+        height: Option<f32>,
+    ) -> Fragment {
+        self.orthogonal_fragment_with(b, cb, cb.width, (height, width))
     }
 
     /// [`Layout::orthogonal_fragment`] con los porcentajes de márgenes y paddings de `b`

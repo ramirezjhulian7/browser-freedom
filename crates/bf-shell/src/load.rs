@@ -12,7 +12,7 @@ use bf_infra::encoding::{self, Encoding};
 use bf_infra::{Resource, ResourceLoader, Url, url_from_arg};
 use bf_layout::Size;
 use bf_net::{
-    EncodingSource, FetchError, FetchOptions, MimeType, NetLoader, ReferrerPolicy,
+    EncodingSource, FetchError, FetchOptions, MimeType, NetErrorKind, NetLoader, ReferrerPolicy,
     html_encoding_with_source,
 };
 
@@ -120,18 +120,16 @@ impl ResourceLoader for CachedLoader {
 /// Por qué no se pudo cargar un documento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    Dns,
-    Tls,
-    Timeout,
-    Connection,
+    /// Falló la red: la causa que da `bf-net` ([`FetchError::kind`]): el nombre, la conexión,
+    /// el tiempo, el certificado (con el motivo), las redirecciones…
+    Net(NetErrorKind),
     Http(u16),
-    NotFound,
-    InvalidUrl,
-    UnsupportedScheme,
-    TooManyRedirects,
     UnknownInternal,
     /// Un pánico del motor con este documento.
     Engine,
+    /// El hilo de la pestaña entró en pánico fuera de la carga y del layout (que tienen su
+    /// propia captura): la pestaña arranca otro hilo y muestra esta página.
+    Crashed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,18 +140,8 @@ pub struct LoadError {
 
 impl LoadError {
     fn from_fetch(e: &FetchError) -> LoadError {
-        let kind = match e {
-            FetchError::Dns(_) => ErrorKind::Dns,
-            FetchError::Tls(_) => ErrorKind::Tls,
-            FetchError::Timeout => ErrorKind::Timeout,
-            FetchError::Io(_) => ErrorKind::Connection,
-            FetchError::NotFound => ErrorKind::NotFound,
-            FetchError::InvalidUrl => ErrorKind::InvalidUrl,
-            FetchError::UnsupportedScheme(_) => ErrorKind::UnsupportedScheme,
-            FetchError::TooManyRedirects => ErrorKind::TooManyRedirects,
-        };
         LoadError {
-            kind,
+            kind: ErrorKind::Net(e.kind()),
             message: e.to_string(),
         }
     }
@@ -601,6 +589,255 @@ mod tests {
         assert_eq!(
             policy("<meta name=referrer content=''><meta name=description content=origin>"),
             None
+        );
+    }
+}
+
+/// La página de error de navegación con la causa de red, contra servidores locales: un
+/// servidor por causa (o un puerto cerrado) y el texto que ve el usuario.
+#[cfg(test)]
+mod net_error_pages {
+    use super::*;
+    use bf_net::dns::{Dns, Family, Resolver};
+    use bf_net::{Fetcher, NetErrorKind as N, TlsReason as T};
+    use std::io::{self, BufRead, BufReader, Write};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+
+    fn context(fetcher: Fetcher) -> LoadContext {
+        LoadContext {
+            net: Arc::new(NetLoader {
+                fetcher,
+                errors: Mutex::default(),
+            }),
+            fonts: FontDb::system(),
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            recent: Vec::new(),
+            theme: Theme::for_system(None),
+            post: None,
+        }
+    }
+
+    /// Lo que se muestra al navegar a `url`: el error y el texto de la página.
+    fn shown(url: &str, fetcher: Fetcher) -> (Option<ErrorKind>, String) {
+        let url = Url::parse(url, None).unwrap();
+        let loaded = load_with(&url, &context(fetcher), None);
+        let text = loaded
+            .doc
+            .descendant_text_content(loaded.doc.root())
+            .to_string();
+        (loaded.meta.error.map(|e| e.kind), text)
+    }
+
+    /// Un servidor en un puerto libre que atiende cada conexión con `f`.
+    fn serve(f: impl Fn(TcpStream) + Send + Sync + 'static) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                f(stream);
+            }
+        });
+        port
+    }
+
+    /// Lee la petición hasta la línea en blanco.
+    fn read_request(stream: &TcpStream) {
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+        }
+    }
+
+    /// Resuelve cualquier nombre a 127.0.0.1, o a nada (`None`: el nombre no existe).
+    struct FakeResolver(Option<IpAddr>);
+
+    impl Resolver for FakeResolver {
+        fn lookup(&self, host: &str, family: Family) -> io::Result<Vec<IpAddr>> {
+            match self.0 {
+                Some(ip) if family == Family::V4 => Ok(vec![ip]),
+                Some(_) => Ok(Vec::new()),
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{host}: nodename nor servname provided, or not known"),
+                )),
+            }
+        }
+    }
+
+    fn with_resolver(mut fetcher: Fetcher, ip: Option<IpAddr>) -> Fetcher {
+        fetcher.dns = Arc::new(Dns::new(Arc::new(FakeResolver(ip))));
+        fetcher
+    }
+
+    fn assert_page(shown: (Option<ErrorKind>, String), kind: ErrorKind, needles: &[&str]) {
+        let (got, text) = shown;
+        assert_eq!(got, Some(kind), "{text}");
+        for n in needles.iter().chain(&["Reintentar"]) {
+            assert!(text.contains(n), "falta {n:?} en {text:?}");
+        }
+    }
+
+    #[test]
+    fn refused_connection() {
+        // Un puerto que se abre y se cierra: nadie escucha.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert_page(
+            shown(&format!("http://127.0.0.1:{port}/"), Fetcher::new()),
+            ErrorKind::Net(N::ConnectionRefused),
+            &["El servidor rechazó la conexión", "nadie atiende"],
+        );
+    }
+
+    #[test]
+    fn unknown_name() {
+        let fetcher = with_resolver(Fetcher::new(), None);
+        let shown = shown("http://no-existe.invalid/", fetcher);
+        if bf_net::dns::has_route() {
+            assert_page(
+                shown,
+                ErrorKind::Net(N::Dns),
+                &["No se encontró el sitio", "no-existe.invalid"],
+            );
+        } else {
+            // Sin ninguna red, el mismo fallo es "sin conexión".
+            assert_page(
+                shown,
+                ErrorKind::Net(N::Unreachable),
+                &["Sin conexión a internet"],
+            );
+        }
+    }
+
+    #[test]
+    fn offline_page() {
+        let ctx = context(Fetcher::new());
+        let url = Url::parse("about:error?sin-conexion", None).unwrap();
+        let l = internal::page(&url, &ctx);
+        let text = l.doc.descendant_text_content(l.doc.root()).to_string();
+        assert_eq!(
+            l.meta.error.map(|e| e.kind),
+            Some(ErrorKind::Net(N::Unreachable))
+        );
+        assert!(text.contains("Sin conexión a internet"), "{text}");
+        assert!(text.contains("Reintentar"), "{text}");
+    }
+
+    #[test]
+    fn connection_cut_before_the_response() {
+        let port = serve(|s| {
+            read_request(&s);
+            drop(s);
+        });
+        assert_page(
+            shown(&format!("http://127.0.0.1:{port}/"), Fetcher::new()),
+            ErrorKind::Net(N::ConnectionReset),
+            &["Se cortó la conexión", "127.0.0.1 cerró la conexión"],
+        );
+    }
+
+    #[test]
+    fn timeout() {
+        let port = serve(|s| {
+            read_request(&s);
+            std::thread::sleep(Duration::from_secs(3));
+            drop(s);
+        });
+        let mut fetcher = Fetcher::new();
+        fetcher.read_timeout = Some(Duration::from_millis(300));
+        assert_page(
+            shown(&format!("http://127.0.0.1:{port}/"), fetcher),
+            ErrorKind::Net(N::Timeout),
+            &["El sitio tardó demasiado", "no respondió a tiempo"],
+        );
+    }
+
+    #[test]
+    fn too_many_redirects() {
+        let port = serve(|mut s| {
+            read_request(&s);
+            let _ = s.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: /otra-vez\r\nContent-Length: 0\r\n\
+                  Connection: close\r\n\r\n",
+            );
+        });
+        assert_page(
+            shown(&format!("http://127.0.0.1:{port}/"), Fetcher::new()),
+            ErrorKind::Net(N::TooManyRedirects),
+            &["Demasiadas redirecciones", "una y otra vez"],
+        );
+    }
+
+    /// Un servidor TLS con el certificado de prueba de `bf-net` (de `localhost` y 127.0.0.1,
+    /// firmado por una autoridad de prueba).
+    fn tls_server() -> u16 {
+        let cert = rustls_pki_types::CertificateDer::from(
+            include_bytes!("../../bf-net/tests/data/server.der").to_vec(),
+        );
+        let key =
+            rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(
+                include_bytes!("../../bf-net/tests/data/server.key.der").to_vec(),
+            ));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap(),
+        );
+        serve(move |mut s| {
+            let mut conn = rustls::ServerConnection::new(config.clone()).unwrap();
+            // El cliente corta el handshake con una alerta: aquí termina con error.
+            while conn.is_handshaking() {
+                if conn.complete_io(&mut s).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn certificate_from_an_unknown_authority() {
+        let port = tls_server();
+        assert_page(
+            shown(&format!("https://127.0.0.1:{port}/"), Fetcher::new()),
+            ErrorKind::Net(N::Tls(T::UnknownIssuer)),
+            &[
+                "El certificado del sitio no es válido",
+                "no lo emitió una autoridad de confianza",
+            ],
+        );
+    }
+
+    #[test]
+    fn certificate_for_another_name() {
+        let port = tls_server();
+        // Confía en la autoridad de prueba, pero el certificado no es de `otro.test`.
+        let fetcher = with_resolver(
+            Fetcher::with_root_certificates(&[
+                include_bytes!("../../bf-net/tests/data/ca.der").to_vec()
+            ]),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        );
+        assert_page(
+            shown(&format!("https://otro.test:{port}/"), fetcher),
+            ErrorKind::Net(N::Tls(T::NameMismatch)),
+            &[
+                "El certificado del sitio no es válido",
+                "es de otro sitio, no de otro.test",
+            ],
         );
     }
 }

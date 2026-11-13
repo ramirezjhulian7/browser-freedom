@@ -306,3 +306,104 @@ fn macos_system_families() {
         assert!(first.is_some(), "ninguna familia para {generic}");
     }
 }
+
+/// E5: `system-ui` en macOS es `.SF NS` (`SFNS.ttf`, variable con 54 tuplas de `gvar` por
+/// glifo: sin la característica `gvar-alloc` de `ttf-parser` no daba contornos), con un peso por
+/// instancia del eje `wght`: la negrita tiene otro contorno.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_system_ui_is_sf() {
+    let Some(db) = system() else { return };
+    if db.family(".SF NS").is_empty() {
+        eprintln!("aviso: no está .SF NS; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db.clone());
+    let family = generic("system-ui");
+    let regular = face_of(&fonts, "A", &request(&family, 400.0, false)).expect("cara regular");
+    let bold = face_of(&fonts, "A", &request(&family, 700.0, false)).expect("cara negrita");
+    assert!(db.faces()[regular].families.iter().any(|f| f == ".sf ns"));
+    assert_eq!(db.faces()[regular].wght, Some(400.0));
+    assert_eq!(db.faces()[bold].wght, Some(700.0));
+    let glyph = |req: &FontRequest<'_>| fonts.shape("A", req)[0];
+    let (gr, gb) = (
+        glyph(&request(&family, 400.0, false)),
+        glyph(&request(&family, 700.0, false)),
+    );
+    let (or, ob) = (
+        fonts.outline(gr.font, gr.id).expect("contorno regular"),
+        fonts.outline(gb.font, gb.id).expect("contorno negrita"),
+    );
+    assert!(!or.commands.is_empty());
+    assert_ne!(or.commands, ob.commands, "la negrita usa el eje wght");
+    // HVAR: la negrita avanza más.
+    assert!(gb.advance > gr.advance);
+}
+
+/// E5: Apple Color Emoji solo tiene mapas de bits (`sbix`); las secuencias (tono de piel,
+/// bandera, ZWJ, keycap) quedan en un solo glifo de esa cara.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_color_emoji() {
+    let Some(db) = system() else { return };
+    if db.family("Apple Color Emoji").is_empty() {
+        eprintln!("aviso: no está Apple Color Emoji; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db.clone());
+    let family = generic("sans-serif");
+    let req = request(&family, 400.0, false);
+    for text in [
+        "😀",
+        "👍🏽",
+        "🇪🇸",
+        "👨\u{200D}👩\u{200D}👧",
+        "1\u{FE0F}\u{20E3}",
+    ] {
+        let glyphs = fonts.shape(text, &req);
+        assert_eq!(glyphs.len(), 1, "{text:?}: {glyphs:?}");
+        let g = glyphs[0];
+        assert!(
+            db.faces()[g.font.0 as usize]
+                .families
+                .iter()
+                .any(|f| f == "apple color emoji"),
+            "{text:?}"
+        );
+        let o = fonts.outline(g.font, g.id).expect("glifo de emoji");
+        assert!(!o.bitmaps.is_empty(), "{text:?} sin mapas de bits");
+        assert!(o.bitmaps.windows(2).all(|w| w[0].ppem < w[1].ppem));
+        assert!(o.bitmaps.iter().all(|b| b.png.starts_with(b"\x89PNG")));
+        assert!(g.advance > 10.0, "{text:?}: avance {}", g.advance);
+    }
+}
+
+/// E5: el fallback por carácter elige, dentro de la familia, la cara del peso pedido (CSS
+/// Fonts 4 §5.2): un texto chino en negrita no mezcla Hiragino W3 con W7.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cjk_single_weight() {
+    let Some(db) = system() else { return };
+    if db.family("Hiragino Sans").len() < 2 {
+        eprintln!("aviso: no está Hiragino Sans con varios pesos; se salta el test");
+        return;
+    }
+    let fonts = Fonts::new(db.clone());
+    let family = generic("sans-serif");
+    let text = "我们在使用简体中文测试字体的粗细";
+    for (weight, range) in [(700.0, 600.0..=700.0), (400.0, 300.0..=400.0)] {
+        for g in fonts.shape(text, &request(&family, weight, false)) {
+            let face = &db.faces()[g.font.0 as usize];
+            assert!(
+                face.families.iter().any(|f| f.starts_with("hiragino")),
+                "{weight}: {:?}",
+                face.families.first()
+            );
+            assert!(
+                range.contains(&face.weight),
+                "{weight}: cara de peso {}",
+                face.weight
+            );
+        }
+    }
+}

@@ -1090,6 +1090,20 @@ impl Engine {
         self.flush_rejections();
     }
 
+    /// E4: ¿hay animaciones o transiciones CSS en curso? (Cada cuadro pinta estilos nuevos.)
+    pub fn is_animating(&self) -> bool {
+        self.has_window() && bf_web::bom::animation::is_animating(&self.rt.agent, self.realm)
+    }
+
+    /// E4: los estilos de la cascada `base` con las animaciones y transiciones del documento en
+    /// la hora del cuadro (el gancho de `bf_paint::prepare_page_animated`).
+    pub fn animated_styles(&mut self, base: &Arc<bf_style::StyleMap>) -> Arc<bf_style::StyleMap> {
+        if !self.has_window() {
+            return base.clone();
+        }
+        bf_web::bom::animation::animate_in(&mut self.rt.agent, self.realm, base.clone())
+    }
+
     /// Cuánto falta para el próximo temporizador: `None` si no hay ninguno.
     pub fn next_wake(&mut self) -> Option<Duration> {
         let at = self.rt.next_wake()?;

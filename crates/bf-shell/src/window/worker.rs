@@ -17,7 +17,7 @@ use bf_infra::Url;
 use bf_js::host::ConsoleLevel;
 use bf_layout::Size;
 use bf_net::NetLoader;
-use bf_paint::{Page, PageContext, prepare_page_with_frames};
+use bf_paint::{Page, PageContext, prepare_page_animated, prepare_page_with_frames};
 
 use crate::internal;
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
@@ -42,6 +42,9 @@ pub struct LoadJob {
     pub referrer: String,
     /// La pantalla (`window.screen`).
     pub screen: bf_web::bom::ScreenInfo,
+    /// El hilo anterior de la pestaña entró en pánico con este mensaje: en lugar de cargar
+    /// `url`, se muestra la página "Esta página falló" ([`ErrorKind::Crashed`]).
+    pub crash: Option<String>,
 }
 
 pub enum Job {
@@ -81,6 +84,11 @@ pub struct View {
     pub device_pixel_ratio: f32,
     /// Zoom de texto del navegador (E11; 1 = sin zoom).
     pub text_zoom: f32,
+    /// E4: cuadros mandados a la ventana por el hilo y recibidos por ella. Mientras la
+    /// ventana va atrasada no se corren cuadros de animación (HTML §8.1.7.3: el agente puede
+    /// saltarse oportunidades de renderizado que no puede mostrar).
+    pub frames_sent: u64,
+    pub frames_taken: u64,
 }
 
 impl Default for View {
@@ -93,6 +101,8 @@ impl Default for View {
             scroll: (0.0, 0.0),
             device_pixel_ratio: 1.0,
             text_zoom: 1.0,
+            frames_sent: 0,
+            frames_taken: 0,
         }
     }
 }
@@ -109,6 +119,12 @@ pub enum FromDoc {
     Request {
         tab: u64,
         request: Box<PageRequest>,
+    },
+    /// El hilo de la pestaña `tab` entró en pánico y terminó; la ventana llama a
+    /// [`Documents::crashed`] y vuelve a cargar la pestaña con la página de error.
+    Crashed {
+        tab: u64,
+        message: String,
     },
 }
 
@@ -162,6 +178,16 @@ impl Documents {
             .text_zoom = zoom;
     }
 
+    /// E4: la ventana recibió un cuadro de la pestaña `tab` (ver [`View::frames_taken`]).
+    pub fn frame_taken(&mut self, tab: u64) {
+        if let Some(t) = self.threads.get(&tab) {
+            t.view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .frames_taken += 1;
+        }
+    }
+
     /// El zoom de texto con el que se maqueta la pestaña `tab`.
     pub fn text_zoom(&mut self, tab: u64) -> f32 {
         self.thread(tab)
@@ -199,6 +225,12 @@ impl Documents {
         for (_, t) in self.threads.drain() {
             let _ = t.jobs.send(Msg::Stop);
         }
+    }
+
+    /// El hilo de la pestaña `tab` terminó por un pánico ([`FromDoc::Crashed`]): se olvida,
+    /// y el próximo trabajo de la pestaña arranca uno nuevo.
+    pub fn crashed(&mut self, tab: u64) {
+        self.threads.remove(&tab);
     }
 
     /// Manda un trabajo solo si la pestaña `tab` ya tiene hilo (E11: una pestaña restaurada
@@ -249,6 +281,11 @@ struct Current {
     /// E1: los bitmaps de los `<canvas>` y su versión (dibujar no cambia el documento).
     canvases: Vec<(bf_dom::NodeId, Arc<bf_paint::Pixmap>)>,
     canvas_version: u64,
+    /// E4: ¿había animaciones o transiciones CSS en curso en el último cuadro?
+    animating: bool,
+    /// E4: el último cuadro cambió los estilos animados: hay que volver a maquetar y pintar
+    /// aunque el documento no haya cambiado.
+    animation_frame: bool,
 }
 
 /// El estado del hilo.
@@ -284,6 +321,8 @@ impl DocumentThread {
         let view = Arc::new(Mutex::new(View::default()));
         let shared = view.clone();
         let me = jobs.clone();
+        // Para avisar a la ventana si el hilo entra en pánico (el estado se pierde con él).
+        let (crash_tx, crash_wake) = (tx.clone(), wake.clone());
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
@@ -304,7 +343,17 @@ impl DocumentThread {
                     last_scroll: (0.0, 0.0),
                     frame_scroll: HashMap::new(),
                 };
-                state.run(rx);
+                // Un pánico fuera de la carga y del layout (un evento, un temporizador, un
+                // cuadro) terminaría el hilo y dejaría la pestaña muerta: se captura aquí y la
+                // ventana muestra "Esta página falló" con otro hilo. El resto de las pestañas
+                // y la ventana no se enteran.
+                if let Err(e) = catch_unwind(AssertUnwindSafe(|| state.run(rx))) {
+                    let message = panic_message(&*e);
+                    eprintln!("[pestaña {tab}] el hilo falló: {message}");
+                    if crash_tx.send(FromDoc::Crashed { tab, message }).is_ok() {
+                        crash_wake();
+                    }
+                }
             })
             .expect("no se pudo crear el hilo de la pestaña");
         DocumentThread { jobs, view }
@@ -365,6 +414,12 @@ impl State {
 
     fn viewport(&self) -> Size {
         self.view().viewport
+    }
+
+    /// E4: ¿la ventana todavía no recibió el último cuadro que se le mandó?
+    fn window_behind(&self) -> bool {
+        let v = self.view();
+        v.frames_sent > v.frames_taken
     }
 
     /// El desplazamiento o la escala cambiaron: el snapshot del layout se pone al día y, si
@@ -444,8 +499,10 @@ impl State {
                 current.canvases = engine.canvases();
                 canvas_changed = true;
             }
-            // E4: lo mismo si cambió el documento de un marco.
+            // E4: lo mismo si cambió el documento de un marco o si el cuadro movió las
+            // animaciones CSS.
             canvas_changed |= engine.take_frames_dirty();
+            canvas_changed |= std::mem::take(&mut current.animation_frame);
         }
         if canvas_changed || current.loaded.doc.version() != current.version {
             let wait = FRAME.saturating_sub(self.last_frame.elapsed());
@@ -464,7 +521,12 @@ impl State {
                 // Dormir hasta el próximo temporizador, el próximo cuadro (si hay callbacks de
                 // `requestAnimationFrame`; sin ellos no hay cuadros y el hilo duerme) o el
                 // próximo mensaje.
-                let to_frame = FRAME.saturating_sub(self.last_raf.elapsed());
+                // E4: con la ventana atrasada, el próximo intento es dentro de un cuadro.
+                let to_frame = if self.window_behind() {
+                    FRAME
+                } else {
+                    FRAME.saturating_sub(self.last_raf.elapsed())
+                };
                 let wait = self
                     .current
                     .as_mut()
@@ -594,6 +656,7 @@ impl State {
             session_history,
             referrer,
             screen,
+            crash,
         } = job;
         let net_waker: Arc<dyn Fn() + Send + Sync> = {
             let me = Mutex::new(self.me.clone());
@@ -632,13 +695,26 @@ impl State {
         // pestaña (RFC 6265bis §5.2).
         set_cookie_site(&url);
         let mut engine = Engine::new(self.console_sink());
-        let loaded = catch_unwind(AssertUnwindSafe(|| {
-            load_with(&url, &ctx, Some((&mut engine, &env)))
-        }))
-        .unwrap_or_else(|e| {
-            let err = engine_error(panic_message(&*e));
-            internal::error_page(&url, &err, &ctx)
-        });
+        let loaded = match crash {
+            Some(message) => {
+                let err = LoadError {
+                    kind: ErrorKind::Crashed,
+                    message,
+                };
+                internal::error_page(&url, &err, &ctx)
+            }
+            None => {
+                #[cfg(test)]
+                crash_test::maybe_panic(&url);
+                catch_unwind(AssertUnwindSafe(|| {
+                    load_with(&url, &ctx, Some((&mut engine, &env)))
+                }))
+                .unwrap_or_else(|e| {
+                    let err = engine_error(panic_message(&*e));
+                    internal::error_page(&url, &err, &ctx)
+                })
+            }
+        };
         set_cookie_site(&loaded.url);
         let version = loaded.doc.version();
         self.current = Some(Current {
@@ -647,6 +723,8 @@ impl State {
             version,
             canvases: Vec::new(),
             canvas_version: 0,
+            animating: false,
+            animation_frame: false,
         });
         self.layout(id, Some(ctx));
         // El primer layout cargó imágenes y hojas: ya puede salir `load` (13.2.7 paso 8).
@@ -665,13 +743,13 @@ impl State {
 
     /// Estilo, layout y lista de visualización del documento actual; `Done` a la ventana.
     fn layout(&mut self, id: u64, ctx: Option<LoadContext>) {
-        let Some(current) = &self.current else {
-            return;
-        };
         let viewport = self.viewport();
         let view_zoom = self.view().text_zoom;
         let view_dpr = self.view().device_pixel_ratio;
         let fonts = self.fonts.clone();
+        let Some(current) = &mut self.current else {
+            return;
+        };
         let canvases = current.canvases.clone();
         // E4: los documentos de los `<iframe>`, que se pintan dentro de su caja.
         let frames = current
@@ -679,7 +757,9 @@ impl State {
             .as_ref()
             .map(|e| e.frame_docs(&self.frame_scroll))
             .unwrap_or_default();
-        let page = |loaded: &Loaded| {
+        // E4: con motor, los estilos de la cascada pasan por sus animaciones y transiciones
+        // CSS (el "style change event" del cuadro) antes de maquetar.
+        let page = |loaded: &Loaded, engine: Option<&mut Engine>| {
             let pctx = PageContext {
                 base: &loaded.base,
                 encoding: loaded.encoding,
@@ -689,12 +769,20 @@ impl State {
                 text_zoom: view_zoom,
                 device_pixel_ratio: view_dpr,
             };
-            catch_unwind(AssertUnwindSafe(|| {
-                prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames)
+            catch_unwind(AssertUnwindSafe(|| match engine {
+                Some(engine) => prepare_page_animated(
+                    &loaded.doc,
+                    &pctx,
+                    viewport,
+                    &canvases,
+                    &frames,
+                    &mut |styles| engine.animated_styles(styles),
+                ),
+                None => prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames),
             }))
         };
         let loaded = current.loaded.clone();
-        let (loaded, mut page) = match page(&loaded) {
+        let (loaded, mut page) = match page(&loaded, current.engine.as_mut()) {
             Ok(p) => (loaded, p),
             // Un error del motor con este documento: se muestra como página de error en
             // lugar de terminar el hilo.
@@ -711,7 +799,7 @@ impl State {
                 });
                 let err = engine_error(message);
                 let shown = Arc::new(internal::error_page(&loaded.url, &err, &ctx));
-                let Ok(p) = page(&shown) else {
+                let Ok(p) = page(&shown, None) else {
                     return;
                 };
                 if let Some(c) = &mut self.current {
@@ -757,6 +845,10 @@ impl State {
             viewport,
         };
         if self.tx.send(FromDoc::Done(Box::new(done))).is_ok() {
+            self.view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .frames_sent += 1;
             (self.wake)();
         }
     }
@@ -764,6 +856,7 @@ impl State {
     /// Las tareas vencidas del documento; si cambiaron el DOM, un cuadro nuevo (como mucho
     /// uno cada [`FRAME`]).
     fn run_tasks(&mut self) {
+        let behind = self.window_behind();
         let Some(current) = &mut self.current else {
             return;
         };
@@ -772,10 +865,16 @@ impl State {
         };
         let mut ran = engine.run_due_tasks();
         // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
-        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME {
+        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME && !behind {
             self.last_raf = Instant::now();
             engine.run_animation_frames();
             ran += 1;
+            // E4: mientras haya animaciones o transiciones CSS (y en el cuadro en que terminan,
+            // para mostrar su estado final), cada cuadro se vuelve a maquetar y pintar. Sin
+            // ellas no se piden cuadros (`wants_frame`) y el hilo duerme.
+            let animating = engine.is_animating();
+            current.animation_frame |= animating || current.animating;
+            current.animating = animating;
         }
         if let Some((x, y)) = engine.take_scroll_request() {
             let _ = self.tx.send(FromDoc::Request {
@@ -808,6 +907,19 @@ pub fn set_cookie_site(url: &Url) {
     }));
 }
 
+/// Para los tests: una URL que hace entrar en pánico al hilo de la pestaña fuera de las
+/// capturas de la carga y del layout, como un fallo en un evento o un temporizador.
+#[cfg(test)]
+pub mod crash_test {
+    pub const URL: &str = "about:blank#panico-de-prueba";
+
+    pub fn maybe_panic(url: &bf_infra::Url) {
+        if url.href() == URL {
+            panic!("pánico de prueba en el hilo de la pestaña");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +938,7 @@ mod tests {
                 session_history: (1, 0),
                 referrer: String::new(),
                 screen: bf_web::bom::ScreenInfo::default(),
+                crash: None,
             }))
         };
         let mut q: VecDeque<Job> = VecDeque::from([

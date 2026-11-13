@@ -111,6 +111,78 @@ fn animation_frames_run_on_the_virtual_clock() {
     );
 }
 
+/// E4: la API de Web Animations sobre las animaciones y transiciones CSS (Web Animations 1
+/// §6, CSS Transitions 2 §6, CSS Animations 2 §6): `getAnimations()` en orden de composición,
+/// `CSSTransition`/`CSSAnimation`, `effect.target`, `currentTime` (que mueve la animación y lo
+/// ve `getComputedStyle` en el acto), `playState`, `pause()`, `finished`, `cancel()` con su
+/// evento y la hora de `document.timeline` fija durante un cuadro.
+#[test]
+fn web_animations_api_over_css_animations() {
+    let root = fake_root("waapi");
+    std::fs::write(
+        root.join("t/waapi.html"),
+        "<!doctype html><style>\
+           @keyframes grow { from { width: 0px; } to { width: 100px; } }\
+           #a { width: 100px; height: 10px; transition: width 1s linear; }\
+           #a.big { width: 200px; }\
+           #b { width: 30px; height: 10px; animation: grow 1s linear; }\
+         </style><div id=a></div><div id=b></div>\
+         <script src=/resources/testharness.js></script>\
+         <script src=/resources/testharnessreport.js></script>\
+         <script>\
+           var a = document.getElementById('a'), b = document.getElementById('b');\
+           getComputedStyle(a).width;\
+           a.className = 'big';\
+           var all = document.getAnimations();\
+           var t = all[0], k = all[1], out = [];\
+           test(function () {\
+             var got = [all.length, t instanceof CSSTransition, t instanceof Animation,\
+                        k instanceof CSSAnimation, t.transitionProperty, k.animationName,\
+                        t.effect.target === a, t.effect.pseudoElement, k.effect.target === b,\
+                        a.getAnimations()[0] === t, document.getAnimations()[0] === t,\
+                        t.playState, t.effect.getTiming().duration].join();\
+             var want = '2,true,true,true,width,grow,true,,true,true,true,running,1000';\
+             if (got !== want) throw new Error(got);\
+           }, 'lista');\
+           test(function () {\
+             t.currentTime = 250; k.currentTime = 500;\
+             var got = [getComputedStyle(a).width, getComputedStyle(b).width,\
+                        t.currentTime, document.timeline.currentTime === document.timeline.currentTime].join();\
+             if (got !== '125px,50px,250,true') throw new Error(got);\
+             k.pause(); var hold = k.currentTime;\
+             if (k.playState !== 'paused' || hold !== 500) throw new Error(k.playState + hold);\
+           }, 'tiempo');\
+           var events = [];\
+           b.addEventListener('animationcancel', function (e) { events.push(e.type); });\
+           k.cancel();\
+           t.finished.then(function (x) {\
+             test(function () {\
+               var got = [x === t, t.playState, getComputedStyle(a).width,\
+                          k.playState, getComputedStyle(b).width, events.join()].join();\
+               if (got !== 'true,finished,200px,idle,30px,animationcancel') throw new Error(got);\
+             }, 'fin');\
+             done();\
+           });\
+         </script>",
+    )
+    .unwrap();
+    let r = run(&root, "t/waapi.html");
+    assert_eq!(r[0].harness, Harness::Ok);
+    let st: Vec<(&str, SubStatus, &str)> = r[0]
+        .subtests
+        .iter()
+        .map(|(n, s, m)| (n.as_str(), *s, m.as_str()))
+        .collect();
+    assert_eq!(
+        st,
+        [
+            ("lista", SubStatus::Pass, ""),
+            ("tiempo", SubStatus::Pass, ""),
+            ("fin", SubStatus::Pass, "")
+        ]
+    );
+}
+
 /// E4: una transición CSS de punta a punta en el runner (CSS Transitions 1 §3 y §6): el
 /// "style change event" de `getComputedStyle` arranca la transición desde el "before-change
 /// style", los cuadros del reloj virtual muestran valores intermedios y se despachan

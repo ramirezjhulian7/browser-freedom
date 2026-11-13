@@ -4,9 +4,12 @@
 pub mod activation;
 pub mod canvas;
 pub mod custom_elements;
+pub mod dataset; // E1
 pub mod elements;
 pub mod forms;
+pub mod legacy; // E1
 pub mod legacy_factories;
+pub mod media; // E1
 pub mod misc;
 pub mod named;
 pub mod reflect;

@@ -40,6 +40,43 @@ pub fn blocks_text(m: ModifiersState, mac: bool) -> bool {
     }
 }
 
+/// ¿El botón principal con estos modificadores es un clic secundario? En macOS, `Ctrl+clic`
+/// es el clic derecho del sistema (Apple HIG, *Pointing devices*: "Control-click"); en el
+/// resto, `Ctrl+clic` sigue siendo un clic (abrir el enlace en otra pestaña).
+pub fn secondary_click(m: ModifiersState, mac: bool) -> bool {
+    mac && m.control_key()
+}
+
+/// Cuánto hay que pellizcar el trackpad (aumento acumulado) para un paso de zoom.
+const PINCH_STEP: f64 = 0.1;
+
+/// El gesto de pellizcar (`WindowEvent::PinchGesture`): suma los aumentos y da un paso de
+/// zoom de página cada [`PINCH_STEP`], como la rueda con el modificador primario. Por pasos
+/// y no continuo: cada cambio de zoom vuelve a maquetar la página.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Pinch {
+    acc: f64,
+}
+
+impl Pinch {
+    /// Un evento del gesto con aumento `delta` (positivo: abrir los dedos); `ended`, el gesto
+    /// terminó o se canceló. Devuelve si hay que acercar (`Some(true)`) o alejar.
+    pub fn update(&mut self, delta: f64, ended: bool) -> Option<bool> {
+        self.acc += if delta.is_finite() { delta } else { 0.0 };
+        let step = if self.acc >= PINCH_STEP {
+            Some(true)
+        } else if self.acc <= -PINCH_STEP {
+            Some(false)
+        } else {
+            None
+        };
+        if step.is_some() || ended {
+            self.acc = 0.0;
+        }
+        step
+    }
+}
+
 /// Un atajo del navegador.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -290,6 +327,25 @@ mod tests {
             assert_eq!(shortcut(&ch("t"), ModifiersState::empty(), mac), None);
             assert_eq!(shortcut(&ch("n"), p | SHIFT, mac), None);
         }
+    }
+
+    #[test]
+    fn control_click_and_pinch() {
+        // `Ctrl+clic` es el clic derecho solo en macOS.
+        assert!(secondary_click(CTRL, true));
+        assert!(!secondary_click(CTRL, false));
+        assert!(!secondary_click(CMD, true));
+        assert!(!secondary_click(ModifiersState::empty(), true));
+        // El pellizco da un paso cada 0,1 de aumento acumulado y se reinicia al terminar.
+        let mut p = Pinch::default();
+        assert_eq!(p.update(0.04, false), None);
+        assert_eq!(p.update(0.04, false), None);
+        assert_eq!(p.update(0.04, false), Some(true));
+        assert_eq!(p.update(0.05, false), None);
+        assert_eq!(p.update(0.0, true), None);
+        assert_eq!(p.update(0.06, false), None);
+        assert_eq!(p.update(-0.2, false), Some(false));
+        assert_eq!(p.update(f64::NAN, false), None);
     }
 
     #[test]

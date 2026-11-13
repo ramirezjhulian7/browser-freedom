@@ -234,3 +234,68 @@ fn paused_animation_holds_its_time() {
     assert_eq!(p.value(300.0, "#a", "width"), "30px");
     assert_eq!(p.value(900.0, "#a", "width"), "30px");
 }
+
+/// E4: `text-shadow` y `box-shadow` se interpolan sombra a sombra (CSS Backgrounds 3 §7.2):
+/// color y longitudes; `none` cuenta como una lista de sombras transparentes de longitud 0.
+#[test]
+fn shadows_interpolate_per_shadow() {
+    let mut p = Page::new(
+        "<style>#a { color: black; text-shadow: none; box-shadow: 0px 0px 0px 0px red;\
+         transition: text-shadow 1s linear, box-shadow 1s linear; }\
+         #a.on { text-shadow: rgb(0, 0, 200) 10px 20px 4px;\
+         box-shadow: 10px 10px 10px 4px blue, inset 2px 2px green; }</style><p id=a>x</p>",
+    );
+    p.at(0.0);
+    p.set("#a", "class", "on");
+    p.at(0.0);
+    assert_eq!(
+        p.value(500.0, "#a", "text-shadow"),
+        "rgba(0, 0, 200, 0.5) 5px 10px 2px"
+    );
+    // La lista más corta (una sombra) se completa con una transparente de longitud 0 y el
+    // `inset` de la otra.
+    assert_eq!(
+        p.value(500.0, "#a", "box-shadow"),
+        "rgb(128, 0, 128) 5px 5px 5px 2px, inset rgba(0, 128, 0, 0.5) 1px 1px 0px 0px"
+    );
+}
+
+/// E4: lo que necesita la API de Web Animations: la lista en orden de composición (primero
+/// las transiciones), mover una animación desde script (`set_times`) y `cancel()` con su
+/// evento.
+#[test]
+fn animator_api_for_web_animations() {
+    let mut p = Page::new(
+        "<style>@keyframes k { from { width: 0px } to { width: 100px } }\
+         #a { width: 10px; transition: width 1s linear; } #a.on { width: 20px; }\
+         #b { width: 30px; animation: k 1s linear; }</style><div id=a></div><div id=b></div>",
+    );
+    p.at(0.0);
+    p.set("#a", "class", "on");
+    p.at(0.0);
+    p.events();
+    let list = p.animator.relevant(&p.doc, 0.0);
+    assert_eq!(list.len(), 2);
+    assert!(list[0].transition && !list[1].transition);
+    assert_eq!(list[0].target.0, find(&p.doc, "#a"));
+    let k = list[1].id;
+    let mut t = p.animator.times(k).expect("la animación existe");
+    assert_eq!(t.name, "k");
+    assert_eq!(t.play_state(250.0), "running");
+    // Saltar a la mitad.
+    t.start_time = Some(250.0 - 500.0);
+    p.animator.set_times(k, &t);
+    assert_eq!(p.value(250.0, "#b", "width"), "50px");
+    // Cancelar: sin efecto, `idle`, `animationcancel` y fuera de la lista.
+    p.animator.cancel(k, 250.0);
+    assert_eq!(p.value(250.0, "#b", "width"), "30px");
+    assert_eq!(p.animator.times(k).unwrap().play_state(250.0), "idle");
+    assert_eq!(p.events(), [("animationcancel", "k".to_owned(), 0.5)]);
+    assert_eq!(p.animator.relevant(&p.doc, 250.0).len(), 1);
+    // La transición termina: sigue respondiendo como "finished".
+    let tr = list[0].id;
+    p.at(2000.0);
+    assert!(p.animator.find(tr).is_none());
+    assert_eq!(p.animator.times(tr).unwrap().play_state(2000.0), "finished");
+    assert_eq!(p.animator.target_of(tr), Some((find(&p.doc, "#a"), None)));
+}

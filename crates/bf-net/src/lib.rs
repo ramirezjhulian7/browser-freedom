@@ -292,7 +292,7 @@ fn system_dns() -> &'static Dns {
 }
 
 fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, FetchError> {
-    connect_tcp_with(system_dns(), host, port)
+    connect_tcp_with(system_dns(), host, port, READ_TIMEOUT)
 }
 
 fn attempt_tcp(a: std::net::SocketAddr) -> io::Result<TcpStream> {
@@ -302,9 +302,25 @@ fn attempt_tcp(a: std::net::SocketAddr) -> io::Result<TcpStream> {
 /// Conexión TCP con Happy Eyeballs (RFC 8305): la resolución de [`dns`] (§3, con caché), las
 /// direcciones de las dos familias intercaladas y los intentos escalonados cada 250 ms en
 /// paralelo ([`eyeballs`], §4–5); la familia que se resolvió tarde se suma a la lista en curso.
-fn connect_tcp_with(dns: &Dns, host: &str, port: u16) -> Result<TcpStream, FetchError> {
+/// Sin ruta hacia fuera ([`dns::has_route`]), un fallo de resolución es "sin conexión"
+/// (`NetworkUnreachable`, [`NetErrorKind::Unreachable`]) y no "el nombre no existe".
+fn connect_tcp_with(
+    dns: &Dns,
+    host: &str,
+    port: u16,
+    read_timeout: Duration,
+) -> Result<TcpStream, FetchError> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let resolution = dns.resolve(bare).map_err(FetchError::Dns)?;
+    let resolution = dns.resolve(bare).map_err(|e| {
+        if dns::has_route() {
+            FetchError::Dns(e)
+        } else {
+            FetchError::Io(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!("sin conexión a la red ({e})"),
+            ))
+        }
+    })?;
     let addrs = eyeballs::interleave(Dns::socket_addrs(&resolution.addrs, port));
     let late = resolution.late.map(|rx| (rx, port));
     let tcp = eyeballs::race_with_late(
@@ -314,8 +330,8 @@ fn connect_tcp_with(dns: &Dns, host: &str, port: u16) -> Result<TcpStream, Fetch
         CONNECT_TIMEOUT,
         attempt_tcp,
     )?;
-    tcp.set_read_timeout(Some(READ_TIMEOUT))?;
-    tcp.set_write_timeout(Some(READ_TIMEOUT))?;
+    tcp.set_read_timeout(Some(read_timeout))?;
+    tcp.set_write_timeout(Some(read_timeout))?;
     let _ = tcp.set_nodelay(true);
     Ok(tcp)
 }
@@ -409,6 +425,9 @@ pub struct Fetcher {
     /// La resolución de nombres con caché (RFC 8305 §3); el resolvedor se puede cambiar con
     /// `Fetcher::dns = Arc::new(Dns::new(...))`.
     pub dns: Arc<Dns>,
+    /// Cuánto se espera a que el servidor mande algo (o acepte lo que se le manda) en una
+    /// conexión abierta; `None`: 30 s. Los tests lo acortan.
+    pub read_timeout: Option<Duration>,
 }
 
 /// Una petición del registro de red de un [`Fetcher`].
@@ -465,7 +484,12 @@ impl Fetcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(key);
-        let mut tcp = connect_tcp_with(&self.dns, host, port)?;
+        let mut tcp = connect_tcp_with(
+            &self.dns,
+            host,
+            port,
+            self.read_timeout.unwrap_or(READ_TIMEOUT),
+        )?;
         if !tls {
             if allow_h2 && self.h2_prior_knowledge {
                 return Ok(Opened::H2(http2::start(http2::Transport::Plain(tcp))?));
@@ -678,12 +702,16 @@ impl Fetcher {
                 CacheUse::Revalidated => "caché validada (304)",
                 CacheUse::Unavailable => "caché vacía (504)",
             };
+            // Con `Cache-Control` y `Age`: qué obliga a validar en la próxima carga.
+            let header = |name: &str| r.headers.get(name).unwrap_or("-").to_owned();
             eprintln!(
-                "red: {} {} {} {} [{how}]",
+                "red: {} {} {} {} [{how}] cache-control={:?} age={}",
                 entry.method,
                 entry.url,
                 entry.status,
-                entry.protocol.name()
+                entry.protocol.name(),
+                header("cache-control"),
+                header("age")
             );
         }
         self.log

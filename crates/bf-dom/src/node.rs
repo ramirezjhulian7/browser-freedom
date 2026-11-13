@@ -421,9 +421,15 @@ impl Document {
 
     /// "Equals" (§4.4, `isEqualNode`).
     pub fn is_equal_node(&self, a: NodeId, b: NodeId) -> bool {
+        self.is_equal_node_in(a, self, b)
+    }
+
+    /// E1: "equals" (§4.4) entre el nodo `a` de este documento y el `b` de `other` (puede ser
+    /// este mismo): la igualdad no mira el documento de los nodos.
+    pub fn is_equal_node_in(&self, a: NodeId, other: &Document, b: NodeId) -> bool {
         let attr_eq =
             |x: &Attribute, y: &Attribute| x.ns == y.ns && x.name == y.name && x.value == y.value;
-        let same = match (&self.get(a).data, &self.get(b).data) {
+        let same = match (&self.get(a).data, &other.get(b).data) {
             (
                 NodeData::Doctype {
                     name: n1,
@@ -447,10 +453,10 @@ impl Document {
                         .all(|x| e2.attrs.iter().any(|y| attr_eq(x, y)))
             }
             (NodeData::Attr(_), NodeData::Attr(_)) => {
-                let (x, y) = (self.attr_data(a), self.attr_data(b));
+                let (x, y) = (self.attr_data(a), other.attr_data(b));
                 x.ns == y.ns
                     && x.local_name == y.local_name
-                    && self.attr_value(a) == self.attr_value(b)
+                    && self.attr_value(a) == other.attr_value(b)
             }
             (
                 NodeData::ProcessingInstruction {
@@ -473,8 +479,12 @@ impl Document {
             return false;
         }
         let ca: Vec<NodeId> = self.children(a).collect();
-        let cb: Vec<NodeId> = self.children(b).collect();
-        ca.len() == cb.len() && ca.iter().zip(&cb).all(|(&x, &y)| self.is_equal_node(x, y))
+        let cb: Vec<NodeId> = other.children(b).collect();
+        ca.len() == cb.len()
+            && ca
+                .iter()
+                .zip(&cb)
+                .all(|(&x, &y)| self.is_equal_node_in(x, other, y))
     }
 
     /// `Node.isSameNode`.

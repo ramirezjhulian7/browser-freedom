@@ -302,24 +302,27 @@ fn clone_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn is_equal_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    // E1: un nodo de otra ventana cuenta como distinto (comparar entre arenas no está hecho).
-    if crate::dom::is_foreign_node(agent, &a.arg(0)) {
+    if a.arg(0).is_nullish() {
         return Ok(Value::Boolean(false));
     }
-    let Some(o) = arg_opt_node(
+    // E1: "equals" (§4.4) no mira el documento: se compara entre arenas (de otro documento o
+    // de otra ventana).
+    let o = arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'isEqualNode' on 'Node': parameter 1",
-    )?
-    else {
-        return Ok(Value::Boolean(false));
+    )?;
+    let (realm, o) = match o {
+        crate::dom::adopt::NodeArg::Local(o) => (agent.current_realm, o),
+        crate::dom::adopt::NodeArg::Foreign(r, o) => (r, o),
     };
-    if o.doc != n.doc {
-        return Ok(Value::Boolean(false));
-    }
-    Ok(Value::Boolean(with_doc(agent, n.doc, |d| {
-        d.is_equal_node(n.node, o.node)
-    })))
+    let here = WebContextHandle::current(agent);
+    let there = WebContextHandle { realm };
+    let mine = here.get(agent).doc(n.doc);
+    let theirs = there.get(agent).doc(o.doc);
+    Ok(Value::Boolean(
+        mine.is_equal_node_in(n.node, theirs, o.node),
+    ))
 }
 
 fn is_same_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -422,8 +425,26 @@ fn is_default_namespace(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
     Ok(Value::Boolean(r))
 }
 
+/// E1: el hijo de referencia es de otro documento: no es hijo del padre (`NotFoundError`),
+/// pero antes va el paso 1 de "ensure pre-insertion validity" (§4.2.3), el tipo del padre.
+fn foreign_child_error(agent: &mut Agent, parent: NodeRef) -> JsResult<Value> {
+    let ok_parent = with_doc(agent, parent.doc, |d| {
+        matches!(
+            d.get(parent.node).data,
+            NodeData::Document | NodeData::DocumentFragment | NodeData::Element(_)
+        )
+    });
+    if ok_parent {
+        throw_dom(agent, bf_dom::DomException::NotFoundError)
+    } else {
+        throw_dom(agent, bf_dom::DomException::HierarchyRequestError)
+    }
+}
+
 fn insert_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let parent = this_node(agent, a)?;
+    // E1: `child` es `Node?` sin valor por defecto: obligatorio.
+    crate::dom::events::required(agent, a, 2, "insertBefore' on 'Node")?;
     let node = arg_node_any(
         agent,
         &a.arg(0),
@@ -437,7 +458,7 @@ fn insert_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if let Some(c) = child
         && c.doc != parent.doc
     {
-        return throw_dom(agent, bf_dom::DomException::NotFoundError);
+        return foreign_child_error(agent, parent);
     }
     let node = prepare_insert(agent, parent, node, child)?;
     let roots = roots_of(agent, parent.doc, node.node);
@@ -475,7 +496,7 @@ fn replace_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         "Failed to execute 'replaceChild' on 'Node': parameter 2",
     )?;
     if child.doc != parent.doc {
-        return throw_dom(agent, bf_dom::DomException::NotFoundError);
+        return foreign_child_error(agent, parent);
     }
     let node = prepare_insert(agent, parent, node, Some(child))?;
     let roots = roots_of(agent, parent.doc, node.node);
@@ -483,6 +504,53 @@ fn replace_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         d.replace_child(parent.node, node.node, child.node)
     });
     after_insert_roots(agent, parent.doc, r, &roots)
+}
+
+/// E1: `ParentNode.moveBefore(node, child)` (DOM §4.2.6, `[CEReactions]`): "move" (§4.2.3),
+/// que conserva el estado del nodo. Un nodo (o un hijo de referencia) de otro documento o de
+/// otra ventana tiene otra raíz shadow-including: paso 1, `HierarchyRequestError`.
+pub fn move_before(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let parent = this_node(agent, a)?;
+    crate::dom::events::required(agent, a, 2, "moveBefore")?;
+    let node = arg_node_any(
+        agent,
+        &a.arg(0),
+        "Failed to execute 'moveBefore': parameter 1",
+    )?;
+    let child = if a.arg(1).is_nullish() {
+        None
+    } else {
+        Some(arg_node_any(
+            agent,
+            &a.arg(1),
+            "Failed to execute 'moveBefore': parameter 2",
+        )?)
+    };
+    let node = match node {
+        crate::dom::adopt::NodeArg::Local(n) if n.doc == parent.doc => n,
+        _ => return throw_dom(agent, bf_dom::DomException::HierarchyRequestError),
+    };
+    let child = match child {
+        None => None,
+        Some(crate::dom::adopt::NodeArg::Local(c)) if c.doc == parent.doc => Some(c.node),
+        Some(_) => {
+            // Pasos 1-2 antes del 3 (el hijo no es de `parent`).
+            let bad_tree = with_doc(agent, parent.doc, |d| {
+                d.shadow_including_root(parent.node) != d.shadow_including_root(node.node)
+                    || d.is_host_including_inclusive_ancestor(node.node, parent.node)
+            });
+            let e = if bad_tree {
+                bf_dom::DomException::HierarchyRequestError
+            } else {
+                bf_dom::DomException::NotFoundError
+            };
+            return throw_dom(agent, e);
+        }
+    };
+    let r = with_doc_mut(agent, parent.doc, |d| {
+        d.move_before(parent.node, node.node, child)
+    });
+    unit(agent, r)
 }
 
 fn remove_child(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -586,6 +654,8 @@ fn data_length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn substring_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: los argumentos obligatorios (WebIDL: menos es un `TypeError`).
+    crate::dom::events::required(agent, a, 2, "substringData' on 'CharacterData")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
     let count = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))? as usize;
     let r = with_doc(agent, n.doc, |d| d.substring_data(n.node, offset, count));
@@ -597,6 +667,8 @@ fn substring_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn append_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: los argumentos obligatorios (WebIDL: menos es un `TypeError`).
+    crate::dom::events::required(agent, a, 1, "appendData' on 'CharacterData")?;
     let s = crate::dom::to_dom_string(agent, &a.arg(0))?;
     with_doc_mut(agent, n.doc, |d| d.append_data(n.node, &s));
     mutated(agent);
@@ -605,6 +677,8 @@ fn append_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn insert_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: los argumentos obligatorios (WebIDL: menos es un `TypeError`).
+    crate::dom::events::required(agent, a, 2, "insertData' on 'CharacterData")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
     let s = crate::dom::to_dom_string(agent, &a.arg(1))?;
     let r = with_doc_mut(agent, n.doc, |d| d.insert_data(n.node, offset, &s));
@@ -613,6 +687,8 @@ fn insert_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn delete_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: los argumentos obligatorios (WebIDL: menos es un `TypeError`).
+    crate::dom::events::required(agent, a, 2, "deleteData' on 'CharacterData")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
     let count = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))? as usize;
     let r = with_doc_mut(agent, n.doc, |d| d.delete_data(n.node, offset, count));
@@ -621,6 +697,8 @@ fn delete_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn replace_data(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
+    // E1: los argumentos obligatorios (WebIDL: menos es un `TypeError`).
+    crate::dom::events::required(agent, a, 3, "replaceData' on 'CharacterData")?;
     let offset = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(0))? as usize;
     let count = bf_js::host::webidl::to_unsigned_long(agent, &a.arg(1))? as usize;
     let s = crate::dom::to_dom_string(agent, &a.arg(2))?;

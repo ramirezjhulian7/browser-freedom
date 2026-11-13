@@ -1528,3 +1528,234 @@ fn nodes_of_two_documents_are_not_mixed() {
         "ok,true,true,true,true,ok,null,ok,null,InvalidStateError,true,NotFoundError"
     );
 }
+
+// E1 (ronda 2 en macOS): `before()`/`after()`/`replaceWith()` con el propio nodo entre los
+// argumentos (§4.2.8, "viable sibling"): el nodo no se quita antes de calcular dónde insertar.
+#[test]
+fn child_node_mutators_with_the_node_itself() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           function fresh() { \
+             var parent = document.createElement('div'); \
+             parent.append('text', document.createElement('test'), document.createElement('x')); \
+             return [parent, parent.childNodes[1], parent.childNodes[2]]; \
+           } \
+           var out = [], t; \
+           t = fresh(); t[1].before(t[1]); out.push(t[0].innerHTML); \
+           t = fresh(); t[1].after(t[2], t[1]); out.push(t[0].innerHTML); \
+           t = fresh(); t[1].replaceWith(t[2], t[1]); out.push(t[0].innerHTML); \
+           var lone = document.createElement('div'), c = document.createElement('c'); \
+           lone.appendChild(c); \
+           var mo = new MutationObserver(function () {}); mo.observe(lone, {childList: true}); \
+           lone.replaceChildren(c); out.push(mo.takeRecords().length, lone.firstChild === c); \
+           return out.join('|'); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "text<test></test><x></x>|text<x></x><test></test>|text<x></x><test></test>|1|true"
+    );
+}
+
+// E1: `createDocument(ns, qn, doctype)` agrega el mismo doctype (adoptado), no una copia; los
+// `Attr` con wrapper siguen a su elemento al adoptarlo; `isEqualNode` compara entre documentos;
+// los argumentos obligatorios de `createDocument`, `insertBefore` y `CharacterData`.
+#[test]
+fn documents_doctypes_and_attrs_across_documents() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var dt = document.implementation.createDocumentType('foo', '', ''); \
+           var x = document.implementation.createDocument(null, 'foo', dt); \
+           out.push(x.doctype === dt, dt.ownerDocument === x, x.firstChild === dt, \
+                    x.documentElement.localName); \
+           var d = document.implementation.createHTMLDocument(''); \
+           var div = d.createElement('div'); div.setAttribute('data-a', '1'); \
+           var attr = div.getAttributeNode('data-a'); \
+           document.adoptNode(div); \
+           out.push(attr.ownerDocument === document, div.getAttributeNode('data-a') === attr); \
+           var a1 = document.implementation.createDocument('', ''); \
+           var a2 = document.implementation.createDocument('', ''); \
+           out.push(a1.isEqualNode(a2), document.createElement('p').isEqualNode(d.createElement('p'))); \
+           out.push(err(function () { document.implementation.createDocument(); }), \
+                    err(function () { document.body.insertBefore(document.createTextNode('t')); }), \
+                    err(function () { document.createTextNode('t').appendData(); }), \
+                    err(function () { document.createTextNode('t').substringData(); })); \
+           var other = d.createElement('span'); \
+           out.push(err(function () { document.createTextNode('t').insertBefore(document.createElement('i'), other); })); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,true,foo,true,true,true,true,TypeError,TypeError,TypeError,TypeError,\
+         HierarchyRequestError"
+    );
+}
+
+// E1: `moveBefore()` (DOM §4.2.6, "move" §4.2.3): mueve sin removing/insertion steps (un
+// script movido no corre; el foco se queda), con dos mutation records, y lanza en los casos de
+// la spec (otra raíz, ancestro, hijo ajeno, tipo).
+#[test]
+fn move_before_moves_without_reinserting() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var a = document.getElementById('a'), p1 = a.children[0], p2 = a.children[1]; \
+           var mo = new MutationObserver(function () {}); \
+           mo.observe(a, {childList: true}); \
+           a.moveBefore(p2, p1); \
+           var recs = mo.takeRecords(); \
+           out.push(a.firstElementChild === p2, recs.length, recs[0].removedNodes[0] === p2, \
+                    recs[1].addedNodes[0] === p2); \
+           a.moveBefore(p1, p1); out.push(a.lastElementChild === p1); \
+           out.push(err(function () { a.moveBefore(document.createElement('i'), null); }), \
+                    err(function () { p1.moveBefore(a, null); }), \
+                    err(function () { a.moveBefore(p1, document.body); }), \
+                    err(function () { document.moveBefore(document.createTextNode('t'), null); }), \
+                    err(function () { a.moveBefore(p1); })); \
+           window.ran = 0; \
+           var s = document.createElement('script'); s.textContent = 'ran++'; \
+           a.appendChild(s); document.body.moveBefore(s, null); \
+           out.push(ran, document.body.lastChild === s); \
+           var log = []; \
+           customElements.define('x-m', class extends HTMLElement { \
+             connectedCallback() { log.push('c'); } disconnectedCallback() { log.push('d'); } \
+             connectedMoveCallback() { log.push('m'); } }); \
+           customElements.define('x-n', class extends HTMLElement { \
+             connectedCallback() { log.push('c'); } disconnectedCallback() { log.push('d'); } }); \
+           var m = document.createElement('x-m'), n = document.createElement('x-n'); \
+           a.append(m, n); log.push('|'); \
+           document.body.moveBefore(m, null); document.body.moveBefore(n, null); \
+           out.push(log.join('')); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,2,true,true,true,HierarchyRequestError,HierarchyRequestError,NotFoundError,\
+         HierarchyRequestError,TypeError,1,true,cc|mdc"
+    );
+}
+
+// E1: `HTMLElement.dataset` y `DOMStringMap` (HTML §3.2.6.6): los atributos `data-*` en
+// camelCase, `[SameObject]`, setter, deleter, enumeración y `[LegacyOverrideBuiltIns]`.
+#[test]
+fn dataset_maps_data_attributes() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var e = document.createElement('div'); \
+           e.setAttribute('data-foo-bar', '1'); e.setAttribute('data-x', '2'); \
+           /* en HTML el nombre pasa a minúsculas: `data-upper`. */ \
+           e.setAttribute('data-Upper', 'no'); e.setAttribute('title', 't'); \
+           var ds = e.dataset; \
+           out.push(ds === e.dataset, ds instanceof DOMStringMap, ds.fooBar, ds.x, ds.upper); \
+           out.push(Object.keys(ds).join('+'), 'fooBar' in ds, 'nope' in ds); \
+           ds.newThing = 7; out.push(e.getAttribute('data-new-thing')); \
+           delete ds.x; out.push(e.hasAttribute('data-x')); \
+           out.push(err(function () { ds['a-b'] = 1; })); \
+           e.setAttribute('data-to-string', 'ts'); out.push(ds.toString); \
+           e.removeAttribute('data-to-string'); out.push(typeof ds.toString); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,1,2,no,fooBar+x+upper,true,false,7,false,SyntaxError,ts,function"
+    );
+}
+
+// E1 (ronda 3): la API de validación de restricciones (HTML §4.10.20.3): `validity` es el
+// mismo `ValidityState`, con los estados de `required`, `type=email`, `pattern`, `min`/`max`,
+// `step` y el error propio; `labels`, `list`, `valueAsDate`, `stepUp`/`stepDown` y
+// `setRangeText`.
+#[test]
+fn constraint_validation_and_input_members() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var i = document.createElement('input'); i.required = true; \
+           out.push(i.validity === i.validity, i.validity instanceof ValidityState, \
+                    i.validity.valueMissing, i.validity.valid, i.checkValidity()); \
+           i.value = 'x'; out.push(i.validity.valid); \
+           i.type = 'email'; i.value = 'nope'; out.push(i.validity.typeMismatch); \
+           i.value = 'a@b.c'; out.push(i.validity.valid); \
+           i.type = 'text'; i.pattern = '[0-9]+'; i.value = 'abc'; \
+           out.push(i.validity.patternMismatch); i.value = '123'; out.push(i.validity.valid); \
+           var n = document.createElement('input'); n.type = 'number'; n.min = '2'; n.max = '10'; \
+           n.step = '2'; n.value = '1'; out.push(n.validity.rangeUnderflow); \
+           n.value = '5'; out.push(n.validity.stepMismatch); \
+           n.value = '4'; n.stepUp(); out.push(n.value); n.stepDown(2); out.push(n.value); \
+           i.setCustomValidity('mal'); out.push(i.validity.customError, i.validationMessage); \
+           out.push(err(function () { i.setCustomValidity(); })); \
+           var l = document.createElement('label'); l.htmlFor = 'q'; \
+           var q = document.createElement('input'); q.id = 'q'; \
+           document.body.append(l, q); out.push(q.labels.length, q.labels[0] === l); \
+           var dl = document.createElement('datalist'); dl.id = 'dl'; document.body.append(dl); \
+           q.setAttribute('list', 'dl'); out.push(q.list === dl); \
+           var d = document.createElement('input'); d.type = 'date'; d.value = '2020-02-29'; \
+           out.push(d.valueAsDate.getTime() === Date.UTC(2020, 1, 29)); \
+           d.valueAsDate = new Date(Date.UTC(1999, 11, 31)); out.push(d.value); \
+           var w = document.createElement('input'); w.type = 'week'; \
+           w.valueAsDate = new Date('2019-12-09T00:00:00.000Z'); out.push(w.value); \
+           var t = document.createElement('input'); t.value = 'abcdef'; \
+           t.setSelectionRange(1, 3); t.setRangeText('XY', 1, 3, 'select'); \
+           out.push(t.value, t.selectionStart, t.selectionEnd); \
+           out.push(err(function () { t.setRangeText(); }), \
+                    err(function () { t.setRangeText('x', 3, 1); })); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,true,false,false,true,true,true,true,true,true,true,6,2,true,mal,\
+         TypeError,1,true,true,true,1999-12-31,2019-W50,aXYdef,1,3,TypeError,IndexSizeError"
+    );
+}
+
+// E1: `HTMLMediaElement` sin reproducción, `TimeRanges`, y lo que faltaba de `Document`
+// (`designMode`, `execCommand`, `queryCommand*`, `domain`) y de `HTMLElement` (popover,
+// `autocapitalize`, `headingOffset`).
+#[test]
+fn media_and_legacy_members() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var v = document.createElement('video'); \
+           out.push(v.networkState, v.readyState, v.paused, isNaN(v.duration), \
+                    v.buffered instanceof TimeRanges, v.buffered.length, v.canPlayType('video/mp4'), \
+                    HTMLMediaElement.HAVE_ENOUGH_DATA, err(function () { v.buffered.start(0); })); \
+           v.volume = 0.5; out.push(v.volume, err(function () { v.volume = 2; })); \
+           v.appendChild(document.createElement('source')); out.push(v.networkState); \
+           out.push(v.play() instanceof Promise); \
+           out.push(document.designMode); document.designMode = 'on'; out.push(document.designMode); \
+           out.push(document.execCommand('bold'), document.queryCommandSupported('bold'), \
+                    document.queryCommandValue('bold'), document.domain, \
+                    err(function () { document.domain = 'otro.test'; })); \
+           var e = document.createElement('div'); \
+           out.push(e.popover, err(function () { e.showPopover(); })); \
+           e.popover = 'nada'; out.push(e.popover); document.body.append(e); \
+           out.push(e.togglePopover(), e.togglePopover(), e.togglePopover({force: true})); \
+           e.setAttribute('autocapitalize', 'on'); out.push(e.autocapitalize); \
+           e.setAttribute('headingoffset', '12'); out.push(e.headingOffset); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "0,0,true,true,true,0,,4,IndexSizeError,0.5,IndexSizeError,3,true,off,on,false,false,,\
+         example.com,SecurityError,,NotSupportedError,manual,true,false,true,sentences,8"
+    );
+}

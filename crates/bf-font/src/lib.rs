@@ -341,8 +341,14 @@ impl Fonts {
                     last.1 = end;
                     continue;
                 }
-                let k = self
-                    .font_for(&families, c, script.tag())
+                // E5: seguido de U+FE0F (presentación emoji, UTS #51 §4) o U+20E3 (keycap),
+                // el carácter se dibuja con la fuente de emoji si la tiene.
+                let emoji_next =
+                    matches!(text[end..].chars().next(), Some('\u{FE0F}' | '\u{20E3}'));
+                let k = emoji_next
+                    .then(|| self.emoji_font(c, request))
+                    .flatten()
+                    .or_else(|| self.font_for(&families, c, script.tag(), request))
                     .unwrap_or(fallback);
                 match runs.last_mut() {
                     Some(last) if last.2 == k && last.3 == script => last.1 = end,
@@ -394,23 +400,77 @@ impl Fonts {
 
     /// Cara para `c`: la primera de las familias pedidas que lo cubra; si no, E9: las
     /// familias de fallback del script de `script` (matching::script_fallback), y por último el
-    /// fallback por carácter de la base de datos.
-    fn font_for(&self, families: &[Vec<FontKey>], c: char, script: &str) -> Option<FontKey> {
+    /// fallback por carácter de la base de datos. E5: dentro de la familia de fallback, la cara
+    /// de peso y estilo más cercanos a los pedidos que tenga `c` (CSS Fonts 4 §5.2), para que
+    /// un texto CJK no mezcle los pesos de una familia como Hiragino (W0…W9).
+    fn font_for(
+        &self,
+        families: &[Vec<FontKey>],
+        c: char,
+        script: &str,
+        request: &FontRequest<'_>,
+    ) -> Option<FontKey> {
         families
             .iter()
             .flatten()
             .copied()
             .find(|&k| self.covers(k, c))
             .or_else(|| {
-                matching::script_fallback(script).iter().find_map(|name| {
-                    self.db
-                        .family(name)
-                        .iter()
-                        .map(|&i| FontKey(i as u32))
-                        .find(|&k| self.covers(k, c))
-                })
+                matching::script_fallback(script)
+                    .iter()
+                    .find_map(|name| self.best_covering(self.db.family(name), c, request))
             })
-            .or_else(|| self.db.fallback(c).map(|i| FontKey(i as u32)))
+            .or_else(|| {
+                let i = self.db.fallback(c)?;
+                // La familia más amplia de la cara (la tipográfica, no la "legacy" de un peso).
+                let faces = self.db.faces()[i]
+                    .families
+                    .iter()
+                    .map(|n| self.db.family(n))
+                    .max_by_key(|f| f.len())
+                    .unwrap_or(&[]);
+                self.best_covering(faces, c, request)
+                    .or(Some(FontKey(i as u32)))
+            })
+    }
+
+    /// E5: la cara de la genérica `emoji` que tenga `c`.
+    fn emoji_font(&self, c: char, request: &FontRequest<'_>) -> Option<FontKey> {
+        generic_candidates("emoji")
+            .iter()
+            .find_map(|name| self.best_covering(self.db.family(name), c, request))
+    }
+
+    /// E5: la cara de `faces` (de una familia del sistema) que mejor encaja con el peso y estilo
+    /// pedidos (CSS Fonts 4 §5.2) entre las que tienen `c`. Se prueban en orden de preferencia,
+    /// así que normalmente solo se carga una.
+    fn best_covering(
+        &self,
+        faces: &[usize],
+        c: char,
+        request: &FontRequest<'_>,
+    ) -> Option<FontKey> {
+        let mut rest: Vec<usize> = faces.to_vec();
+        while !rest.is_empty() {
+            let descriptors: Vec<Descriptors> = rest
+                .iter()
+                .map(|&i| {
+                    let f = &self.db.faces()[i];
+                    Descriptors {
+                        weight: (f.weight, f.weight),
+                        style: f.style,
+                        stretch: f.stretch,
+                    }
+                })
+                .collect();
+            let b = best_match(&descriptors, request.weight, request.italic)?;
+            let k = FontKey(rest[b] as u32);
+            if self.covers(k, c) {
+                return Some(k);
+            }
+            rest.remove(b);
+        }
+        None
     }
 
     /// `map[i]` es el offset en el texto original del byte `i` de `text` (ver `shape`).
@@ -429,7 +489,14 @@ impl Fonts {
     ) {
         let face = self.face(key);
         let shaped = face.as_ref().and_then(|f| {
-            let rb = rustybuzz::Face::from_slice(&f.data, f.index)?;
+            let mut rb = rustybuzz::Face::from_slice(&f.data, f.index)?;
+            // E5: la instancia de una fuente variable (avances con `HVAR`, sustituciones).
+            if let Some(w) = f.wght {
+                rb.set_variations(&[rustybuzz::Variation {
+                    tag: face::WGHT,
+                    value: w,
+                }]);
+            }
             let mut buffer = rustybuzz::UnicodeBuffer::new();
             buffer.push_str(text);
             if let Some(script) = script

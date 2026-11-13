@@ -19,6 +19,7 @@ pub mod performance_observer; // E3: Performance Timeline y User Timing
 pub mod screen;
 pub mod script;
 pub mod storage;
+pub mod web_animations; // E4: Animation, KeyframeEffect, getAnimations()
 
 use bf_infra::Url;
 use bf_js::host::{HostClassId, HostHandle, HostKey};
@@ -270,6 +271,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         };
         agent.set_embedder_data(classes);
         performance_observer::register(agent, realm); // E3
+        web_animations::register_classes(agent); // E4
     }
     let url = ctx.get(agent).url.clone();
     if agent.realm_data::<BomState>(realm).is_none() {
@@ -280,6 +282,7 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     agent.current_realm = realm;
     install_window(agent, realm);
     document::install(agent, realm);
+    web_animations::install(agent, realm);
     frames::install(agent, realm);
     agent.current_realm = saved;
 }

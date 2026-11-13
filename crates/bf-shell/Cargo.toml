@@ -36,3 +36,9 @@ unicode-normalization = "0.1"
 
 [lints]
 workspace = true
+
+# Los tests de las páginas de error de TLS levantan un servidor TLS local (las mismas versiones
+# que ya usa `bf-net`: no son dependencias nuevas del proyecto).
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"

@@ -271,9 +271,15 @@ fn set_cookie_site(url: &bf_infra::Url) {
 /// E4: como [`load::load`], pero conserva el motor: después de cargar corre el bucle de
 /// eventos (temporizadores, tareas, red) hasta que no queda nada pendiente o pasa `wait`, y
 /// devuelve el documento de ese momento con los de sus marcos.
+///
+/// Los scripts ven `viewport` como `innerWidth`/`innerHeight` y `scale` como
+/// `devicePixelRatio` (CSSOM View §4: px de dispositivo por px CSS), lo mismo que la
+/// ventana con esa escala de pantalla.
 fn load_live(
     arg: &str,
     wait: std::time::Duration,
+    viewport: bf_layout::Size,
+    scale: f32,
 ) -> Result<(load::Loaded, Vec<bf_paint::FrameDoc>), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     if url.scheme == "about" {
@@ -281,9 +287,17 @@ fn load_live(
     }
     set_cookie_site(&url);
     let mut engine = script::Engine::stderr();
+    bf_web::cssom::set_viewport(
+        &mut engine.rt.agent,
+        engine.realm,
+        viewport.width,
+        viewport.height,
+        scale,
+    );
     // E6: la caché HTTP, HSTS y las cookies persistentes en disco, como `load::load`.
     let net = std::sync::Arc::new(bf_net::NetLoader::with_disk_cache());
-    let env = script::PageEnv::cli(net.clone());
+    let mut env = script::PageEnv::cli(net.clone());
+    env.screen.device_pixel_ratio = f64::from(scale);
     let mut loaded = load::fetch_document_with(&url, net, None, Some((&mut engine, &env)))
         .map_err(|e| format!("no se pudo cargar {url}: {e}"))?;
     set_cookie_site(&loaded.url);
@@ -341,7 +355,7 @@ fn render(arg: &str, args: &[String]) -> Result<(), String> {
         None => 5000,
     };
     let wait = std::time::Duration::from_millis(wait);
-    let (loaded, frames) = load_live(arg, wait)?;
+    let (loaded, frames) = load_live(arg, wait, viewport, scale)?;
     let start = std::time::Instant::now();
     let fonts = bf_font::FontDb::system();
     let font_scan = start.elapsed();

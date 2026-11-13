@@ -97,6 +97,25 @@ pub enum PathCommand {
 pub struct Outline {
     pub units_per_em: f32,
     pub commands: Vec<PathCommand>,
+    /// E5: mapas de bits del glifo, uno por tamaño (tabla `sbix` de Apple o `CBDT`), de menor
+    /// a mayor `ppem`. Una fuente de emoji en color (Apple Color Emoji) solo tiene estos: el
+    /// pintor usa el del tamaño más cercano en lugar del contorno.
+    pub bitmaps: Vec<GlyphBitmap>,
+}
+
+/// E5: el mapa de bits de un glifo en un tamaño (OpenType, tabla `sbix`: "glyph data").
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphBitmap {
+    /// Píxeles por em del tamaño (el "strike").
+    pub ppem: u16,
+    /// Esquina inferior izquierda de la imagen respecto del origen del glifo, en píxeles del
+    /// tamaño (y hacia arriba).
+    pub x: f32,
+    pub y: f32,
+    pub width: u16,
+    pub height: u16,
+    /// La imagen codificada (PNG).
+    pub png: Arc<[u8]>,
 }
 
 pub trait FontProvider {
