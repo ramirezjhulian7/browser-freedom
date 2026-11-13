@@ -830,6 +830,39 @@ struct Styler<'a> {
     /// E4: el índice de reglas de cada grupo de hojas (por las direcciones de sus hojas): se
     /// arma la primera vez que se usa el grupo y sirve para todos los nodos.
     indexes: std::cell::RefCell<HashMap<Vec<usize>, std::rc::Rc<RuleIndex<'a>>>>,
+    /// E4: con `BF_TRACE`, el tiempo de cada parte (ver [`Timings`]).
+    timings: Option<std::cell::RefCell<Timings>>,
+    /// E4: la base del último padre (ver `Styler::base`).
+    base: std::cell::RefCell<Option<(usize, ComputedStyle)>>,
+}
+
+/// E4: en qué se va la cascada (con `BF_TRACE=1`, una línea `perf cascada` al terminar).
+#[derive(Default)]
+struct Timings {
+    /// Emparejar selectores (`RuleIndex::matching`), con `:host`, `::slotted` y los hints.
+    matching: std::time::Duration,
+    /// Las declaraciones del elemento: atributo `style`, hints, orden y expandir los shorthands
+    /// (cada declaración se vuelve a analizar en cada elemento: `expand`).
+    declarations: std::time::Duration,
+    /// Los valores computados de cada propiedad, con la herencia (`cascaded_value`).
+    values: std::time::Duration,
+    /// Lo de arriba que fue para `::before`, `::after` y `::marker`.
+    pseudo: std::time::Duration,
+    elements: usize,
+    pseudo_calls: usize,
+    /// Armar los índices de reglas (dentro de `matching`) y cuántas reglas de primer nivel.
+    index: std::time::Duration,
+    rules: usize,
+    /// `::before`/`::after` sin `content` ni `all`: no se calculan sus valores.
+    skipped: usize,
+}
+
+impl Timings {
+    fn add(cell: Option<&std::cell::RefCell<Timings>>, f: impl FnOnce(&mut Timings)) {
+        if let Some(c) = cell {
+            f(&mut c.borrow_mut());
+        }
+    }
 }
 
 /// Métricas de fuente para las unidades `ex` y `ch`. El layout las provee con sus fuentes;
@@ -879,7 +912,15 @@ impl<'a> Styler<'a> {
             .indexes
             .borrow_mut()
             .entry(key)
-            .or_insert_with(|| std::rc::Rc::new(RuleIndex::new(sheets, self.media, &is_supported)))
+            .or_insert_with(|| {
+                let start = std::time::Instant::now();
+                let index = RuleIndex::new(sheets, self.media, &is_supported);
+                Timings::add(self.timings.as_ref(), |t| {
+                    t.index += start.elapsed();
+                    t.rules += sheets.iter().map(|s| s.rules.len()).sum::<usize>();
+                });
+                std::rc::Rc::new(index)
+            })
             .clone();
         index.matching(self.doc, node, pseudo, self.ctx, shadow)
     }
@@ -1015,6 +1056,23 @@ impl<'a> Styler<'a> {
         parent: Option<&ComputedStyle>,
         is_root: bool,
     ) -> ComputedStyle {
+        self.style_if(node, pseudo, parent, is_root, false)
+            .expect("estilo sin condición")
+    }
+
+    /// El estilo de `node`/`pseudo`. Con `needs_content`, `None` si ninguna declaración que
+    /// le aplica puede darle `content`: sin `content` ni `all`, `content` queda en su valor
+    /// inicial (`normal`, no se hereda: CSS Generated Content 3 §2), y un `::before` o un
+    /// `::after` así no se genera; no hace falta calcular el resto de sus valores.
+    fn style_if(
+        &self,
+        node: NodeId,
+        pseudo: Option<PseudoElement>,
+        parent: Option<&ComputedStyle>,
+        is_root: bool,
+        needs_content: bool,
+    ) -> Option<ComputedStyle> {
+        let clock = self.timings.as_ref().map(|_| std::time::Instant::now());
         let sheets = ua_sheets();
         let mut matched: Vec<(u64, usize, u8, MatchedDeclaration<'a>)> = Vec::new();
         // E1: las hojas de autor del árbol del elemento.
@@ -1042,6 +1100,21 @@ impl<'a> Styler<'a> {
         let hints_sheet: [&'a Stylesheet; 1] = [&sheets.hints];
         for m in self.matched(node, pseudo, &hints_sheet, own) {
             matched.push((2, usize::MAX, depth, m));
+        }
+        let matched_at = clock.map(|c| c.elapsed());
+        if needs_content
+            && !matched.iter().any(|(_, _, _, m)| {
+                let name = &m.declaration.name;
+                name.eq_ignore_ascii_case("content") || name.eq_ignore_ascii_case("all")
+            })
+        {
+            Timings::add(self.timings.as_ref(), |t| {
+                t.matching += matched_at.unwrap_or_default();
+                t.pseudo += matched_at.unwrap_or_default();
+                t.pseudo_calls += 1;
+                t.skipped += 1;
+            });
+            return None;
         }
         let mut owned: Vec<(Origin, bool, Declaration)> = Vec::new();
         if pseudo.is_none() {
@@ -1075,7 +1148,22 @@ impl<'a> Styler<'a> {
             }
         }
         let sources = self.sources(&owned, &matched, depth);
-        self.compute(&sources, parent, is_root)
+        let style = self.compute(&sources, parent, is_root, clock);
+        if let (Some(c), Some(m)) = (clock, matched_at) {
+            let total = c.elapsed();
+            Timings::add(self.timings.as_ref(), |t| {
+                t.matching += m;
+                // `compute` cuenta las declaraciones desde el principio: sin el emparejado.
+                t.declarations = t.declarations.saturating_sub(m);
+                if pseudo.is_some() {
+                    t.pseudo += total;
+                    t.pseudo_calls += 1;
+                } else {
+                    t.elements += 1;
+                }
+            });
+        }
+        Some(style)
     }
 
     fn compute(
@@ -1083,6 +1171,7 @@ impl<'a> Styler<'a> {
         sources: &[Source<'_>],
         parent: Option<&ComputedStyle>,
         is_root: bool,
+        clock: Option<std::time::Instant>,
     ) -> ComputedStyle {
         let mut longhands: Vec<(LonghandId, Entry)> = Vec::new();
         let mut customs: Vec<CustomEntry> = Vec::new();
@@ -1095,9 +1184,8 @@ impl<'a> Styler<'a> {
         for (id, e) in longhands {
             per_property[id as usize].push(e);
         }
-        let mut style = parent
-            .cloned()
-            .unwrap_or_else(|| ComputedStyle::initial().clone());
+        let values_at = clock.map(|c| c.elapsed());
+        let mut style = self.base(parent);
         style.custom = compute_custom_properties(&mut customs, parent, &self.registry);
         let mut custom = style.custom.clone();
 
@@ -1207,6 +1295,10 @@ impl<'a> Styler<'a> {
             ) {
                 continue;
             }
+            // Sin declaraciones: `unset`, que ya trae la base (heredado del padre o inicial).
+            if per_property[def.id as usize].is_empty() {
+                continue;
+            }
             let value = self.cascaded_value(def.id, &per_property, parent, &full, &custom);
             style.set(value);
         }
@@ -1236,6 +1328,15 @@ impl<'a> Styler<'a> {
                 Display::Contents if is_root => Display::Block,
                 d => d.blockify(),
             };
+        }
+        if let (Some(c), Some(v)) = (clock, values_at) {
+            let total = c.elapsed();
+            Timings::add(self.timings.as_ref(), |t| {
+                // Desde el principio de `style_for`: lo anterior a `values_at` menos el
+                // emparejado (que suma `style_for`) son las declaraciones.
+                t.values += total - v;
+                t.declarations += v;
+            });
         }
         style
     }
@@ -1336,6 +1437,31 @@ impl<'a> Styler<'a> {
             Some(DeclValue::Value(Value::FontSize(fs))) => fs.is_absolute(),
             Some(_) => false,
         }
+    }
+
+    /// E4: el estilo de partida de un hijo de `parent`: las propiedades heredadas con el valor
+    /// del padre y el resto con su valor inicial (lo que da `unset` a una propiedad sin
+    /// declaraciones: CSS Cascade 5 §7.3). Se guarda la del último padre: sus hijos y sus
+    /// pseudoelementos van seguidos.
+    fn base(&self, parent: Option<&ComputedStyle>) -> ComputedStyle {
+        let Some(p) = parent else {
+            return ComputedStyle::initial().clone();
+        };
+        // Los estilos de los padres viven hasta el final de la cascada (en el mapa o en la
+        // pila), así que la dirección no se repite con otro estilo.
+        let key = std::ptr::from_ref(p) as usize;
+        let mut cache = self.base.borrow_mut();
+        if let Some((k, b)) = cache.as_ref()
+            && *k == key
+        {
+            return b.clone();
+        }
+        let mut b = p.clone();
+        for def in PROPERTIES.iter().filter(|d| !d.inherited) {
+            b.set(initial_values()[def.id as usize].clone());
+        }
+        *cache = Some((key, b.clone()));
+        b
     }
 
     /// Valor computado de un longhand según su valor en cascada.
@@ -1462,6 +1588,8 @@ pub fn style_document_with_sheets(
         root_line_height: crate::properties::types::MEDIUM_FONT_SIZE * NORMAL_LINE_HEIGHT,
         fonts,
         indexes: std::cell::RefCell::new(HashMap::new()),
+        timings: std::env::var_os("BF_TRACE").map(|_| std::cell::RefCell::default()),
+        base: std::cell::RefCell::new(None),
     };
     let mut map = StyleMap::new();
     let mut stack: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = doc
@@ -1480,7 +1608,9 @@ pub fn style_document_with_sheets(
                 .resolve(style.font_size_px(), NORMAL_LINE_HEIGHT);
         }
         for pseudo in [PseudoElement::Before, PseudoElement::After] {
-            let ps = styler.style_for(node, Some(pseudo), Some(&style), false);
+            let Some(ps) = styler.style_if(node, Some(pseudo), Some(&style), false, true) else {
+                continue;
+            };
             if !matches!(ps.content, Content::None | Content::Normal) && ps.display != Display::None
             {
                 map.insert((node, Some(pseudo)), Arc::new(ps));
@@ -1500,6 +1630,24 @@ pub fn style_document_with_sheets(
             stack.push((child, Some(style.clone())));
         }
         map.insert((node, None), style);
+    }
+    if let Some(t) = &styler.timings {
+        let t = t.borrow();
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "perf cascada: emparejar {:.1} ms (índices {:.1} ms, {} reglas) · declaraciones \
+             {:.1} ms · valores {:.1} ms; de eso, pseudoelementos {:.1} ms ({} elementos, {} \
+             llamadas de pseudoelementos, {} sin `content`)",
+            ms(t.matching),
+            ms(t.index),
+            t.rules,
+            ms(t.declarations),
+            ms(t.values),
+            ms(t.pseudo),
+            t.elements,
+            t.pseudo_calls,
+            t.skipped
+        );
     }
     map
 }
