@@ -23,6 +23,10 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();
+    // E1: fijado mientras dura (crear los métodos y compilar `idb.js` pueden recolectar, y nada
+    // más lo enraíza): sin esto, un realm creado con el heap ya grande (un marco) a veces llamaba
+    // a la fábrica con un objeto liberado ("Gc liberado").
+    let native_pin = agent.host_pin(Value::Object(native));
     let fns: [(&str, u32, NativeFn); 19] = [
         ("fire", 2, fire),
         ("setParent", 2, set_parent),
@@ -52,6 +56,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     if let Ok(f) = agent.eval_script(&src, "bf-web:idb.js") {
         let _ = agent.call(&f, Value::Undefined, &[g, Value::Object(native)]);
     }
+    agent.host_unpin(native_pin);
     agent.current_realm = saved;
 }
 

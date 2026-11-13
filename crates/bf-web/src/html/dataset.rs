@@ -148,26 +148,39 @@ pub fn register(agent: &mut Agent, realm: RealmId) {
         global("WeakMap"),
         global("Reflect"),
     );
+    // Todo lo que se crea aquí se fija mientras dura: compilar la fábrica puede recolectar, y
+    // nada más enraíza `holder` ni `make` (en una página con muchos marcos, cada realm nuevo
+    // pasa por aquí).
     let holder = agent.new_plain_object();
+    let holder_pin = agent.host_pin(Value::Object(holder));
     let make = bf_js::builtins::method(agent, holder, "make", 0, make_map);
-    let f = agent.eval_script(FACTORY, "dataset").and_then(|factory| {
-        agent.call(
-            &factory,
-            Value::Undefined,
-            &[
-                Value::Object(make),
-                element_proto,
-                dom_exception,
-                proxy,
-                weak_map,
-                reflect,
-            ],
-        )
-    });
+    let make_pin = agent.host_pin(Value::Object(make));
+    let f = match agent.eval_script(FACTORY, "dataset") {
+        Ok(factory) => {
+            let factory_pin = agent.host_pin(factory.clone());
+            let r = agent.call(
+                &factory,
+                Value::Undefined,
+                &[
+                    Value::Object(make),
+                    element_proto,
+                    dom_exception,
+                    proxy,
+                    weak_map,
+                    reflect,
+                ],
+            );
+            agent.host_unpin(factory_pin);
+            r
+        }
+        Err(e) => Err(e),
+    };
     if let Ok(f) = f {
         let h = agent.host_pin(f);
         agent.set_realm_data(realm, DatasetFn(h));
     }
+    agent.host_unpin(make_pin);
+    agent.host_unpin(holder_pin);
     agent.current_realm = saved;
 }
 

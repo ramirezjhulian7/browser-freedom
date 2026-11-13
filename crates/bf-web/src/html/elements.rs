@@ -48,6 +48,7 @@ pub fn class_named(agent: &Agent, name: &str) -> Option<HostClassId> {
 fn extend(name: &str, class: HostClass) -> HostClass {
     let class = super::forms::extend(name, class);
     let class = super::tables::extend(name, class);
+    let class = super::media::extend(name, class); // E1
     super::misc::extend(name, class)
 }
 
@@ -81,6 +82,41 @@ fn html_element_class(element: HostClassId) -> HostClass {
         .attribute("isContentEditable", Some(is_content_editable), None)
         // E1: HTMLOrSVGElement `dataset` (HTML §3.2.6.6).
         .attribute("dataset", Some(super::dataset::get_dataset), None)
+        // E1: popover (§6.12), autocapitalize/autocorrect/writingSuggestions (§6.8) y los
+        // niveles de encabezado (§4.3.11).
+        .attribute(
+            "popover",
+            Some(super::legacy::get_popover),
+            Some(super::legacy::set_popover),
+        )
+        .method("showPopover", 0, super::legacy::show_popover)
+        .method("hidePopover", 0, super::legacy::hide_popover)
+        .method("togglePopover", 0, super::legacy::toggle_popover)
+        .attribute(
+            "autocapitalize",
+            Some(super::legacy::get_autocapitalize),
+            Some(super::legacy::set_autocapitalize),
+        )
+        .attribute(
+            "autocorrect",
+            Some(super::legacy::get_autocorrect),
+            Some(super::legacy::set_autocorrect),
+        )
+        .attribute(
+            "writingSuggestions",
+            Some(super::legacy::get_writing_suggestions),
+            Some(super::legacy::set_writing_suggestions),
+        )
+        .attribute(
+            "headingOffset",
+            Some(super::legacy::get_heading_offset),
+            Some(super::legacy::set_heading_offset),
+        )
+        .attribute(
+            "headingReset",
+            Some(super::legacy::get_heading_reset),
+            Some(super::legacy::set_heading_reset),
+        )
         .method("click", 0, super::misc::click)
         .method("focus", 0, super::misc::focus)
         .method("blur", 0, super::misc::blur)
@@ -126,6 +162,8 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     define_document_colors(agent, realm);
     define_document_collections(agent, realm);
     super::dataset::register(agent, realm); // E1
+    super::forms::register_validity(agent); // E1
+    super::media::register(agent); // E1
 }
 
 // --- Las colecciones del documento (HTML §3.1.4, "DOM tree accessors") ---
