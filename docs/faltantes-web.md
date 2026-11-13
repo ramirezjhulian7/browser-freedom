@@ -1,15 +1,16 @@
 # Faltantes vistos en sitios reales
 
-Lo que falla al navegar con Freedom por sitios reales, para priorizar el trabajo de la fase 2.
-Cada fila dice qué se vio, dónde, y si quedó verificado con una página de prueba aislada
+Lo que falla al navegar con Freedom por sitios reales, para priorizar el trabajo. Cada fila
+dice qué se vio, dónde, y si quedó verificado con una página de prueba aislada
 (`freedom session` sobre `master` en `08ff44e`, 2026-10-21) o si la causa todavía hay que
-investigarla.
+investigarla. Al día con `master` el 2026-11-13: lo que sigue en "Funciones que faltan" se
+comprobó en el código de `bf-web`, sin volver a abrir los sitios.
 
 ## Funciones que faltan (verificado)
 
 | Falta | Síntoma en los sitios | Spec | Dónde va |
 |---|---|---|---|
-| `IntersectionObserver` | `undefined`: carga diferida de imágenes y listas infinitas no arrancan. | Intersection Observer | 2.2 |
+| `IntersectionObserver` | `undefined`: la carga diferida hecha con scripts y las listas infinitas no arrancan. El `loading=lazy` nativo ya funciona (ver abajo). | Intersection Observer | 2.2 |
 | `ResizeObserver` | `undefined`. | Resize Observer | 2.2 |
 | `crypto.subtle` | `undefined` (sí existe `crypto`). | Web Cryptography API | 2.2 |
 | `localStorage` en páginas `file:` | `SecurityError: The operation is insecure`. Chrome y Firefox lo permiten (origen opaco con almacenamiento propio por archivo o carpeta). | HTML §12.2 | 2.2, `bf-web` bom |
@@ -26,6 +27,28 @@ sitios):
   (`bf-web/src/cssom/mod.rs::window_metrics`).
 - `customElements`: `bf-web/src/html/custom_elements.rs` (E1).
 - `Worker` (y `SharedWorker`): `bf-web/src/workers/` (E3).
+
+Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`, cada uno con su test):
+- **Carga de imágenes desde el documento y los scripts.** Los `<img>` siguen *update the image
+  data* (HTML §4.8.4.3.5): `load` y `error`, `complete`, `decode()`, y retienen el `load` de la
+  ventana mientras cargan. Asignar `src` desde un script dispara `onload`. También se disparan
+  el `load` de `<link>` y el de `preload` (E2, `pendiente/mac/e2.md`, ronda 6;
+  `bf-web/tests/img_load.rs`).
+- **`loading=lazy`** (HTML §4.8.4.3.9): la imagen se pide cuando queda a menos de 1250 px del
+  viewport, y cada imagen se decodifica una sola vez por proceso (E2, ronda 8). Falta pedirlas
+  al desplazar en la ventana: hoy se piden al cambiar el DOM.
+- **CSS Font Loading** (`document.fonts`, `FontFace`, `FontFaceSet`): antes `document.fonts`
+  no existía y `document.fonts.ready` lanzaba `TypeError` (E5, `pendiente/mac/e5.md`, ronda 7;
+  `bf-web/tests/font_loading.rs`).
+- **El `load` de `<iframe>`** espera al `load` de su documento y retiene el del padre (HTML
+  §7.4.6.3). Antes salía en cuanto se parseaba el marco (E2, ronda 8). Además se dispara tras
+  `document.close()` y acepta URLs `blob:` (E3, `pendiente/mac/e3.md`, ronda 6).
+- **Shadow roots en el adoption agency.** Un script que metía un nodo en un shadow root (o en
+  el contenido de un `<template>`) durante el parseo podía hacer que el parser creara un ciclo
+  y no terminara nunca. Ahora la comprobación sube del shadow root a su host (DOM §4.2.2) (E3,
+  ronda 6; `bf-html/tests/robustness.rs`).
+- **Pánicos `Gc liberado` al crear marcos**: `bf_web::register_all` corre dentro de
+  `Agent::rooting_scope` (E3, ronda 6; `bf-web/tests/gc_rooting.rs`).
 
 ## Errores en sitios por investigar
 
@@ -46,6 +69,6 @@ a probar esos sitios para ver el mensaje real.
 
 ## Pruebas que fallan en `master`
 
-- Ninguna: `master` `8917a5f` pasa la suite completa en el Mac (verificado por el
-  planificador el 2026-11-12). La que estaba anotada aquí,
+- Ninguna: `master` pasa la verificación completa en el Mac: formato, clippy y 125 grupos de
+  tests (informe del planificador del 2026-11-13). La que estaba anotada aquí,
   `bf-web/tests/cssom.rs::snapshot_from_the_shell_is_used` (`devicePixelRatio`), ya pasa.

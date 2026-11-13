@@ -127,65 +127,58 @@ ejecutable se llama `freedom` y es el binario del paquete `bf-shell`.
 
 La **fase 1** está cerrada: el navegador carga y muestra páginas reales sin JavaScript (Google,
 Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, enlaces,
-historial, scroll y zoom. La **fase 2** está en curso: el motor de JavaScript (`bf-js`) pasa el
-95.3 % de test262 y ejecuta los scripts de las páginas en un hilo por pestaña, con workers;
-las interfaces del DOM (con Shadow DOM y custom elements), de HTML, del navegador, de red y
-del CSSOM (`bf-web`) se están completando. De las **fases 3 y 4** ya están tablas, grid,
-tamaños intrínsecos, bidi y cortes de línea de Unicode, encodings multibyte, HTTP/2 con caché
-HTTP en disco, SVG y WebP, y scroll containers con `sticky`; faltan, entre otros, `transform`
-y las animaciones de CSS, la escritura vertical y AVIF. Lo hecho y lo que falta, apartado por
-apartado y con sus cifras, está en [`docs/roadmap.md`](docs/roadmap.md).
+historial, scroll y zoom.
+
+Las **fases 2 a 4** cumplen 43 de sus 45 criterios. Faltan dos:
+- `html/syntax/parsing` sin ningún fallo; está en 99.8 %.
+- Los reftests de css-flexbox con palabras clave de tamaño; pasan 86 de 108.
+
+Lo que ya está:
+- El motor de JavaScript (`bf-js`) pasa el 98.8 % de test262 y ejecuta los scripts de las
+  páginas en un hilo por pestaña, con workers.
+- Las interfaces del DOM (con Shadow DOM y custom elements), de HTML, del navegador, de red y
+  del CSSOM (`bf-web`), con la carga de imágenes y CSS Font Loading.
+- Tablas, grid, tamaños intrínsecos, escritura vertical, bidi, `transform`, transiciones y
+  animaciones de CSS.
+- HTTP/2 con caché HTTP en disco, SVG y WebP, y scroll containers con `sticky`.
+
+La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está empezando. Las cifras
+son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
+[`docs/roadmap.md`](docs/roadmap.md) (tabla "Avance por criterios").
 
 ## Estado por subsistema
 
-| Subsistema | Spec | Suite oficial | Resultado |
-|---|---|---|---|
-| Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) |
-| Tree construction | HTML §13.2.6, §13.4 | WPT `html/syntax/parsing` | **3900** pasan, 0 fallan (4 omitidos) |
-| CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) |
-| URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan (7 omitidos: encoders multibyte) |
-| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, UI 4, Selectors 4, SVG 2 | WPT reftests (17 directorios) | **5583 / 7585 ejecutables (73.6%)** |
-| APIs web | DOM, Shadow DOM, HTML, URL, Encoding, Console | WPT testharness.js (12 directorios, [`docs/wpt-status.md`](docs/wpt-status.md)) | **163 951 / 181 458 subtests (90.4%)** sin `encoding/legacy-mb-*` |
-| Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) |
-| Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing, [`docs/test262-status.md`](docs/test262-status.md)) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) |
-| Motor JavaScript | ECMA-262 2026 | test262 (ejecución, [`docs/test262-status.md`](docs/test262-status.md)) | `language/` **99.95%**; total **95.3%** (48 791 / 51 220) |
+La última columna dice de dónde sale cada cifra. Las de WPT y la ejecución de test262 son del
+Mac (macOS, Apple M4, desde el 2026-11-12); las de Windows quedan como histórico en esos mismos
+archivos. Las suites de los parsers (tokenizador, CSS Syntax, URL, test262-parser-tests y
+test262 solo parsing) corren dentro de `cargo test --workspace`, que está en verde en `master`.
+Sus recuentos son los de la última corrida con resumen y no se han vuelto a anotar en el Mac.
+
+| Subsistema | Spec | Suite oficial | Resultado | Fuente |
+|---|---|---|---|---|
+| Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) | `cargo test -p bf-html --test html5lib_tokenizer` |
+| Tree construction | HTML §13.2.6, §13.4 | árboles de WPT `html/syntax/parsing`, sin JavaScript | **3900** pasan, 0 fallan (4 omitidos) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
+| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8150 / 8166** subtests (99.8 %) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
+| CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) | `cargo test -p bf-css --test css_parsing_tests` |
+| URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan; los 7 casos de `percent-encoding.json` también pasan (Mac) | `cargo test -p bf-url --test wpt_url`; [`docs/roadmap.md`](docs/roadmap.md), 3.5 |
+| Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, Transforms, Writing Modes, SVG 2… | WPT reftests (30 grupos) | **9935 / 12 548 ejecutables (79.2 %)** | [`docs/wpt-status.md`](docs/wpt-status.md), "Reftests en macOS" |
+| Reftests con JavaScript | — | WPT reftests `needs-js` de la fase 1 | **93.1 %** de los no manuales se ejecuta | [`docs/roadmap.md`](docs/roadmap.md), 2.3 |
+| APIs web | DOM, Shadow DOM, HTML, CSSOM, Fetch, Encoding | WPT testharness.js | `html/dom` **97.2 %**, `dom/nodes` **92.8 %**, `dom/events` **80.2 %**, `css/cssom` **81.6 %**, `fetch/api/basic` **89.4 %**, `encoding` **97.5 %** | [`docs/roadmap.md`](docs/roadmap.md), 2.2, 2.3 y 3.5 |
+| Parser de JavaScript | ECMA-262 2026 §12–16, Annex B | test262-parser-tests | **3332** pasan, 0 fallan (48 *stale*) | `cargo test -p bf-js --test parser_tests` |
+| Parser de JavaScript | ECMA-262 2026 | test262 (solo parsing) | **51 490** pasan, 0 fallan (527 omitidos: propuestas) | [`docs/test262-status.md`](docs/test262-status.md) |
+| Motor JavaScript | ECMA-262 2026 | test262 (ejecución) | `language/` **99.95 %**, `built-ins/` **99.99 %**; total **98.8 %** (50 594 / 51 220) | [`docs/test262-status.md`](docs/test262-status.md); `built-ins/` en [`docs/roadmap.md`](docs/roadmap.md), 2.1 |
 
 - *stale*: casos cuya expectativa quedó desactualizada respecto del spec vigente. Se listan en
   cada test con el motivo.
 - *omitidos*: casos de scripting o de encodings multibyte.
-- Los encodings multibyte (japonés, coreano y chino) ya se decodifican y codifican; lo que no
-  pasa de `encoding/legacy-mb-*` son los tests que cargan un `<iframe>` o envían un formulario
-  a uno. Con ellos, el total es 381 570 / 949 176 subtests.
+- Lo que no pasa de `encoding/legacy-mb-*` son los tests que cargan un `<iframe>` o envían un
+  formulario a uno; por eso la cifra de `encoding` se da sin ellos.
 
-Detalle de los reftests por directorio (fuente: [`docs/wpt-status.md`](docs/wpt-status.md)):
-
-| Directorio | pass | fail | needs-js | % de los ejecutables |
-|---|---:|---:|---:|---:|
-| css/CSS2/box-display | 70 | 16 | 53 | 81.4% |
-| css/CSS2/margin-padding-clear | 659 | 23 | 57 | 96.6% |
-| css/CSS2/normal-flow | 652 | 42 | 162 | 93.9% |
-| css/CSS2/floats | 77 | 23 | 25 | 77.0% |
-| css/CSS2/floats-clear | 186 | 25 | 36 | 88.2% |
-| css/CSS2/positioning | 459 | 54 | 65 | 89.5% |
-| css/CSS2/linebox | 176 | 14 | 53 | 92.1% |
-| css/CSS2/text | 350 | 31 | 182 | 91.9% |
-| css/CSS2/colors | 19 | 0 | 3 | 100.0% |
-| css/CSS2/borders | 498 | 6 | 258 | 98.8% |
-| css/CSS2/tables | 246 | 4 | 889 | 98.4% |
-| css/css-backgrounds | 321 | 295 | 334 | 52.0% |
-| css/css-flexbox | 633 | 316 | 478 | 66.7% |
-| css/css-tables | 102 | 36 | 164 | 73.9% |
-| css/css-grid | 635 | 930 | 913 | 40.5% |
-| css/css-ui | 75 | 37 | 1097 | 67.0% |
-| css/selectors | 107 | 13 | 404 | 89.2% |
-| svg | 318 | 133 | 971 | 70.5% |
-
-`needs-js` son los reftests con `<script>` o testharness.js: el harness de reftests todavía no
-los ejecuta. Los de testharness.js de las APIs web se miden aparte (fila «APIs web» de la
-tabla de estado). Mediciones posteriores por grupo (mismo WPT, en `docs/wpt-status.md`):
-`css/css-flexbox` 699 / 949 (73.7%) y `css/css-grid` 1054 / 1567 (67.3%, con `grid-lanes`
-518 / 851) tras E5; `css/css-overflow` 61.8% y `css/css-position/sticky` 10 / 11 (E12);
-`css/CSS2/bidi-text` 79.0% y `css/css-text` 59.2% (E9).
+El detalle de los reftests por directorio, con la cifra de Windows al lado, está en
+[`docs/wpt-status.md`](docs/wpt-status.md), sección "Reftests en macOS". Mediciones posteriores
+a esa tabla, ya en `master`:
+- `css/css-flexbox` 780 / 949 (E5, ronda 6, `docs/pendiente/mac/e5-flexbox-subconjuntos.md`);
+- `css/css-backgrounds` 581 / 615, 94.5 % (E2, ronda 5, `docs/pendiente/mac/e2.md`).
 
 ### Qué implementa cada crate
 
@@ -572,6 +565,7 @@ cargo test -p bf-js --release --test fuzz -- --ignored --nocapture   # 1000 muta
 cargo run --release -p bf-js --bin test262 -- tests/test262 --out docs/test262-status.md   # ejecución de test262
 cargo test -p bf-js --release --test test262_run -- --ignored --nocapture   # regresión de language/
 cargo run --release -p bf-web --bin wpt-testharness -- --out docs/wpt-status.md   # WPT testharness.js (dom, html/dom, url, encoding…)
+cargo run --release -p bf-web --bin wpt-testharness -- html/syntax/parsing --threads 3   # un directorio, con 3 hilos
 cargo test -p bf-web --release --test wpt_testharness -- --ignored --nocapture   # WPT testharness.js sin pánicos
 cargo test -p bf-layout --test layout       # 102 casos propios (BF_LAYOUT_PRINT=1 imprime)
 cargo test -p bf-paint --test raster        # 14 PNG de referencia (UPDATE_EXPECTED=1 regenera)
@@ -591,6 +585,32 @@ Con `BF_FULL=1` recorren todo, y solo entonces `test262_parse` escribe su secci�
 cambiar `tools/test262-commit.txt`; con un índice de otro commit, la muestra se saca
 recorriendo el árbol). Los tests `#[ignore]` (reftests, fuzz,
 regresión de test262) siguen igual: se corren con `--ignored`.
+
+**El runner de testharness.js** (`crates/bf-web/src/bin/wpt-testharness.rs`):
+- Acepta directorios de `tests/wpt` como argumentos, `--filter <texto>`, `--threads <n>`,
+  `--timeout <s>` (10 por defecto), `--list-failures`, `--results <tsv>` y `--out <md>`.
+- Corre cada variante `<meta name=variant>` de un `.html` (por ejemplo, los `?file=…` de
+  `html5lib_*`).
+- No corre los tests `-manual`, porque necesitan a una persona.
+- Cada documento corre en su hilo. Si no devuelve el control en el tiempo límite más 10 s,
+  cuenta como `NORESULT` y la corrida sigue.
+
+**Pruebas propias de lo añadido en el Mac:**
+
+| Qué | Prueba |
+|---|---|
+| Carga de imágenes: `load`, `error` y `decode()` de `<img>`; `loading=lazy`; el `load` de `<iframe>` que espera a su documento | `cargo test -p bf-web --test img_load` |
+| Una sola decodificación por imagen | `cargo test -p bf-image --test shared_cache` y `cargo test -p bf-shell --test image_decode_once` |
+| CSS Font Loading (`document.fonts`, `FontFace`) | `cargo test -p bf-web --test font_loading` |
+| Parser HTML: adoption agency sin ciclos a través de shadow roots y templates, scripts SVG, CR LF partido entre dos `document.write` | `cargo test -p bf-html --test robustness` |
+| Instalar una ventana con el GC recolectando en cada asignación | `cargo test -p bf-web --test gc_rooting` |
+| Scripts en documentos XHTML y SVG mientras se parsean | `cargo test -p bf-shell --test xhtml_scripts` |
+| La rueda sobre `<textarea>` y list box | `cargo test -p bf-shell --test wheel` |
+| Envío de formularios POST a un servidor local | `cargo test -p bf-shell --test forms` |
+| Google, Wikipedia y Hacker News sin pánicos (usa la red) | `cargo test -p bf-shell --test real_sites -- --ignored` |
+
+En el Mac las pruebas se corren con `export CARGO_BUILD_JOBS=3` y las mediciones de WPT con
+3 hilos, porque la máquina se comparte entre varios ejecutores.
 
 Los reftests no hacen fallar `cargo test`: escriben el resumen en
 [`docs/wpt-status.md`](docs/wpt-status.md) y dejan en `target/reftests/` las imágenes de cada
@@ -615,7 +635,8 @@ Opciones:
 - `REFTEST_THREADS`: hilos (3 por defecto).
 
 La tabla separa los `needs-js` sin referencia (testharness.js o manuales, que este runner no
-corre) de los reftests con JavaScript. El detalle queda en `target/reftests-js/results.tsv`,
+corre) de los reftests con JavaScript. De los 2114 `needs-js` de la fase 1, 852 son manuales.
+Entre los dos runners se ejecuta el 93.1 % de los 1262 restantes (`docs/roadmap.md`, 2.3). El detalle queda en `target/reftests-js/results.tsv`,
 con las imágenes de los fallos al lado. También se puede llamar directamente:
 `freedom wpt-reftests-js --wpt tests/wpt --out target/reftests-js`.
 

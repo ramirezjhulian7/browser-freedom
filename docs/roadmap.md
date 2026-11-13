@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-12** (`master` `d1148b8` más la ronda 6 de E3). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `71444d2`). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -24,31 +24,39 @@ mediciones anteriores, con su fecha).
 ## Avance por criterios
 
 Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
-está cerrada y no entra en la cuenta (con ella al 100 %, el total sería 74.4 %).
+está cerrada y no entra en la cuenta. Con ella al 100 %, el total sería (100 + 94.7 + 94.1 +
+100 + 16.7) / 5 = **81.1 %**.
 
 | Fase | Criterios | Cumplidos | Sin medir | Avance |
 |---|---:|---:|---:|---:|
-| 2: JavaScript y la plataforma web dinámica | 19 | 17 | 0 | 89.5 % |
-| 3: completar CSS y el texto | 17 | 15 | 0 | 88.2 % |
-| 4: red, medios y documentos | 9 | 7 | 1 | 77.8 % |
-| 5: navegador de uso diario | 6 | 1 | 3 | 16.7 % |
-| **Total** (media de las fases) | 51 | 40 | 4 | **68.0 %** |
+| 2: JavaScript y la plataforma web dinámica | 19 | 18 | 0 | 94.7 % |
+| 3: completar CSS y el texto | 17 | 16 | 0 | 94.1 % |
+| 4: red, medios y documentos | 9 | 9 | 0 | 100.0 % |
+| 5: navegador de uso diario | 6 | 1 | 0 | 16.7 % |
+| **Total** (media de las fases) | 51 | 44 | 0 | **76.4 %** |
 
-Criterios no cumplidos, con su cifra actual y su meta (todas del Mac, 2026-11-12):
+Cambios respecto de la tabla del 2026-11-12 (68.0 %):
+- **2.3, reftests `needs-js`**: se cumple con el criterio reformulado (ver 2.3).
+- **3.3, `linear-gradient` en css-flexbox**: 16 / 16 (E5, ronda 6).
+- **4.1, recarga de Wikipedia**: se cumple con el criterio reformulado (ver 4.1).
+- **4.3, rueda sobre `<textarea>` y list box**: hay test (E6, ronda 6).
+- **Fase 5**: los tres criterios que estaban sin medir ya tienen cifra, pero ninguno se cumple
+  en `master`.
 
-| Apartado | Criterio | Cifra actual | Meta |
-|---|---|---|---|
-| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8150 / 8166 subtests (99.8 %), 236 documentos | 0 fallos |
-| 2.3 | Reftests `needs-js` que pasan a ejecutarse | 55.6 % del total y 93.1 % de los no manuales con el runner de E6, que aún no está en `master`; reformulación pendiente de decisión del usuario | ≥ 60 % |
-| 3.3 | Reftests de css-flexbox que fallan por `linear-gradient` | 15 / 16 (el que falla no es por el gradiente) | pasan |
-| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 74 / 108 | pasan |
-| 4.1 | Peticiones nuevas al recargar Wikipedia | 7 validaciones obligatorias (`must-revalidate`) y 0 descargas; reformulación pendiente de decisión del usuario | ≤ 2 |
-| 4.3 | `<textarea>` y list box se desplazan con la rueda | sin test que lo pruebe junto (hay uno de la rueda y otro de `textarea` como scroll container, `bf-layout/tests/scroll.rs`) | test |
-| 5 | WPT `html-aam` y `wai-aria` | sin medir (no están en el checkout de WPT) | ≥ 50 % |
-| 5 | Un lector de pantalla lee Wikipedia | no: no hay árbol de accesibilidad | lo lee |
-| 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC | no escapa |
-| 5 | 60 fps al desplazar Wikipedia | sin medir | 60 fps |
-| 5 | Primera pintura de Wikipedia en release | sin medir | < 500 ms |
+Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
+
+| Apartado | Criterio | Cifra actual | Meta | Fuente |
+|---|---|---|---|---|
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8150 / 8166 subtests (99.8 %), 236 documentos | 0 fallos | `pendiente/mac/e3.md`, ronda 6 |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 86 / 108 | pasan | `pendiente/mac/e5-flexbox-subconjuntos.md` |
+| 5 | WPT `html-aam` y `wai-aria` | 0 % y 21.8 % en `master`; 93.3 % y 91.8 % en `army/e1`, en integración | ≥ 50 % | `pendiente/mac/e1.md` de `army/e1`, ronda 5 |
+| 5 | Un lector de pantalla lee Wikipedia | no: el árbol de accesibilidad está a medias en `army/e1` y no se expone al sistema | lo lee | `pendiente/mac/e1.md` de `army/e1` |
+| 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC | no escapa | — |
+| 5 | 60 fps al desplazar Wikipedia | mediana del cuadro de 124 ms a escala 1 y 482 ms a escala 2; ningún cuadro baja de 16.7 ms | 60 fps | `pendiente/mac/e4.md`, ronda 5 |
+| 5 | Primera pintura de Wikipedia en release | 797 a 892 ms (E4, carga 27-29); mediana de 953 ms (E2, carga 11-19) | < 500 ms | `pendiente/mac/e4.md`, ronda 5; `pendiente/mac/e2.md`, ronda 8 |
+
+El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md). Las
+dos se midieron con la máquina cargada por otros ejecutores.
 
 Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
 en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
@@ -185,12 +193,17 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
 **Aceptación**:
 - WPT `html/webappapis/scripting/event-loops` ≥ 70%, `html/syntax/parsing` sigue en 0
   fallos (ahora con los tests que necesitan `document.write`) y `fetch/api/basic` ≥ 70%.
-- De los 2110 reftests `needs-js` de la fase 1, ≥ 60% pasa a ejecutarse (el resto son
-  manuales o de otras APIs).
+- ≥ 60 % de los reftests `needs-js` no manuales pasa a ejecutarse.
+  - *Reformulado por decisión del usuario (2026-11-13).* Texto original: ~~"De los 2110
+    reftests `needs-js` de la fase 1, ≥ 60% pasa a ejecutarse (el resto son manuales o de
+    otras APIs)"~~.
+  - Razón: 852 de los 2114 `needs-js` (40.3 %) son tests visuales manuales sin JavaScript
+    ("Test passes if…"), que ningún runner puede ejecutar. El máximo alcanzable era 59.7 %,
+    por debajo de la meta (`pendiente/mac/e6.md`, ronda 5).
 - Google, Wikipedia y Hacker News con su JavaScript cargan sin pánicos, y el buscador de
   Google funciona escribiendo en la caja y pulsando Intro.
 
-**Estado** (3 de 5 criterios cumplidos):
+**Estado** (4 de 5 criterios cumplidos):
 - **Hecho**: hilo por pestaña con motor JS, scripts del documento, `document.write`, módulos e
   import maps (`bf-web/src/bom/script.rs`), eventos de usuario despachados desde
   `bf-shell/src/window/events.rs`, `fetch()`/XHR con CORS, *mode* y *credentials*
@@ -199,23 +212,36 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   (E3, `bf-web/src/workers/`). `requestAnimationFrame` integrado (E4). E3, ronda 6: el punto
   de control de microtasks antes de cada script del parser (§13.2.6.4.8), *flush autofocus
   candidates* en *update the rendering*, los scripts SVG (§13.2.6.5) y el `load` del
-  `<iframe>` tras `document.close()`.
+  `<iframe>` tras `document.close()`. E2, rondas 6 y 8 (`pendiente/mac/e2.md`): *update the
+  image data* de los `<img>` (§4.8.4.3.5: `load`, `error`, `decode()`); el `load` de un
+  `<iframe>` espera al de su documento y retiene el del padre (§7.4.6.3); `load` de `<link>`.
+  E5, ronda 7 (`pendiente/mac/e5.md`): CSS Font Loading (`document.fonts`, `FontFace`,
+  `FontFaceSet`), `css/css-font-loading` 61.1 % (44 / 72).
 - **Criterios** (Mac, 2026-11-12): `fetch/api/basic` **89.4 %** (839 / 939; meta ≥ 70 %
   cumplida). `html/webappapis/scripting/event-loops` **75.0 %** (6 / 8 subtests en 7
   documentos, E3 ronda 6; meta ≥ 70 % cumplida; el runner ya no cuenta
   `task_microtask_ordering-manual.html`, que es manual: con él serían 6 / 9). Google,
   Wikipedia y Hacker News cargan sin pánicos con su JavaScript y la búsqueda de Google
   funciona: `crates/bf-shell/tests/real_sites.rs` (E6; criterio cumplido).
+- **Reftests `needs-js` no manuales: 93.1 %** (criterio reformulado cumplido; meta ≥ 60 %).
+  - El runner es `freedom wpt-reftests-js` (`crates/bf-shell/src/reftest_js.rs`, de E6), en
+    `master` desde `3f2076c`.
+  - De los 2114 `needs-js` de la fase 1, 1262 no son manuales. Se ejecutan 1175: 381 reftests
+    con JavaScript y 794 documentos de testharness que terminan con el harness OK. Sobre el
+    total, el 55.6 % (`pendiente/mac/e6.md`, ronda 5).
+  - En la ronda 6 de E6, sobre `master`, los reftests con JavaScript ejecutados subieron a
+    387 / 402 (96.3 %) (`pendiente/mac/e6.md`, ronda 6). La cifra combinada no se volvió a
+    medir.
 - **Parcial**: `html/syntax/parsing` **8150 / 8166 subtests (99.8 %)** en 236 documentos (E3
   ronda 6, con las variantes `?file=…` de `html5lib_url`, `html5lib_write` y
   `html5lib_write_single`, que antes no corrían: todas pasan). Quedan 16: custom elements que
   mueven nodos durante el parseo (5), foster parenting (4), adoption agency entre documentos
   (4) y "the end" (3). El árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0
   fallos.
-- **Falta**: los reftests `needs-js`: el runner de E6 ejecuta el **55.6 %** del total y el
-  **93.1 %** de los no manuales (Mac, 2026-11-12), pero todavía no está en `master`; meta
-  ≥ 60 % del total, con una propuesta de reformulación ("60 % de los no manuales")
-  **pendiente de decisión del usuario**. `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`.
+- **Falta**: `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`. En el runner de reftests con
+  JavaScript, los errores de todos los grupos bajaron de 141 a 114 con CSS Font Loading
+  (`pendiente/mac/e5.md`, ronda 7). Siguen faltando `Element.animate()` y algunos `load`
+  (`pendiente/mac/e6.md`, ronda 6).
 
 ### 2.4 Interactividad de formularios
 
@@ -288,20 +314,21 @@ pintura), subgrid dentro de lanes.
 - `css/css-transforms` ≥ 50%, `css/css-transitions` y `css/css-animations` ≥ 40%.
 - Los reftests de css-flexbox que fallan por `linear-gradient` en el fondo de control pasan.
 
-**Estado** (4 de 5 criterios cumplidos):
+**Estado** (5 de 5 criterios cumplidos):
 - **Hecho**: `css/css-backgrounds` **94.5 %** (581 / 615, E2, Mac, 2026-11-12; meta ≥ 70 %
   cumplida; el 42 % y el 52 % de antes eran de otro recuento). `box-shadow` y `text-shadow`
   (`bf-style/src/properties/mod.rs`); gradientes (`bf-style/src/properties/gradient.rs`);
   `border-image` (`bf-paint/src/border_image.rs`, E7); `filter`, `clip-path` con formas
   básicas y `mix-blend-mode` en cajas HTML (`bf-paint/src/filters.rs`, E7). `transform`,
   transiciones y animaciones (E4): `css/css-transforms` **81.5 %** (reftests, Mac,
-  2026-11-12; meta ≥ 50 % cumplida), `css/css-transitions` **71.6 %** (2397 / 3347) y
-  `css/css-animations` **51.8 %** (687 / 1325) (testharness, E4, Mac, 2026-11-12; metas
-  ≥ 40 % cumplidas). El `TODO(E4)` de `bf-layout/src/positioned.rs` ya no está.
-- **Parcial**: los reftests de css-flexbox con `linear-gradient`: **15 / 16** (Mac,
-  2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos). El que
-  falla, `align-self-016`, no es por el gradiente: un ítem `align-self: start` en un
-  contenedor `column wrap` recibe su ancho fit-content en vez del max-content.
+  2026-11-12; meta ≥ 50 % cumplida), `css/css-transitions` **72.1 %** (2470 / 3428) y
+  `css/css-animations` **55.5 %** (789 / 1422) (testharness, E4, Mac, ronda 5,
+  `pendiente/mac/e4.md`; metas ≥ 40 % cumplidas; en la ronda 3 eran 71.6 % y 51.8 % con otros
+  totales de subtests). El `TODO(E4)` de `bf-layout/src/positioned.rs` ya no está.
+- **Hecho después**: los reftests de css-flexbox con `linear-gradient`: **16 / 16** (Mac,
+  2026-11-12, E5 ronda 6, en `master` desde `cb9ab93`,
+  `pendiente/mac/e5-flexbox-subconjuntos.md`; criterio cumplido). `align-self-016` pasa con el
+  reajuste fit-content en columnas multilínea y la suma de floats seguidos en el max-content.
 - **Falta**: `background-attachment: fixed` (`TODO(backgrounds)`, `bf-paint/src/builder.rs`);
   `transform` 3D (se aplana, sin `perspective`); `url()` en `filter` y `clip-path` de HTML.
 
@@ -326,9 +353,9 @@ pintura), subgrid dentro de lanes.
   (E5, `master` `7469c42`). Mac, 2026-11-12: `css/css-writing-modes` **77.4 %** (854 / 1104;
   meta ≥ 40 % cumplida), `css/CSS2/bidi-text` **79.0 %** (meta ≥ 70 % cumplida),
   `css/css-text` 59.2 %. Flexbox con `direction: rtl` y propiedades lógicas inline (E5).
-- **Hecho después**: los reftests de css-flexbox por `writing-mode`/rtl: **103 / 136
-  (75.7 %)** (Mac, 2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta ≥ 75 %
-  cumplida).
+- **Hecho después**: los reftests de css-flexbox por `writing-mode`/rtl: **107 / 136
+  (78.7 %)** (Mac, 2026-11-12, E5 ronda 6, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta
+  ≥ 75 % cumplida; 103 / 136 en `master` `d1148b8`).
 - **Falta**: `hyphens: auto` con diccionario, propagación de `direction`/`writing-mode` del
   `<body>` (`pendiente/e9.md`), `sideways-lr` y la baseline en flujos verticales.
 
@@ -366,10 +393,14 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
   2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
   `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
-- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **74 / 108** (Mac,
-  2026-11-12, E5, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos). Fallan
-  `flex-wrap: balance` (8), el mínimo automático (8), tamaños intrínsecos de columnas con
-  wrap (5) y otros. `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata
+- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **86 / 108** (Mac,
+  2026-11-12, E5 ronda 6, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos;
+  74 / 108 antes). Fallan 22:
+  - `flex-wrap: balance` y `flex-line-count` (8). Son de CSS Flexbox 2, un borrador sin texto
+    estable, y no se implementan.
+  - El algoritmo de tamaños intrínsecos de flex, §9.9.1 (5).
+  - Un borde punteado con ancho fraccionario (2, de pintura).
+  - Sueltos (7). `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata
   un URI vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros
   casos.
 - **Falta**: `lookupNamespaceURI`/`isDefaultNamespace`, `@namespace` y `ns|E` en selectores,
@@ -390,9 +421,16 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
 - Tests propios contra un servidor h2 local (frames, HPACK con los vectores de RFC 7541,
   prioridades).
 - WPT `fetch/http-cache` ≥ 70%.
-- Recargar Wikipedia hace ≤ 2 peticiones de red nuevas.
+- Recargar Wikipedia no descarga ningún cuerpo: solo hace las validaciones condicionales que
+  RFC 9111 §4.2.4 y §5.2.2.2 obligan (`must-revalidate`, `no-cache`), y ningún recurso fresco
+  se vuelve a pedir.
+  - *Reformulado por decisión del usuario (2026-11-13).* Texto original: ~~"Recargar
+    Wikipedia hace ≤ 2 peticiones de red nuevas"~~.
+  - Razón: Wikipedia sirve 7 recursos con `max-age=0, must-revalidate`, y RFC 9111 obliga a
+    validarlos en cada uso. Ningún navegador que siga el estándar puede bajar de 7 peticiones
+    (`pendiente/mac/e6.md`, ronda 4).
 
-**Estado** (2 de 3 criterios cumplidos):
+**Estado** (3 de 3 criterios cumplidos):
 - **Hecho** (E6): HTTP/2 y HPACK propios (`bf-net/src/{http2,hpack}.rs`); tests contra un
   servidor h2 local en `bf-net/tests/h2.rs` (frames, `CONTINUATION`, control de flujo,
   `GOAWAY`/`REFUSED_STREAM`, ALPN) y los vectores C.1–C.6 de RFC 7541 en ambos sentidos; los
@@ -402,13 +440,12 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   cumplida; 90.4 % en Windows). Cookies en disco y PSL (`bf-net/src/{cookies,psl}.rs`); el `TODO(http-cache)`
   del shell se quitó (decisión del planificador: `CachedLoader` queda como memoria del
   documento). Además: HSTS, Referrer-Policy, Happy Eyeballs.
-- **Parcial**: recargar `es.wikipedia.org/wiki/Navegador_web` (E6, Mac, 2026-11-12, `F5` con
-  la caché en disco): 41 entradas, 34 de la caché sin red, **7 validadas con 304 y 0
-  descargas**. Las 7 llevan `max-age=0, must-revalidate`, que RFC 9111 obliga a validar, así
-  que el criterio (≤ 2 peticiones) no se puede cumplir sin violar el estándar. Hay una
-  propuesta de reformulación ("no descarga nada; solo valida lo obligatorio") **pendiente de
-  decisión del usuario**; el texto del criterio no cambia hasta entonces (Windows,
-  2026-11-10: 8 peticiones, 2 de ellas descargas).
+- **Hecho después** (criterio reformulado cumplido): recargar
+  `es.wikipedia.org/wiki/Navegador_web` (E6, Mac, 2026-11-12, `F5` con la caché en disco,
+  `pendiente/mac/e6.md`, ronda 4) da 41 entradas.
+  - 34 salen de la caché sin red.
+  - **7 se validan con 304 y hay 0 descargas.** Las 7 llevan `max-age=0, must-revalidate`.
+  - En Windows (2026-11-10) eran 8 peticiones, 2 de ellas descargas.
 - **Integrado** (`4bb212d`, `76d4eca`, ya en `master`): `immutable`,
   `stale-while-revalidate`, 6 conexiones por origen, coalescing h2, errores de red con causa,
   autenticación HTTP y caché de DNS (`pendiente/e6.md`).
@@ -447,19 +484,25 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
 **Aceptación**: WPT `css/css-overflow` ≥ 50% y `css/css-position/sticky` ≥ 50%. `<textarea>`
 y los list box se desplazan con la rueda.
 
-**Estado** (2 de 3 criterios cumplidos):
+**Estado** (3 de 3 criterios cumplidos):
 - **Hecho** (E12): scroll containers con barras superpuestas, rueda, arrastre y teclado
   (`bf-layout/src/scroll.rs`, `bf-paint/src/scrollbars.rs`); `position: sticky`; `line-clamp`,
   `text-overflow` y `overflow-clip-margin`. Mac, 2026-11-12: `css/css-overflow` **65.1 %** y
   `css/css-position/sticky` **100 %** (11 / 11 ejecutables, 98 `needs-js`): metas cumplidas.
   `object-fit`/`object-position` (`bf-style/src/properties/object.rs`, `bf-paint/src/images.rs`):
   179 de 182 tests `object-fit*`/`object-position*` (98.4 %, Mac).
-- **Parcial**: `<textarea>` y los list box son scroll containers y la rueda mueve el
-  contenedor más interno (`bf-layout/tests/scroll.rs`), pero no hay un test de la rueda sobre
-  un `<textarea>` o un list box: criterio sin medir.
+- **Hecho después**: la rueda sobre un `<textarea>` de 60 líneas y sobre un `<select size=4>`
+  con 30 opciones cambia su `scrollTop` y la página no se mueve. Fuera de ellos, la rueda
+  desplaza la página (`crates/bf-shell/tests/wheel.rs`, por el mismo camino que
+  `WindowEvent::MouseWheel`; E6, ronda 6, `pendiente/mac/e6.md`; criterio cumplido).
 - **Hecho después** (E2, `master` `b2b2f0d`): `srcset`, `sizes` y `<picture>` eligen la imagen
   con la densidad real de la pantalla (`bf_image::source`), con `currentSrc`.
-- **Falta**: carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
+- **Hecho después** (E2, ronda 8, `pendiente/mac/e2.md`): `loading=lazy` (HTML §4.8.4.3.9)
+  aplaza la petición hasta que la imagen queda a menos de 1250 px del viewport. Cada imagen se
+  decodifica una vez por proceso (`bf_image::decode_frames_shared`). WPT `the-img-element`
+  75.2 % (1470 / 1954).
+- **Falta**: pedir las imágenes perezosas al desplazar en la ventana (hoy solo al cambiar el
+  DOM); carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
   `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
 
 ---
@@ -489,9 +532,14 @@ y los list box se desplazan con la rueda.
     release.
 
 **Estado** (1 de 6 criterios cumplidos):
-- **Accesibilidad**: falta el árbol y su exposición al sistema (E1 trabaja en ello en la
-  ronda 6); solo la reflexión ARIA en el DOM (`ARIAMixin`, E1) y el zoom de texto (E11).
-  `html-aam` y `wai-aria`: sin medir (no están en el checkout de WPT).
+- **Accesibilidad**: en `master` hay la reflexión ARIA en el DOM (`ARIAMixin`, E1) y el zoom
+  de texto (E11). `html-aam` 0 / 889 y `wai-aria` 128 / 588 (21.8 %), medidos por E1 sobre
+  `master` `cd8fc5a`.
+  - **En integración, `army/e1`**: rol y nombre accesibles (WIP). Ahí `html-aam` sube a
+    **93.3 %** y `wai-aria` a **91.8 %** (meta ≥ 50 %) (`pendiente/mac/e1.md` de esa rama,
+    ronda 5).
+  - Falta exponer el árbol al sistema (NSAccessibility) y que un lector de pantalla lea
+    Wikipedia.
 - **Procesos y sandbox**: falta. Hoy cada pestaña es un hilo del mismo proceso
   (`bf-shell/src/window/worker.rs`). Un pánico en una pestaña **no cierra la ventana**: la
   pestaña muestra "Esta página falló" con la URL, el mensaje y "Recargar", y las demás siguen
@@ -499,12 +547,27 @@ y los list box se desplazan con la rueda.
 - **Seguridad**: `Referrer-Policy` (`bf-net/src/referrer.rs`, con la política del documento en
   los subrecursos del shell) y HSTS (`bf-net/src/hsts.rs`) hechos (E6); COOP/COEP y
   `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las
-  cabeceras). Faltan CSP, mixed content, Permissions Policy y Safe Browsing.
+  cabeceras). En integración, `army/e6`: CSP 3 y Mixed Content
+  (`bf-net/src/{csp,mixed_content,security}.rs`, `pendiente/mac/e6.md` de esa rama, ronda 7).
+  Faltan Permissions Policy y Safe Browsing.
 - **Interfaz**: pestañas; historial persistente, marcadores, descargas con su barra, buscar en
   la página, zoom de texto, opciones, varias ventanas y sesión restaurada (E11, en `master`
   desde `9d64fdd`; `bf-shell/src/{history,bookmarks,downloads,find,settings,restore}.rs`).
-  Atajos con `Cmd` en macOS (E6, `bf-shell/src/window/keys.rs`). Impresión (`@page`), falta.
-- **Rendimiento**: falta GPU y raster en tiles. 60 fps y primera pintura de Wikipedia: sin medir.
+  Atajos con `Cmd` en macOS (E6, `bf-shell/src/window/keys.rs`). Un pánico en el hilo de la
+  ventana guarda la sesión antes de salir (E6, ronda 6). En integración, `army/e6`:
+  `Freedom.app` firmada ad hoc con su `.dmg` (`packaging/macos/build.sh`). Impresión
+  (`@page`), falta.
+- **Rendimiento** (`pendiente/mac/e4.md`, ronda 5; método en [`rendimiento.md`](rendimiento.md)):
+  - En `master` hay un índice de reglas en la cascada, que bajó la cascada de unos 600 ms a
+    unos 180 ms. También se componen solo las franjas pintadas de las capas de opacidad.
+  - **Primera pintura de Wikipedia**: de 797 a 892 ms con la máquina cargada (meta
+    < 500 ms). E2 midió una mediana de 953 ms en su ronda 8. La red y la caché se llevan
+    unos 270 ms, en validaciones que RFC 9111 obliga a hacer.
+  - **Desplazamiento**: la mediana del cuadro es de 124 ms a escala 1 y de 482 ms a escala 2.
+    Ningún cuadro baja de 16.7 ms (meta: 60 fps).
+  - **En integración, `army/e4`**: raster en tiles de la página, en paralelo y con
+    desplazamiento incremental (`pendiente/mac/e4.md` de esa rama, ronda 7).
+  - Falta la GPU.
 
 ---
 
