@@ -5,6 +5,8 @@
 //!
 //! El SVG no es un bitmap: `bf-svg` lo interpreta y `bf-paint` lo rasteriza al tamaño pedido.
 //!
+//! [`source`] elige el recurso de un `<img>` por `srcset`, `sizes` y `<picture>` (HTML §4.8.4.3).
+//!
 //! TODO(roadmap): AVIF (diseño en `docs/pendiente/e7.md`).
 
 #![forbid(unsafe_code)]
@@ -15,6 +17,7 @@ mod gif;
 mod ico;
 mod jpeg;
 mod png;
+pub mod source;
 mod webp;
 
 use std::fmt;

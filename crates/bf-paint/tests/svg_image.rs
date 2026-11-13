@@ -378,6 +378,7 @@ fn foreign_object_html_content() {
         fonts: std::sync::Arc::new(bf_font::FontDb::from_faces(Vec::new())),
         extra: &[],
         text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
     };
     let viewport = Size {
         width: 40.0,
@@ -554,6 +555,26 @@ fn img_svg_with_only_view_box() {
              <img src=\"{RATIO_ONLY}\" style='display:block'></div>"
         ));
         // 16×8.
+        assert_eq!(px(&p, 0, 0), (255, 0, 0, 255), "{container}");
+        assert_eq!(px(&p, 15, 7), (255, 0, 0, 255), "{container}");
+        assert_eq!(px(&p, 15, 9), (255, 255, 255, 255), "{container}");
+        assert_eq!(px(&p, 17, 3), (255, 255, 255, 255), "{container}");
+    }
+}
+
+/// Un `<svg>` en línea sin `width` ni `height` y con `viewBox` sigue la misma regla que el
+/// `<img>` de arriba: solo proporción, y ocupa el ancho disponible (16×8), no 300×150.
+#[test]
+fn inline_svg_with_only_view_box() {
+    for container in [
+        "style='width:16px'",
+        "style='display:flex;flex-direction:column;align-items:center;width:16px;height:20px'",
+    ] {
+        let p = page(&format!(
+            "<!DOCTYPE html><body style='margin:0'><div {container}>\
+             <svg viewBox='0 0 2 1' style='display:block'><rect width='2' height='1' fill='red'/>\
+             </svg></div>"
+        ));
         assert_eq!(px(&p, 0, 0), (255, 0, 0, 255), "{container}");
         assert_eq!(px(&p, 15, 7), (255, 0, 0, 255), "{container}");
         assert_eq!(px(&p, 15, 9), (255, 255, 255, 255), "{container}");

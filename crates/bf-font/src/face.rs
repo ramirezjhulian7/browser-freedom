@@ -7,6 +7,8 @@ use ttf_parser::{Face, GlyphId, OutlineBuilder, RasterGlyphImage, RasterImageFor
 
 /// Etiqueta del eje de peso de las fuentes variables (OpenType, `fvar`).
 pub const WGHT: ttf_parser::Tag = ttf_parser::Tag::from_bytes(b"wght");
+/// Etiqueta del eje de tamaño óptico (OpenType, `fvar`; CSS Fonts 4 §7.4).
+pub const OPSZ: ttf_parser::Tag = ttf_parser::Tag::from_bytes(b"opsz");
 
 /// Estilo de una cara (CSS Fonts 4 §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,14 +85,41 @@ impl LoadedFace {
     }
 
     pub fn face(&self) -> Option<Face<'_>> {
+        self.face_at(None)
+    }
+
+    /// E5: [`LoadedFace::face`] con el eje `opsz` en `opsz` si se da (`font-optical-sizing:
+    /// auto`, CSS Fonts 4 §7.4).
+    pub fn face_at(&self, opsz: Option<f32>) -> Option<Face<'_>> {
         let mut face = Face::parse(&self.data, self.index).ok()?;
         if let Some(w) = self.wght {
             face.set_variation(WGHT, w);
         }
+        if let Some(o) = opsz {
+            face.set_variation(OPSZ, o);
+        }
         Some(face)
     }
 
+    /// E5: los ejes fijados de la cara (`wght` de la instancia y el `opsz` dado), para el
+    /// shaper.
+    pub fn variations(&self, opsz: Option<f32>) -> Vec<(ttf_parser::Tag, f32)> {
+        let mut v = Vec::new();
+        if let Some(w) = self.wght {
+            v.push((WGHT, w));
+        }
+        if let Some(o) = opsz {
+            v.push((OPSZ, o));
+        }
+        v
+    }
+
     pub fn outline(&self, glyph: u16) -> Option<Outline> {
+        self.outline_at(glyph, None)
+    }
+
+    /// E5: [`LoadedFace::outline`] con el tamaño óptico `opsz` (ver [`LoadedFace::face_at`]).
+    pub fn outline_at(&self, glyph: u16, opsz: Option<f32>) -> Option<Outline> {
         struct Builder(Vec<PathCommand>);
         impl OutlineBuilder for Builder {
             fn move_to(&mut self, x: f32, y: f32) {
@@ -109,7 +138,7 @@ impl LoadedFace {
                 self.0.push(PathCommand::Close);
             }
         }
-        let face = self.face()?;
+        let face = self.face_at(opsz)?;
         let mut builder = Builder(Vec::new());
         let has_outline = face.outline_glyph(GlyphId(glyph), &mut builder).is_some();
         let bitmaps = bitmaps(&face, GlyphId(glyph));

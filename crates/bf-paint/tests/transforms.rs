@@ -26,6 +26,7 @@ fn paint(html: &str) -> (Pixmap, bf_paint::Page) {
         fonts: Arc::new(FontDb::from_faces(Vec::new())),
         extra: &[],
         text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
     };
     let page = prepare_page_with_frames(&doc, &ctx, VIEWPORT, &[], &[]);
     (render(&page.display_list, VIEWPORT, 1.0, Rgba::WHITE), page)

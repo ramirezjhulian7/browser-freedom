@@ -252,6 +252,15 @@ impl<'a> Layout<'a> {
         height: Option<f32>,
         margins: Edges,
     ) -> Fragment {
+        // E5: un ítem de otro modo de escritura es la raíz de un flujo ortogonal (CSS Writing
+        // Modes 4 §7.3; CSS Flexbox 1 §9.2.3): se maqueta en su marco con el ancho y el alto
+        // (si se fija) que le da el algoritmo flex, y su border box queda en `(x, y)`.
+        if self.is_orthogonal(b) {
+            let mut f = self.orthogonal_item_fragment(b, cb, content_w, height);
+            let (dx, dy) = (x - f.rect.x, y - f.rect.y);
+            f.translate(dx, dy);
+            return f;
+        }
         self.forced_height = height;
         let mut scratch = FloatContext::default();
         let (f, _) = self.box_contents(b, cb, x, y, content_w, margins, &mut scratch, false);

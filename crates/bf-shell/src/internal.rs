@@ -1204,6 +1204,7 @@ fn engine(url: &Url, ctx: &LoadContext) -> String {
         fonts: ctx.fonts.clone(),
         extra: &[],
         text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
     };
     let page = prepare_page(&loaded.doc, &pctx, ctx.viewport);
     themed(

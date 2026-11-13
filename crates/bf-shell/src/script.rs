@@ -1268,6 +1268,7 @@ mod tests {
             fonts,
             extra: &[],
             text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
         };
         let viewport = bf_layout::Size {
             width: 640.0,
