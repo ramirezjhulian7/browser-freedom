@@ -877,6 +877,19 @@ pub struct SubLoader<L>(pub L);
 
 impl<L: ResourceLoader> ResourceLoader for SubLoader<L> {
     fn load(&self, url: &Url) -> Option<Resource> {
+        // E1: wptserve sirve `/resources/WebIDLParser.js` como alias de la copia de webidl2 de
+        // WPT (en el repo no hay un archivo con ese nombre); sin él los `idlharness`, en la
+        // página y en los workers, terminan en `WebIDL2 is not defined`.
+        if url.path_string() == "/resources/WebIDLParser.js" {
+            let alias = url.serialize(true).replace(
+                "/resources/WebIDLParser.js",
+                "/resources/webidl2/lib/webidl2.js",
+            );
+            let alias = Url::parse(&alias, None).ok()?;
+            let mut r = self.0.load(&alias)?;
+            r.url = url.clone();
+            return Some(r);
+        }
         let mut r = self.0.load(url)?;
         let name = url.path_string();
         let name = name.rsplit('/').next().unwrap_or("");

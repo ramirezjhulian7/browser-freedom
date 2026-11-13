@@ -1706,6 +1706,7 @@ pub const GLOBAL_EVENT_HANDLERS: &[&str] = &[
     "change",
     "click",
     "close",
+    "command",
     "contextlost",
     "contextmenu",
     "contextrestored",

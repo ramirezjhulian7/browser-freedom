@@ -1672,3 +1672,90 @@ fn dataset_maps_data_attributes() {
         "true,true,1,2,no,fooBar+x+upper,true,false,7,false,SyntaxError,ts,function"
     );
 }
+
+// E1 (ronda 3): la API de validación de restricciones (HTML §4.10.20.3): `validity` es el
+// mismo `ValidityState`, con los estados de `required`, `type=email`, `pattern`, `min`/`max`,
+// `step` y el error propio; `labels`, `list`, `valueAsDate`, `stepUp`/`stepDown` y
+// `setRangeText`.
+#[test]
+fn constraint_validation_and_input_members() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var i = document.createElement('input'); i.required = true; \
+           out.push(i.validity === i.validity, i.validity instanceof ValidityState, \
+                    i.validity.valueMissing, i.validity.valid, i.checkValidity()); \
+           i.value = 'x'; out.push(i.validity.valid); \
+           i.type = 'email'; i.value = 'nope'; out.push(i.validity.typeMismatch); \
+           i.value = 'a@b.c'; out.push(i.validity.valid); \
+           i.type = 'text'; i.pattern = '[0-9]+'; i.value = 'abc'; \
+           out.push(i.validity.patternMismatch); i.value = '123'; out.push(i.validity.valid); \
+           var n = document.createElement('input'); n.type = 'number'; n.min = '2'; n.max = '10'; \
+           n.step = '2'; n.value = '1'; out.push(n.validity.rangeUnderflow); \
+           n.value = '5'; out.push(n.validity.stepMismatch); \
+           n.value = '4'; n.stepUp(); out.push(n.value); n.stepDown(2); out.push(n.value); \
+           i.setCustomValidity('mal'); out.push(i.validity.customError, i.validationMessage); \
+           out.push(err(function () { i.setCustomValidity(); })); \
+           var l = document.createElement('label'); l.htmlFor = 'q'; \
+           var q = document.createElement('input'); q.id = 'q'; \
+           document.body.append(l, q); out.push(q.labels.length, q.labels[0] === l); \
+           var dl = document.createElement('datalist'); dl.id = 'dl'; document.body.append(dl); \
+           q.setAttribute('list', 'dl'); out.push(q.list === dl); \
+           var d = document.createElement('input'); d.type = 'date'; d.value = '2020-02-29'; \
+           out.push(d.valueAsDate.getTime() === Date.UTC(2020, 1, 29)); \
+           d.valueAsDate = new Date(Date.UTC(1999, 11, 31)); out.push(d.value); \
+           var w = document.createElement('input'); w.type = 'week'; \
+           w.valueAsDate = new Date('2019-12-09T00:00:00.000Z'); out.push(w.value); \
+           var t = document.createElement('input'); t.value = 'abcdef'; \
+           t.setSelectionRange(1, 3); t.setRangeText('XY', 1, 3, 'select'); \
+           out.push(t.value, t.selectionStart, t.selectionEnd); \
+           out.push(err(function () { t.setRangeText(); }), \
+                    err(function () { t.setRangeText('x', 3, 1); })); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "true,true,true,false,false,true,true,true,true,true,true,true,6,2,true,mal,\
+         TypeError,1,true,true,true,1999-12-31,2019-W50,aXYdef,1,3,TypeError,IndexSizeError"
+    );
+}
+
+// E1: `HTMLMediaElement` sin reproducción, `TimeRanges`, y lo que faltaba de `Document`
+// (`designMode`, `execCommand`, `queryCommand*`, `domain`) y de `HTMLElement` (popover,
+// `autocapitalize`, `headingOffset`).
+#[test]
+fn media_and_legacy_members() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+           var v = document.createElement('video'); \
+           out.push(v.networkState, v.readyState, v.paused, isNaN(v.duration), \
+                    v.buffered instanceof TimeRanges, v.buffered.length, v.canPlayType('video/mp4'), \
+                    HTMLMediaElement.HAVE_ENOUGH_DATA, err(function () { v.buffered.start(0); })); \
+           v.volume = 0.5; out.push(v.volume, err(function () { v.volume = 2; })); \
+           v.appendChild(document.createElement('source')); out.push(v.networkState); \
+           out.push(v.play() instanceof Promise); \
+           out.push(document.designMode); document.designMode = 'on'; out.push(document.designMode); \
+           out.push(document.execCommand('bold'), document.queryCommandSupported('bold'), \
+                    document.queryCommandValue('bold'), document.domain, \
+                    err(function () { document.domain = 'otro.test'; })); \
+           var e = document.createElement('div'); \
+           out.push(e.popover, err(function () { e.showPopover(); })); \
+           e.popover = 'nada'; out.push(e.popover); document.body.append(e); \
+           out.push(e.togglePopover(), e.togglePopover(), e.togglePopover({force: true})); \
+           e.setAttribute('autocapitalize', 'on'); out.push(e.autocapitalize); \
+           e.setAttribute('headingoffset', '12'); out.push(e.headingOffset); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(
+        r,
+        "0,0,true,true,true,0,,4,IndexSizeError,0.5,IndexSizeError,3,true,off,on,false,false,,\
+         example.com,SecurityError,,NotSupportedError,manual,true,false,true,sentences,8"
+    );
+}

@@ -70,7 +70,47 @@ pub fn document_class(node: HostClassId) -> HostClass {
         .method("importNode", 1, import_node)
         .method("adoptNode", 1, adopt_node)
         .method("createRange", 0, crate::dom::range::document_create_range)
-        .method("getSelection", 0, crate::dom::range::document_get_selection);
+        .method("getSelection", 0, crate::dom::range::document_get_selection)
+        // E1: lo de HTML que faltaba (§3.1.3, §6.10, §16.3.4).
+        .attribute(
+            "domain",
+            Some(crate::html::legacy::get_domain),
+            Some(crate::html::legacy::set_domain),
+        )
+        .attribute(
+            "designMode",
+            Some(crate::html::legacy::get_design_mode),
+            Some(crate::html::legacy::set_design_mode),
+        )
+        .method("execCommand", 1, crate::html::legacy::exec_command)
+        .method(
+            "queryCommandEnabled",
+            1,
+            crate::html::legacy::query_command_false,
+        )
+        .method(
+            "queryCommandIndeterm",
+            1,
+            crate::html::legacy::query_command_false,
+        )
+        .method(
+            "queryCommandState",
+            1,
+            crate::html::legacy::query_command_false,
+        )
+        .method(
+            "queryCommandSupported",
+            1,
+            crate::html::legacy::query_command_false,
+        )
+        .method(
+            "queryCommandValue",
+            1,
+            crate::html::legacy::query_command_value,
+        )
+        .method("clear", 0, crate::html::legacy::noop)
+        .method("captureEvents", 0, crate::html::legacy::noop)
+        .method("releaseEvents", 0, crate::html::legacy::noop);
 
     let c = mixins::parent_node(c);
     let mut names: Vec<&'static str> = GLOBAL_EVENT_HANDLERS.to_vec();
