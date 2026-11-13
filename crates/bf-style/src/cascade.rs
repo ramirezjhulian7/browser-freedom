@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch, ShadowMode, Specificity};
-use bf_css::stylesheet::{MatchedDeclaration, Origin, Stylesheet, matching_declarations_in};
+use bf_css::stylesheet::{MatchedDeclaration, Origin, RuleIndex, Stylesheet};
 use bf_css::syntax::{
     ComponentValue, Declaration, Function, NestedItem, SimpleBlock, parse_block_contents,
     parse_declaration,
@@ -825,6 +825,9 @@ struct Styler<'a> {
     root_font_size: f32,
     root_line_height: f32,
     fonts: Option<&'a dyn FontMetricsSource>,
+    /// E4: el índice de reglas de cada grupo de hojas (por las direcciones de sus hojas): se
+    /// arma la primera vez que se usa el grupo y sirve para todos los nodos.
+    indexes: std::cell::RefCell<HashMap<Vec<usize>, std::rc::Rc<RuleIndex<'a>>>>,
 }
 
 /// Métricas de fuente para las unidades `ex` y `ch`. El layout las provee con sus fuentes;
@@ -852,16 +855,19 @@ impl<'a> Styler<'a> {
         if sheets.is_empty() {
             return Vec::new();
         }
-        matching_declarations_in(
-            self.doc,
-            node,
-            pseudo,
-            sheets,
-            self.media,
-            &is_supported,
-            self.ctx,
-            shadow,
-        )
+        let key: Vec<usize> = sheets
+            .iter()
+            .map(|s| std::ptr::from_ref::<Stylesheet>(s) as usize)
+            .collect();
+        let index = self
+            .indexes
+            .borrow_mut()
+            .entry(key)
+            .or_insert_with(|| {
+                std::rc::Rc::new(RuleIndex::new(sheets, self.media, &is_supported))
+            })
+            .clone();
+        index.matching(self.doc, node, pseudo, self.ctx, shadow)
     }
 
     /// E1: las hojas de autor del árbol con raíz `root` (el documento o un shadow root) y su
@@ -1356,6 +1362,7 @@ pub fn style_document_with_sheets(
         root_font_size: crate::properties::types::MEDIUM_FONT_SIZE,
         root_line_height: crate::properties::types::MEDIUM_FONT_SIZE * NORMAL_LINE_HEIGHT,
         fonts,
+        indexes: std::cell::RefCell::new(HashMap::new()),
     };
     let mut map = StyleMap::new();
     let mut stack: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = doc
