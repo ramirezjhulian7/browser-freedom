@@ -513,6 +513,9 @@ pub struct Engine {
     /// E6: el documento es XML ([`Engine::parse_xml`]): `load` lo dispara
     /// [`Engine::resources_loaded`] sin parser HTML.
     xml_load_pending: bool,
+    /// E6: el desplazamiento y el viewport de la última revisión de las imágenes
+    /// `loading=lazy` ([`Engine::update_view`]).
+    lazy_view: Option<((f32, f32), bf_layout::Size)>,
 }
 
 impl Engine {
@@ -541,6 +544,7 @@ impl Engine {
             images: Rc::new(RefCell::new(bf_layout::ImageSizes::new())),
             navigation_policies: (None, None),
             xml_load_pending: false,
+            lazy_view: None,
         }
     }
 
@@ -681,6 +685,23 @@ impl Engine {
         {
             s.scroll = scroll;
             s.device_pixel_ratio = device_pixel_ratio;
+        }
+        // E6: el "lazy load intersection observer" (HTML §4.8.4.3.9) mira la intersección con
+        // el viewport: si el desplazamiento o el tamaño del viewport cambiaron, las imágenes
+        // `loading=lazy` que quedaron cerca se piden ya (si no, solo se revisaban cuando el
+        // documento cambiaba, en `sync_frames`).
+        let viewport = self
+            .rt
+            .agent
+            .realm_data::<WebContext>(realm)
+            .and_then(|ctx| ctx.layout.as_ref())
+            .map(|l| l.viewport);
+        if let Some(viewport) = viewport {
+            let view = Some((scroll, viewport));
+            if self.lazy_view != view {
+                self.lazy_view = view;
+                bf_web::html::legacy_factories::check_lazy_images(&mut self.rt.agent, realm);
+            }
         }
     }
 

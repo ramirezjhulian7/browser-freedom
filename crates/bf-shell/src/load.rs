@@ -1139,3 +1139,136 @@ mod security_pages {
         assert!(has(&log, "solo informe"), "{log:?}");
     }
 }
+
+/// E6: `loading=lazy` al desplazar (HTML §4.8.4.3.9, "lazy load intersection observer"): la
+/// imagen lejana se pide cuando el desplazamiento de la ventana ([`Engine::update_view`]) la
+/// acerca al viewport, sin que cambie el documento.
+#[cfg(test)]
+mod lazy_images {
+    use super::*;
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::rc::Rc;
+
+    /// Un GIF de 1×1.
+    const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\
+                         \x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x01D\x00;";
+
+    const PAGE: &str = "<!doctype html><body style='margin:0'>\
+        <img loading=lazy src='/cerca.gif' onload=\"console.log('cerca-cargó')\">\
+        <div style='height:10000px'></div>\
+        <img loading=lazy src='/lejos.gif' onload=\"console.log('lejos-cargó')\">";
+
+    /// Un servidor que responde `PAGE` en `/` y el GIF en las demás rutas; anota las rutas
+    /// pedidas.
+    fn server() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let seen = paths.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut r = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                let path = line.split(' ').nth(1).unwrap_or("/").to_owned();
+                let (ty, body) = if path == "/" {
+                    ("text/html; charset=utf-8", PAGE.as_bytes())
+                } else {
+                    seen.lock().unwrap().push(path);
+                    ("image/gif", GIF)
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nCache-Control: no-store\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, paths)
+    }
+
+    /// Un loader sin red: así la maqueta de la prueba no pide las imágenes por su cuenta y el
+    /// servidor solo ve las peticiones del motor web.
+    struct NoNetwork;
+
+    impl ResourceLoader for NoNetwork {
+        fn load(&self, _url: &Url) -> Option<Resource> {
+            None
+        }
+    }
+
+    /// Corre las tareas del motor hasta que `done` sea cierto en la consola (o 10 s).
+    fn run_until(engine: &mut Engine, log: &RefCell<Vec<String>>, done: &str) {
+        let start = Instant::now();
+        while !log.borrow().iter().any(|l| l == done) && start.elapsed() < Duration::from_secs(10) {
+            engine.run_due_tasks();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn lazy_image_is_requested_on_scroll() {
+        let (port, paths) = server();
+        let net = Arc::new(NetLoader::new());
+        let ctx = LoadContext {
+            net: net.clone(),
+            fonts: FontDb::system(),
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            recent: Vec::new(),
+            theme: Theme::for_system(None),
+            post: None,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let sink = log.clone();
+        let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+            sink.borrow_mut().push(e.text)
+        }));
+        let env = PageEnv::cli(net);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+        let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+        assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+        // La cercana se pide al cargar (el CSSOM maqueta por su cuenta); la lejana espera.
+        run_until(&mut engine, &log, "cerca-cargó");
+        assert!(log.borrow().iter().any(|l| l == "cerca-cargó"), "{log:?}");
+        assert_eq!(*paths.lock().unwrap(), ["/cerca.gif"]);
+
+        // La maqueta de la ventana, arriba de todo: la lejana sigue esperando.
+        let doc = engine.render_copy().unwrap();
+        let pctx = bf_paint::PageContext {
+            base: &loaded.base,
+            encoding: loaded.encoding,
+            loader: Arc::new(NoNetwork),
+            fonts: ctx.fonts.clone(),
+            extra: &[],
+            text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
+        };
+        let page = bf_paint::prepare_page(&doc, &pctx, ctx.viewport);
+        engine.set_layout(&page, doc.version(), (0.0, 0.0), 1.0);
+        for _ in 0..20 {
+            engine.run_due_tasks();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*paths.lock().unwrap(), ["/cerca.gif"]);
+
+        // Desplazar sin volver a maquetar: la lejana queda cerca y se pide.
+        engine.update_view((0.0, 9500.0), 1.0);
+        run_until(&mut engine, &log, "lejos-cargó");
+        assert!(log.borrow().iter().any(|l| l == "lejos-cargó"), "{log:?}");
+        assert_eq!(*paths.lock().unwrap(), ["/cerca.gif", "/lejos.gif"]);
+    }
+}
