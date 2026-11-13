@@ -1563,15 +1563,28 @@ impl<'a> Layout<'a> {
             return self.inline_intrinsic_widths(b);
         }
         let (mut min, mut max) = (0.0f32, 0.0f32);
+        // E5: los floats seguidos caben uno al lado del otro en el max-content (no hay saltos,
+        // CSS Sizing 3 §5.1), así que sus anchos se suman; `clear` o un bloque en flujo empiezan
+        // otra fila.
+        let mut floats = 0.0f32;
         for child in &b.children {
             if child.is_absolutely_positioned() || matches!(child.kind, BoxKind::Marker { .. }) {
                 continue;
             }
             let (cmin, cmax) = self.outer_intrinsic_widths(child);
             min = min.max(cmin);
-            max = max.max(cmax);
+            if child.is_float() {
+                if child.style.clear != Clear::None {
+                    max = max.max(floats);
+                    floats = 0.0;
+                }
+                floats += cmax;
+            } else {
+                max = max.max(floats).max(cmax);
+                floats = 0.0;
+            }
         }
-        (min, max)
+        (min, max.max(floats))
     }
 
     /// Anchos intrínsecos del margin box (porcentajes como 0).

@@ -877,6 +877,15 @@ impl<'a> Layout<'a> {
                     };
                     let stretched = line.cross - it.bp_cross - it.margin(2) - it.margin(3);
                     it.cross = stretched.min(hi).max(lo).max(0.0);
+                } else if !row && wrap && cross_auto {
+                    // E5: en una columna multilínea, un ítem que no se estira se vuelve a
+                    // ajustar (fit-content) al tamaño cruzado final de su línea, sin cambiar su
+                    // tamaño principal (csswg-drafts#11784; WPT `align-self-016`).
+                    let (lo, hi) = width_limits(&it.b.style, cb.width, it.bp_cross);
+                    let avail = (line.cross - it.bp_cross - it.margin(2) - it.margin(3)).max(0.0);
+                    let b = it.b;
+                    let fit = self.item_fit_width(b, avail);
+                    items[i].cross = fit.min(hi).max(lo).max(0.0);
                 }
             }
         }
