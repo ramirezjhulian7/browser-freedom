@@ -116,7 +116,7 @@
   // `font-feature-settings` y `font-variation-settings` (CSS Fonts 4 §6.12, §7.2): `normal` o
   // una lista de etiquetas de cuatro caracteres con su valor.
   const TAG = /^\s*("[\x20-\x7e]{4}"|'[\x20-\x7e]{4}')/;
-  function tagList(v, value) {
+  function tagList(v, value, normalizeValue) {
     const t = v.trim();
     if (/^normal$/i.test(t)) return "normal";
     const items = t.split(",");
@@ -127,11 +127,22 @@
       const rest = item.slice(m[0].length).trim();
       if (!value(rest)) return null;
       out.push('"' + m[1].slice(1, -1) + '"' + (rest ? " " + rest : ""));
+      if (normalizeValue) out[out.length - 1] = normalizeValue(out[out.length - 1], rest);
     }
     return out.join(", ");
   }
+  // El valor 1 (u `on`) se omite y `off` es 0 (CSS Fonts 4 §6.12, serialización).
   const featureSettings = (v) =>
-    tagList(v, (r) => r === "" || /^(on|off)$/i.test(r) || /^\d+$/.test(r));
+    tagList(
+      v,
+      (r) => r === "" || /^(on|off)$/i.test(r) || /^\d+$/.test(r),
+      (item, r) => {
+        const tag = item.slice(0, 6);
+        if (r === "" || /^on$/i.test(r) || r === "1") return tag;
+        if (/^off$/i.test(r)) return tag + " 0";
+        return tag + " " + String(Number(r));
+      }
+    );
   const variationSettings = (v) => tagList(v, (r) => /^[-+]?(\d+(\.\d+)?|\.\d+)(e[-+]?\d+)?$/i.test(r));
   const overrideValue = (v) => {
     const t = v.trim();
@@ -147,7 +158,15 @@
       "U+0-10FFFF",
       (v) => {
         const items = v.split(",");
-        return items.length && items.every((i) => URANGE.test(i)) ? items.map((i) => i.trim()).join(", ") : null;
+        if (!items.length || !items.every((i) => URANGE.test(i))) return null;
+        // Serialización (CSSOM): hexadecimal en mayúsculas sin ceros a la izquierda.
+        const hex = (h) => (/\?/.test(h) ? h.toUpperCase() : parseInt(h, 16).toString(16).toUpperCase());
+        return items
+          .map((i) => {
+            const [a, b] = i.trim().slice(2).split("-");
+            return "U+" + hex(a) + (b === undefined ? "" : "-" + hex(b));
+          })
+          .join(", ");
       },
     ],
     featureSettings: ["font-feature-settings", "normal", featureSettings],
@@ -429,11 +448,11 @@
     if (f.status === "loading") setFaceLoading(o, faceObj);
     publish(s);
   }
+  // Sin constructor público (CSS Font Loading 3 lo retiró; WPT `historical.html`).
   class FontFaceSet extends ET {
-    constructor(initialFaces) {
+    constructor(token) {
+      if (token !== TOKEN) throw new TypeError("Illegal constructor");
       super();
-      const list = initialFaces === undefined ? [] : Array.from(initialFaces);
-      initSet(this, null, list);
     }
     get size() {
       return members(setOf(this)).length;
