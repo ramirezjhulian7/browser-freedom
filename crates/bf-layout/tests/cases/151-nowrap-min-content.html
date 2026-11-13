@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!-- CSS Text 3 §3 y CSS Sizing 3 §5: con `white-space: nowrap` los espacios no son oportunidades de corte, así que el min-content de una celda es su línea entera ("aa bb", 40px) y la tabla desborda su contenedor de 60px en vez de estrecharse (WPT css/CSS2/tables/table-anonymous-objects-079…086). -->
+<style>body{margin:0;white-space:nowrap} .w{width:60px} table{border-spacing:0} td{padding:0}</style>
+<div class=w><table><tr><td>aa bb</td><td>cc dd</td></tr></table></div>
+<!-- expect
+Block <html> 0,0 800×16
+  Block <body> 0,0 800×16
+    Block <div.w> 0,0 60×16
+      Block <table> 0,0 80×16
+        Block <table> 0,0 80×16
+          Block <tbody> 0,0 80×16
+            Block <tr> 0,0 80×16
+              Block <td> 0,0 40×16
+                Line 0,0 40×16
+                  Text "aa bb" 0,0 40×16
+              Block <td> 40,0 40×16
+                Line 40,0 40×16
+                  Text "cc dd" 40,0 40×16
+-->

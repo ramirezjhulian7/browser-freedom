@@ -2079,6 +2079,9 @@ impl<'a> Layout<'a> {
             /// Espacios colapsables todavía no sumados: se quitan al principio y al final de
             /// la línea (fase 2 del procesamiento de espacios).
             pending: f32,
+            /// E5: la parte de `pending` que no es oportunidad de corte (espacios colapsables
+            /// de un texto que no se parte, `nowrap`): si sigue contenido, es de la palabra.
+            word_pending: f32,
             has_content: bool,
             /// E9: lo último fue una atómica (hay oportunidad después, CSS Text 3 §5.1).
             after_atomic: bool,
@@ -2089,8 +2092,10 @@ impl<'a> Layout<'a> {
             fn content(&mut self) {
                 if self.has_content {
                     self.line += self.pending;
+                    self.word += self.word_pending;
                 }
                 self.pending = 0.0;
+                self.word_pending = 0.0;
                 self.has_content = true;
             }
             fn end_line(&mut self) {
@@ -2099,6 +2104,7 @@ impl<'a> Layout<'a> {
                 self.min = self.min.max(self.word);
                 self.word = 0.0;
                 self.pending = 0.0;
+                self.word_pending = 0.0;
                 self.has_content = false;
             }
         }
@@ -2140,8 +2146,14 @@ impl<'a> Layout<'a> {
                                 '\n' => acc.end_line(),
                                 ' ' | '\t' if s.white_space.collapses_spaces() => {
                                     acc.pending += w;
-                                    acc.min = acc.min.max(acc.word);
-                                    acc.word = 0.0;
+                                    // E5: sin `wraps` (`nowrap`) el espacio no es oportunidad de
+                                    // corte (CSS Text 3 §3): el min-content es la línea entera.
+                                    if wraps {
+                                        acc.min = acc.min.max(acc.word);
+                                        acc.word = 0.0;
+                                    } else {
+                                        acc.word_pending += w;
+                                    }
                                 }
                                 ' ' | '\t' if wraps => {
                                     acc.content();
