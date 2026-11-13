@@ -620,6 +620,28 @@ pub fn dispatch_wheel(
 }
 
 impl bf_html::ScriptHost for WebScripts<'_> {
+    // E2: los `<link>` del parser cargan su hoja o su `preload` y disparan `load`/`error`.
+    fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
+        let realm = self.realm;
+        crate::html::legacy_factories::with_lent_document(
+            self.agent,
+            realm,
+            doc.document_mut(),
+            |agent| crate::cssom::sheets::link_connected(agent, crate::NodeRef::new(0, link)),
+        );
+    }
+
+    // E2: los `<img>` del parser piden su imagen (y demoran `load`, §4.8.4.3.5).
+    fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
+        let realm = self.realm;
+        crate::html::legacy_factories::with_lent_document(
+            self.agent,
+            realm,
+            doc.document_mut(),
+            |agent| crate::html::legacy_factories::img_created(agent, crate::NodeRef::new(0, img)),
+        );
+    }
+
     fn prepare(&mut self, doc: &mut Parser, script: NodeId) -> ScriptDisposition {
         let Some(info) = doc.document().script_info(script).cloned() else {
             return ScriptDisposition::Failed;

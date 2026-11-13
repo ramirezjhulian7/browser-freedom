@@ -59,6 +59,14 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
     fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
         let _ = (doc, link);
     }
+
+    /// E2: el parser insertó un `img` del namespace HTML en el documento (conectado, con sus
+    /// atributos): "when an img element is created" el host empieza "update the image data"
+    /// (HTML §4.8.4.3.5) y puede demorar `load` mientras la busca. Se llama como
+    /// [`ScriptHost::link_inserted`].
+    fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
+        let _ = (doc, img);
+    }
 }
 
 impl ScriptHost for NoScript {}
@@ -323,8 +331,12 @@ impl Parser {
                 return;
             };
             self.b.process_token(tok);
-            for link in std::mem::take(&mut self.b.inserted_links) {
-                host.link_inserted(self, link);
+            for el in std::mem::take(&mut self.b.inserted_links) {
+                if self.b.doc.element(el).is_some_and(|e| e.is_html("img")) {
+                    host.img_inserted(self, el);
+                } else {
+                    host.link_inserted(self, el);
+                }
             }
             if self.generation != generation {
                 return;

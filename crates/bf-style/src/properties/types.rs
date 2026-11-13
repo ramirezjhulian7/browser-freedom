@@ -1740,12 +1740,157 @@ impl PropValue for BackgroundAttachment {
     }
 }
 
-/// `none | <url> | <gradient>` (CSS Images 3 §2).
+/// `none | <url> | <gradient> | <image-set()>` (CSS Images 3 §2, CSS Images 4 §2.4).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Image {
     None,
     Url(String),
     Gradient(Box<Gradient>),
+    /// E2: `image-set()` (y `-webkit-image-set()`): las opciones tal cual; quien pinta elige
+    /// una según la densidad de la pantalla y el `type` (CSS Images 4 §2.4).
+    Set(Vec<ImageSetOption>),
+}
+
+/// Una opción de `image-set()`: `[<image> | <string>] [<resolution> || type(<string>)]?`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageSetOption {
+    /// Una URL (también la de un `<string>`) o un gradiente; nunca otro `image-set()`.
+    pub image: Image,
+    /// En `dppx` (`1x` si falta).
+    pub resolution: f32,
+    /// El MIME de `type()`: una opción con un tipo sin soporte no se elige.
+    pub mime: Option<String>,
+}
+
+/// Una `<resolution>` en `dppx` (CSS Values 4 §7.4: `x`, `dppx`, `dpi`, `dpcm`), también con
+/// `calc()`. Una literal negativa es inválida; un `calc()` negativo se recorta a 0 (CSS Values
+/// 4 §10.12).
+fn resolution_dppx(v: &ComponentValue) -> Option<f32> {
+    if let ComponentValue::Function(f) = v
+        && f.name.eq_ignore_ascii_case("calc")
+    {
+        return match calc_resolution(&f.value)? {
+            (r, true) if r.is_finite() => Some(r.max(0.0) as f32),
+            _ => None,
+        };
+    }
+    let dppx = resolution_value(v)?;
+    (dppx >= 0.0 && dppx.is_finite()).then_some(dppx as f32)
+}
+
+/// El valor en `dppx` de una dimensión de resolución.
+fn resolution_value(v: &ComponentValue) -> Option<f64> {
+    let Some(TokenKind::Dimension(n, unit)) = v.token() else {
+        return None;
+    };
+    Some(match unit.to_ascii_lowercase().as_str() {
+        "x" | "dppx" => n.value,
+        "dpi" => n.value / 96.0,
+        "dpcm" => n.value * 2.54 / 96.0,
+        _ => return None,
+    })
+}
+
+/// Evalúa un `calc()` de resoluciones y números: (valor, ¿es una resolución?). Sumas y restas
+/// de términos del mismo tipo; productos con un número; paréntesis anidados.
+fn calc_resolution(values: &[ComponentValue]) -> Option<(f64, bool)> {
+    let items: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
+    let factor = |v: &ComponentValue| -> Option<(f64, bool)> {
+        match v {
+            ComponentValue::Block(b) if b.kind == bf_css::syntax::BlockKind::Paren => {
+                calc_resolution(&b.value)
+            }
+            ComponentValue::Function(f) if f.name.eq_ignore_ascii_case("calc") => {
+                calc_resolution(&f.value)
+            }
+            _ => match v.token() {
+                Some(TokenKind::Number(n)) => Some((n.value, false)),
+                _ => resolution_value(v).map(|r| (r, true)),
+            },
+        }
+    };
+    let mut sum: Option<(f64, bool)> = None;
+    let mut sign = 1.0;
+    let mut i = 0;
+    while i < items.len() {
+        let mut term = factor(items[i])?;
+        i += 1;
+        while let Some(TokenKind::Delim(op @ ('*' | '/'))) = items.get(i).and_then(|v| v.token()) {
+            let rhs = factor(items.get(i + 1)?)?;
+            term = match (op, term, rhs) {
+                ('*', (a, ra), (b, rb)) if !(ra && rb) => (a * b, ra || rb),
+                ('/', (a, ra), (b, false)) if b != 0.0 => (a / b, ra),
+                _ => return None,
+            };
+            i += 2;
+        }
+        sum = Some(match sum {
+            None => (sign * term.0, term.1),
+            Some((acc, kind)) if kind == term.1 => (acc + sign * term.0, kind),
+            Some(_) => return None,
+        });
+        match items.get(i).and_then(|v| v.token()) {
+            None => break,
+            Some(TokenKind::Delim('+')) => sign = 1.0,
+            Some(TokenKind::Delim('-')) => sign = -1.0,
+            _ => return None,
+        }
+        i += 1;
+    }
+    sum
+}
+
+/// `image-set( <image-set-option># )` (CSS Images 4 §2.4).
+fn parse_image_set(v: &ComponentValue) -> Option<Vec<ImageSetOption>> {
+    let ComponentValue::Function(f) = v else {
+        return None;
+    };
+    if !(f.name.eq_ignore_ascii_case("image-set")
+        || f.name.eq_ignore_ascii_case("-webkit-image-set"))
+    {
+        return None;
+    }
+    let mut out = Vec::new();
+    for group in split_comma_separated(&f.value) {
+        let items: Vec<&ComponentValue> = group.iter().filter(|v| !v.is_whitespace()).collect();
+        let (first, rest) = items.split_first()?;
+        let image = match first.token() {
+            Some(TokenKind::String(s)) => Image::Url(s.clone()),
+            _ => parse_url(first)
+                .map(Image::Url)
+                .or_else(|| Gradient::parse(first).map(|g| Image::Gradient(Box::new(g))))?,
+        };
+        let (mut resolution, mut mime) = (None, None);
+        for v in rest {
+            if let Some(r) = resolution_dppx(v) {
+                if resolution.replace(r).is_some() {
+                    return None;
+                }
+            } else if let ComponentValue::Function(t) = v
+                && t.name.eq_ignore_ascii_case("type")
+            {
+                let args: Vec<&ComponentValue> =
+                    t.value.iter().filter(|v| !v.is_whitespace()).collect();
+                let [arg] = args.as_slice() else {
+                    return None;
+                };
+                let Some(TokenKind::String(m)) = arg.token() else {
+                    return None;
+                };
+                if mime.replace(m.clone()).is_some() {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        out.push(ImageSetOption {
+            image,
+            resolution: resolution.unwrap_or(1.0),
+            mime,
+        });
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 impl PropValue for Image {
@@ -1754,13 +1899,23 @@ impl PropValue for Image {
             [v] if is_ident(v, "none") => Some(Image::None),
             [v] => parse_url(v)
                 .map(Image::Url)
-                .or_else(|| Gradient::parse(v).map(|g| Image::Gradient(Box::new(g)))),
+                .or_else(|| Gradient::parse(v).map(|g| Image::Gradient(Box::new(g))))
+                .or_else(|| parse_image_set(v).map(Image::Set)),
             _ => None,
         }
     }
     fn compute(&self, ctx: &ComputeContext<'_>) -> Self {
         match self {
             Image::Gradient(g) => Image::Gradient(Box::new(g.compute(ctx))),
+            Image::Set(options) => Image::Set(
+                options
+                    .iter()
+                    .map(|o| ImageSetOption {
+                        image: o.image.compute(ctx),
+                        ..o.clone()
+                    })
+                    .collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -1769,6 +1924,19 @@ impl PropValue for Image {
             Image::None => "none".into(),
             Image::Url(u) => format!("url({u:?})"),
             Image::Gradient(g) => g.to_css(),
+            Image::Set(options) => {
+                let parts: Vec<String> = options
+                    .iter()
+                    .map(|o| {
+                        let mut s = format!("{} {}x", o.image.to_css(), fmt_number(o.resolution));
+                        if let Some(m) = &o.mime {
+                            let _ = write!(s, " type({m:?})");
+                        }
+                        s
+                    })
+                    .collect();
+                format!("image-set({})", parts.join(", "))
+            }
         }
     }
 }

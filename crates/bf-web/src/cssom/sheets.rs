@@ -788,6 +788,87 @@ pub fn schedule_link_load(agent: &mut Agent, n: NodeRef) {
     );
 }
 
+/// ¿`rel` de `n` tiene el tipo de enlace `kind`? (HTML §4.6.7: lista separada por espacios,
+/// sin distinguir mayúsculas.)
+fn link_has_rel(agent: &Agent, n: NodeRef, kind: &str) -> bool {
+    with_doc(agent, n.doc, |d| {
+        d.element(n.node)
+            .filter(|e| e.is_html("link"))
+            .and_then(|e| e.attr("rel"))
+            .is_some_and(|r| {
+                r.split_ascii_whitespace()
+                    .any(|t| t.eq_ignore_ascii_case(kind))
+            })
+    })
+}
+
+/// E2: un `<link>` del documento quedó conectado (lo insertó el parser o un script): una hoja
+/// carga y dispara `load`/`error` ([`schedule_link_load`]); un `preload` busca su recurso y
+/// dispara `load` o `error` (HTML §4.6.7.4; el recurso no se guarda: el motor no lo
+/// reutiliza). Los dos demoran el `load` del documento mientras tanto.
+pub fn link_connected(agent: &mut Agent, n: NodeRef) {
+    if n.doc != 0 {
+        return;
+    }
+    if link_has_rel(agent, n, "stylesheet") {
+        crate::html::legacy_factories::delay_load(agent, n, true);
+        schedule_link_load(agent, n);
+    } else if link_has_rel(agent, n, "preload") {
+        schedule_preload(agent, n);
+    }
+}
+
+/// `<link rel=preload href>`: busca `href` y dispara `load` (respuesta 2xx) o `error`, si el
+/// enlace sigue conectado y siendo un `preload`.
+fn schedule_preload(agent: &mut Agent, n: NodeRef) {
+    let realm = WebContextHandle::current(agent).realm;
+    let url = with_doc(agent, n.doc, |d| {
+        let href = d.element(n.node)?.attr("href")?.to_owned();
+        bf_infra::Url::parse(&href, Some(&d.base_url())).ok()
+    });
+    let fire = move |agent: &mut Agent, ok: bool| {
+        crate::html::legacy_factories::delay_load(agent, n, false);
+        let live =
+            with_doc(agent, n.doc, |d| d.is_connected(n.node)) && link_has_rel(agent, n, "preload");
+        if live {
+            crate::dom::events::fire_event(
+                agent,
+                n.doc,
+                bf_dom::events::EventTarget::Node(n.node),
+                if ok { "load" } else { "error" },
+                bf_dom::events::EventInit::default(),
+                bf_dom::events::EventKind::Event,
+            );
+        }
+        crate::html::legacy_factories::resume_load(agent, realm);
+    };
+    crate::html::legacy_factories::delay_load(agent, n, true);
+    let Some(url) = url else {
+        agent.queue_task(
+            bf_js::host::TaskSource::Networking,
+            Box::new(move |agent: &mut Agent| {
+                let saved = agent.current_realm;
+                agent.current_realm = realm;
+                fire(agent, false);
+                agent.current_realm = saved;
+            }),
+        );
+        return;
+    };
+    let req = crate::net::NetRequest {
+        url,
+        options: bf_net::RequestOptions::default(),
+    };
+    crate::net::start(
+        agent,
+        req,
+        Box::new(move |agent: &mut Agent, r: crate::net::NetResult| {
+            let ok = r.is_ok_and(|r| (200..300).contains(&r.status));
+            fire(agent, ok);
+        }),
+    );
+}
+
 /// El evento `load` de un `<style>` conectado (HTML §4.2.6, "the style element"): en una
 /// tarea, si sigue en el documento.
 pub fn schedule_style_load(agent: &mut Agent, n: NodeRef) {
@@ -824,6 +905,16 @@ fn link_loaded(agent: &mut Agent, n: NodeRef, id: u64) {
         return;
     }
     st.link_loads.remove(&n);
+    // E2: deja de demorar el `load` del documento (lo marcó [`link_connected`]) y, después
+    // del evento del enlace, "the end" sigue.
+    let realm = WebContextHandle::current(agent).realm;
+    crate::html::legacy_factories::delay_load(agent, n, false);
+    link_load_event(agent, n);
+    crate::html::legacy_factories::resume_load(agent, realm);
+}
+
+/// `load` o `error` en el `<link>` según cómo quedó su hoja.
+fn link_load_event(agent: &mut Agent, n: NodeRef) {
     // `sync` crea (o reutiliza) la hoja del elemento si sigue siendo una hoja activa.
     sync(agent);
     let st = &state(agent).sheets;
@@ -862,7 +953,11 @@ pub fn link_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str, removed
         state(agent).sheets.explicitly_enabled.insert(n);
     }
     if connected_link {
-        schedule_link_load(agent, n);
+        if link_has_rel(agent, n, "preload") && !link_has_rel(agent, n, "stylesheet") {
+            schedule_preload(agent, n);
+        } else {
+            schedule_link_load(agent, n);
+        }
     }
 }
 

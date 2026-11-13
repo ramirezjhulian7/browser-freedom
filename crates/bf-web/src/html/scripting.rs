@@ -220,6 +220,28 @@ pub fn fire_event(
 }
 
 impl ScriptHost for PageHost<'_> {
+    // E2: como en la ventana (`bom::script`): los `<link>` del parser cargan su hoja o su
+    // `preload`, y los `<img>` piden su imagen; los dos demoran `load`.
+    fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
+        let realm = self.realm;
+        super::legacy_factories::with_lent_document(
+            self.agent,
+            realm,
+            doc.document_mut(),
+            |agent| crate::cssom::sheets::link_connected(agent, crate::NodeRef::new(0, link)),
+        );
+    }
+
+    fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
+        let realm = self.realm;
+        super::legacy_factories::with_lent_document(
+            self.agent,
+            realm,
+            doc.document_mut(),
+            |agent| super::legacy_factories::img_created(agent, crate::NodeRef::new(0, img)),
+        );
+    }
+
     fn prepare(&mut self, doc: &mut Parser, script: NodeId) -> ScriptDisposition {
         let Some(info) = doc.document().script_info(script).cloned() else {
             return ScriptDisposition::Failed;

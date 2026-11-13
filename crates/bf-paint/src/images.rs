@@ -227,6 +227,9 @@ pub struct PageImages {
     pub stats: bf_image::DecodeStats,
     /// Imágenes que no se pudieron descargar.
     pub fetch_failed: usize,
+    /// E2: densidad de la pantalla con la que se eligieron las fuentes (`srcset`,
+    /// `image-set()`); 0 = sin fijar (1).
+    pub device_pixel_ratio: f32,
 }
 
 impl PageImages {
@@ -277,6 +280,43 @@ impl PageImages {
         }
         cache.insert(key, pixmap.clone());
         Some(pixmap)
+    }
+
+    /// E2: la imagen que se usa de `img` y su resolución (dppx): la opción de un
+    /// `image-set()` que se elige con la densidad de la pantalla y el `type` (CSS Images 4
+    /// §2.4, con [`bf_image::source::choose`]); cualquier otra, ella misma a `1x`. `None` para
+    /// `none` o un `image-set()` sin opción usable.
+    pub fn chosen<'i>(&self, img: &'i Image) -> Option<(&'i Image, f32)> {
+        match img {
+            Image::None => None,
+            Image::Set(options) => {
+                let set = options
+                    .iter()
+                    .enumerate()
+                    // Una resolución de 0 (o un `calc()` negativo, recortado a 0) daría un
+                    // tamaño natural infinito: la opción no se usa.
+                    .filter(|(_, o)| {
+                        o.resolution > 0.0
+                            && o.mime
+                                .as_deref()
+                                .is_none_or(bf_image::source::supports_type)
+                    })
+                    .map(|(i, o)| bf_image::source::ImageSource {
+                        url: i.to_string(),
+                        density: f64::from(o.resolution),
+                    })
+                    .collect();
+                let dpr = if self.device_pixel_ratio > 0.0 {
+                    self.device_pixel_ratio
+                } else {
+                    1.0
+                };
+                let pick = bf_image::source::choose(set, f64::from(dpr))?;
+                let o = options.get(pick.url.parse::<usize>().ok()?)?;
+                Some((&o.image, o.resolution))
+            }
+            other => Some((other, 1.0)),
+        }
     }
 
     /// La densidad de la fuente elegida para `node` (1 si no se eligió por densidad).
@@ -619,7 +659,10 @@ pub fn load_images_in(
     loader: &dyn ResourceLoader,
     media: &bf_css::media::MediaContext,
 ) -> PageImages {
-    let mut images = PageImages::default();
+    let mut images = PageImages {
+        device_pixel_ratio: media.device_pixel_ratio as f32,
+        ..PageImages::default()
+    };
     let mut urls: Vec<String> = Vec::new();
     let want = |u: String, urls: &mut Vec<String>| {
         if !urls.contains(&u) {
@@ -671,16 +714,17 @@ pub fn load_images_in(
         images.svg_resources.load(&svg, Some(base), Some(loader));
     }
     for style in styles.values() {
-        for img in style.background_image.0.iter().chain(&style.mask_image.0) {
-            if let Image::Url(u) = img {
+        let used = style
+            .background_image
+            .0
+            .iter()
+            .chain(&style.mask_image.0)
+            .chain([&style.list_style_image, &style.border_image_source]);
+        for img in used {
+            // De un `image-set()`, solo la opción elegida.
+            if let Some((Image::Url(u), _)) = images.chosen(img) {
                 want(u.clone(), &mut urls);
             }
-        }
-        if let Image::Url(u) = &style.list_style_image {
-            want(u.clone(), &mut urls);
-        }
-        if let Image::Url(u) = &style.border_image_source {
-            want(u.clone(), &mut urls);
         }
     }
     // Carga en paralelo: la red domina el tiempo.

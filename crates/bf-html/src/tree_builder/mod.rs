@@ -207,7 +207,8 @@ struct TreeBuilder {
     /// pasos que siguen a sacarlo de la stack (13.2.6.4.8) apenas vuelve del dispatcher.
     script_end: Option<NodeId>,
     /// E10: los `link` HTML que el parser insertó conectados al documento y de los que el host
-    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]).
+    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]); E2: también los `img`
+    /// ([`script::ScriptHost::img_inserted`]).
     inserted_links: Vec<NodeId>,
     /// *Script nesting level* (13.2.4.4 "parser pause flag" y 13.2.6.4.8).
     nesting: u32,
@@ -817,8 +818,11 @@ impl TreeBuilder {
         self.doc.insert_before(loc.parent, element, loc.before);
         // E10: un `link` que queda conectado (no en el contenido de un `template`) empieza a
         // procesar su recurso (HTML §4.6.7 "becomes browsing-context connected"): se avisa al
-        // host al volver del dispatcher.
-        if self.doc.element(element).is_some_and(|e| e.is_html("link"))
+        // host al volver del dispatcher. E2: un `img`, igual (pide su imagen, §4.8.4.3.5).
+        if self
+            .doc
+            .element(element)
+            .is_some_and(|e| e.is_html("link") || e.is_html("img"))
             && self.doc.is_connected(element)
         {
             self.inserted_links.push(element);
