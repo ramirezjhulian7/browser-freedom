@@ -4330,6 +4330,23 @@ impl App {
             .count();
         let (f50, f95, fmax) = stats(&mut frames);
         let (r50, _, _) = stats(&mut rasters);
+        // Cuántos ítems y cuántas capas (opacidad, máscara, efecto) tiene la lista.
+        let (items, layers) = self.page.as_ref().map_or((0, 0), |p| {
+            let l = &p.display_list.items;
+            let layers = l
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        DisplayItem::PushOpacity(_)
+                            | DisplayItem::PushMask
+                            | DisplayItem::PushEffect
+                    )
+                })
+                .count();
+            (l.len(), layers)
+        });
+        trace(&format!("perf lista: {items} ítems, {layers} capas"));
         format!(
             "perf desplazamiento: {n} cuadros de {} px a escala {}: mediana {}, p95 {}, máx {}; \
              raster mediano {}; {slow} cuadros de más de 16,7 ms",

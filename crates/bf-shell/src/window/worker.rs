@@ -817,13 +817,14 @@ impl State {
                 .map_or(Duration::ZERO, Engine::script_time);
             let t = page.timings;
             super::trace(&format!(
-                "perf carga {}: red/caché {} · parseo {} · scripts {} · estilo {} · imágenes {} \
-                 · maqueta {} · lista {} ({} nodos)",
+                "perf carga {}: red/caché {} · parseo {} · scripts {} · hojas {} · cascada {} \
+                 · imágenes {} · maqueta {} · lista {} ({} nodos)",
                 loaded.url,
                 super::ms(loaded.fetch),
                 super::ms(loaded.parse.saturating_sub(scripts)),
                 super::ms(scripts),
-                super::ms(t.style),
+                super::ms(t.style.saturating_sub(t.cascade)),
+                super::ms(t.cascade),
                 super::ms(t.images),
                 super::ms(t.layout),
                 super::ms(t.paint),
