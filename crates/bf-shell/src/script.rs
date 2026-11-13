@@ -1029,6 +1029,12 @@ impl Engine {
     }
 
     /// Scripts ejecutados y con error.
+    /// E4: tiempo total ejecutando los scripts del documento (para `BF_TRACE`).
+    pub fn script_time(&self) -> Duration {
+        bf_web::bom::script::script_env(&self.rt.agent, self.realm)
+            .map_or(Duration::ZERO, |e| e.run_time)
+    }
+
     pub fn counts(&self) -> (usize, usize) {
         bf_web::bom::script::script_env(&self.rt.agent, self.realm)
             .map_or((0, 0), |e| (e.executed, e.failed))

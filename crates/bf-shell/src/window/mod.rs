@@ -271,6 +271,11 @@ struct App {
     graphics: Option<Graphics>,
     /// Tamaño lógico cuando no hay ventana (sesiones sin ventana de [`session`]).
     headless: Size,
+    /// E4: px de dispositivo por px lógico sin ventana (el paso `scale:` de [`session`]; 2 =
+    /// pantalla Retina).
+    headless_scale: f32,
+    /// E4: cuándo empezó la última navegación, hasta su primera pintura (`BF_TRACE`).
+    nav_start: Cell<Option<Instant>>,
     initial: Option<Url>,
     /// Superposición de depuración activa, y el fragmento bajo el puntero (rect, si es fijo y
     /// su descripción).
@@ -453,9 +458,22 @@ fn same_viewport(a: Size, b: Size) -> bool {
     (a.width - b.width).abs() <= 0.5 && (a.height - b.height).abs() <= 0.5
 }
 
+/// ¿Están activadas las trazas (`BF_TRACE`)?
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BF_TRACE").is_some())
+}
+
+/// Milisegundos con un decimal (para las trazas de rendimiento).
+fn ms(d: Duration) -> String {
+    format!("{:.1} ms", d.as_secs_f64() * 1000.0)
+}
+
 /// Trazas de eventos de la ventana en stderr, activadas con `BF_TRACE=1` (diagnóstico).
+/// E4: las que empiezan por `perf` son las mediciones de rendimiento (primera pintura,
+/// desglose de la carga y cuadros al desplazar; método en `docs/rendimiento.md`).
 fn trace(msg: &str) {
-    if std::env::var_os("BF_TRACE").is_some() {
+    if tracing() {
         eprintln!(
             "[{:>8.3}] {msg}",
             TRACE_START
@@ -836,6 +854,8 @@ impl App {
                 width: 1024.0,
                 height: 768.0,
             },
+            headless_scale: 1.0,
+            nav_start: Cell::new(None),
             initial,
             overlay: false,
             overlay_hover: None,
@@ -862,7 +882,7 @@ impl App {
     fn dpi(&self) -> f32 {
         self.graphics
             .as_ref()
-            .map_or(1.0, |g| g.window.scale_factor() as f32)
+            .map_or(self.headless_scale, |g| g.window.scale_factor() as f32)
     }
 
     /// Tamaño lógico de la ventana.
@@ -1710,6 +1730,8 @@ impl App {
         if let Some(e) = self.history.get_mut(self.index) {
             e.scroll = self.scroll;
         }
+        self.nav_start.set(Some(Instant::now()));
+        trace(&format!("perf navegación {}", url.href()));
         self.next_id += 1;
         let id = self.next_id;
         let mut recent: Vec<(String, String)> = Vec::new();
@@ -2757,8 +2779,19 @@ impl App {
                     Rgba::WHITE,
                     self.scroll,
                 );
-                self.raster.set(Some(start.elapsed()));
+                let raster = start.elapsed();
+                self.raster.set(Some(raster));
                 *cache = Some((key, page));
+                // E4: la primera pintura de la navegación (el primer raster de su página).
+                if self.loading.is_none()
+                    && let Some(nav) = self.nav_start.take()
+                {
+                    trace(&format!(
+                        "perf primera pintura: {} desde la navegación (raster {})",
+                        ms(nav.elapsed()),
+                        ms(raster)
+                    ));
+                }
             }
             if let Some((_, page)) = cache.as_ref() {
                 blit(&mut frame, page, 0.0, area.y * dpi);
@@ -4263,6 +4296,52 @@ impl App {
         }
     }
 
+    /// E4: `n` cuadros de desplazamiento de `dy` px (cambia de sentido en los bordes); devuelve
+    /// el resumen de lo que tardó cada uno.
+    fn scroll_bench(&mut self, n: usize, dy: &mut f32) -> String {
+        let mut frames = Vec::with_capacity(n);
+        let mut rasters = Vec::with_capacity(n);
+        for _ in 0..n {
+            let start = Instant::now();
+            let before = self.scroll;
+            self.scroll_by(0.0, *dy);
+            if self.scroll == before {
+                *dy = -*dy;
+                self.scroll_by(0.0, *dy);
+            }
+            self.sync_view();
+            self.receive();
+            self.apply_page_scroll(&[]);
+            let _ = self.frame();
+            frames.push(start.elapsed());
+            rasters.push(self.raster.get().unwrap_or_default());
+        }
+        let stats = |v: &mut Vec<Duration>| {
+            v.sort();
+            let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            (at(0.5), at(0.95), v[v.len() - 1])
+        };
+        if frames.is_empty() {
+            return "perf desplazamiento: 0 cuadros".to_owned();
+        }
+        let slow = frames
+            .iter()
+            .filter(|d| d.as_secs_f64() > 1.0 / 60.0)
+            .count();
+        let (f50, f95, fmax) = stats(&mut frames);
+        let (r50, _, _) = stats(&mut rasters);
+        format!(
+            "perf desplazamiento: {n} cuadros de {} px a escala {}: mediana {}, p95 {}, máx {}; \
+             raster mediano {}; {slow} cuadros de más de 16,7 ms",
+            dy.abs(),
+            self.dpi(),
+            ms(f50),
+            ms(f95),
+            ms(fmax),
+            ms(r50)
+        )
+    }
+
     /// Centro (px lógicos de la ventana) del primer texto de un enlace que contiene `needle`.
     fn link_point(&self, needle: &str) -> Option<(f32, f32)> {
         /// Textos que contienen `needle`, con si están dentro de una caja fija.
@@ -4355,6 +4434,21 @@ impl App {
                 self.settle();
             }
             "newtab" => self.new_tab(None, false),
+            // E4: `scale:2` rasteriza con 2 px de dispositivo por px lógico (Retina).
+            "scale" => {
+                self.headless_scale = arg.parse().map_err(|_| bad())?;
+                self.page_generation += 1;
+            }
+            // E4: `scrollbench:<cuadros>:<dy>` desplaza la página `dy` px por cuadro y mide el
+            // trabajo de cada cuadro de la ventana (lo de `redraw`: el scroll al hilo del
+            // documento, lo que llegó de él, lo `sticky` y el raster); resumen en stderr.
+            "scrollbench" => {
+                let (n, dy) = arg.split_once(':').ok_or_else(bad)?;
+                let n: usize = n.parse().map_err(|_| bad())?;
+                let mut dy: f32 = dy.parse().map_err(|_| bad())?;
+                let summary = self.scroll_bench(n, &mut dy);
+                eprintln!("{summary}");
+            }
             // `textzoom:in|out|reset`: lo que hace `Ctrl+Shift` + rueda (E11).
             "textzoom" => match arg {
                 "in" => self.text_zoom_step(true),
