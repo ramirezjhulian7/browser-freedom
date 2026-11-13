@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-13** (`master` `71444d2`). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `21ea345`). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -25,17 +25,24 @@ mediciones anteriores, con su fecha).
 
 Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
 está cerrada y no entra en la cuenta. Con ella al 100 %, el total sería (100 + 94.7 + 94.1 +
-100 + 16.7) / 5 = **81.1 %**.
+100 + 33.3) / 5 = **84.4 %**.
 
 | Fase | Criterios | Cumplidos | Sin medir | Avance |
 |---|---:|---:|---:|---:|
 | 2: JavaScript y la plataforma web dinámica | 19 | 18 | 0 | 94.7 % |
 | 3: completar CSS y el texto | 17 | 16 | 0 | 94.1 % |
 | 4: red, medios y documentos | 9 | 9 | 0 | 100.0 % |
-| 5: navegador de uso diario | 6 | 1 | 0 | 16.7 % |
-| **Total** (media de las fases) | 51 | 44 | 0 | **76.4 %** |
+| 5: navegador de uso diario | 6 | 2 | 0 | 33.3 % |
+| **Total** (media de las fases) | 51 | 45 | 0 | **80.5 %** |
 
-Cambios respecto de la tabla del 2026-11-12 (68.0 %):
+Cuenta: (94.7 + 94.1 + 100 + 33.3) / 4 = 80.5 %; cumplidos 18 + 16 + 9 + 2 = 45 de
+19 + 17 + 9 + 6 = 51.
+
+Cambios respecto de la tabla de la ronda 1 del ciclo de cierre (76.4 %):
+- **Fase 5, `html-aam` y `wai-aria`**: 93.3 % y 91.8 % en `master` (E1, integrado en
+  `21ea345`; `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1").
+
+Cambios de la ronda 1 del ciclo de cierre respecto de la tabla del 2026-11-12 (68.0 %):
 - **2.3, reftests `needs-js`**: se cumple con el criterio reformulado (ver 2.3).
 - **3.3, `linear-gradient` en css-flexbox**: 16 / 16 (E5, ronda 6).
 - **4.1, recarga de Wikipedia**: se cumple con el criterio reformulado (ver 4.1).
@@ -48,15 +55,26 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 | Apartado | Criterio | Cifra actual | Meta | Fuente |
 |---|---|---|---|---|
 | 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8155 / 8166 subtests (99.9 %), 236 documentos; los 11 que quedan necesitan cambios grandes o se contradicen entre sí | 0 fallos | `pendiente/mac/e3.md`, ciclo de cierre, ronda 2 |
-| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 86 / 108 | pasan | `pendiente/mac/e5-flexbox-subconjuntos.md` |
-| 5 | WPT `html-aam` y `wai-aria` | 0 % y 21.8 % en `master`; 93.3 % y 91.8 % en `army/e1`, en integración | ≥ 50 % | `pendiente/mac/e1.md` de `army/e1`, ronda 5 |
-| 5 | Un lector de pantalla lee Wikipedia | no: el árbol de accesibilidad está a medias en `army/e1` y no se expone al sistema | lo lee | `pendiente/mac/e1.md` de `army/e1` |
-| 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC | no escapa | — |
-| 5 | 60 fps al desplazar Wikipedia | mediana del cuadro de 124 ms a escala 1 y 482 ms a escala 2; ningún cuadro baja de 16.7 ms | 60 fps | `pendiente/mac/e4.md`, ronda 5 |
-| 5 | Primera pintura de Wikipedia en release | 797 a 892 ms (E4, carga 27-29); mediana de 953 ms (E2, carga 11-19) | < 500 ms | `pendiente/mac/e4.md`, ronda 5; `pendiente/mac/e2.md`, ronda 8 |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 86 / 108 en `master`; 94 / 107 en `army/e5`, sin integrar | pasan | `pendiente/mac/e5-flexbox-subconjuntos.md`; la de la rama, en su `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 1" |
+| 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
+| 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
+| 5 | 60 fps al desplazar Wikipedia | 53 fps a escala 1 (18.8 ms por cuadro) y 17 fps a escala 2 (57.8 ms) | 60 fps | [`rendimiento.md`](rendimiento.md), "Resultados"; `pendiente/mac/e4.md`, "Cierre, ronda 1" |
+| 5 | Primera pintura de Wikipedia en release | mediana de 1205 ms (1311, 1205 y 1162 ms, carga 30-53) | < 500 ms | [`rendimiento.md`](rendimiento.md), "Resultados"; `pendiente/mac/e4.md`, "Cierre, ronda 1" |
 
 El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md). Las
 dos se midieron con la máquina cargada por otros ejecutores.
+
+## Decisiones pendientes del usuario
+
+Tres criterios no avanzan sin una decisión que no le toca a ningún ejecutor:
+- **Lector de pantalla (fase 5).** El motor ya calcula rol y nombre accesibles, pero un lector
+  de pantalla de macOS solo lee lo que se expone por `NSAccessibility`. Eso pide FFI con
+  Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo.
+- **Fuzzer de IPC (fase 5).** Hace falta separar el motor en procesos (navegador y contenido)
+  con IPC propio. Hoy cada pestaña es un hilo del mismo proceso.
+- **3.6, flexbox por palabras clave de tamaño.** 8 de los 108 tests son de CSS Flexbox 2
+  (`flex-wrap: balance`, `flex-line-count`), un borrador sin texto estable. O se implementa
+  sin especificación estable o se sacan del criterio.
 
 Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
 en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
@@ -401,9 +419,11 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
   2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
   `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
-- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **86 / 108** (Mac,
-  2026-11-12, E5 ronda 6, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que pasen todos;
-  74 / 108 antes). Fallan 22:
+- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **86 / 108** en
+  `master` (Mac, 2026-11-12, E5 ronda 6, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que
+  pasen todos; 74 / 108 antes). La rama `army/e5`, todavía sin integrar, llega a 94 / 107 con
+  el algoritmo de tamaños intrínsecos de flex (su `pendiente/mac/e5.md`, "Ciclo de cierre,
+  ronda 1"). En `master` fallan 22:
   - `flex-wrap: balance` y `flex-line-count` (8). Son de CSS Flexbox 2, un borrador sin texto
     estable, y no se implementan.
   - El algoritmo de tamaños intrínsecos de flex, §9.9.1 (5).
@@ -508,9 +528,10 @@ y los list box se desplazan con la rueda.
 - **Hecho después** (E2, ronda 8, `pendiente/mac/e2.md`): `loading=lazy` (HTML §4.8.4.3.9)
   aplaza la petición hasta que la imagen queda a menos de 1250 px del viewport. Cada imagen se
   decodifica una vez por proceso (`bf_image::decode_frames_shared`). WPT `the-img-element`
-  75.2 % (1470 / 1954).
-- **Falta**: pedir las imágenes perezosas al desplazar en la ventana (hoy solo al cambiar el
-  DOM); carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
+  75.2 % (1470 / 1954). Desde la ronda 1 del ciclo de cierre (E6, `pendiente/mac/e6.md`) la
+  ventana también las pide al desplazar (`Engine::update_view`).
+- **Falta**: el pintado del shell pide todos los `<img>` sin mirar `loading`
+  (`bf_paint::images::load_images_in`, hallazgo de E6); carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
   `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
 
 ---
@@ -539,42 +560,74 @@ y los list box se desplazan con la rueda.
   - Aceptación: 60 fps al desplazar Wikipedia; primera pintura de Wikipedia < 500 ms en
     release.
 
-**Estado** (1 de 6 criterios cumplidos):
-- **Accesibilidad**: en `master` hay la reflexión ARIA en el DOM (`ARIAMixin`, E1) y el zoom
-  de texto (E11). `html-aam` 0 / 889 y `wai-aria` 128 / 588 (21.8 %), medidos por E1 sobre
-  `master` `cd8fc5a`.
-  - **En integración, `army/e1`**: rol y nombre accesibles (WIP). Ahí `html-aam` sube a
-    **93.3 %** y `wai-aria` a **91.8 %** (meta ≥ 50 %) (`pendiente/mac/e1.md` de esa rama,
-    ronda 5).
-  - Falta exponer el árbol al sistema (NSAccessibility) y que un lector de pantalla lea
-    Wikipedia.
+**Estado** (2 de 6 criterios cumplidos):
+- **Accesibilidad** (E1, en `master` desde `21ea345`; `pendiente/mac/e1.md`, "Ciclo de cierre,
+  ronda 1"):
+  - El motor calcula el rol y el nombre accesible de cada elemento (HTML-AAM, ARIA 1.2,
+    AccName 1.2, también a través de shadow roots y slots), y los expone a los tests con
+    `test_driver.get_computed_role`/`get_computed_label`.
+  - `html-aam` **93.3 %** (829 / 889) y `wai-aria` **91.8 %** (540 / 588): criterio
+    cumplido (meta ≥ 50 %). `accname` 91.7 % y `core-aam` 8 / 8.
+  - También en `master`: la reflexión ARIA en el DOM (`ARIAMixin`) y el zoom de texto (E11).
+  - **Falta** exponer el árbol al sistema (`NSAccessibility`) para que un lector de pantalla
+    lea Wikipedia: decisión pendiente (ver "Decisiones pendientes del usuario").
 - **Procesos y sandbox**: falta. Hoy cada pestaña es un hilo del mismo proceso
-  (`bf-shell/src/window/worker.rs`). Un pánico en una pestaña **no cierra la ventana**: la
-  pestaña muestra "Esta página falló" con la URL, el mensaje y "Recargar", y las demás siguen
-  (`window::tests::tab_panic_shows_error_page`, E6, Mac, 2026-11-12; criterio cumplido).
-- **Seguridad**: `Referrer-Policy` (`bf-net/src/referrer.rs`, con la política del documento en
-  los subrecursos del shell) y HSTS (`bf-net/src/hsts.rs`) hechos (E6); COOP/COEP y
-  `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las
-  cabeceras). En integración, `army/e6`: CSP 3 y Mixed Content
-  (`bf-net/src/{csp,mixed_content,security}.rs`, `pendiente/mac/e6.md` de esa rama, ronda 7).
-  Faltan Permissions Policy y Safe Browsing.
-- **Interfaz**: pestañas; historial persistente, marcadores, descargas con su barra, buscar en
-  la página, zoom de texto, opciones, varias ventanas y sesión restaurada (E11, en `master`
-  desde `9d64fdd`; `bf-shell/src/{history,bookmarks,downloads,find,settings,restore}.rs`).
-  Atajos con `Cmd` en macOS (E6, `bf-shell/src/window/keys.rs`). Un pánico en el hilo de la
-  ventana guarda la sesión antes de salir (E6, ronda 6). En integración, `army/e6`:
-  `Freedom.app` firmada ad hoc con su `.dmg` (`packaging/macos/build.sh`). Impresión
-  (`@page`), falta.
-- **Rendimiento** (`pendiente/mac/e4.md`, ronda 5; método en [`rendimiento.md`](rendimiento.md)):
-  - En `master` hay un índice de reglas en la cascada, que bajó la cascada de unos 600 ms a
-    unos 180 ms. También se componen solo las franjas pintadas de las capas de opacidad.
-  - **Primera pintura de Wikipedia**: de 797 a 892 ms con la máquina cargada (meta
-    < 500 ms). E2 midió una mediana de 953 ms en su ronda 8. La red y la caché se llevan
-    unos 270 ms, en validaciones que RFC 9111 obliga a hacer.
-  - **Desplazamiento**: la mediana del cuadro es de 124 ms a escala 1 y de 482 ms a escala 2.
-    Ningún cuadro baja de 16.7 ms (meta: 60 fps).
-  - **En integración, `army/e4`**: raster en tiles de la página, en paralelo y con
-    desplazamiento incremental (`pendiente/mac/e4.md` de esa rama, ronda 7).
+  (`bf-shell/src/window/worker.rs`); separar procesos es una decisión pendiente. Un pánico en
+  una pestaña **no cierra la ventana**: la pestaña muestra "Esta página falló" con la URL, el
+  mensaje y "Recargar", y las demás siguen (`window::tests::tab_panic_shows_error_page`, E6,
+  Mac, 2026-11-12; criterio cumplido).
+- **Seguridad**:
+  - `Referrer-Policy` (`bf-net/src/referrer.rs`) y HSTS (`bf-net/src/hsts.rs`) (E6); COOP/COEP
+    y `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las
+    cabeceras).
+  - **CSP 3 y Mixed Content** (E6, en `master` desde `21ea345`;
+    `bf-net/src/{csp,mixed_content,security}.rs`, `bf-web/src/security.rs`;
+    `pendiente/mac/e6.md`, ronda 7 y "Ciclo de cierre, ronda 1"):
+    - CSP desde la cabecera y desde `<meta>`: `script-src` con nonce, hash y
+      `'strict-dynamic'`, `connect-src`, `frame-src`, `'unsafe-eval'` y `Report-Only`.
+    - Contenido mixto: lo activo `http:` en una página `https:` se bloquea y las imágenes
+      pasan a `https:`.
+    - WPT `content-security-policy` y `mixed-content`: 173 de 1782 subtests (152 de 1754
+      antes; la mayoría necesita cabeceras o subdominios de `wptserve`).
+    - Falta de CSP: `img-src` para los `<img>` de `bf-web`; `style-src` y `script-src-attr`
+      en línea; `securitypolicyviolation` y `report-uri`/`report-to`; `worker-src`;
+      `media-src`; `connect-src` de `WebSocket` y `EventSource`; `frame-ancestors`, `sandbox`,
+      `upgrade-insecure-requests` y `base-uri`.
+  - Faltan Permissions Policy y Safe Browsing.
+- **Interfaz**:
+  - Pestañas, historial persistente, marcadores, descargas con su barra, buscar en la página,
+    zoom de texto, opciones, varias ventanas y sesión restaurada (E11, en `master` desde
+    `9d64fdd`; `bf-shell/src/{history,bookmarks,downloads,find,settings,restore}.rs`).
+  - Atajos con `Cmd` en macOS (E6, `bf-shell/src/window/keys.rs`). Un pánico en el hilo de la
+    ventana guarda la sesión antes de salir (E6, ronda 6).
+  - **`Freedom.app`** firmada ad hoc con su `.dmg` (`packaging/macos/build.sh`, E6, en `master`
+    desde `21ea345`; `pendiente/mac/e6.md`, ronda 7). El Finder todavía no le pasa el documento
+    con «Abrir con» (`winit` no expone esos eventos).
+  - Impresión (`@page`): falta.
+- **Rendimiento** (`pendiente/mac/e4.md`, "Cierre, ronda 1"; método y tabla en
+  [`rendimiento.md`](rendimiento.md)):
+  - En `master`:
+    - índice de reglas en la cascada;
+    - raster en tiles de la página, en paralelo y con desplazamiento incremental;
+    - capas superpuestas compuestas solo en su caja (`render_over`);
+    - la barra de la ventana guardada pintada.
+  - **Desplazamiento**: **53 fps a escala 1** (18.8 ms por cuadro, raster 15.3 ms) y **17 fps a
+    escala 2** (57.8 ms), con carga 57-85. Antes, 124 ms y 482 ms. Meta: 60 fps (16.7 ms).
+  - **Primera pintura de Wikipedia**: mediana **1205 ms** (meta < 500 ms). Desglose de una
+    carga típica:
+
+    | Fase | ms |
+    |---|---:|
+    | Red y caché | 287 |
+    | Parseo | 334 |
+    | Scripts | 26 |
+    | Hojas | 95 |
+    | Cascada | 238 |
+    | Imágenes | 11 |
+    | Maqueta | 168 |
+    | Lista | 9 |
+
+    La red y la caché son validaciones que RFC 9111 obliga a hacer.
   - Falta la GPU.
 
 ---
