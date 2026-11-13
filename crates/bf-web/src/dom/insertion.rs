@@ -116,6 +116,22 @@ fn resource(agent: &mut Agent, doc: DocIndex, el: NodeId, attr: &str, kind: Reso
     }
 }
 
+/// E1: el parser de la ventana de `realm` insertó un nodo en `script`, un `script` conectado
+/// que no insertó el parser (`bf_html::ScriptHost::script_children_changed`): sus *children
+/// changed steps* (HTML §4.12.1.1) lo preparan, y un inline se ejecuta en el acto, en mitad
+/// del token.
+pub fn parser_script_children_changed(
+    agent: &mut Agent,
+    realm: bf_js::vm::RealmId,
+    doc: &mut bf_dom::Document,
+    script: NodeId,
+) {
+    crate::dom::adopt::with_parser_document(agent, realm, doc, |agent| {
+        prepare_script(agent, 0, script);
+        crate::dom::mutated(agent);
+    });
+}
+
 /// "Prepare the script element" para un `script` que conectó el DOM (no el parser), y la
 /// ejecución de los inline clásicos (§4.12.1.1 paso 34.2 y "execute the script element").
 fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {

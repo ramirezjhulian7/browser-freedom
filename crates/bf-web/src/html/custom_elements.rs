@@ -1226,6 +1226,86 @@ pub fn create_element(agent: &mut Agent, el: NodeRef, is: Option<String>) -> JsR
     }
 }
 
+/// E1: "create an element for a token" (HTML §13.2.6.1) pasos 6-10 para el parser de la
+/// ventana de `realm` (`bf_html::ScriptHost::create_element_for_token`): `element` está en
+/// `doc`, sin atributos y con su *is value*. Sin definición devuelve `None` (no corre script);
+/// con ella, construye el elemento de forma síncrona, le añade `attrs` e invoca las
+/// reacciones, y devuelve el elemento que resultó.
+pub fn parser_create_element(
+    agent: &mut Agent,
+    realm: RealmId,
+    doc: &mut bf_dom::Document,
+    element: NodeId,
+    attrs: &[bf_dom::Attribute],
+) -> Option<NodeId> {
+    let reg = agent.realm_data::<Registry>(realm)?;
+    if reg.defs.is_empty() {
+        return None;
+    }
+    // 4-5: la definición, por el nombre y el *is value*.
+    let e = doc.element(element)?;
+    let is = doc.is_value(element).map(|s| s.to_string());
+    let local = e.name.to_string();
+    let found = reg.defs.iter().any(|d| {
+        d.local_name == local.as_str()
+            && (d.name == local.as_str() || is.as_deref().is_some_and(|is| d.name == is))
+    });
+    if !found {
+        return None;
+    }
+    let mut result = element;
+    crate::dom::adopt::with_parser_document(agent, realm, doc, |agent| {
+        // 7.2: el punto de control de microtasks, con la pila de JavaScript vacía.
+        if agent.frames.is_empty()
+            && let Err(Throw::Value(e)) = agent.perform_microtask_checkpoint()
+        {
+            crate::dom::events::report_exception(agent, &e);
+        }
+        // 8: "create an element" con el *synchronous custom elements flag* (DOM §4.9).
+        let el = NodeRef::new(0, element);
+        match create_element(agent, el, None) {
+            Ok(v) => {
+                if let Some(n) = unwrap_node(agent, &v).filter(|n| n.doc == 0) {
+                    result = n.node;
+                }
+            }
+            Err(Throw::Value(e)) => crate::dom::events::report_exception(agent, &e),
+            Err(_) => {}
+        }
+        // 9: "append" cada atributo (registros de mutación y `attributeChangedCallback`).
+        with_doc_mut(agent, 0, |d| {
+            for a in attrs {
+                d.set_attribute_value(
+                    result,
+                    a.name.clone(),
+                    a.value.clone(),
+                    a.prefix.clone(),
+                    a.ns,
+                );
+            }
+        });
+        // 10: se invocan las reacciones de la cola.
+        crate::dom::mutated(agent);
+    });
+    Some(result)
+}
+
+/// E1: el parser de la ventana de `realm` insertó el custom element `element` de `doc`
+/// (`bf_html::ScriptHost::custom_element_inserted`): las reacciones de la cola que rodea la
+/// inserción (§13.2.6.1, "insert an element at the adjusted insertion location", 2.3).
+pub fn parser_inserted_custom_element(
+    agent: &mut Agent,
+    realm: RealmId,
+    doc: &mut bf_dom::Document,
+    element: NodeId,
+) {
+    if !doc.has_custom_element_events() {
+        return;
+    }
+    let _ = element;
+    crate::dom::adopt::with_parser_document(agent, realm, doc, crate::dom::mutated);
+}
+
 /// Después de clonar o importar: los elementos copiados con definición se actualizan (en
 /// la cola de reacciones).
 pub fn cloned(agent: &mut Agent, root: NodeRef) {

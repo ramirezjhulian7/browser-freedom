@@ -888,6 +888,29 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         fire_pageshow(self.agent, self.realm);
         *doc = take_parser(self.agent, self.realm);
     }
+
+    // E1: los ganchos del tree builder en mitad de un token (HTML §13.2.6.1 y §4.12.1.1); el
+    // documento del parser se presta al contexto mientras corre el script (`dom::adopt`).
+    fn create_element_for_token(
+        &mut self,
+        doc: &mut Document,
+        element: NodeId,
+        attrs: &[bf_dom::Attribute],
+    ) -> Option<NodeId> {
+        crate::html::custom_elements::parser_create_element(
+            self.agent, self.realm, doc, element, attrs,
+        )
+    }
+
+    fn custom_element_inserted(&mut self, doc: &mut Document, element: NodeId) {
+        crate::html::custom_elements::parser_inserted_custom_element(
+            self.agent, self.realm, doc, element,
+        );
+    }
+
+    fn script_children_changed(&mut self, doc: &mut Document, script: NodeId) {
+        crate::dom::insertion::parser_script_children_changed(self.agent, self.realm, doc, script);
+    }
 }
 
 // --- document.write/writeln/open/close (§8.4) ---

@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 
 use bf_dom::events::{EventInit, EventTarget, NoScript};
 use bf_dom::script::{DocumentReadiness, OnReady, ScriptResult, ScriptType};
-use bf_dom::{Document, DomException, DomString, NodeId, QuirksMode};
+use bf_dom::{Attribute, Document, DomException, DomString, NodeId, QuirksMode};
 
 use super::{ParseOptions, TreeBuilder};
 use crate::tokenizer::ParseError;
@@ -93,6 +93,41 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
     /// momento.
     fn page_shown(&mut self, doc: &mut Parser) {
         let _ = doc;
+    }
+
+    // E1: los ganchos que el tree builder llama en mitad de un token. Reciben el documento
+    // del parser y no el `Parser`, que está a medio procesar el token; el host lo presta a
+    // script mientras corre.
+
+    /// E1: "create an element for a token" (HTML §13.2.6.1), pasos 6 a 10, para un posible
+    /// custom element (namespace HTML con un nombre válido de custom element o un atributo
+    /// `is`), fuera del parseo de fragmentos. `element` está creado sin atributos y con su *is
+    /// value*. Si hay definición (*will execute script*), el host hace el punto de control de
+    /// microtasks, construye el elemento de forma síncrona, le añade `attrs` (paso 9), invoca
+    /// las reacciones (paso 10) y devuelve el elemento que resultó (el constructor puede
+    /// devolver otro). Con `None` (sin definición) el tree builder añade los atributos.
+    fn create_element_for_token(
+        &mut self,
+        doc: &mut Document,
+        element: NodeId,
+        attrs: &[Attribute],
+    ) -> Option<NodeId> {
+        let _ = (doc, element, attrs);
+        None
+    }
+
+    /// E1: el parser insertó el custom element `element` ("insert an element at the adjusted
+    /// insertion location", §13.2.6.1): se invocan las reacciones de la cola que rodea la
+    /// inserción (`connectedCallback`, antes de que el parser le añada hijos).
+    fn custom_element_inserted(&mut self, doc: &mut Document, element: NodeId) {
+        let _ = (doc, element);
+    }
+
+    /// E1: el parser insertó un nodo en `script`, un `script` HTML conectado que no insertó
+    /// el parser (sus *children changed steps*, §4.12.1.1): el host lo prepara ("prepare the
+    /// script element") y, si es inline, lo ejecuta en el acto.
+    fn script_children_changed(&mut self, doc: &mut Document, script: NodeId) {
+        let _ = (doc, script);
     }
 }
 
@@ -357,7 +392,7 @@ impl Parser {
             let Some(tok) = self.b.next_tok() else {
                 return;
             };
-            self.b.process_token(tok);
+            self.b.process_token_with(tok, host);
             for el in std::mem::take(&mut self.b.inserted_links) {
                 if self.b.doc.element(el).is_some_and(|e| e.is_html("img")) {
                     host.img_inserted(self, el);
