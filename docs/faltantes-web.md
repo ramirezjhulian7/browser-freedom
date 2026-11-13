@@ -10,8 +10,8 @@ comprobó en el código de `bf-web`, sin volver a abrir los sitios.
 
 | Falta | Síntoma en los sitios | Spec | Dónde va |
 |---|---|---|---|
-| `IntersectionObserver` | `undefined`: la carga diferida hecha con scripts y las listas infinitas no arrancan. El `loading=lazy` nativo ya funciona (ver abajo). | Intersection Observer | 2.2 |
-| `ResizeObserver` | `undefined`. | Resize Observer | 2.2 |
+| `IntersectionObserver` | `undefined`: la carga diferida hecha con scripts y las listas infinitas no arrancan. El `loading=lazy` nativo ya funciona (ver abajo). En curso (E2). | Intersection Observer | 2.2 |
+| `ResizeObserver` | `undefined`. En curso (E2). | Resize Observer | 2.2 |
 | `crypto.subtle` | `undefined` (sí existe `crypto`). | Web Cryptography API | 2.2 |
 | `localStorage` en páginas `file:` | `SecurityError: The operation is insecure`. Chrome y Firefox lo permiten (origen opaco con almacenamiento propio por archivo o carpeta). | HTML §12.2 | 2.2, `bf-web` bom |
 

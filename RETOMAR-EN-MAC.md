@@ -159,13 +159,13 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
   Policy (con `img-src` y el evento `securitypolicyviolation`) y bloqueo de contenido mixto.
   Con una VPN que da una ruta IPv6 sin salida, la conexión prueba IPv4 primero (RFC 6724).
 - **Pintura:** raster en tiles de la página, en paralelo y con desplazamiento incremental; el
-  cuadro de la ventana se reutiliza y los `sticky` van en capa propia. Desplazar Wikipedia
-  cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (E4, carga 15-36); falta
-  confirmarlo con la máquina libre. `monospace` y `<pre>` salen a 13 px.
-- **Primera pintura de Wikipedia:** el parseo bajó de unos 300 ms a 56-60 ms (E3 y E2, ver
-  `docs/rendimiento.md`) y la red a unos 400 ms (E6). La última medida completa es de 823 a
-  936 ms (E2, carga 25, antes del arreglo de red de E6); falta medirla sobre `master` con la
-  máquina libre. La meta es menos de 500 ms.
+  cuadro de la ventana se reutiliza y los `sticky` van en capa propia. Desplazar Wikipedia va
+  a **60 fps**: mediana de 3.7-4.0 ms por cuadro a densidad 1 y de 5.2-6.1 ms a densidad 2
+  (medida del planificador sobre `276fa07`, con los ejecutores casi parados; criterio
+  cumplido). `monospace` y `<pre>` salen a 13 px.
+- **Primera pintura de Wikipedia:** 542-665 ms en cinco corridas (misma medida); la meta es
+  menos de 500 ms. La red sola se lleva 247-315 ms; el desglose está en `docs/roadmap.md`,
+  fase 5, "Rendimiento".
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
 - **Empaquetado:** `Freedom.app` firmada ad hoc con su `.dmg`
@@ -175,31 +175,43 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
 
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
-criterios: 80.5 %** de las fases 2 a 5 (84.4 % contando la fase 1). Lo que falta está en la
+criterios: 84.7 %** de las fases 2 a 5 (87.8 % contando la fase 1). Lo que falta está en la
 lista "Criterios no cumplidos" del roadmap; cinco puntos esperan una decisión del usuario
 (roadmap, "Decisiones pendientes del usuario").
 
 ## 8. Ramas en integración
 
-Al 2026-11-13, con `master` en `0c8b903`. `army/e2` y `army/e3` ya están integradas.
-`git log --oneline master..army/e<n>` muestra qué trae cada rama, y su nota
-(`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y qué falta. Las tres
-siguen en curso al cerrar el ciclo, y su trabajo **no** está en `master`:
+Al 2026-11-13, `master` está en `03bbd8a`. `army/e4`, `army/e5` y `army/e6` ya están
+integradas (hasta `276fa07`: raster a densidad 2, cascada, parseo de CSS, maqueta y
+precarga de la caché); `276fa07` está en GitHub y `03bbd8a` (solo documentación de E4) falta
+subirlo.
+
+`git log --oneline master..army/e<n>` muestra qué trae cada rama que todavía no está en
+`master`, y su nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y
+qué falta. En curso al escribir esto:
 
 | Rama | Qué trae | Nota |
 |---|---|---|
-| `army/e4` | 60 fps a densidad 2, cascada y parseo de CSS | `docs/pendiente/mac/e4.md` de la rama, cuando la entregue (en `master`, hasta "Cierre, ronda 3") |
-| `army/e5` | Tiempo de maqueta | `docs/pendiente/mac/e5.md` de la rama, cuando la entregue |
-| `army/e6` | Calentar la caché durante la validación del documento y juntar las peticiones en vuelo repetidas | `docs/pendiente/mac/e6.md` de la rama, "Ciclo de cierre, ronda 6" |
+| `army/e2` | `IntersectionObserver` y `ResizeObserver` | `docs/pendiente/mac/e2.md` de la rama, cuando la entregue |
+| `army/e6` | Diagnóstico de lo que le falta a `asimetrix.co` | `docs/pendiente/mac/e6.md` de la rama, cuando la entregue |
+| `army/e1`, `army/e3`, `army/e4`, `army/e5` | Primera pintura (ver la sección 9) | la de cada rama |
 
 ## 9. Lo primero al retomar
 
-1. Integrar `army/e4`, `army/e5` y `army/e6` (`git merge --no-ff`, una por una) y correr la
-   verificación completa (sección 4).
-2. Con la máquina libre, medir el desplazamiento (`scrollbench:120:40` a densidad 1 y a
-   densidad 2) y la primera pintura de Wikipedia, con el método de
-   [`docs/rendimiento.md`](docs/rendimiento.md), y actualizar los dos criterios de la fase 5
-   en `docs/roadmap.md`.
+**Objetivo del ciclo: la primera pintura de Wikipedia por debajo de 500 ms** (hoy, 542-665
+ms). La red no baja de unos 250 ms, así que el resto tiene que caber en unos 200. Dos vías:
+
+- abaratar la cascada y la maqueta;
+- adelantar a la espera de la red lo que no depende de la respuesta: instalar la ventana,
+  parsear las hojas que están en caché y compilar los scripts que están en caché
+  (`bf_js::code_cache` y `bf_web::precompile_window_scripts`, de E3; `preload.rs`, de E6,
+  es donde se llamarían).
+
+Por orden:
+
+1. Integrar las ramas que estén listas y correr la verificación completa (sección 4).
+2. Medir la primera pintura con el método de [`docs/rendimiento.md`](docs/rendimiento.md),
+   con la máquina libre, y actualizar el criterio de la fase 5 en `docs/roadmap.md`.
 3. Las decisiones pendientes del usuario (roadmap, "Decisiones pendientes del usuario"):
    lector de pantalla, fuzzer de IPC, los 8 tests de CSS Flexbox 2 de 3.6, los 2 subtests de
    `html/syntax/parsing` que no se pueden cumplir y el suelo de red de la primera pintura.
