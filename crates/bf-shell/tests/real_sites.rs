@@ -134,3 +134,41 @@ fn hacker_news() {
     let s = session("https://news.ycombinator.com/", &["wait", "wait"]);
     assert_eq!(s.title(), "Hacker News", "{}", s.log);
 }
+
+/// E6: `https://asimetrix.co/` (Next.js). Hoy muestra su propia pantalla de error ("This page
+/// couldn't load") porque el motor no tiene `IntersectionObserver` (lo implementa E2); la lista
+/// de tropiezos está en `docs/pendiente/mac/e6.md`. Comprueba que la consola no tiene errores
+/// (`[pestaña N] …` en stderr) y, con la barra de búsqueda, que la pantalla de error no está.
+#[test]
+#[ignore = "red: asimetrix.co"]
+fn asimetrix() {
+    let s = session(
+        "https://asimetrix.co/",
+        &[
+            "wait",
+            "wait",
+            "wait",
+            "wait",
+            "key:f3",
+            "type:This page couldn",
+            "wait",
+        ],
+    );
+    let errors: Vec<&str> = s
+        .log
+        .lines()
+        .filter(|l| l.starts_with("[pestaña"))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "errores de consola: {errors:#?}\n{}",
+        s.log
+    );
+    assert!(
+        s.last
+            .contains("buscar=\"This page couldn\" \"Sin resultados\""),
+        "la pantalla de error del sitio sigue a la vista:\n{}",
+        s.log
+    );
+    assert!(s.title().contains("Asimetrix"), "{}", s.log);
+}
