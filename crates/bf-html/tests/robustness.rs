@@ -1,7 +1,8 @@
 //! E3: casos del parser que antes colgaban el motor o corrían scripts de más o de menos:
 //! ciclos del adoption agency a través de un shadow root o del contenido de un template,
 //! scripts SVG (HTML §13.2.6.5), el punto de control de microtasks antes de cada script
-//! (§13.2.6.4.8, paso 1) y CR LF partidos entre dos `document.write`.
+//! (§13.2.6.4.8, paso 1), CR LF partidos entre dos `document.write` y el momento de
+//! `pageshow` en "the end" (§13.2.7).
 
 mod common;
 
@@ -24,6 +25,9 @@ struct Host<F: FnMut(&mut Parser)> {
     on_execute: F,
     checkpoints: usize,
     svg: Vec<Option<SvgScriptSource>>,
+    /// `load` de la ventana (0 o 1) cuando el parser avisó `page_shown`.
+    shown_after_load: Vec<usize>,
+    loads: usize,
 }
 
 impl<F: FnMut(&mut Parser)> Host<F> {
@@ -32,12 +36,17 @@ impl<F: FnMut(&mut Parser)> Host<F> {
             on_execute,
             checkpoints: 0,
             svg: Vec::new(),
+            shown_after_load: Vec::new(),
+            loads: 0,
         }
     }
 }
 
 impl<F: FnMut(&mut Parser)> bf_dom::events::ScriptHost for Host<F> {
-    fn call_listener(&mut self, _: &mut Document, _: u64, _: &mut Event) -> bool {
+    fn call_listener(&mut self, _: &mut Document, _: u64, event: &mut Event) -> bool {
+        if event.type_.as_lossy_str() == "load" {
+            self.loads += 1;
+        }
         false
     }
 }
@@ -53,6 +62,10 @@ impl<F: FnMut(&mut Parser)> ScriptHost for Host<F> {
 
     fn process_svg_script(&mut self, parser: &mut Parser, script: NodeId) {
         self.svg.push(svg_script_source(parser.document(), script));
+    }
+
+    fn page_shown(&mut self, _: &mut Parser) {
+        self.shown_after_load.push(self.loads);
     }
 }
 
@@ -174,4 +187,21 @@ fn cr_and_lf_in_separate_writes_are_one_newline() {
         })
         .collect();
     assert_eq!(text, "a\nb");
+}
+
+/// "The end" (§13.2.7): el parser avisa `page_shown` (para `pageshow`) una vez, después del
+/// `load` de la ventana.
+#[test]
+fn page_shown_once_after_the_window_load() {
+    let mut host = Host::new(|_: &mut Parser| {});
+    let mut parser = Parser::with_input("<p>x", &opts());
+    // Un listener de `load` en la ventana, para que el host lo vea.
+    parser.document_mut().add_event_listener(
+        bf_dom::events::EventTarget::Window,
+        "load",
+        bf_dom::events::Listener::Script(1),
+        Default::default(),
+    );
+    parser.finish(&mut host);
+    assert_eq!(host.shown_after_load, [1]);
 }

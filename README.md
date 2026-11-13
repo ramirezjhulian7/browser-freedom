@@ -139,7 +139,7 @@ Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, 
 historial, scroll y zoom.
 
 Las **fases 2 a 4** cumplen 43 de sus 45 criterios. Faltan dos:
-- `html/syntax/parsing` sin ningún fallo; está en 99.8 %.
+- `html/syntax/parsing` sin ningún fallo; está en 99.9 %.
 - Los reftests de css-flexbox con palabras clave de tamaño; pasan 86 de 108.
 
 Lo que ya está:
@@ -167,7 +167,7 @@ Sus recuentos son los de la última corrida con resumen y no se han vuelto a ano
 |---|---|---|---|---|
 | Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) | `cargo test -p bf-html --test html5lib_tokenizer` |
 | Tree construction | HTML §13.2.6, §13.4 | árboles de WPT `html/syntax/parsing`, sin JavaScript | **3900** pasan, 0 fallan (4 omitidos) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
-| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8150 / 8166** subtests (99.8 %) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
+| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8155 / 8166** subtests (99.9 %) | [`docs/roadmap.md`](docs/roadmap.md), 2.3 |
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) | `cargo test -p bf-css --test css_parsing_tests` |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan; los 7 casos de `percent-encoding.json` también pasan (Mac) | `cargo test -p bf-url --test wpt_url`; [`docs/roadmap.md`](docs/roadmap.md), 3.5 |
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, Transforms, Writing Modes, SVG 2… | WPT reftests (30 grupos) | **9935 / 12 548 ejecutables (79.2 %)** | [`docs/wpt-status.md`](docs/wpt-status.md), "Reftests en macOS" |

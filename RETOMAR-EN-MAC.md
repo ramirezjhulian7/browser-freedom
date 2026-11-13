@@ -142,7 +142,7 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
 - **Runners de WPT:** `wpt-testharness` (testharness.js) y `freedom wpt-reftests-js`
-  (reftests con JavaScript). `html/syntax/parsing` está en 99.8 % y `event-loops` en 75 %.
+  (reftests con JavaScript). `html/syntax/parsing` está en 99.9 % y `event-loops` en 75 %.
 
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado. **Avance por criterios: 76.4 %** de las fases 2 a 5 (81.1 % contando

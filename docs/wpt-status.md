@@ -345,7 +345,7 @@ Medido en macOS sobre `army/e3` (`master` `d1148b8` más la ronda 6 de E3) con
 
 | Directorio | documentos | archivos OK | subtests | pass | % pass |
 |---|---:|---:|---:|---:|---:|
-| `html/syntax/parsing` | 236 | 235 | 8166 | 8150 | 99.8 % |
+| `html/syntax/parsing` | 236 | 235 | 8166 | 8150 | 99.8 % (8155, 99.9 %, el 2026-11-13: ver `docs/roadmap.md`, 2.3) |
 | `html/webappapis/scripting/event-loops` | 7 | 7 | 8 | 6 | 75.0 % |
 
 Cambios del runner (`crates/bf-web/src/bin/wpt-testharness.rs`):

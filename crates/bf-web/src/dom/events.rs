@@ -518,6 +518,19 @@ pub fn dispatch_js_event(
     event: Gc<Object>,
     checked: bool,
 ) -> JsResult<Result<bool, bf_dom::DomException>> {
+    dispatch_js_event_with_override(agent, doc, target, event, checked, None)
+}
+
+/// [`dispatch_js_event`] con un *target override* (DOM §2.9): E3, para `pageshow` en el
+/// `Window` con el documento como `target` (HTML "fire a page transition event").
+pub fn dispatch_js_event_with_override(
+    agent: &mut Agent,
+    doc: DocIndex,
+    target: EventTarget,
+    event: Gc<Object>,
+    checked: bool,
+    target_override: Option<EventTarget>,
+) -> JsResult<Result<bool, bf_dom::DomException>> {
     let ev_value = Value::Object(event);
     let cell = event_data(agent, &ev_value).expect("evento").cell.clone();
     // E1: el documento anterior, por si el dispatch se rechaza (el evento ya se está
@@ -556,7 +569,7 @@ pub fn dispatch_js_event(
         if checked {
             document.dispatch_event_checked(target, &mut ev, &mut host)
         } else {
-            Ok(document.dispatch(target, &mut ev, &mut host))
+            Ok(document.dispatch_with_override(target, &mut ev, &mut host, target_override))
         }
     };
     *ctx.get_mut(agent).doc_mut(doc) = document;

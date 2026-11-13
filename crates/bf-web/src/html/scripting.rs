@@ -365,4 +365,19 @@ impl ScriptHost for PageHost<'_> {
             *doc = *p;
         }
     }
+
+    /// E3: `pageshow` tras el `load` de la ventana (HTML §13.2.7), con el parser prestado al
+    /// contexto como en [`ScriptHost::microtask_checkpoint`].
+    fn page_shown(&mut self, doc: &mut Parser) {
+        let real = std::mem::replace(doc, Parser::new(&ParseOptions::default()));
+        let saved = std::mem::replace(
+            &mut ctx(self.agent, self.realm).documents[0],
+            DocumentOwner::Parser(Box::new(real)),
+        );
+        crate::bom::script::fire_pageshow(self.agent, self.realm);
+        let back = std::mem::replace(&mut ctx(self.agent, self.realm).documents[0], saved);
+        if let DocumentOwner::Parser(p) = back {
+            *doc = *p;
+        }
+    }
 }
