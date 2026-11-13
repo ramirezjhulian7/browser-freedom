@@ -104,7 +104,9 @@ cualquier programa del Mac.
 - **Funciona:**
   - **Páginas:** HTML y CSS, con su texto, tablas y la mayoría de los diseños, incluido el
     texto de derecha a izquierda (árabe, hebreo) y el vertical (japonés, chino).
-  - **Imágenes:** PNG, JPEG, GIF y APNG animados, WebP, BMP, ICO y SVG.
+  - **Imágenes:** PNG, JPEG, GIF y APNG animados, WebP, BMP, ICO y SVG. Las imágenes
+    marcadas como perezosas (`loading="lazy"`) solo se descargan al acercarse a la zona
+    visible, y una sola vez.
   - **Movimiento:** animaciones, transiciones y transformaciones de CSS.
   - **Scripts:** los de las páginas, con buena parte de las funciones del navegador que usan.
   - **Navegación:** enlaces, pestañas y varias ventanas, atrás y adelante, buscar en la
@@ -170,6 +172,8 @@ La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está a medias
   aplican;
 - desplazar Wikipedia cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (meta:
   16.7 ms, 60 fps), sin confirmar con la máquina libre;
+- la primera pintura de Wikipedia midió 823-936 ms antes del último arreglo de red (meta:
+  menos de 500 ms), y falta medirla con la máquina libre;
 - faltan los procesos separados con sandbox.
 
 Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
@@ -631,6 +635,7 @@ regresión de test262) siguen igual: se corren con `--ignored`.
 | Qué | Prueba |
 |---|---|
 | Carga de imágenes: `load`, `error` y `decode()` de `<img>`; `loading=lazy`; el `load` de `<iframe>` que espera a su documento | `cargo test -p bf-web --test img_load` |
+| `loading=lazy` en el pintado: las perezosas que esperan no se piden y las que llegan no se descargan dos veces | `cargo test -p bf-paint --test lazy_images` y `cargo test -p bf-shell --bin freedom lazy_paint_tests` |
 | Una sola decodificación por imagen | `cargo test -p bf-image --test shared_cache` y `cargo test -p bf-shell --test image_decode_once` |
 | CSS Font Loading (`document.fonts`, `FontFace`) | `cargo test -p bf-web --test font_loading` |
 | Parser HTML: adoption agency sin ciclos a través de shadow roots y templates, scripts SVG, CR LF partido entre dos `document.write` | `cargo test -p bf-html --test robustness` |

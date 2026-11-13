@@ -234,9 +234,9 @@ the rendering* (HTML §8.1.7.3, §4.8.4.3.9). Ahora, con navegador (una ventana 
 de maquetas), `sync_frames` no la revisa mientras la maqueta del documento de ahora no
 exista (`bf_web::cssom::awaiting_shell_layout`). `Engine::set_layout` la revisa siempre con
 la maqueta que trae el navegador. Sin navegador (`freedom render`, los runners de WPT) nada
-cambia. Lo que se pinta tampoco: `bf_paint` pide todos los `<img>` sin mirar `loading`
-(en `master` `0995c60`; `army/e2`, sin integrar, hace que el pintado respete `loading`, y con
-las dos ramas la imagen perezosa cercana sale en el cuadro siguiente a la primera pintura).
+cambia. Lo que se pinta, al medir, tampoco: entonces `bf_paint` pedía todos los `<img>` sin
+mirar `loading`. Desde `0c8b903` (E2) el pintado respeta `loading`, y la imagen perezosa
+cercana sale en el cuadro siguiente a la primera pintura.
 
 A/B con dos binarios que solo difieren en ese cambio (los dos con las marcas), alternados,
 5 corridas cada uno, carga de 1 minuto 13,1-13,6 (de 5 minutos, 37-44):
