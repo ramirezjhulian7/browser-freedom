@@ -181,6 +181,23 @@ pub fn central_baseline(style: &ComputedStyle) -> bool {
     ) && style.text_orientation != TextOrientation::Sideways
 }
 
+/// E5: posición (desde el borde superior lógico, sobre una altura lógica `height`) de la baseline
+/// sintetizada de una caja sin baseline propia en el marco `frame` (CSS Box Alignment 3 §9.1,
+/// CSS Inline 3 §4.1): en horizontal, el borde inferior; en vertical con baseline central, el
+/// centro; con la alfabética, el lado line-under, que en vertical es el izquierdo físico: el
+/// inicio del bloque en `vertical-lr` y el final en `vertical-rl` (y `sideways-*`).
+pub fn synthesized_baseline(frame: Frame, style: &ComputedStyle, height: f32) -> f32 {
+    if !frame.is_vertical() {
+        height
+    } else if central_baseline(style) {
+        height / 2.0
+    } else if matches!(frame, Frame::VerticalLr) && style.writing_mode == WritingMode::VerticalLr {
+        0.0
+    } else {
+        height
+    }
+}
+
 /// ¿Hay alguna caja con un modo de escritura vertical?
 pub fn has_vertical(b: &LayoutBox) -> bool {
     Frame::of(&b.style).is_vertical() || b.children.iter().any(has_vertical)

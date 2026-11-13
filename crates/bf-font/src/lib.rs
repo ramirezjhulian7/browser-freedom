@@ -78,6 +78,18 @@ fn is_sfnt(data: &[u8]) -> bool {
     )
 }
 
+/// El carácter que se da al shaper: los controles (tab, salto de línea) como espacios, porque su
+/// ancho lo decide el layout, y E5: U+00A0 (no-break space) también como espacio, como Blink y
+/// WebKit; así conserva el kerning del espacio (Times tiene el par espacio–«T») y su glifo, que
+/// es el mismo. Su comportamiento de corte de línea lo decide el layout sobre el texto original.
+fn shaping_char(c: char) -> char {
+    if c.is_control() || c == '\u{A0}' {
+        ' '
+    } else {
+        c
+    }
+}
+
 /// Caracteres que siguen al anterior si su cara los tiene (marcas combinantes, ZWJ,
 /// selectores de variación), para no partir clusters entre fuentes.
 fn continues_cluster(c: char) -> bool {
@@ -352,7 +364,7 @@ impl Fonts {
             for (i, c) in text[sstart..send].char_indices() {
                 let i = sstart + i;
                 let end = i + c.len_utf8();
-                let c = if c.is_control() { ' ' } else { c };
+                let c = shaping_char(c);
                 if let Some(last) = runs.last_mut()
                     && last.3 == script
                     && continues_cluster(c)
@@ -388,7 +400,7 @@ impl Fonts {
             let mut run = String::with_capacity(end - start);
             let mut map = Vec::with_capacity(end - start + 1);
             for (i, c) in text[start..end].char_indices() {
-                let c = if c.is_control() { ' ' } else { c };
+                let c = shaping_char(c);
                 map.resize(run.len(), start + i);
                 map.push(start + i);
                 run.push(c);

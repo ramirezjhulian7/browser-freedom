@@ -901,11 +901,9 @@ impl<'a> Layout<'a> {
             b.style.overflow_x == Overflow::Visible && b.style.overflow_y == Overflow::Visible;
         // E9: en un flujo vertical con baseline central, la baseline sintetizada de una caja
         // sin baseline propia es la central: la mitad de su margin box (CSS Inline 3 §4.1).
-        let synth = if self.frame.is_vertical() && crate::writing_mode::central_baseline(&b.style) {
-            outer.height / 2.0
-        } else {
-            outer.height
-        };
+        let frame = self.frame;
+        let synth_of = |h: f32| crate::writing_mode::synthesized_baseline(frame, &b.style, h);
+        let synth = synth_of(outer.height);
         // La baseline de un inline-block es la de su última line box; si no tiene o su
         // overflow no es visible, el borde inferior del margin box (§10.8.1).
         let baseline = match (&b.kind, visible) {
@@ -922,7 +920,7 @@ impl<'a> Layout<'a> {
             _ if b.control.is_some() => synth,
             // inline-flex: la baseline del contenedor es la de su primer ítem (Flexbox §8.5).
             (BoxKind::InlineBlock, _) if crate::flex::is_flex_container(b) => {
-                crate::flex::container_baseline(&fragment).map_or(synth, |y| y - outer.y)
+                crate::flex::container_baseline(&fragment, &synth_of).map_or(synth, |y| y - outer.y)
             }
             // E4: inline-grid (CSS Grid 2 §9.1) e inline-table (CSS 2.2 §17.5.3: la baseline de
             // la primera fila).
@@ -2079,6 +2077,9 @@ impl<'a> Layout<'a> {
             /// Espacios colapsables todavía no sumados: se quitan al principio y al final de
             /// la línea (fase 2 del procesamiento de espacios).
             pending: f32,
+            /// E5: la parte de `pending` que no es oportunidad de corte (espacios colapsables
+            /// de un texto que no se parte, `nowrap`): si sigue contenido, es de la palabra.
+            word_pending: f32,
             has_content: bool,
             /// E9: lo último fue una atómica (hay oportunidad después, CSS Text 3 §5.1).
             after_atomic: bool,
@@ -2089,8 +2090,10 @@ impl<'a> Layout<'a> {
             fn content(&mut self) {
                 if self.has_content {
                     self.line += self.pending;
+                    self.word += self.word_pending;
                 }
                 self.pending = 0.0;
+                self.word_pending = 0.0;
                 self.has_content = true;
             }
             fn end_line(&mut self) {
@@ -2099,6 +2102,7 @@ impl<'a> Layout<'a> {
                 self.min = self.min.max(self.word);
                 self.word = 0.0;
                 self.pending = 0.0;
+                self.word_pending = 0.0;
                 self.has_content = false;
             }
         }
@@ -2140,8 +2144,14 @@ impl<'a> Layout<'a> {
                                 '\n' => acc.end_line(),
                                 ' ' | '\t' if s.white_space.collapses_spaces() => {
                                     acc.pending += w;
-                                    acc.min = acc.min.max(acc.word);
-                                    acc.word = 0.0;
+                                    // E5: sin `wraps` (`nowrap`) el espacio no es oportunidad de
+                                    // corte (CSS Text 3 §3): el min-content es la línea entera.
+                                    if wraps {
+                                        acc.min = acc.min.max(acc.word);
+                                        acc.word = 0.0;
+                                    } else {
+                                        acc.word_pending += w;
+                                    }
                                 }
                                 ' ' | '\t' if wraps => {
                                     acc.content();

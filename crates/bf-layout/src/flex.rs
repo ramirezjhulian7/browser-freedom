@@ -137,6 +137,25 @@ fn flex_content_align(a: Aligned<ContentAlign>, free: f32) -> ContentAlign {
     }
 }
 
+/// E5: copia de un reemplazado con su tamaño principal (`width` en filas, `height` en
+/// columnas) en `auto` y, si se da, `width` fijo en `w` (content box), para medir su sugerencia
+/// de tamaño por contenido (§4.5).
+fn with_auto_main(b: &LayoutBox, row: bool, w: Option<f32>) -> LayoutBox {
+    let mut probe = b.clone();
+    let mut st = (*b.style).clone();
+    if row {
+        st.width = Size::Auto;
+    } else {
+        st.height = Size::Auto;
+        if let Some(w) = w {
+            st.width = Size::LengthPercentage(bf_style::values::LengthPercentage::px(w));
+            st.box_sizing = bf_style::properties::types::BoxSizing::ContentBox;
+        }
+    }
+    probe.style = std::sync::Arc::new(st);
+    probe
+}
+
 /// Primera baseline de un fragmento (y absoluta): la del primer line box en orden.
 pub(crate) fn first_baseline(f: &Fragment) -> Option<f32> {
     if f.kind == FragmentKind::Line {
@@ -162,7 +181,10 @@ pub(crate) fn first_baseline(f: &Fragment) -> Option<f32> {
 
 /// Baseline de un contenedor flex (§8.5): la del primer ítem; si no tiene, sintetizada con
 /// el borde inferior de su border box. `None` si no hay ítems.
-pub(crate) fn container_baseline(f: &Fragment) -> Option<f32> {
+///
+/// E5: si el primer ítem no tiene baseline, se sintetiza de su border box (§8.5) con `synth`
+/// (de la altura a la baseline; ver `writing_mode::synthesized_baseline`).
+pub(crate) fn container_baseline(f: &Fragment, synth: &dyn Fn(f32) -> f32) -> Option<f32> {
     let item = f.children.iter().find(|c| {
         !matches!(
             c.style.position,
@@ -170,7 +192,7 @@ pub(crate) fn container_baseline(f: &Fragment) -> Option<f32> {
                 | bf_style::properties::types::Position::Fixed
         )
     })?;
-    Some(first_baseline(item).unwrap_or(item.rect.bottom()))
+    Some(first_baseline(item).unwrap_or(item.rect.y + synth(item.rect.height)))
 }
 
 /// E5: orientación de los ejes de un contenedor flex (§5.1), para alinear absolutos.
@@ -521,16 +543,34 @@ impl<'a> Layout<'a> {
             if min_auto && matches!(overflow, Overflow::Visible | Overflow::Clip) {
                 let content_min = if row {
                     if let BoxKind::Replaced { natural, ratio } = &b.kind {
+                        // E5: la sugerencia por contenido es el min-content: el tamaño del
+                        // reemplazado con su propio `width` en `auto` (ese es la sugerencia por
+                        // tamaño especificado), así que sale del alto definido a través de la
+                        // relación de aspecto o del tamaño natural (§4.5).
                         let rcb = Cb {
                             x: 0.0,
                             y: 0.0,
                             width: cb.width,
                             height: cb.height,
                         };
-                        self.replaced_size(b, *natural, *ratio, rcb).width
+                        let probe = with_auto_main(b, true, None);
+                        self.replaced_size(&probe, *natural, *ratio, rcb).width
                     } else {
                         self.intrinsic_widths(b).0
                     }
+                } else if let BoxKind::Replaced { natural, ratio } = &b.kind {
+                    // E5: lo mismo en columnas, con `height: auto` y, si su ancho no es una
+                    // longitud (`auto` o una keyword como `stretch`), el tamaño cruzado ya
+                    // resuelto (estirado o ajustado) como ancho.
+                    let rcb = Cb {
+                        x: 0.0,
+                        y: 0.0,
+                        width: cb.width,
+                        height: cb.height,
+                    };
+                    let w = (!matches!(s.width, Size::LengthPercentage(_))).then_some(column_cross);
+                    let probe = with_auto_main(b, false, w);
+                    self.replaced_size(&probe, *natural, *ratio, rcb).height
                 } else {
                     self.item_content_height(b, cb, column_cross, bp_v)
                 };
@@ -739,10 +779,16 @@ impl<'a> Layout<'a> {
                 item.cross = h;
                 if item.align == ItemAlign::Baseline {
                     let border_top = f.rect.y;
-                    item.baseline = Some(
-                        item.margin(2)
-                            + first_baseline(&f).map_or(f.rect.height, |b| b - border_top),
+                    // E5: sin baseline propia se sintetiza del border box (CSS Box Alignment 3
+                    // §9.1): el borde inferior o, en un flujo vertical con baseline central
+                    // (CSS Inline 3 §4.1), el centro.
+                    let synth = crate::writing_mode::synthesized_baseline(
+                        self.frame,
+                        &b.style,
+                        f.rect.height,
                     );
+                    item.baseline =
+                        Some(item.margin(2) + first_baseline(&f).map_or(synth, |b| b - border_top));
                 }
             }
         }
@@ -877,6 +923,15 @@ impl<'a> Layout<'a> {
                     };
                     let stretched = line.cross - it.bp_cross - it.margin(2) - it.margin(3);
                     it.cross = stretched.min(hi).max(lo).max(0.0);
+                } else if !row && wrap && cross_auto {
+                    // E5: en una columna multilínea, un ítem que no se estira se vuelve a
+                    // ajustar (fit-content) al tamaño cruzado final de su línea, sin cambiar su
+                    // tamaño principal (csswg-drafts#11784; WPT `align-self-016`).
+                    let (lo, hi) = width_limits(&it.b.style, cb.width, it.bp_cross);
+                    let avail = (line.cross - it.bp_cross - it.margin(2) - it.margin(3)).max(0.0);
+                    let b = it.b;
+                    let fit = self.item_fit_width(b, avail);
+                    items[i].cross = fit.min(hi).max(lo).max(0.0);
                 }
             }
         }
@@ -1217,7 +1272,16 @@ impl<'a> Layout<'a> {
         }
         let (mut min, mut max) = (0.0f32, 0.0f32);
         let mut n = 0;
-        for c in b.children.iter().filter(|c| !c.is_absolutely_positioned()) {
+        // E5: los ítems `visibility: collapse` no ocupan sitio en el eje principal ni llevan
+        // hueco (§4.4).
+        let collapsed = |c: &LayoutBox| {
+            row && c.style.visibility == bf_style::properties::types::Visibility::Collapse
+        };
+        for c in b
+            .children
+            .iter()
+            .filter(|c| !c.is_absolutely_positioned() && !collapsed(c))
+        {
             let (mut cmin, mut cmax) = self.outer_intrinsic_widths(c);
             let content_min = cmin;
             // E5: en filas, la aportación de un ítem que no puede crecer (encoger) no pasa de
