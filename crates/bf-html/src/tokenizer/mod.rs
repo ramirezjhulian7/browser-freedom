@@ -11,6 +11,7 @@ mod token;
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 pub use error::ParseError;
 pub use states::State;
@@ -59,7 +60,9 @@ pub struct Tokenizer {
     comment: String,
     doctype: Doctype,
     pi: ProcessingInstruction,
-    last_start_tag: Option<String>,
+    /// Compartido: la foto de [`Tokenizer::next_token`] lo copia en cada token sin asignar
+    /// memoria.
+    last_start_tag: Option<Arc<str>>,
     cdata_allowed: bool,
     queue: VecDeque<Token>,
     eof_emitted: bool,
@@ -101,7 +104,7 @@ struct Snapshot {
     comment: String,
     doctype: Doctype,
     pi: ProcessingInstruction,
-    last_start_tag: Option<String>,
+    last_start_tag: Option<Arc<str>>,
     errors: usize,
 }
 
@@ -308,7 +311,7 @@ impl Tokenizer {
 
     /// Fija el nombre del último start tag emitido, usado para el *appropriate end tag token*.
     pub fn set_last_start_tag(&mut self, name: &str) {
-        self.last_start_tag = Some(name.to_owned());
+        self.last_start_tag = Some(name.into());
     }
 
     /// Indica si existe un *adjusted current node* que no es un elemento del namespace HTML.
@@ -513,7 +516,8 @@ impl Tokenizer {
     }
 
     fn is_appropriate_end_tag(&self) -> bool {
-        self.tag_kind == TagKind::End && self.last_start_tag.as_deref() == Some(&self.tag.name)
+        self.tag_kind == TagKind::End
+            && self.last_start_tag.as_deref() == Some(self.tag.name.as_str())
     }
 
     fn start_attribute(&mut self) {
@@ -553,7 +557,7 @@ impl Tokenizer {
         let tag = std::mem::take(&mut self.tag);
         match self.tag_kind {
             TagKind::Start => {
-                self.last_start_tag = Some(tag.name.clone());
+                self.last_start_tag = Some(tag.name.as_str().into());
                 self.emit(Token::StartTag(tag));
             }
             TagKind::End => {

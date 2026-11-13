@@ -203,3 +203,71 @@ fn lazy_images_wait_for_the_viewport() {
     assert_eq!(p.show("log.join()"), "cerca,lejos");
     assert_eq!(p.show("lejos.naturalWidth"), "3");
 }
+
+/// E3: un proveedor de maquetas (el del navegador) que cuenta cuántas veces maqueta.
+struct CountingLayout(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl bf_web::cssom::LayoutProvider for CountingLayout {
+    fn layout(
+        &mut self,
+        doc: &bf_dom::Document,
+        styles: &bf_style::StyleMap,
+        viewport: bf_layout::Size,
+    ) -> bf_layout::FragmentTree {
+        self.0.set(self.0.get() + 1);
+        bf_layout::layout_document(doc, styles, viewport, &bf_layout::TestFont)
+    }
+}
+
+/// E3: con navegador (un proveedor de maquetas), el "lazy load intersection observer" espera
+/// a la maqueta del documento de ahora en vez de maquetarlo por su cuenta al quedar sin
+/// trabajo (HTML §8.1.7.3, *update the rendering*: las intersecciones van después de
+/// maquetar); con la maqueta hecha, la imagen cercana se pide.
+#[test]
+fn lazy_images_wait_for_the_browser_layout() {
+    let mut rt = Runtime::new(Box::new(DefaultHooks));
+    let realm = rt.main_realm();
+    let url = Url::parse("https://example.test/", None).unwrap();
+    bf_web::install(
+        &mut rt.agent,
+        realm,
+        WebContext::new(DocumentOwner::Document(Box::default()), url.clone()),
+    );
+    bom::script::install_scripting(
+        &mut rt.agent,
+        realm,
+        &url,
+        Arc::new(bf_infra::FileLoader::new()),
+    );
+    let layouts = std::rc::Rc::new(std::cell::Cell::new(0));
+    bf_web::cssom::set_layout_provider(
+        &mut rt.agent,
+        realm,
+        Box::new(CountingLayout(layouts.clone())),
+    );
+    bom::script::begin_parse(&mut rt.agent, realm, &url);
+    bom::script::feed(
+        &mut rt.agent,
+        realm,
+        &format!(
+            "<script>var log = [];</script><body style='margin:0'>\
+             <img id=cerca loading=lazy src='{GIF_1X1}' onload=\"log.push('cerca')\">"
+        ),
+    );
+    bom::script::finish(&mut rt.agent, realm);
+    bom::frames::sync_frames(&mut rt.agent, realm);
+    rt.run_until_idle().expect("tareas");
+    assert_eq!(layouts.get(), 0, "sync_frames no maqueta por su cuenta");
+    let show = |rt: &mut Runtime, src: &str| {
+        let v = rt.eval_script(realm, src, "test.js").expect("script");
+        rt.to_display(&v)
+    };
+    assert_eq!(show(&mut rt, "log.join()"), "");
+    // La maqueta del navegador (aquí, la del CSSOM con el mismo proveedor).
+    bf_web::cssom::current_layout(&mut rt.agent);
+    assert_eq!(layouts.get(), 1);
+    bom::frames::sync_frames(&mut rt.agent, realm);
+    rt.run_until_idle().expect("tareas");
+    assert_eq!(show(&mut rt, "log.join()"), "cerca");
+    assert_eq!(layouts.get(), 1, "la revisión usa la maqueta que ya hay");
+}
