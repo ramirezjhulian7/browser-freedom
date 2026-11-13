@@ -1359,8 +1359,8 @@ fn performance_observer_api_and_errors() {
 // E1: un nodo o un rango de otra ventana (otro realm, otra arena de nodos) da un error del
 // DOM, o la respuesta del DOM para "otra raíz", en vez de resolverse contra la arena de esta
 // ventana: antes era un pánico (`bf-dom` `Document::get`, índice fuera de rango, o
-// `Document::live_range`). Adoptarlo e insertarlo sí funciona: ver
-// `nodes_move_between_windows`.
+// `Document::live_range`). Adoptarlo, insertarlo e importarlo (se clona) sí funciona: ver
+// `nodes_move_between_windows` y `more_operations_take_nodes_of_another_window`.
 #[test]
 fn nodes_and_ranges_of_another_window_do_not_panic() {
     // E4: una operación de la interfaz de esta ventana aplicada a un objeto del marco corre en
@@ -1395,7 +1395,7 @@ fn nodes_and_ranges_of_another_window_do_not_panic() {
                return out.join(); \
              })()"
         ),
-        "NotSupportedError,false,false,false,false,true,WrongDocumentError,\
+        "ok,false,false,false,false,true,WrongDocumentError,\
          WrongDocumentError,false,false,NotSupportedError,0,ok,,uno"
     );
 }
@@ -1452,6 +1452,87 @@ fn nodes_move_between_windows() {
         "true,true,true,true,true,true,true,uno,true,true,listener,handler,\
          true,true,true,dos,true,true,true,true,true,false,\
          NotSupportedError,HierarchyRequestError,ok"
+    );
+}
+
+// E1 (ronda 2): más operaciones con nodos del documento de otra ventana: `importNode` los
+// clona (el original se queda), `setAttributeNode` adopta un `Attr` libre (y uno en uso da
+// `InUseAttributeError`), `insertAdjacentElement`, `Range.insertNode` y `surroundContents`
+// los adoptan; `insertAdjacentElement` con un `where` inválido no mueve nada.
+#[test]
+fn more_operations_take_nodes_of_another_window() {
+    let mut p = framed(
+        "<p id=a>uno</p><iframe id=f srcdoc=\"<p id=b>dos</p><i id=i>i</i><b id=c>c</b>\
+         <u id=u>u</u><span id=s title=t>s</span>\"></iframe>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "(function () { \
+               var fd = document.getElementById('f').contentDocument; \
+               var a = document.getElementById('a'), out = []; \
+               function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+               var b = fd.getElementById('b'), copy = document.importNode(b, true); \
+               out.push(copy !== b, copy.ownerDocument === document, copy.textContent, \
+                        b.ownerDocument === fd, fd.getElementById('b') === b); \
+               var at = fd.createAttribute('data-z'); at.value = 'v'; \
+               a.setAttributeNode(at); \
+               out.push(a.getAttribute('data-z'), at.ownerElement === a, at.ownerDocument === document); \
+               var used = fd.getElementById('s').getAttributeNode('title'); \
+               out.push(err(function () { a.setAttributeNode(used); })); \
+               var i = fd.getElementById('i'); \
+               out.push(err(function () { a.insertAdjacentElement('nowhere', i); }), \
+                        fd.getElementById('i') === i); \
+               a.insertAdjacentElement('beforeend', i); \
+               out.push(i.parentNode === a, i.ownerDocument === document); \
+               var r = document.createRange(); r.setStart(a, 0); r.collapse(true); \
+               var c = fd.getElementById('c'); r.insertNode(c); \
+               out.push(a.firstChild === c, c.ownerDocument === document); \
+               var r2 = document.createRange(); r2.selectNodeContents(c); \
+               var u = fd.getElementById('u'); r2.surroundContents(u); \
+               out.push(c.firstChild === u, u.textContent, u.ownerDocument === document); \
+               return out.join(); \
+             })()"
+        ),
+        "true,true,dos,true,true,v,true,true,InUseAttributeError,SyntaxError,true,\
+         true,true,true,true,true,c,true"
+    );
+}
+
+// E1: "inner invoke" (DOM §2.10, whatwg/dom#1084): después de quitar un `<iframe>`, no corren
+// los listeners de los targets de su ventana ni los callbacks creados en ella; sí corre un
+// callback de esta ventana en un target de esta ventana (aunque el evento sea del marco).
+#[test]
+fn listeners_of_a_removed_frame_do_not_run() {
+    let mut p = framed(
+        "<iframe id=f srcdoc=\"<p id=x>x</p><script>parent.t = new EventTarget(); \
+         parent.cb = function () { parent.hits.push('cb'); }; \
+         parent.ev = new Event('x'); parent.ctl = new AbortController();</script>\"></iframe>",
+        &[],
+    );
+    assert_eq!(
+        p.show(
+            "(function () { \
+               window.hits = []; \
+               var f = document.getElementById('f'), fd = f.contentDocument; \
+               var x = fd.getElementById('x'), mine = new EventTarget(); \
+               t.addEventListener('x', function () { hits.push('t'); }); \
+               x.addEventListener('x', function () { hits.push('node'); }); \
+               mine.addEventListener('x', cb); \
+               mine.addEventListener('y', function () { hits.push('mine'); }); \
+               ctl.signal.onabort = function () { hits.push('abort'); }; \
+               t.dispatchEvent(new Event('x')); x.dispatchEvent(new Event('x')); \
+               mine.dispatchEvent(new Event('x')); \
+               var before = hits.join('+'); hits = []; \
+               f.remove(); \
+               mine.addEventListener('x', function () { hits.push('mine-x'); }); \
+               var r = t.dispatchEvent(new Event('x', {cancelable: true})); \
+               x.dispatchEvent(new Event('x')); mine.dispatchEvent(new Event('x')); \
+               mine.dispatchEvent(new Event('y')); ctl.abort(); mine.dispatchEvent(ev); \
+               return [before, hits.join('+'), r, ctl.signal.aborted].join(); \
+             })()"
+        ),
+        "t+node+cb,mine-x+mine+mine-x,true,true"
     );
 }
 

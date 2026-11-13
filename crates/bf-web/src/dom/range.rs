@@ -13,7 +13,6 @@ use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
 
-use crate::dom::adopt::adopt_into;
 use crate::dom::insertion::{inserted, roots_of};
 use crate::dom::state::state;
 use crate::dom::{
@@ -838,8 +837,15 @@ fn clone_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     }
 }
 
-/// "Insert" un nodo en un rango (§5.5).
-fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) -> JsResult<()> {
+/// "Insert" un nodo en un rango (§5.5). E1: el nodo puede ser de otra ventana (se adopta en el
+/// paso 6, después de los chequeos).
+fn insert_into(
+    agent: &mut Agent,
+    this: &Value,
+    doc: DocIndex,
+    node: impl Into<crate::dom::adopt::NodeArg>,
+) -> JsResult<()> {
+    let node = node.into();
     let Some(rd) = agent.host_unwrap::<RangeData>(this) else {
         return Ok(());
     };
@@ -847,7 +853,9 @@ fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) ->
     let r = range_bounds(agent, doc, id);
     let s = r.start;
     // 1.
-    let bad = (node.doc == doc && s.node == node.node)
+    let same =
+        matches!(node, crate::dom::adopt::NodeArg::Local(n) if n.doc == doc && s.node == n.node);
+    let bad = same
         || with_doc(agent, doc, |d| {
             matches!(
                 d.get(s.node).data,
@@ -871,7 +879,9 @@ fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) ->
         (reference, parent)
     });
     // 6. "Ensure pre-insertion validity" (los nodos de otro documento se adoptan antes).
-    let node = if node.doc == doc {
+    let node = if let crate::dom::adopt::NodeArg::Local(node) = node
+        && node.doc == doc
+    {
         let r = with_doc(agent, doc, |d| {
             d.ensure_pre_insertion_validity(node.node, parent, reference)
         });
@@ -945,7 +955,8 @@ fn insert_into(agent: &mut Agent, this: &Value, doc: DocIndex, node: NodeRef) ->
 
 fn insert_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, _) = this_range(agent, a)?;
-    let n = arg_node(
+    // E1: también un nodo de otra ventana (se adopta).
+    let n = crate::dom::adopt::arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'insertNode' on 'Range': parameter 1",
@@ -957,7 +968,8 @@ fn insert_node(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `surroundContents(newParent)` (§5.5).
 fn surround_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (doc, id) = this_range(agent, a)?;
-    let new_parent = arg_node(
+    // E1: también un nodo de otra ventana (se adopta en el paso 4).
+    let new_parent = crate::dom::adopt::arg_node_any(
         agent,
         &a.arg(0),
         "Failed to execute 'surroundContents' on 'Range': parameter 1",
@@ -973,12 +985,18 @@ fn surround_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return throw_dom(agent, DomException::InvalidStateError);
     }
     // 2.
-    let bad_type = with_doc(agent, new_parent.doc, |d| {
-        matches!(
-            d.get(new_parent.node).data,
-            NodeData::Document | NodeData::Doctype { .. } | NodeData::DocumentFragment
-        )
-    });
+    let (realm, np) = match new_parent {
+        crate::dom::adopt::NodeArg::Local(n) => (agent.current_realm, n),
+        crate::dom::adopt::NodeArg::Foreign(r, n) => (r, n),
+    };
+    let bad_type = matches!(
+        crate::WebContextHandle { realm }
+            .get(agent)
+            .doc(np.doc)
+            .get(np.node)
+            .data,
+        NodeData::Document | NodeData::Doctype { .. } | NodeData::DocumentFragment
+    );
     if bad_type {
         return throw_dom(agent, DomException::InvalidNodeTypeError);
     }
@@ -994,7 +1012,7 @@ fn surround_contents(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Err(e) => return throw_dom(agent, e),
     };
     // 4.
-    let new_parent = adopt_into(agent, new_parent, doc)?;
+    let new_parent = crate::dom::adopt::adopt_arg(agent, new_parent, doc)?;
     with_doc_mut(agent, doc, |d| d.replace_all(None, new_parent.node));
     // 5.
     insert_into(agent, &a.this, doc, new_parent)?;

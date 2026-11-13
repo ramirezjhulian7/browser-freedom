@@ -325,6 +325,33 @@ impl Document {
         node
     }
 
+    /// E1: los nodos `Attr` ya creados de `el` (en el orden de sus atributos).
+    pub fn existing_attr_nodes(&self, el: NodeId) -> Vec<NodeId> {
+        let Some(e) = self.element(el) else {
+            return Vec::new();
+        };
+        e.attrs
+            .iter()
+            .filter_map(|a| self.attr_nodes.get(&(el, a.ns, a.name.clone())).copied())
+            .collect()
+    }
+
+    /// E1: el nodo `Attr` de `el` con el mismo namespace y nombre local que el `Attr` `attr`
+    /// de `other` (se crea si hace falta): al copiar un elemento a otro documento, el `Attr`
+    /// que corresponde a uno que JavaScript ya tenía.
+    pub fn matching_attr_node(
+        &mut self,
+        el: NodeId,
+        other: &Document,
+        attr: NodeId,
+    ) -> Option<NodeId> {
+        let NodeData::Attr(a) = &other.get(attr).data else {
+            return None;
+        };
+        let i = self.attr_index_ns(el, a.ns, &a.local_name)?;
+        Some(self.attr_node_at(el, i))
+    }
+
     /// `NamedNodeMap.length` de `el.attributes`.
     pub fn attributes_length(&self, el: NodeId) -> usize {
         self.element(el).map_or(0, |e| e.attrs.len())

@@ -531,6 +531,16 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
             TESTHARNESS_REPORT.to_owned(),
         );
     }
+    // E1: wptserve sirve `/resources/WebIDLParser.js` como alias de la copia de webidl2 de WPT
+    // (`resources/webidl2/lib/webidl2.js`; en el repo no hay un archivo con ese nombre). Sin él,
+    // los `idlharness` terminan en `WebIDL2 is not defined`.
+    if let Ok(webidl2) = std::fs::read_to_string(root.join("resources/webidl2/lib/webidl2.js")) {
+        for o in [ORIGIN, HTTPS_ORIGIN] {
+            resources
+                .overrides
+                .insert(format!("{o}/resources/WebIDLParser.js"), webidl2.clone());
+        }
+    }
     rt.agent.set_realm_data(realm, resources);
     // E3: el runner vacía la bandeja de los workers y los espera en tiempo real.
     crate::workers::set_manual_pump(&mut rt.agent);
