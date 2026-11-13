@@ -19,6 +19,7 @@ use crate::controls::Control;
 use crate::float::FloatContext;
 use crate::font::{FontMetrics, FontProvider, FontRequest, Glyph};
 use crate::fragment::{Edges, Fragment, FragmentKind, Rect, Size as LayoutSize};
+use crate::perf::Part;
 
 /// Content box del containing block. `height` es `Some` si es definida (para porcentajes).
 #[derive(Debug, Clone, Copy)]
@@ -64,6 +65,7 @@ impl CollapsedMargin {
 
 /// Caja con `position: absolute | fixed` pendiente de layout hasta conocer su containing
 /// block.
+#[derive(Clone, Copy)]
 pub(crate) struct PendingAbs<'a> {
     pub b: &'a LayoutBox,
     pub static_x: f32,
@@ -72,6 +74,10 @@ pub(crate) struct PendingAbs<'a> {
     /// `static_x` es el borde derecho de la caja hipotética (CSS 2.2 §10.3.7).
     pub static_rtl: bool,
 }
+
+/// E5: caja, `pct_height_basis`, `cb_max_height` (en bits) y marco de un cálculo de anchos
+/// intrínsecos ([`Layout::intrinsic_widths`]).
+pub(crate) type IntrinsicKey = (usize, Option<u32>, Option<u32>, u8);
 
 pub(crate) struct Layout<'a> {
     pub fonts: &'a dyn FontProvider,
@@ -120,6 +126,20 @@ pub(crate) struct Layout<'a> {
     /// E5: ejes en los que un ítem puede ser subgrid según su contenedor (por dirección de la
     /// caja): un ítem de grid lanes solo lo es en el eje de rejilla (CSS Grid 3 §2.5).
     pub subgrid_mask: std::collections::HashMap<usize, (bool, bool)>,
+    /// E5: tiempos por parte para `perf maqueta` (`BF_TRACE`).
+    pub perf: crate::perf::Perf,
+    /// E5: líneas ya maquetadas de cada block container con contenido inline, para no
+    /// repetirlas cuando un ítem flex o grid se maqueta para medirlo y luego para colocarlo
+    /// (`inline.rs`, [`crate::inline::InlineKey`]).
+    pub inline_cache: std::collections::HashMap<
+        crate::inline::InlineKey,
+        std::rc::Rc<crate::inline::InlineResult<'a>>,
+    >,
+    /// E5: anchos intrínsecos ya calculados ([`Self::intrinsic_widths`]).
+    pub intrinsic_cache: std::collections::HashMap<IntrinsicKey, (f32, f32)>,
+    /// E5: `false` con `BF_NO_LAYOUT_CACHE` en el entorno: sin las dos cachés de arriba, para
+    /// compararlas con el recorrido completo en el mismo binario.
+    pub caches: bool,
 }
 
 /// Tabla de §10.4 para un reemplazado con ancho y alto `auto` y relación de aspecto: respeta
@@ -358,6 +378,10 @@ impl<'a> Layout<'a> {
             cb_rtl: false,
             content_probe: false,
             subgrid_mask: std::collections::HashMap::new(),
+            perf: crate::perf::Perf::new(),
+            inline_cache: std::collections::HashMap::new(),
+            intrinsic_cache: std::collections::HashMap::new(),
+            caches: std::env::var_os("BF_NO_LAYOUT_CACHE").is_none(),
         }
     }
 
@@ -366,7 +390,9 @@ impl<'a> Layout<'a> {
     }
 
     pub fn metrics(&self, style: &ComputedStyle) -> FontMetrics {
+        self.perf.enter(Part::Shape);
         let mut m = self.fonts.metrics(&Self::font_request(style));
+        self.perf.exit();
         // E9: en un flujo vertical la baseline dominante es la central salvo con glifos de lado
         // (CSS Inline 3 §4.1, `dominant-baseline: auto`): en el marco lógico, el ascent y el
         // descent son la mitad del em box cada uno.
@@ -380,7 +406,9 @@ impl<'a> Layout<'a> {
 
     /// Glifos con `letter-spacing` y `word-spacing` aplicados.
     pub fn shape(&self, text: &str, style: &ComputedStyle) -> Vec<Glyph> {
+        self.perf.enter(Part::Shape);
         let mut glyphs = self.fonts.shape(text, &Self::font_request(style));
+        self.perf.exit();
         let letter = style.letter_spacing.px();
         let word = style.word_spacing.px();
         // letter-spacing va después de cada carácter tipográfico: el último glifo del
@@ -783,6 +811,21 @@ impl<'a> Layout<'a> {
         floats: &mut FloatContext,
         is_root: bool,
     ) -> (Fragment, CollapsedMargin) {
+        self.perf.enter_box(Part::Block, b);
+        let r = self.block_in_inner(b, cb, avail, top, floats, is_root);
+        self.perf.exit();
+        r
+    }
+
+    fn block_in_inner(
+        &mut self,
+        b: &'a LayoutBox,
+        cb: Cb,
+        avail: Cb,
+        top: f32,
+        floats: &mut FloatContext,
+        is_root: bool,
+    ) -> (Fragment, CollapsedMargin) {
         // E9: raíz de un flujo de otro modo de escritura.
         if self.is_orthogonal(b) {
             return self.orthogonal_block(b, cb, avail, top);
@@ -1039,12 +1082,25 @@ impl<'a> Layout<'a> {
                 // alto para sus líneas, pero no es definido para los porcentajes (§9.8).
                 self.flex_height_pct_indefinite =
                     forced_indefinite && specified_height(style, cb.height, edges_v).is_none();
-                self.flex_layout(b, child_cb)
+                self.perf.enter_box(Part::Flex, b);
+                let r = self.flex_layout(b, child_cb);
+                self.perf.exit();
+                r
             }
             // E4: grid y tablas.
-            _ if crate::grid::is_grid_container(b) => self.grid_layout(b, child_cb),
-            BoxKind::Table => self.table_layout(b, child_cb),
-            _ if b.has_inline_children() => self.inline_content(b, child_cb, fl),
+            _ if crate::grid::is_grid_container(b) => {
+                self.perf.enter_box(Part::Grid, b);
+                let r = self.grid_layout(b, child_cb);
+                self.perf.exit();
+                r
+            }
+            BoxKind::Table => {
+                self.perf.enter_box(Part::Table, b);
+                let r = self.table_layout(b, child_cb);
+                self.perf.exit();
+                r
+            }
+            _ if b.has_inline_children() => self.inline_content_cached(b, child_cb, fl),
             _ => {
                 let (frags, end, pending) = self.block_children(b, child_cb, fl);
                 let mut h = end - content_top;
@@ -1503,6 +1559,19 @@ impl<'a> Layout<'a> {
         y_min: f32,
         floats: &mut FloatContext,
     ) -> Fragment {
+        self.perf.enter_box(Part::Float, b);
+        let f = self.float_box_inner(b, cb, y_min, floats);
+        self.perf.exit();
+        f
+    }
+
+    fn float_box_inner(
+        &mut self,
+        b: &'a LayoutBox,
+        cb: Cb,
+        y_min: f32,
+        floats: &mut FloatContext,
+    ) -> Fragment {
         let margins = margin_edges(&b.style, cb.width);
         let content_w = self.fit_width(b, cb, margins.horizontal());
         let mut scratch = FloatContext::default();
@@ -1535,7 +1604,33 @@ impl<'a> Layout<'a> {
     }
 
     /// Anchos intrínsecos (min-content, max-content) del contenido de `b`.
+    ///
+    /// E5: se guardan por caja y por el estado que leen (la base de los porcentajes de alto, el
+    /// marco y el `max-height` del flujo ortogonal), salvo los de un subgrid, que dependen de
+    /// las pistas del padre: cada contenedor flex o grid los pide varias veces por ítem.
     pub(crate) fn intrinsic_widths(&mut self, b: &'a LayoutBox) -> (f32, f32) {
+        let ptr = b as *const LayoutBox as usize;
+        let key = (
+            ptr,
+            self.pct_height_basis.map(f32::to_bits),
+            self.cb_max_height.map(f32::to_bits),
+            self.frame as u8,
+        );
+        if self.caches
+            && let Some(&r) = self.intrinsic_cache.get(&key)
+        {
+            return r;
+        }
+        self.perf.enter_box(Part::Intrinsic, b);
+        let r = self.intrinsic_widths_measured(b);
+        self.perf.exit();
+        if !self.subgrids.contains_key(&ptr) && !self.subgrid_mask.contains_key(&ptr) {
+            self.intrinsic_cache.insert(key, r);
+        }
+        r
+    }
+
+    fn intrinsic_widths_measured(&mut self, b: &'a LayoutBox) -> (f32, f32) {
         // E9: la contribución de un flujo ortogonal es su tamaño en el eje inline del padre.
         if self.is_orthogonal(b) {
             return self.orthogonal_intrinsic(b);

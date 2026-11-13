@@ -16,6 +16,7 @@ pub mod fragment;
 mod grid; // E4
 mod inline;
 pub mod linebreak; // E9: UAX #14
+mod perf; // E5: `perf maqueta` con BF_TRACE
 mod positioned;
 pub mod scroll; // E12
 mod table; // E4
@@ -52,7 +53,10 @@ pub fn layout_document_with_images(
     fonts: &dyn FontProvider,
     images: &ImageSizes,
 ) -> FragmentTree {
+    let start = std::time::Instant::now();
     let (root, report) = box_tree::build_box_tree_report(doc, styles, images);
+    let tree_time = start.elapsed();
+    let mut perf = None;
     let fragment = root.as_ref().map(|root| {
         // E9: con cajas verticales, cada caja se maqueta en el marco de su flujo; una raíz
         // vertical, con el viewport traspuesto, y el resultado vuelve a coordenadas físicas.
@@ -71,11 +75,17 @@ pub fn layout_document_with_images(
             layout.frame = frame;
             let mut f = block::layout_root(&mut layout, &tree);
             writing_mode::fragment_to_physical(&mut f, frame, (0.0, 0.0), viewport.width);
+            perf = Some(layout.perf);
             return f;
         }
         let mut layout = block::Layout::new(fonts, viewport);
-        block::layout_root(&mut layout, root)
+        let f = block::layout_root(&mut layout, root);
+        perf = Some(layout.perf);
+        f
     });
+    if let (Some(perf), Some(root)) = (&perf, &root) {
+        perf.report(tree_time, start.elapsed(), box_tree::count_boxes(root));
+    }
     let mut tree = FragmentTree {
         root: fragment,
         viewport,

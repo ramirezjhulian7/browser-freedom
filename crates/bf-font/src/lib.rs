@@ -90,6 +90,24 @@ fn shaping_char(c: char) -> char {
     }
 }
 
+/// E5: ¿Daría rustybuzz dirección LTR a este run sin dirección explícita? La misma regla que
+/// `shape_run` + `guess_segment_properties`: el script del run (salvo Zyyy, Zinh y Zzzz) o el
+/// del primer carácter con script, y su dirección horizontal (LTR si no tiene). Los controles se
+/// dan forma como espacios, que no tienen script, así que no cambian la respuesta.
+fn guessed_ltr(text: &str, script: &str) -> bool {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    if let Some(script) = Some(script)
+        .filter(|t| !matches!(*t, "Zyyy" | "Zinh" | "Zzzz"))
+        .map(|t| rustybuzz::ttf_parser::Tag::from_bytes_lossy(t.as_bytes()))
+        .and_then(rustybuzz::Script::from_iso15924_tag)
+    {
+        buffer.set_script(script);
+    }
+    buffer.guess_segment_properties();
+    buffer.direction() == rustybuzz::Direction::LeftToRight
+}
+
 /// Caracteres que siguen al anterior si su cara los tiene (marcas combinantes, ZWJ,
 /// selectores de variación), para no partir clusters entre fuentes.
 fn continues_cluster(c: char) -> bool {
@@ -206,10 +224,16 @@ impl Fonts {
         if let Some(&r) = lock(&self.coverage).get(&(key, c)) {
             return r;
         }
-        let r = self
-            .face(key)
-            .and_then(|f| f.face().and_then(|face| face.glyph_index(c)))
-            .is_some();
+        // E5: las caras del sistema, con su `cmap` sin cargar el archivo entero si aún no se usó
+        // (`FontDb::covers`).
+        let r = if key.0 & WEB_BIT == 0 {
+            let (base, _) = split_key(key);
+            self.db.covers(base.0 as usize, c)
+        } else {
+            self.face(key)
+                .and_then(|f| f.face().and_then(|face| face.glyph_index(c)))
+                .is_some()
+        };
         lock(&self.coverage).insert((key, c), r);
         r
     }
@@ -352,6 +376,10 @@ impl Fonts {
         if let Some(g) = lock(&self.shaped).get(&key) {
             return g.as_ref().clone();
         }
+        // E5: sin dirección (`None`, tamaños intrínsecos) y con dirección LTR (`Some(false)`,
+        // las líneas) el resultado es el mismo si el shaper adivinaría LTR en cada run: la
+        // caché se comparte y el mismo texto no se da forma dos veces.
+        let mut twin = None;
         let families = self.resolve(request);
         let fallback = self.primary(request).map_or(NO_FONT, |(k, _)| k);
         // Runs de la misma cara. Los controles (tab, salto de línea) se dan forma como
@@ -388,6 +416,19 @@ impl Fonts {
                 }
             }
         }
+        if rtl != Some(true)
+            && runs
+                .iter()
+                .all(|&(start, end, _, script)| guessed_ltr(&text[start..end], script.tag()))
+        {
+            let other_dir = if rtl.is_none() { Some(false) } else { None };
+            let other: ShapeKey = (key.0.clone(), key.1, key.2.clone(), other_dir);
+            if let Some(g) = lock(&self.shaped).get(&other).cloned() {
+                lock(&self.shaped).insert(key, g.clone());
+                return g.as_ref().clone();
+            }
+            twin = Some(other);
+        }
         // Un run bidi RTL sale en orden visual: los runs de fuente/script, de atrás adelante.
         if rtl == Some(true) {
             runs.reverse();
@@ -416,7 +457,12 @@ impl Fonts {
                 &mut glyphs,
             );
         }
-        lock(&self.shaped).insert(key, Arc::new(glyphs.clone()));
+        let shared = Arc::new(glyphs.clone());
+        let mut shaped = lock(&self.shaped);
+        if let Some(twin) = twin {
+            shaped.insert(twin, shared.clone());
+        }
+        shaped.insert(key, shared);
         glyphs
     }
 
