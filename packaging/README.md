@@ -44,7 +44,58 @@ se le pase) y deja el resultado en `dist/`.
   `hicolor`. El `.tar.gz` trae `install.sh` (en `~/.local`, o en `/usr/local` con
   `--system`; `--uninstall` lo quita). Se compila en Ubuntu 22.04 (glibc 2.35).
 - **macOS:** ejecutable universal (Apple Silicon e Intel), macOS 11 o posterior, firmado ad
-  hoc.
+  hoc. Ver [macOS en detalle](#macos-en-detalle).
+
+## macOS en detalle
+
+```sh
+sh packaging/macos/build.sh             # universal (Apple Silicon e Intel) y .dmg, como el workflow
+sh packaging/macos/build.sh --native    # solo la arquitectura de este Mac: una compilación
+sh packaging/macos/build.sh --native --no-dmg 0.2.0   # sin .dmg y con otra versión
+```
+
+Deja en `dist/`:
+- `Freedom.app`;
+- `Freedom-<v>-macos-universal.dmg`, o `…-macos-arm64.dmg` / `…-macos-x86_64.dmg` con
+  `--native`.
+
+El modo universal instala con `rustup` el target que falte (`x86_64-apple-darwin` o
+`aarch64-apple-darwin`).
+
+El paquete:
+
+```
+Freedom.app/Contents/
+  Info.plist               packaging/macos/Info.plist con la versión
+  PkgInfo                  APPL????
+  MacOS/freedom            el ejecutable de release
+  Resources/freedom.icns   el icono (packaging/icons)
+  _CodeSignature/          la firma ad hoc
+```
+
+El `Info.plist` declara:
+- `NSHighResolutionCapable`: la ventana se pinta en píxeles físicos en pantallas Retina.
+- Los tipos de documento que Freedom muestra («Abrir con», rol *Viewer*, rango
+  *Alternate*): `.html`/`.htm`, `.xhtml`/`.xht` y `.svg`.
+- Los esquemas `http` y `https`: Freedom aparece entre los navegadores del sistema.
+
+El script comprueba el resultado sin abrir ninguna ventana:
+- `plutil -lint` del `Info.plist`;
+- la firma ad hoc (`codesign --force --deep --sign -`) y `codesign --verify --deep --strict`;
+- que `Freedom.app/Contents/MacOS/freedom --version` responde.
+
+El ejecutable de dentro admite las mismas órdenes que el suelto. Por ejemplo,
+`dist/Freedom.app/Contents/MacOS/freedom render about:home -o home.png`.
+
+La firma ad hoc evita el aviso de «está dañada» en el Mac donde se compiló. Una app bajada
+de internet (con el atributo `com.apple.quarantine`) sigue pidiendo «Abrir igualmente» en
+Privacidad y seguridad, porque no está notarizada.
+
+**Limitación:** macOS entrega las aperturas desde el Finder («Abrir con», doble clic en un
+`.html`) y los enlaces de otras aplicaciones como eventos de Apple (`odoc`, `GURL`), no como
+argumentos. `winit` 0.30 no los expone, así que en esos casos Freedom se abre con la página
+de inicio o la sesión anterior, no con el documento. `open -a Freedom --args archivo.html`
+sí lo pasa como argumento.
 
 ## Iconos
 

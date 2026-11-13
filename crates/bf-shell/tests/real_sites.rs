@@ -86,7 +86,17 @@ fn assert_no_crash(s: &Session, url: &str) {
 fn google_search() {
     let s = session(
         "https://www.google.com/",
-        &["field:q", "type:navegador web", "key:enter", "wait", "wait"],
+        // Los dos `wait` dejan terminar los scripts de la portada (la versión con JavaScript
+        // reemplaza los manejadores del formulario después de `load`; en debug tarda).
+        &[
+            "wait",
+            "wait",
+            "field:q",
+            "type:navegador web",
+            "key:enter",
+            "wait",
+            "wait",
+        ],
     );
     let url = s.url();
     assert!(

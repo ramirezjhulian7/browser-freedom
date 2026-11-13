@@ -102,7 +102,7 @@ impl ModuleLoader for WebModuleLoader {
         let parsed = Url::parse(url, None).map_err(|_| format!("URL inválida: {url}"))?;
         let res = self
             .loader
-            .load(&parsed)
+            .load_for(&parsed, bf_infra::Destination::Script)
             .ok_or_else(|| format!("no se pudo cargar {url}"))?;
         Ok(encoding::decode(&res.bytes, Encoding::Utf8).0)
     }
@@ -707,6 +707,18 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         let Some(url) = info.url.clone() else {
             return ScriptDisposition::Ready;
         };
+        // E6: Mixed Content y CSP (`script-src`, con el `nonce` del elemento).
+        let nonce = info.nonce.to_string();
+        let Some(url) = crate::security::check_request(
+            self.agent,
+            self.realm,
+            Some(doc.document()),
+            &url,
+            bf_infra::Destination::Script,
+            Some(&nonce),
+        ) else {
+            return ScriptDisposition::Failed;
+        };
         match self.fetch(&url, info.encoding) {
             Some(f) => {
                 if let Some(env) = env_mut(self.agent, self.realm) {
@@ -727,6 +739,20 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         };
         let page = doc.document().url.href();
         let fetched = env_mut(self.agent, self.realm).and_then(|e| e.fetched.remove(&script));
+        // E6: CSP para los scripts en línea (CSP 3 §4.2.3, "Should element's inline behavior
+        // be blocked"): `'unsafe-inline'`, el `nonce` o el hash del texto.
+        if fetched.is_none()
+            && info.type_ != ScriptType::ImportMap
+            && !crate::security::allow_inline_script(
+                self.agent,
+                self.realm,
+                Some(doc.document()),
+                Some(&info.nonce.to_string()),
+                info.source_text.as_lossy_str(),
+            )
+        {
+            return;
+        }
         // El parser vuelve al contexto mientras corre el script.
         let placeholder = Parser::new(&parse_options());
         let parser = std::mem::replace(doc, placeholder);
