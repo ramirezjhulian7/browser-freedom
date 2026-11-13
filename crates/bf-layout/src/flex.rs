@@ -521,16 +521,57 @@ impl<'a> Layout<'a> {
             if min_auto && matches!(overflow, Overflow::Visible | Overflow::Clip) {
                 let content_min = if row {
                     if let BoxKind::Replaced { natural, ratio } = &b.kind {
-                        let rcb = Cb {
-                            x: 0.0,
-                            y: 0.0,
-                            width: cb.width,
-                            height: cb.height,
+                        // E5: la sugerencia por contenido es el min-content sin el `width`
+                        // propio (ese es la sugerencia por tamaño especificado): con relación de
+                        // aspecto y alto definido, el alto transferido por la relación; si no, el
+                        // ancho natural; y con relación, acotado por `min-height`/`max-height`
+                        // transferidos (§4.5).
+                        let r = ratio.filter(|r| *r > 0.0);
+                        let w = match (specified_height(s, cb.height, bp_v), r) {
+                            (Some(h), Some(r)) => Some(h * r),
+                            _ if natural.width > 0.0 => Some(natural.width),
+                            _ => None,
                         };
-                        self.replaced_size(b, *natural, *ratio, rcb).width
+                        match (w, r) {
+                            (Some(w), Some(r)) => {
+                                let (hlo, hhi) = height_limits(s, cb.height, bp_v);
+                                w.min(hhi * r).max(hlo * r)
+                            }
+                            (Some(w), None) => w,
+                            (None, _) => {
+                                let rcb = Cb {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: cb.width,
+                                    height: cb.height,
+                                };
+                                self.replaced_size(b, *natural, *ratio, rcb).width
+                            }
+                        }
                     } else {
                         self.intrinsic_widths(b).0
                     }
+                } else if let BoxKind::Replaced { natural, ratio } = &b.kind
+                    && let Some(h) = {
+                        // E5: lo mismo en columnas: el ancho definido transferido por la relación
+                        // de aspecto o el alto natural, acotado por `min-width`/`max-width`
+                        // transferidos (§4.5).
+                        let r = ratio.filter(|r| *r > 0.0);
+                        let h = match (specified_width(s, cb.width, bp_h), r) {
+                            (Some(w), Some(r)) => Some(w / r),
+                            _ if natural.height > 0.0 => Some(natural.height),
+                            _ => None,
+                        };
+                        match (h, r) {
+                            (Some(h), Some(r)) => {
+                                let (wlo, whi) = width_limits(s, cb.width, bp_h);
+                                Some(h.min(whi / r).max(wlo / r))
+                            }
+                            (h, _) => h,
+                        }
+                    }
+                {
+                    h
                 } else {
                     self.item_content_height(b, cb, column_cross, bp_v)
                 };
@@ -1226,7 +1267,16 @@ impl<'a> Layout<'a> {
         }
         let (mut min, mut max) = (0.0f32, 0.0f32);
         let mut n = 0;
-        for c in b.children.iter().filter(|c| !c.is_absolutely_positioned()) {
+        // E5: los ítems `visibility: collapse` no ocupan sitio en el eje principal ni llevan
+        // hueco (§4.4).
+        let collapsed = |c: &LayoutBox| {
+            row && c.style.visibility == bf_style::properties::types::Visibility::Collapse
+        };
+        for c in b
+            .children
+            .iter()
+            .filter(|c| !c.is_absolutely_positioned() && !collapsed(c))
+        {
             let (mut cmin, mut cmax) = self.outer_intrinsic_widths(c);
             let content_min = cmin;
             // E5: en filas, la aportación de un ítem que no puede crecer (encoger) no pasa de
