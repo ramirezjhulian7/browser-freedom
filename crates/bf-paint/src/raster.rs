@@ -5,6 +5,8 @@
 //! el texto, con antialias. El texto se dibuja como paths rellenos, sin hinting. Cada
 //! `PushOpacity` abre una capa que se compone al cerrarla.
 
+use std::collections::HashMap;
+
 use bf_layout::fragment::{Edges, Rect, Size};
 use bf_layout::{MeterLevel, PathCommand, Widget};
 use bf_style::properties::types::{BorderStyle, TextDecorationStyle};
@@ -1631,7 +1633,7 @@ fn render_region(
     pixels: (u32, u32),
     cull: bool,
 ) -> Pixmap {
-    render_items(&dl.items, &[], scale, bg, scroll, start, pixels, cull)
+    render_items(&dl.items, &[], scale, bg, scroll, start, pixels, cull, None)
 }
 
 /// [`render_region`] de `items` sin los de los rangos `skip` (grupos completos, de su `Push` a
@@ -1646,6 +1648,7 @@ fn render_items(
     start: (f32, f32),
     pixels: (u32, u32),
     cull: bool,
+    spans: Option<&[Option<crate::display_list::Span>]>,
 ) -> Pixmap {
     let width = pixels.0.max(1);
     let height = pixels.1.max(1);
@@ -1664,8 +1667,26 @@ fn render_items(
         width,
         height,
     };
+    // E4: los grupos enteros que no tocan el pixmap se saltan (ver `group_spans`).
+    let local;
+    let spans = match spans {
+        Some(s) => Some(s),
+        None if cull => {
+            local = crate::display_list::group_spans(items);
+            Some(&local[..])
+        }
+        None => None,
+    };
+    let mut next = 0;
     for (i, item) in items.iter().enumerate() {
-        if skip.iter().any(|r| r.contains(&i)) {
+        if i < next || skip.iter().any(|r| r.contains(&i)) {
+            continue;
+        }
+        if let Some(spans) = &spans
+            && let Some((end, Some(b))) = spans[i]
+            && !device_hits(&canvas.transforms[0], &b, width, height)
+        {
+            next = end + 1;
             continue;
         }
         if cull
@@ -1883,12 +1904,15 @@ fn copy_box(
     (dx, dy): (u32, u32),
     src: &Pixmap,
     (sx, sy, w, h): (u32, u32, u32, u32),
+    row0: usize,
 ) {
     let ds = dst.width() as usize * 4;
     let ss = src.width() as usize * 4;
     let n = w as usize * 4;
+    let rows = dst.height() as usize;
     for r in 0..h as usize {
-        let d = (dy as usize + r) * ds + dx as usize * 4;
+        // `dst` es un anillo de filas: la fila `y` del cuadro está en `(y + row0) % alto`.
+        let d = ((dy as usize + r + row0) % rows) * ds + dx as usize * 4;
         let s = (sy as usize + r) * ss + sx as usize * 4;
         dst.data_mut()[d..d + n].copy_from_slice(&src.data()[s..s + n]);
     }
@@ -1901,7 +1925,9 @@ type Tile = (i64, i64);
 #[allow(clippy::too_many_arguments)]
 fn paint_tiles(
     out: &mut Pixmap,
+    row0: usize,
     dl: &DisplayList,
+    spans: &[Option<crate::display_list::Span>],
     skip: &[std::ops::Range<usize>],
     scale: f32,
     bg: Rgba,
@@ -1927,6 +1953,7 @@ fn paint_tiles(
             (x0 as f32, y0 as f32),
             ((tw + 2 * m) as u32, (th + 2 * m) as u32),
             true,
+            Some(spans),
         )
     };
     let threads = raster_threads_for(tiles.len());
@@ -1965,6 +1992,7 @@ fn paint_tiles(
                 (bx - ax) as u32,
                 (by - ay) as u32,
             ),
+            row0,
         );
     }
 }
@@ -2041,7 +2069,12 @@ pub fn render_tiled(
 pub struct TiledFrame {
     scale: f32,
     s_dev: (i64, i64),
+    /// La página sin los `sticky` en capa propia, como anillo de filas: la fila `y` del cuadro
+    /// está en la fila `(y + row0) % alto` (desplazar no mueve píxeles).
     under: Pixmap,
+    row0: usize,
+    /// Lo que se sabe de la lista (no cambia mientras el cuadro se reutiliza).
+    list: ListCache,
     /// Las capas `sticky` (en el orden de la lista) con dónde va su píxel (0, 0) en el cuadro y
     /// su recorte; `None` si los `sticky` van pintados en los tiles.
     layers: Option<Vec<PlacedLayer>>,
@@ -2049,6 +2082,24 @@ pub struct TiledFrame {
 
 /// Una capa `sticky`, dónde va su píxel (0, 0) en el cuadro y su recorte.
 type PlacedLayer = (StickyLayer, (i64, i64), Option<DevClip>);
+
+/// E4: lo que [`TiledFrame`] calcula una vez por lista: sus grupos `fixed`/`sticky`, los
+/// grupos que un tile puede saltar y la caja de los contornos de los ítems que se miraron.
+struct ListCache {
+    info: crate::display_list::ScrollInfo,
+    spans: Vec<Option<crate::display_list::Span>>,
+    ink: HashMap<usize, Option<Rect>>,
+}
+
+impl ListCache {
+    fn new(dl: &DisplayList) -> Option<ListCache> {
+        Some(ListCache {
+            info: crate::display_list::scroll_info(dl)?,
+            spans: crate::display_list::group_spans(&dl.items),
+            ink: HashMap::new(),
+        })
+    }
+}
 
 /// Un recorte en px de dispositivo del cuadro: `[x0, y0, x1, y1]`.
 type DevClip = [f32; 4];
@@ -2084,6 +2135,7 @@ fn sticky_shift(g: &crate::display_list::StickyGroup, s: (f32, f32)) -> (f32, f3
 fn layer_plan(
     dl: &DisplayList,
     info: &crate::display_list::ScrollInfo,
+    ink: &mut HashMap<usize, Option<Rect>>,
     scroll: (f32, f32),
     scale: f32,
     size: Size,
@@ -2125,7 +2177,9 @@ fn layer_plan(
             };
             for (i, b, fixed, m) in info.after_sticky.iter().filter(|e| e.0 >= g.items.end) {
                 if covers(&in_frame(b, *fixed))
-                    && crate::display_list::ink_bounds(&dl.items[*i], m)
+                    && ink
+                        .entry(*i)
+                        .or_insert_with(|| crate::display_list::ink_bounds(&dl.items[*i], m))
                         .is_none_or(|ink| covers(&in_frame(&ink, *fixed)))
                 {
                     return None;
@@ -2136,6 +2190,11 @@ fn layer_plan(
             f64::from(shift.0) * f64::from(scale),
             f64::from(shift.1) * f64::from(scale),
         );
+        // La fracción, en 1/256 de px: el desplazamiento sale de restas en f32 con el scroll, que
+        // con scrolls grandes cambian los últimos bits de un cuadro a otro aunque la capa no se
+        // mueva respecto del px (y la capa se volvía a pintar). Los dos caminos la redondean
+        // igual, así que siguen dando los mismos píxeles.
+        let k = ((k.0 * 256.0).round() / 256.0, (k.1 * 256.0).round() / 256.0);
         let ki = (k.0.floor(), k.1.floor());
         let frac = ((k.0 - ki.0) as f32, (k.1 - ki.1) as f32);
         let x0 = (f64::from(g.rect.x * scale + frac.0)).floor() as i64 - 1;
@@ -2199,6 +2258,7 @@ fn render_layer(
         ),
         place.pixels,
         true,
+        None,
     );
     StickyLayer {
         frac: place.frac,
@@ -2270,23 +2330,6 @@ fn compose_over(
     }
 }
 
-/// Corre las filas de `p` `di` filas hacia arriba (o hacia abajo si es negativo).
-fn shift_rows(p: &mut Pixmap, di: i64) {
-    let _timer = profile::Timer::start(profile::COPY);
-    let stride = p.width() as usize * 4;
-    let h = p.height() as usize;
-    let n = di.unsigned_abs() as usize;
-    if n == 0 || n >= h {
-        return;
-    }
-    let data = p.data_mut();
-    if di > 0 {
-        data.copy_within(n * stride..h * stride, 0);
-    } else {
-        data.copy_within(0..(h - n) * stride, n * stride);
-    }
-}
-
 impl TiledFrame {
     /// El cuadro entero en `scroll`. `None` como [`render_tiled`].
     pub fn render(
@@ -2297,9 +2340,9 @@ impl TiledFrame {
         scroll: (f32, f32),
     ) -> Option<TiledFrame> {
         let s_dev = device_scroll(scroll, scale)?;
-        let info = crate::display_list::scroll_info(dl)?;
+        let mut list = ListCache::new(dl)?;
         let (width, height) = frame_size(size, scale);
-        let plan = layer_plan(dl, &info, scroll, scale, size);
+        let plan = layer_plan(dl, &list.info, &mut list.ink, scroll, scale, size);
         let (tw, th) = tile_size(scale);
         let tiles: Vec<Tile> = tiles_for(
             (0, 0, i64::from(width), i64::from(height)),
@@ -2311,18 +2354,20 @@ impl TiledFrame {
         let mut under = Pixmap::new(width, height)?;
         paint_tiles(
             &mut under,
+            0,
             dl,
-            &layer_skip(&info, plan.is_some()),
+            &list.spans,
+            &layer_skip(&list.info, plan.is_some()),
             scale,
             bg,
             scroll,
             s_dev,
             &tiles,
-            tile_margin(&info, scale),
+            tile_margin(&list.info, scale),
         );
         let layers = plan.map(|plan| {
             plan.iter()
-                .zip(&info.sticky)
+                .zip(&list.info.sticky)
                 .map(|(place, g)| (render_layer(dl, g, place, scale), place.at, place.clip))
                 .collect()
         });
@@ -2330,6 +2375,8 @@ impl TiledFrame {
             scale,
             s_dev,
             under,
+            row0: 0,
+            list,
             layers,
         })
     }
@@ -2363,8 +2410,10 @@ impl TiledFrame {
         if di.abs() >= h {
             return None;
         }
-        let info = crate::display_list::scroll_info(dl)?;
-        let plan = layer_plan(dl, &info, scroll, scale, size);
+        // La misma lista que en `render` (quien reutiliza el cuadro lo garantiza): lo que se
+        // sabe de ella sirve.
+        let plan = layer_plan(dl, &self.list.info, &mut self.list.ink, scroll, scale, size);
+        let info = &self.list.info;
         if plan.is_some() != self.layers.is_some() {
             return None;
         }
@@ -2398,7 +2447,9 @@ impl TiledFrame {
                 dirty.push((x, y - di, bw, bh));
             }
         }
-        shift_rows(&mut self.under, di);
+        // Correr el cuadro es mover el principio del anillo de filas: las filas que salen de
+        // la vista quedan donde entran las nuevas, que se pintan encima.
+        self.row0 = (self.row0 as i64 + di).rem_euclid(h) as usize;
         let (tw, th) = tile_size(scale);
         let mut tiles: Vec<Tile> = Vec::new();
         for (x, y, bw, bh) in dirty {
@@ -2418,14 +2469,16 @@ impl TiledFrame {
         tiles.dedup();
         paint_tiles(
             &mut self.under,
+            self.row0,
             dl,
-            &layer_skip(&info, plan.is_some()),
+            &self.list.spans,
+            &layer_skip(info, plan.is_some()),
             scale,
             bg,
             scroll,
             s_dev,
             &tiles,
-            tile_margin(&info, scale),
+            tile_margin(info, scale),
         );
         if let Some(plan) = plan {
             let mut old = self.layers.take().unwrap_or_default();
@@ -2471,11 +2524,12 @@ impl TiledFrame {
         let rows = (target.height() as usize)
             .saturating_sub(top)
             .min(self.under.height() as usize);
+        let h = self.under.height() as usize;
         let src = self.under.data();
         let dst = target.data_mut();
         for r in 0..rows {
             let d = (top + r) * tw;
-            let s = r * pw;
+            let s = ((r + self.row0) % h) * pw;
             dst[d..d + w].copy_from_slice(&src[s..s + w]);
         }
         let (top, end) = (top as i64, (top + rows) as i64);
@@ -2488,6 +2542,10 @@ impl TiledFrame {
     /// El cuadro como un solo pixmap.
     pub fn to_pixmap(&self) -> Pixmap {
         let mut out = self.under.clone();
+        let stride = out.width() as usize * 4;
+        let split = self.row0 * stride;
+        out.data_mut()
+            .copy_from_slice(&[&self.under.data()[split..], &self.under.data()[..split]].concat());
         let end = i64::from(out.height());
         for (layer, at, clip) in self.layers.iter().flatten() {
             compose_over(&mut out, &layer.pixmap, *at, (0, end), *clip);
@@ -2543,10 +2601,17 @@ pub mod profile {
 
     static ON: AtomicBool = AtomicBool::new(false);
     static NANOS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    /// Cuántas veces se midió cada parte (tiles pintados, capas `sticky` pintadas, ...).
+    static COUNT: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+
+    /// Cuántas veces se midió `kind` desde que se empezó a medir.
+    pub fn count(kind: usize) -> u64 {
+        COUNT[kind].load(Ordering::Relaxed)
+    }
 
     /// Empieza o deja de medir (y pone a cero lo acumulado).
     pub fn set(on: bool) {
-        for n in &NANOS {
+        for n in NANOS.iter().chain(&COUNT) {
             n.store(0, Ordering::Relaxed);
         }
         ON.store(on, Ordering::Relaxed);
@@ -2574,6 +2639,7 @@ pub mod profile {
         fn drop(&mut self) {
             if let Some((kind, t)) = self.0 {
                 NANOS[kind].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                COUNT[kind].fetch_add(1, Ordering::Relaxed);
             }
         }
     }

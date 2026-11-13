@@ -911,6 +911,100 @@ struct IndexedRule<'a> {
     source_order: usize,
     selectors: &'a SelectorList,
     declarations: &'a [Declaration],
+    /// Por cada selector, los bits que sus compounds ancestros piden en el filtro de
+    /// ancestros (ver [`AncestorBloom`]); `None` si no se puede saber.
+    ancestors: Vec<Option<AncestorBloom>>,
+}
+
+/// E4: filtro de Bloom de los ids, clases y tipos de los ancestros de un elemento (256 bits,
+/// dos por clave), como el de Servo y Blink. Si un selector pide en sus ancestros una clave
+/// cuyo bit falta, no puede coincidir: se descarta sin probarlo. Un bit puesto no asegura
+/// nada (falsos positivos), así que solo descarta lo que de verdad no coincide.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AncestorBloom(pub [u64; 4]);
+
+impl AncestorBloom {
+    /// La clave de un id (`#`), una clase (`.`) o un tipo (`t`), en minúsculas ASCII (así es un
+    /// superconjunto en cualquier modo: quirks, XML).
+    fn insert(&mut self, kind: u8, name: &str) {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in std::iter::once(kind).chain(name.bytes().map(|b| b.to_ascii_lowercase())) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for bit in [h & 255, (h >> 8) & 255] {
+            self.0[(bit >> 6) as usize] |= 1 << (bit & 63);
+        }
+    }
+
+    /// Las claves de un elemento (su tipo, su id y sus clases).
+    pub fn add_element(&mut self, el: &bf_dom::Element) {
+        self.insert(b't', el.name.as_ref());
+        if let Some(id) = el.attr("id") {
+            self.insert(b'#', id);
+        }
+        if let Some(classes) = el.attr("class") {
+            for c in classes
+                .split([' ', '\t', '\n', '\r', '\x0C'])
+                .filter(|c| !c.is_empty())
+            {
+                self.insert(b'.', c);
+            }
+        }
+    }
+
+    /// El filtro de los ancestros elementos de `node`, subiendo por `doc.parent` como el
+    /// emparejado fuera de los shadow trees (la cascada lo arma de padre a hijo y lo guarda).
+    pub fn of_ancestors(doc: &Document, node: NodeId) -> AncestorBloom {
+        let mut out = AncestorBloom::default();
+        let mut at = doc.parent(node);
+        while let Some(p) = at {
+            let Some(el) = doc.element(p) else {
+                break;
+            };
+            out.add_element(el);
+            at = doc.parent(p);
+        }
+        out
+    }
+
+    /// Lo de `self` y lo de `other`.
+    pub fn union(&self, other: &AncestorBloom) -> AncestorBloom {
+        AncestorBloom(std::array::from_fn(|i| self.0[i] | other.0[i]))
+    }
+
+    fn contains(&self, needed: &AncestorBloom) -> bool {
+        self.0
+            .iter()
+            .zip(&needed.0)
+            .all(|(have, need)| have & need == *need)
+    }
+}
+
+/// E4: lo que los compounds ancestros de `sel` piden: los de los compounds unidos a su
+/// derecha por un combinador descendiente o hijo coinciden con ancestros del elemento (aunque
+/// haya combinadores de hermanos en medio). `None` si no se puede saber: selectores relativos,
+/// `::slotted()`, `::part()`.
+fn ancestor_needs(sel: &crate::selectors::ComplexSelector) -> Option<AncestorBloom> {
+    use crate::selectors::Combinator;
+    if sel.leading.is_some() || sel.slotted.is_some() || sel.part.is_some() {
+        return None;
+    }
+    let mut out = AncestorBloom::default();
+    for (compound, combinator) in sel.compounds.iter().zip(&sel.combinators) {
+        if !matches!(combinator, Combinator::Descendant | Combinator::Child) {
+            continue;
+        }
+        for simple in compound {
+            match simple {
+                Simple::Id(id) => out.insert(b'#', id),
+                Simple::Class(c) => out.insert(b'.', c),
+                Simple::Type { lower, .. } => out.insert(b't', lower),
+                _ => {}
+            }
+        }
+    }
+    Some(out)
 }
 
 /// El grupo de un complex selector: el id, la clase o el tipo de su último compound.
@@ -992,6 +1086,7 @@ impl<'a> RuleIndex<'a> {
                         source_order: *source_order,
                         selectors: &style.selectors,
                         declarations: &style.declarations,
+                        ancestors: style.selectors.0.iter().map(ancestor_needs).collect(),
                     });
                     *source_order += style.declarations.len();
                     for sel in &style.selectors.0 {
@@ -1119,9 +1214,41 @@ impl<'a> RuleIndex<'a> {
         ctx: &MatchContext,
         shadow: crate::selectors::ShadowMatch,
     ) -> Vec<MatchedDeclaration<'a>> {
+        self.matching_filtered(doc, node, pseudo, ctx, shadow, None)
+    }
+
+    /// E4: [`RuleIndex::matching`] con el filtro de los ancestros de `node` (ver
+    /// [`AncestorBloom`]): se usa solo fuera de los shadow trees, donde el camino a los
+    /// ancestros es `doc.parent`. Da lo mismo que sin él.
+    pub fn matching_filtered(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        pseudo: Option<PseudoElement>,
+        ctx: &MatchContext,
+        shadow: crate::selectors::ShadowMatch,
+        ancestors: Option<&AncestorBloom>,
+    ) -> Vec<MatchedDeclaration<'a>> {
+        let ancestors = ancestors.filter(|_| {
+            shadow.mode == crate::selectors::ShadowMode::Tree
+                && shadow.scope.is_none()
+                && !doc.has_shadow_roots()
+        });
         let mut out = Vec::new();
         for id in self.candidates(doc, node, pseudo, shadow) {
             let rule = &self.rules[id as usize];
+            if let Some(have) = ancestors
+                && !rule
+                    .selectors
+                    .0
+                    .iter()
+                    .zip(&rule.ancestors)
+                    .any(|(s, need)| {
+                        s.pseudo_element == pseudo && need.as_ref().is_none_or(|n| have.contains(n))
+                    })
+            {
+                continue;
+            }
             let Some(specificity) =
                 matching_specificity_in(rule.selectors, doc, node, pseudo, ctx, shadow)
             else {

@@ -301,6 +301,8 @@ struct App {
     /// E4: raster de la barra con su clave (`Chrome::bar_key`, DPI y tamaño): sin cambios en
     /// la barra no se vuelve a pintar en cada cuadro.
     bar_cache: RefCell<Option<(BarKey, Pixmap)>>,
+    /// E4: raster de la línea de estado con su clave (como `bar_cache`).
+    status_cache: RefCell<Option<(BarKey, Pixmap)>>,
     /// E4: el pixmap de un cuadro ya mostrado, para armar el siguiente sin reservar otro.
     spare_frame: Cell<Option<Pixmap>>,
     /// Último viewport con el que se pidió layout al hilo de trabajo.
@@ -406,7 +408,7 @@ type BarKey = ((u64, bool, u32, [u32; 8]), [u32; 6]);
 type PageRaster = (RasterKey, PagePixels);
 
 enum PagePixels {
-    Tiled(bf_paint::raster::TiledFrame),
+    Tiled(Box<bf_paint::raster::TiledFrame>),
     Single(Pixmap),
 }
 
@@ -959,6 +961,7 @@ impl App {
             panel_cache: RefCell::new(None),
             panel_generation: 0,
             bar_cache: RefCell::new(None),
+            status_cache: RefCell::new(None),
             spare_frame: Cell::new(None),
             last_layout_request: None,
             focus_bar_on_load: false,
@@ -2904,7 +2907,7 @@ impl App {
                             && k.size == key.size
                             && k.frame == key.frame =>
                     {
-                        prev.scrolled(dl, viewport, scale, Rgba::WHITE, snapped)
+                        (*prev).scrolled(dl, viewport, scale, Rgba::WHITE, snapped)
                     }
                     _ => None,
                 };
@@ -2912,7 +2915,7 @@ impl App {
                 let page = match incremental {
                     Some(page) => {
                         inc += 1;
-                        PagePixels::Tiled(page)
+                        PagePixels::Tiled(Box::new(page))
                     }
                     None => match bf_paint::raster::TiledFrame::render(
                         dl,
@@ -2923,7 +2926,7 @@ impl App {
                     ) {
                         Some(page) => {
                             til += 1;
-                            PagePixels::Tiled(page)
+                            PagePixels::Tiled(Box::new(page))
                         }
                         None => {
                             one += 1;
@@ -3104,13 +3107,32 @@ impl App {
             blit(&mut frame, &layer, x * dpi, y * dpi);
         }
         if let Some(status) = self.chrome.status() {
-            let layer = render(
-                status.display_list(),
-                self.chrome.status_size(),
-                dpi,
-                theme.chrome,
+            // E4: guardada mientras no cambie (antes se pintaba y componía en cada cuadro).
+            let size = self.chrome.status_size();
+            let key: BarKey = (
+                (self.chrome.status_generation(), false, 0, [0; 8]),
+                [
+                    dpi,
+                    size.width,
+                    size.height,
+                    theme.chrome.r,
+                    theme.chrome.g,
+                    theme.chrome.b,
+                ]
+                .map(f32::to_bits),
             );
-            blit(&mut frame, &layer, 0.0, (logical.height - STATUS) * dpi);
+            let mut cache = self.status_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+                *cache = Some((key, render(status.display_list(), size, dpi, theme.chrome)));
+            }
+            if let Some((_, layer)) = cache.as_ref() {
+                let y = (logical.height - STATUS) * dpi;
+                if theme.chrome.a >= 1.0 {
+                    blit_opaque(&mut frame, layer, y);
+                } else {
+                    blit(&mut frame, layer, 0.0, y);
+                }
+            }
         }
         if let Some(menu) = &self.menu {
             let layer = render(menu.display_list(), menu.size(), dpi, Rgba::TRANSPARENT);
@@ -4522,6 +4544,11 @@ impl App {
             self.apply_page_scroll(&[]);
             pre.push(start.elapsed());
             let kinds = self.raster_kinds.get();
+            let counted = |k| bf_paint::raster::profile::count(k);
+            let (tiles, layers) = (
+                counted(bf_paint::raster::profile::TILE),
+                counted(bf_paint::raster::profile::STICKY),
+            );
             let frame = self.frame();
             let took = start.elapsed();
             frames.push(took);
@@ -4538,10 +4565,12 @@ impl App {
                     "sin raster"
                 };
                 slow_frames.push(format!(
-                    "{} ({how}, raster {}, antes {})",
+                    "{} ({how}, raster {}, antes {}, {} tiles, {} capas sticky)",
                     ms(took),
                     ms(self.raster.get().unwrap_or_default()),
-                    ms(pre.last().copied().unwrap_or_default())
+                    ms(pre.last().copied().unwrap_or_default()),
+                    counted(bf_paint::raster::profile::TILE) - tiles,
+                    counted(bf_paint::raster::profile::STICKY) - layers
                 ));
             }
             rasters.push(self.raster.get().unwrap_or_default());

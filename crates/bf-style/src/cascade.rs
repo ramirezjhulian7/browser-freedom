@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, PseudoElement, ShadowMatch, ShadowMode, Specificity};
 use bf_css::stylesheet::{
-    MatchedDeclaration, Origin, RuleIndex, Stylesheet, matching_declarations_in,
+    AncestorBloom, MatchedDeclaration, Origin, RuleIndex, Stylesheet, matching_declarations_in,
 };
 use bf_css::syntax::{
     ComponentValue, Declaration, Function, NestedItem, SimpleBlock, parse_block_contents,
@@ -860,6 +860,8 @@ struct Styler<'a> {
     /// E4: la expansión de cada declaración de hoja (por su dirección: las hojas viven toda la
     /// cascada), para no volver a analizar su valor en cada elemento.
     expanded: std::cell::RefCell<HashMap<usize, std::rc::Rc<Expanded>>>,
+    /// E4: el filtro de ancestros de cada nodo (ver `Styler::ancestor_bloom`).
+    blooms: std::cell::RefCell<HashMap<NodeId, AncestorBloom>>,
 }
 
 /// E4: en qué se va la cascada (con `BF_TRACE=1`, una línea `perf cascada` al terminar).
@@ -948,7 +950,31 @@ impl<'a> Styler<'a> {
                 std::rc::Rc::new(index)
             })
             .clone();
-        index.matching(self.doc, node, pseudo, self.ctx, shadow)
+        // `BF_NO_ANCESTOR_FILTER=1`: sin el filtro de ancestros (para medirlo).
+        static NO_FILTER: OnceLock<bool> = OnceLock::new();
+        let filter =
+            !*NO_FILTER.get_or_init(|| std::env::var_os("BF_NO_ANCESTOR_FILTER").is_some());
+        let bloom = (filter && !self.doc.has_shadow_roots()).then(|| self.ancestor_bloom(node));
+        index.matching_filtered(self.doc, node, pseudo, self.ctx, shadow, bloom.as_ref())
+    }
+
+    /// E4: el filtro de los ancestros de `node` ([`AncestorBloom`]): el del padre más las claves
+    /// del padre, guardado por nodo (cada elemento lo usa en varias llamadas y sus hijos parten
+    /// de él).
+    fn ancestor_bloom(&self, node: NodeId) -> AncestorBloom {
+        if let Some(b) = self.blooms.borrow().get(&node) {
+            return *b;
+        }
+        let bloom = match self.doc.parent(node) {
+            Some(p) if let Some(el) = self.doc.element(p) => {
+                let mut b = self.ancestor_bloom(p);
+                b.add_element(el);
+                b
+            }
+            _ => AncestorBloom::default(),
+        };
+        self.blooms.borrow_mut().insert(node, bloom);
+        bloom
     }
 
     /// E1: las hojas de autor del árbol con raíz `root` (el documento o un shadow root) y su
@@ -1630,6 +1656,7 @@ pub fn style_document_with_sheets(
         timings: std::env::var_os("BF_TRACE").map(|_| std::cell::RefCell::default()),
         base: std::cell::RefCell::new(None),
         expanded: std::cell::RefCell::new(HashMap::new()),
+        blooms: std::cell::RefCell::new(HashMap::new()),
     };
     let mut map = StyleMap::new();
     let mut stack: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = doc

@@ -423,6 +423,117 @@ pub(crate) fn item_bounds(item: &DisplayItem) -> Option<Rect> {
     Some(inflate(&r, 2.0))
 }
 
+/// E4: un grupo de la lista (de un `Push*` a su `Pop*`): el índice de su `Pop*` y la caja de
+/// todo lo que pinta, en px CSS de la página sin desplazar (la base del lienzo), o `None` si no
+/// se sabe.
+pub(crate) type Span = (usize, Option<Rect>);
+
+/// E4: [`Span`] de cada ítem que abre un grupo (`None` en el resto). La caja se sabe salvo en
+/// los grupos con un efecto (un `filter` puede leer y pintar fuera de su contenido) y en los
+/// que contienen un `fixed` o un `sticky`, o están dentro de uno (dependen del scroll); un
+/// recorte la limita a su rectángulo. Con ella, el raster de un tile salta los grupos enteros
+/// que no lo tocan: no pintarían nada en él, y componer una capa vacía no cambia nada.
+pub(crate) fn group_spans(items: &[DisplayItem]) -> Vec<Option<Span>> {
+    struct Open {
+        start: usize,
+        acc: Option<Rect>,
+        known: bool,
+        clip: Option<Rect>,
+        transform: bool,
+    }
+    let mut out = vec![None; items.len()];
+    let mut stack: Vec<Open> = Vec::new();
+    let mut matrices: Vec<Affine> = vec![IDENTITY];
+    // Grupos `fixed`/`sticky` abiertos: lo de dentro no tiene caja fija en la página.
+    let mut scrolled = 0usize;
+    for (i, item) in items.iter().enumerate() {
+        let top = *matrices.last().unwrap_or(&IDENTITY);
+        let open = |known: bool, clip: Option<Rect>, transform: bool| Open {
+            start: i,
+            acc: None,
+            known,
+            clip,
+            transform,
+        };
+        match item {
+            DisplayItem::PushTransform { dx, dy } => {
+                matrices.push(concat(&top, &[1.0, 0.0, 0.0, 1.0, *dx, *dy]));
+                stack.push(open(scrolled == 0, None, true));
+            }
+            DisplayItem::PushMatrix(m) => {
+                matrices.push(concat(&top, m));
+                stack.push(open(scrolled == 0, None, true));
+            }
+            DisplayItem::PushFixed | DisplayItem::PushSticky { .. } => {
+                for g in &mut stack {
+                    g.known = false;
+                }
+                scrolled += 1;
+                matrices.push(top);
+                stack.push(open(false, None, true));
+            }
+            DisplayItem::PushClip { rect, .. } | DisplayItem::PushClipBorder { rect, .. } => {
+                stack.push(open(scrolled == 0, Some(map_rect(&top, rect)), false));
+            }
+            DisplayItem::PushClipText { .. }
+            | DisplayItem::PushOpacity(_)
+            | DisplayItem::PushMask => stack.push(open(scrolled == 0, None, false)),
+            DisplayItem::PushEffect => stack.push(open(false, None, false)),
+            DisplayItem::PushShadow { .. } => {
+                let mut g = open(scrolled == 0, None, false);
+                g.acc = item_bounds(item).map(|b| map_rect(&top, &b));
+                stack.push(g);
+            }
+            DisplayItem::PopTransform
+            | DisplayItem::PopFixed
+            | DisplayItem::PopSticky
+            | DisplayItem::PopClip
+            | DisplayItem::PopOpacity
+            | DisplayItem::PopMask { .. }
+            | DisplayItem::PopEffect(_)
+            | DisplayItem::PopShadow => {
+                let Some(g) = stack.pop() else {
+                    continue;
+                };
+                if matches!(item, DisplayItem::PopFixed | DisplayItem::PopSticky) {
+                    scrolled = scrolled.saturating_sub(1);
+                }
+                if g.transform && matrices.len() > 1 {
+                    matrices.pop();
+                }
+                let bounds = g.known.then(|| {
+                    let acc = g.acc.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+                    match g.clip {
+                        Some(c) => {
+                            let (x0, y0) = (acc.x.max(c.x), acc.y.max(c.y));
+                            let x1 = (acc.x + acc.width).min(c.x + c.width);
+                            let y1 = (acc.y + acc.height).min(c.y + c.height);
+                            Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+                        }
+                        None => acc,
+                    }
+                });
+                out[g.start] = Some((i, bounds));
+                if let Some(parent) = stack.last_mut() {
+                    match bounds {
+                        Some(b) if b.width > 0.0 && b.height > 0.0 => {
+                            parent.acc = Some(union(parent.acc, b));
+                        }
+                        Some(_) => {}
+                        None => parent.known = false,
+                    }
+                }
+            }
+            other => {
+                if let (Some(g), Some(b)) = (stack.last_mut(), item_bounds(other)) {
+                    g.acc = Some(union(g.acc, map_rect(&top, &b)));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// E4: la caja de lo que pinta `item` con la transformación `m` (px CSS), más ajustada que
 /// [`item_bounds`] para el texto: la de los puntos de los contornos de sus glifos (encierran
 /// la curva), con 2 px de margen por el ajuste a la rejilla y el antialiasing. Los glifos de
