@@ -14,9 +14,8 @@
 //! `reftest-wait`, se dispara `TestRendered` en ella tras el primer pintado y se espera a que
 //! un script quite la clase. Un pánico o un tiempo agotado cuentan como `error`.
 //!
-//! Los documentos XML (`.xht`, `.svg`) se parsean enteros y después se ejecutan sus scripts en
-//! orden de documento, con `DOMContentLoaded` y `load` al final: el parser XML no ejecuta
-//! scripts mientras parsea.
+//! Los documentos XML (`.xht`, `.svg`) ejecutan sus scripts durante el parseo, en orden de
+//! documento, por el mismo camino que la ventana ([`crate::xml_scripts`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -194,56 +193,6 @@ fn frames(agent: &Agent, realm: RealmId) -> Vec<FrameDoc> {
     convert(bf_web::bom::frames::frame_views(agent, realm))
 }
 
-/// Ejecuta los scripts de un documento XML ya parseado, en orden de documento (los externos
-/// con el loader), y dispara `DOMContentLoaded` y `load`.
-fn run_xml_scripts(agent: &mut Agent, realm: RealmId, url: &Url, loader: &dyn ResourceLoader) {
-    let doc = document(agent, realm);
-    let mut scripts = Vec::new();
-    for n in doc.inclusive_descendants(doc.root()) {
-        let Some(el) = doc.element(n) else { continue };
-        if el.name.as_lossy_str() != "script" {
-            continue;
-        }
-        let ty = el.attr("type").unwrap_or("").trim().to_ascii_lowercase();
-        if !matches!(
-            ty.as_str(),
-            "" | "text/javascript" | "application/javascript" | "application/ecmascript"
-        ) {
-            continue;
-        }
-        let src = el.attr("src").or_else(|| {
-            el.attrs
-                .iter()
-                .find(|a| a.name.as_lossy_str() == "href")
-                .map(|a| a.value.as_str().unwrap_or(""))
-        });
-        let (text, script_url) = match src {
-            Some(src) => {
-                let Ok(u) = Url::parse(src.trim(), Some(url)) else {
-                    continue;
-                };
-                let Some(r) = loader.load(&u) else { continue };
-                (bf_infra::decode_text(&r.bytes), u.href())
-            }
-            None => (doc.text_content(n), url.href()),
-        };
-        scripts.push((text, script_url));
-    }
-    for (text, script_url) in scripts {
-        bf_web::html::scripting::PageHost { agent, realm }.run_classic_script(&text, &script_url);
-    }
-    let root = doc.root();
-    let init = |bubbles| EventInit {
-        bubbles,
-        cancelable: false,
-        composed: false,
-    };
-    let mut ev = Event::new("DOMContentLoaded", init(true));
-    bf_web::bom::script::dispatch_trusted(agent, realm, EventTarget::Node(root), &mut ev);
-    let mut ev = Event::new("load", init(false));
-    bf_web::bom::script::dispatch_trusted(agent, realm, EventTarget::Window, &mut ev);
-}
-
 /// El runner: el harness de `bf-paint` (fuentes con Ahem, rutas, imágenes de los fallos) y
 /// el loader de `tests/wpt` con las sustituciones de `wptserve`.
 pub struct Runner {
@@ -309,13 +258,12 @@ impl Runner {
         );
         let realm = rt.main_realm();
         let xml = is_xml(path);
-        let owner = if xml {
-            DocumentOwner::Document(Box::new(reftest::parse_text(path, &text)))
-        } else {
-            DocumentOwner::Document(Box::default())
-        };
         let agent = &mut rt.agent;
-        bf_web::install(agent, realm, WebContext::new(owner, url.clone()));
+        bf_web::install(
+            agent,
+            realm,
+            WebContext::new(DocumentOwner::Document(Box::default()), url.clone()),
+        );
         bf_web::bom::script::install_scripting(agent, realm, &url, self.loader.clone());
         bf_web::cssom::set_viewport(agent, realm, VIEWPORT.width, VIEWPORT.height, 1.0);
         let images = Rc::new(RefCell::new(bf_layout::ImageSizes::default()));
@@ -328,7 +276,11 @@ impl Runner {
                 images: images.clone(),
             }),
         );
-        if !xml {
+        if xml {
+            // Como la ventana: los scripts corren durante la construcción del documento.
+            let parsed = reftest::parse_text(path, &text);
+            crate::xml_scripts::parse(agent, realm, &parsed, &url);
+        } else {
             bf_web::bom::script::begin_parse(agent, realm, &url);
             bf_web::bom::script::feed(agent, realm, &text);
             bf_web::bom::script::finish(agent, realm);
@@ -342,13 +294,15 @@ impl Runner {
             fonts,
             extra: &[],
             text_zoom: 1.0,
+            // Los reftests de WPT se capturan con DPR 1.
+            device_pixel_ratio: 1.0,
         };
         // Como el hilo de la pestaña: el primer layout carga imágenes y hojas, y después sale
         // `load` (HTML §13.2.7 paso 8); los scripts ven el tamaño de las imágenes.
         let first = bf_paint::prepare_page(&document(agent, realm), &ctx, VIEWPORT);
         *images.borrow_mut() = first.images.sizes.clone();
         if xml {
-            run_xml_scripts(agent, realm, &url, &*self.loader);
+            crate::xml_scripts::fire_load(agent, realm);
         } else {
             bf_web::bom::script::resources_loaded(agent, realm);
         }

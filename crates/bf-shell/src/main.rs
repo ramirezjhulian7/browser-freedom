@@ -20,6 +20,7 @@ mod script;
 mod settings;
 mod theme;
 mod window;
+mod xml_scripts;
 
 use bf_css::media::MediaContext;
 use bf_css::selectors::{MatchContext, NamespaceMap, matches, parse_selector_list};

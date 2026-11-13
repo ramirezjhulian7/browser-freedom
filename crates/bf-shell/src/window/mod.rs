@@ -4400,6 +4400,16 @@ impl App {
                 self.mouse = point(arg).ok_or_else(bad)?;
                 self.mouse_moved();
             }
+            // E6: `wheel:X,Y,DY`: la rueda sobre (X, Y), DY px hacia abajo (negativo, arriba),
+            // por el mismo camino que `WindowEvent::MouseWheel`.
+            "wheel" => {
+                let (at, dy) = arg.rsplit_once(',').ok_or_else(bad)?;
+                self.mouse = point(at).ok_or_else(bad)?;
+                let dy: f32 = dy.trim().parse().map_err(|_| bad())?;
+                self.mouse_moved();
+                self.wheel(0.0, dy);
+                self.settle_input();
+            }
             // `dialog:ok`, `dialog:ok:texto` (para `prompt`) o `dialog:cancel`.
             "dialog" => {
                 self.receive();
@@ -4526,7 +4536,7 @@ impl App {
 /// `freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
-/// `link:texto` (clic en el enlace con ese texto), `type:texto`,
+/// `link:texto` (clic en el enlace con ese texto), `wheel:X,Y,DY` (la rueda), `type:texto`,
 /// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto), `resize:W,H` y `wait`.
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
