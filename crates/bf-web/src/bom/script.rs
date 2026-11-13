@@ -227,6 +227,19 @@ pub fn script_env(agent: &Agent, realm: RealmId) -> Option<&ScriptEnv> {
     agent.realm_data::<ScriptEnv>(realm)
 }
 
+/// E6: el loader de los recursos de la ventana `realm`: el de sus scripts (el del navegador; en
+/// un marco, el de la pestaña) o, en el runner de testharness, el de sus `PageResources`. En el
+/// navegador no hay `PageResources`: buscar solo ahí dejaba sin red a `FontFace.load()` (y deja
+/// todavía a las hojas de `<link>` del CSSOM, `cssom::sheets::load_linked_sheet`, que esperan a
+/// que el CSSOM no vuelva a parsear las hojas que ya parsea el pintado).
+pub fn page_loader(agent: &Agent, realm: RealmId) -> Option<Arc<dyn ResourceLoader>> {
+    script_env(agent, realm).map(ScriptEnv::loader).or_else(|| {
+        agent
+            .realm_data::<crate::html::scripting::PageResources>(realm)
+            .map(|r| r.loader.clone())
+    })
+}
+
 fn env_mut(agent: &mut Agent, realm: RealmId) -> Option<&mut ScriptEnv> {
     agent.realm_data_mut::<ScriptEnv>(realm)
 }

@@ -1634,3 +1634,107 @@ mod shared_requests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
+
+/// E6 (diagnóstico de asimetrix.co): la CSS Font Loading API (`FontFace.load()`, CSS Font
+/// Loading 3 §2.2) descarga con el loader de la ventana, también desde un marco. Antes buscaba
+/// solo `PageResources`, que existe en el runner de testharness pero no en el navegador: la
+/// fuente fallaba con `NetworkError` (el embed de YouTube de asimetrix.co dejaba dos promesas
+/// rechazadas). Las hojas de `<link>` del CSSOM tienen el mismo problema (`error` en vez de
+/// `load`, `cssRules` vacío) y siguen así: arreglarlo igual sube la primera pintura de
+/// Wikipedia unos 70 ms, porque el CSSOM parsea otra vez todas las hojas (ver
+/// `docs/pendiente/mac/e6.md`). El test lo deja anotado.
+#[cfg(test)]
+mod page_loader_pages {
+    use super::*;
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::rc::Rc;
+
+    const PAGE: &str = "<!doctype html><link rel=stylesheet href=/a.css \
+        onload=\"console.log('link-load', document.styleSheets[0].cssRules.length)\" \
+        onerror=\"console.log('link-error')\">\
+        <script>new FontFace('Prueba', 'url(/f.woff2)').load().then(\
+          () => console.log('fuente-ok'), e => console.log('fuente-' + e.name));</script>\
+        <iframe src=/marco.html></iframe>";
+
+    const FRAME: &str = "<!doctype html><script>new FontFace('Marco', 'url(/f.woff2)').load()\
+        .then(() => console.log('marco-fuente-ok'), e => console.log('marco-fuente-' + e.name));\
+        </script>";
+
+    /// `/` la página, `/marco.html` el marco, `/a.css` una hoja y `/f.woff2` unos bytes con la
+    /// firma de WOFF2 (lo que comprueba `fetchFont`).
+    fn server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut r = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                let path = line.split(' ').nth(1).unwrap_or("/").to_owned();
+                let (ty, body): (&str, Vec<u8>) = match path.as_str() {
+                    "/" => ("text/html; charset=utf-8", PAGE.into()),
+                    "/marco.html" => ("text/html; charset=utf-8", FRAME.into()),
+                    "/a.css" => ("text/css", b"p { color: red } a { color: blue }".to_vec()),
+                    "/f.woff2" => ("font/woff2", b"wOF2\0\0\0\0datos".to_vec()),
+                    _ => ("text/plain", Vec::new()),
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn font_loading_uses_the_window_loader() {
+        let port = server();
+        let net = Arc::new(NetLoader::new());
+        let ctx = LoadContext {
+            net: net.clone(),
+            fonts: FontDb::system(),
+            viewport: Size {
+                width: 800.0,
+                height: 600.0,
+            },
+            recent: Vec::new(),
+            theme: Theme::for_system(None),
+            post: None,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let sink = log.clone();
+        let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+            sink.borrow_mut().push(e.text)
+        }));
+        let env = PageEnv::cli(net);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+        let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+        assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+        // Las tareas del documento y las del marco (que crea `sync_frames`).
+        for _ in 0..5 {
+            engine.run_due_tasks();
+            engine.sync_frames();
+            engine.resources_loaded();
+        }
+        let log = log.take();
+        let has = |s: &str| log.iter().any(|l| l == s);
+        assert!(has("fuente-ok"), "{log:?}");
+        assert!(has("marco-fuente-ok"), "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("NetworkError")), "{log:?}");
+        // Pendiente (E4): la hoja del `<link>` en el CSSOM sigue sin red en el navegador.
+        assert!(has("link-error"), "¿ya se arregló el CSSOM? {log:?}");
+    }
+}

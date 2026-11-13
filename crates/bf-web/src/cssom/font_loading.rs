@@ -184,9 +184,8 @@ fn fetch_font(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let len = agent.get_str(list, "length")?.as_number().unwrap_or(0.0) as usize;
     let realm = WebContextHandle::current(agent).realm;
-    let loader = agent
-        .realm_data::<crate::html::scripting::PageResources>(realm)
-        .map(|r| r.loader.clone());
+    // E6: el loader de la ventana (en el navegador no hay `PageResources`).
+    let loader = crate::bom::script::page_loader(agent, realm);
     for i in 0..len {
         let item = agent.get_str(list, &i.to_string())?;
         let item = agent.to_string(&item)?.to_string();
@@ -195,8 +194,11 @@ fn fetch_font(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 continue;
             };
             // Las URL `data:` no necesitan cargador.
+            // E6: con *destination* `font` (Fetch §2.2.5): contenido mixto y CSP `font-src`.
             let data = match &loader {
-                Some(l) => l.load(&url).map(|r| r.bytes),
+                Some(l) => l
+                    .load_for(&url, bf_infra::Destination::Font)
+                    .map(|r| r.bytes),
                 None => bf_infra::FileLoader::default().load(&url).map(|r| r.bytes),
             };
             if data.is_some_and(|d| is_font_data(&d)) {
