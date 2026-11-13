@@ -1,5 +1,11 @@
 # E5: subconjuntos de `css/css-flexbox` de los criterios 3.3, 3.4 y 3.6 del roadmap
 
+> **Actualización (ciclo de cierre, ronda 1, 2026-11-13, `army/e5` sobre `master` `71444d2`):**
+> con `cargo run --release -p bf-paint --bin wpt-reftests -- css/css-flexbox`, 3.6 pasa de 86 a
+> **94/107** (tests con resultado), 3.4 de 106 a **110/135**, 3.3 sigue en 16/16 y
+> `css/css-flexbox` de 780 a **802/949**. Detalle test por test y los 13 de 3.6 que siguen
+> fallando en `e5.md` ("Ciclo de cierre, ronda 1"). Las listas de abajo son de la ronda 6.
+
 Medido en macOS (ronda 6) sobre `army/e5` (`master` `d1148b8` más los cambios de E5), con
 `REFTEST_GROUPS=css/css-flexbox,… cargo test -p bf-paint --test wpt_reftests_groups -- --ignored
 --test-threads=3`. Solo reftests (los de testharness no cuentan). Cada subconjunto son los

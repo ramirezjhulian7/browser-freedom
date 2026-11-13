@@ -84,6 +84,10 @@ pub(crate) struct Layout<'a> {
     /// Altura de contenido impuesta a la próxima caja que maquete `box_contents` (ítems flex
     /// estirados o flexionados en columna).
     pub forced_height: Option<f32>,
+    /// E5: el alto impuesto (`forced_height`) es el tamaño principal flexionado de un ítem de
+    /// una columna con alto indefinido: no es definido para los porcentajes (CSS Flexbox 1
+    /// §9.8 punto 2).
+    pub forced_height_indefinite: bool,
     /// Leyenda renderizada del `<fieldset>` en curso, que `block_children` no coloca.
     pub legend: Option<&'a LayoutBox>,
     /// E4: columnas de cada tabla ya medidas (por dirección de la caja de tabla).
@@ -337,6 +341,7 @@ impl<'a> Layout<'a> {
             fixed: Vec::new(),
             root: None,
             forced_height: None,
+            forced_height_indefinite: false,
             legend: None,
             table_cache: std::collections::HashMap::new(),
             table_paint: None,
@@ -859,6 +864,7 @@ impl<'a> Layout<'a> {
         is_root: bool,
     ) -> (Fragment, CollapsedMargin) {
         let forced = self.forced_height.take();
+        let forced_indefinite = std::mem::take(&mut self.forced_height_indefinite);
         let probe = std::mem::take(&mut self.content_probe);
         let style = &b.style;
         let border = border_edges(style);
@@ -954,7 +960,32 @@ impl<'a> Layout<'a> {
                 })
                 // E4: el alto en % de una tabla se resuelve contra el containing block de su
                 // envoltorio.
-                .or_else(|| cb.height.filter(|_| crate::table::is_table_wrapper(b))),
+                .or_else(|| cb.height.filter(|_| crate::table::is_table_wrapper(b)))
+                // E5: los bloques anónimos no cuentan al resolver porcentajes: se usa el
+                // ancestro no anónimo más cercano (CSS 2 §9.2.1.1; WPT
+                // `css-flexbox/percentage-heights-022`).
+                .or_else(|| {
+                    cb.height
+                        .filter(|_| matches!(b.kind, BoxKind::AnonymousBlock))
+                }),
+        };
+        // E5: los porcentajes de alto de los hijos de un ítem flexionado en una columna con
+        // alto indefinido son indefinidos salvo que el ítem tenga su propio alto definido (CSS
+        // Flexbox 1 §9.8 punto 2; WPT `css-flexbox/percentage-heights-024`). Los contenedores
+        // flex, grid y tablas usan igualmente ese alto para repartir su espacio.
+        let child_cb = if forced_indefinite
+            && !crate::flex::is_flex_container(b)
+            && !crate::grid::is_grid_container(b)
+            && !matches!(b.kind, BoxKind::Table)
+            && !crate::table::is_table_wrapper(b)
+            && specified_height(style, cb.height, edges_v).is_none()
+        {
+            Cb {
+                height: None,
+                ..child_cb
+            }
+        } else {
+            child_cb
         };
         let positioned = is_positioned(style);
         // E12: un elemento transformado es containing block de los absolutos y los fijos de su
@@ -1072,13 +1103,31 @@ impl<'a> Layout<'a> {
         let stretch_cb = cb
             .height
             .map(|h| (h - margins.top - margins.bottom - edges_v).max(0.0));
+        // E5: el alto min-content de un reemplazado es el que tendría con `height: auto` y su
+        // ancho usado (CSS Sizing 3 §5.1, a través de la relación de aspecto), no su `height`
+        // especificado (WPT `css-flexbox/flex-minimum-height-flex-items-023`).
+        let keyword_h = match &b.kind {
+            BoxKind::Replaced { natural, ratio }
+                if style.min_height.is_intrinsic() || style.max_height.as_size().is_intrinsic() =>
+            {
+                let mut probe = b.clone();
+                let mut st = (**style).clone();
+                st.height = Size::Auto;
+                st.width =
+                    Size::LengthPercentage(bf_style::values::LengthPercentage::px(content_w));
+                st.box_sizing = BoxSizing::ContentBox;
+                probe.style = std::sync::Arc::new(st);
+                self.replaced_size(&probe, *natural, *ratio, cb).height
+            }
+            _ => auto_h,
+        };
         match &style.min_height {
-            k if k.is_intrinsic() => hmin = hmin.max(auto_h),
+            k if k.is_intrinsic() => hmin = hmin.max(keyword_h),
             Size::Stretch => hmin = stretch_cb.unwrap_or(hmin),
             _ => {}
         }
         match style.max_height.as_size() {
-            k if k.is_intrinsic() => hmax = auto_h,
+            k if k.is_intrinsic() => hmax = keyword_h,
             Size::Stretch => hmax = stretch_cb.unwrap_or(hmax),
             _ => {}
         }
@@ -1483,7 +1532,8 @@ impl<'a> Layout<'a> {
         }
         // E5: los porcentajes de altura de los descendientes se resuelven contra el alto de
         // `b` si es definido respecto a `pct_height_basis` (CSS Sizing 3 §5.2.1).
-        if matches!(b.kind, BoxKind::Replaced { .. }) {
+        // E5: un bloque anónimo no cambia la base de los porcentajes (CSS 2 §9.2.1.1).
+        if matches!(b.kind, BoxKind::Replaced { .. } | BoxKind::AnonymousBlock) {
             return self.intrinsic_widths_inner(b);
         }
         let st = &b.style;

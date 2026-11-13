@@ -1759,3 +1759,25 @@ fn media_and_legacy_members() {
          example.com,SecurityError,,NotSupportedError,manual,true,false,true,sentences,8"
     );
 }
+
+// E5: la hoja UA oculta los popovers cerrados (HTML §15.3.1,
+// `[popover]:not(:popover-open):not(dialog[open])`) y `:popover-open` sigue a
+// `showPopover()`/`hidePopover()`/`togglePopover()` (HTML §4.16.3, §6.12).
+#[test]
+fn closed_popovers_are_not_rendered() {
+    let mut p = Page::new(SIMPLE);
+    let r = p.show(
+        "(function () { \
+           var out = []; \
+           var e = document.createElement('div'); e.popover = 'auto'; document.body.append(e); \
+           function d() { return getComputedStyle(e).display; } \
+           out.push(d(), e.matches(':popover-open')); \
+           e.showPopover(); out.push(d(), e.matches(':popover-open')); \
+           e.hidePopover(); out.push(d()); \
+           e.togglePopover(); out.push(d(), getComputedStyle(e).position); \
+           e.togglePopover(false); out.push(d()); \
+           return out.join(); \
+         })()",
+    );
+    assert_eq!(r, "none,false,block,true,none,block,fixed,none");
+}
