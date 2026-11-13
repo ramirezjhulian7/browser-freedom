@@ -137,6 +137,25 @@ fn flex_content_align(a: Aligned<ContentAlign>, free: f32) -> ContentAlign {
     }
 }
 
+/// E5: copia de un reemplazado con su tamaño principal (`width` en filas, `height` en
+/// columnas) en `auto` y, si se da, `width` fijo en `w` (content box), para medir su sugerencia
+/// de tamaño por contenido (§4.5).
+fn with_auto_main(b: &LayoutBox, row: bool, w: Option<f32>) -> LayoutBox {
+    let mut probe = b.clone();
+    let mut st = (*b.style).clone();
+    if row {
+        st.width = Size::Auto;
+    } else {
+        st.height = Size::Auto;
+        if let Some(w) = w {
+            st.width = Size::LengthPercentage(bf_style::values::LengthPercentage::px(w));
+            st.box_sizing = bf_style::properties::types::BoxSizing::ContentBox;
+        }
+    }
+    probe.style = std::sync::Arc::new(st);
+    probe
+}
+
 /// Primera baseline de un fragmento (y absoluta): la del primer line box en orden.
 pub(crate) fn first_baseline(f: &Fragment) -> Option<f32> {
     if f.kind == FragmentKind::Line {
@@ -524,57 +543,34 @@ impl<'a> Layout<'a> {
             if min_auto && matches!(overflow, Overflow::Visible | Overflow::Clip) {
                 let content_min = if row {
                     if let BoxKind::Replaced { natural, ratio } = &b.kind {
-                        // E5: la sugerencia por contenido es el min-content sin el `width`
-                        // propio (ese es la sugerencia por tamaño especificado): con relación de
-                        // aspecto y alto definido, el alto transferido por la relación; si no, el
-                        // ancho natural; y con relación, acotado por `min-height`/`max-height`
-                        // transferidos (§4.5).
-                        let r = ratio.filter(|r| *r > 0.0);
-                        let w = match (specified_height(s, cb.height, bp_v), r) {
-                            (Some(h), Some(r)) => Some(h * r),
-                            _ if natural.width > 0.0 => Some(natural.width),
-                            _ => None,
+                        // E5: la sugerencia por contenido es el min-content: el tamaño del
+                        // reemplazado con su propio `width` en `auto` (ese es la sugerencia por
+                        // tamaño especificado), así que sale del alto definido a través de la
+                        // relación de aspecto o del tamaño natural (§4.5).
+                        let rcb = Cb {
+                            x: 0.0,
+                            y: 0.0,
+                            width: cb.width,
+                            height: cb.height,
                         };
-                        match (w, r) {
-                            (Some(w), Some(r)) => {
-                                let (hlo, hhi) = height_limits(s, cb.height, bp_v);
-                                w.min(hhi * r).max(hlo * r)
-                            }
-                            (Some(w), None) => w,
-                            (None, _) => {
-                                let rcb = Cb {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: cb.width,
-                                    height: cb.height,
-                                };
-                                self.replaced_size(b, *natural, *ratio, rcb).width
-                            }
-                        }
+                        let probe = with_auto_main(b, true, None);
+                        self.replaced_size(&probe, *natural, *ratio, rcb).width
                     } else {
                         self.intrinsic_widths(b).0
                     }
-                } else if let BoxKind::Replaced { natural, ratio } = &b.kind
-                    && let Some(h) = {
-                        // E5: lo mismo en columnas: el ancho definido transferido por la relación
-                        // de aspecto o el alto natural, acotado por `min-width`/`max-width`
-                        // transferidos (§4.5).
-                        let r = ratio.filter(|r| *r > 0.0);
-                        let h = match (specified_width(s, cb.width, bp_h), r) {
-                            (Some(w), Some(r)) => Some(w / r),
-                            _ if natural.height > 0.0 => Some(natural.height),
-                            _ => None,
-                        };
-                        match (h, r) {
-                            (Some(h), Some(r)) => {
-                                let (wlo, whi) = width_limits(s, cb.width, bp_h);
-                                Some(h.min(whi / r).max(wlo / r))
-                            }
-                            (h, _) => h,
-                        }
-                    }
-                {
-                    h
+                } else if let BoxKind::Replaced { natural, ratio } = &b.kind {
+                    // E5: lo mismo en columnas, con `height: auto` y, si su ancho no es una
+                    // longitud (`auto` o una keyword como `stretch`), el tamaño cruzado ya
+                    // resuelto (estirado o ajustado) como ancho.
+                    let rcb = Cb {
+                        x: 0.0,
+                        y: 0.0,
+                        width: cb.width,
+                        height: cb.height,
+                    };
+                    let w = (!matches!(s.width, Size::LengthPercentage(_))).then_some(column_cross);
+                    let probe = with_auto_main(b, false, w);
+                    self.replaced_size(&probe, *natural, *ratio, rcb).height
                 } else {
                     self.item_content_height(b, cb, column_cross, bp_v)
                 };
@@ -791,9 +787,8 @@ impl<'a> Layout<'a> {
                         &b.style,
                         f.rect.height,
                     );
-                    item.baseline = Some(
-                        item.margin(2) + first_baseline(&f).map_or(synth, |b| b - border_top),
-                    );
+                    item.baseline =
+                        Some(item.margin(2) + first_baseline(&f).map_or(synth, |b| b - border_top));
                 }
             }
         }
