@@ -12,7 +12,7 @@ Las reglas no cambian:
 - `#![forbid(unsafe_code)]` (cualquier excepción, por ejemplo en el GC, se justifica por
   escrito en el archivo y se revisa aparte).
 
-**Estado al 2026-11-13** (`master` `21ea345`). Cada apartado lleva un
+**Estado al 2026-11-13** (`master` `0995c60`, más `army/e3` donde se dice). Cada apartado lleva un
 bloque **Estado** con lo hecho, lo parcial y lo que falta, la cifra medida y dónde vive. Las
 cifras salen de [`wpt-status.md`](wpt-status.md), [`test262-status.md`](test262-status.md),
 [`perf.md`](perf.md) y los `docs/pendiente/e*.md` y `docs/pendiente/mac/e*.md` (sección
@@ -38,6 +38,9 @@ está cerrada y no entra en la cuenta. Con ella al 100 %, el total sería (100 +
 Cuenta: (94.7 + 94.1 + 100 + 33.3) / 4 = 80.5 %; cumplidos 18 + 16 + 9 + 2 = 45 de
 19 + 17 + 9 + 6 = 51.
 
+Sin cambios en la tabla desde la ronda 3 del ciclo de cierre: lo integrado después
+(`0995c60`) mejora cifras, pero no cierra ningún criterio (ver la lista de abajo).
+
 Cambios respecto de la tabla de la ronda 1 del ciclo de cierre (76.4 %):
 - **Fase 5, `html-aam` y `wai-aria`**: 93.3 % y 91.8 % en `master` (E1, integrado en
   `21ea345`; `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1").
@@ -54,19 +57,19 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 
 | Apartado | Criterio | Cifra actual | Meta | Fuente |
 |---|---|---|---|---|
-| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8155 / 8166 subtests (99.9 %), 236 documentos; los 11 que quedan necesitan cambios grandes o se contradicen entre sí | 0 fallos | `pendiente/mac/e3.md`, ciclo de cierre, ronda 2 |
-| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 86 / 108 en `master`; 94 / 107 en `army/e5`, sin integrar | pasan | `pendiente/mac/e5-flexbox-subconjuntos.md`; la de la rama, en su `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 1" |
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8159 / 8166 subtests (99.9 %), 236 documentos; de los 7 que quedan, 5 piden que el parser ceda el control en mitad de un paso y 2 no se pueden cumplir | 0 fallos | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 5" |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 95 / 107 en `master` (8 de los 12 que faltan son de CSS Flexbox 2) | pasan | `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3" |
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
-| 5 | 60 fps al desplazar Wikipedia | 53 fps a escala 1 (18.8 ms por cuadro) y 17 fps a escala 2 (57.8 ms) | 60 fps | [`rendimiento.md`](rendimiento.md), "Resultados"; `pendiente/mac/e4.md`, "Cierre, ronda 1" |
-| 5 | Primera pintura de Wikipedia en release | mediana de 1205 ms (1311, 1205 y 1162 ms, carga 30-53) | < 500 ms | [`rendimiento.md`](rendimiento.md), "Resultados"; `pendiente/mac/e4.md`, "Cierre, ronda 1" |
+| 5 | 60 fps al desplazar Wikipedia | E4: mediana de 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (carga 15-36). Planificador sobre `0995c60`, carga 46-58: 12.6-15.3 ms a densidad 1 y 27.7-37.7 ms a densidad 2. Sin confirmar con la máquina libre | 60 fps (16.7 ms) | `pendiente/mac/e4.md`, "Cierre, ronda 3"; la del planificador, su reporte de la ronda 7 |
+| 5 | Primera pintura de Wikipedia en release | sin medida conjunta tras los últimos cambios. Por partes: red 401 ms (E6), parseo 60 ms (E3, en `army/e3`), cascada 76 ms (E4), maqueta 100-168 ms (E4) | < 500 ms | [`rendimiento.md`](rendimiento.md); `pendiente/mac/e6.md` y `e3.md`, "Ciclo de cierre, ronda 5"; `e4.md`, "Cierre, ronda 1" y "Cierre, ronda 3" |
 
 El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md). Las
 dos se midieron con la máquina cargada por otros ejecutores.
 
 ## Decisiones pendientes del usuario
 
-Tres criterios no avanzan sin una decisión que no le toca a ningún ejecutor:
+Cinco puntos no avanzan sin una decisión que no le toca a ningún ejecutor:
 - **Lector de pantalla (fase 5).** El motor ya calcula rol y nombre accesibles, pero un lector
   de pantalla de macOS solo lee lo que se expone por `NSAccessibility`. Eso pide FFI con
   Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo.
@@ -75,6 +78,18 @@ Tres criterios no avanzan sin una decisión que no le toca a ningún ejecutor:
 - **3.6, flexbox por palabras clave de tamaño.** 8 de los 108 tests son de CSS Flexbox 2
   (`flex-wrap: balance`, `flex-line-count`), un borrador sin texto estable. O se implementa
   sin especificación estable o se sacan del criterio.
+- **2.3, los 2 subtests de `html/syntax/parsing` que no se pueden cumplir.**
+  `DOMContentLoaded-defer.html` pide lo contrario que
+  `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
+  `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
+  no dispara. O se sacan del criterio o 2.3 no puede llegar a 0 fallos.
+- **Primera pintura, el suelo de la red.** El documento de Wikipedia trae `max-age=0,
+  must-revalidate` y hay que validarlo en cada visita. En un proceso nuevo eso son tres viajes
+  de ida y vuelta (TCP, TLS 1.3 y el 304), unos 115 ms cada uno en esta red: un suelo de unos
+  345 ms antes de parsear nada (`pendiente/mac/e6.md`, "Ciclo de cierre, ronda 5"). Bajarlo
+  pide reanudar TLS con 0-RTT (RFC 8446 §2.3), guardando los *session tickets* entre procesos.
+  O se acepta, o se mide la primera pintura sin la red (con el documento ya validado), o se
+  cambia la meta.
 
 Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
 en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
@@ -250,20 +265,22 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   - En la ronda 6 de E6, sobre `master`, los reftests con JavaScript ejecutados subieron a
     387 / 402 (96.3 %) (`pendiente/mac/e6.md`, ronda 6). La cifra combinada no se volvió a
     medir.
-- **Parcial**: `html/syntax/parsing` **8155 / 8166 subtests (99.9 %)** en 236 documentos (Mac,
-  2026-11-13, E3, `pendiente/mac/e3.md`, ciclo de cierre, ronda 2; 8150 en la ronda 6). Las
-  variantes `?file=…` de `html5lib_url`, `html5lib_write` y `html5lib_write_single` pasan
-  todas (5423 / 5423), y el árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0
-  fallos. Quedan 11:
+- **Parcial**: `html/syntax/parsing` **8159 / 8166 subtests (99.9 %)** en 236 documentos (Mac,
+  2026-11-13, E1, `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 5"; 8155 en la ronda 2 de
+  E3). Las variantes `?file=…` de `html5lib_url`, `html5lib_write` y `html5lib_write_single`
+  pasan todas (5423 / 5423), y el árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan.
+  Meta: 0 fallos. Quedan 7:
   - Construcción síncrona de custom elements y los *children changed steps* de un `script` en
-    mitad de un token (5). Las dos necesitan que el tree builder pueda llamar al host en mitad
-    de un paso; hoy solo lo hace entre tokens.
-  - Nodos que un script lleva a otro documento (4). Al adoptar se copia el nodo en la arena del
-    otro documento, y el parser sigue con el original.
+    mitad de un token, como `foster-parenting-moved-table` (5). Necesitan que el tree builder
+    pueda llamar al host en mitad de un paso; hoy solo lo hace entre tokens.
   - `DOMContentLoaded-defer.html` (1): pide lo contrario que
     `DOMContentLoaded-defer-task-order.tentative.html`, que pasa.
   - `adoption-agency-reparenting-pagehide.tentative.html` (1): espera un `pagehide` que el
     estándar no dispara.
+  - Estos dos últimos no se pueden cumplir; sacarlos del criterio es una decisión pendiente
+    (ver "Decisiones pendientes del usuario").
+  - Los 4 de nodos que un script lleva a otro documento ya pasan: el parser sigue a los nodos
+    adoptados (E1, `bf-web/src/dom/adopt.rs`).
 - **Falta**: `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`. En el runner de reftests con
   JavaScript, los errores de todos los grupos bajaron de 141 a 114 con CSS Font Loading
   (`pendiente/mac/e5.md`, ronda 7). Siguen faltando `Element.animate()` y algunos `load`
@@ -419,18 +436,17 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
   2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
   `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
-- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **86 / 108** en
-  `master` (Mac, 2026-11-12, E5 ronda 6, `pendiente/mac/e5-flexbox-subconjuntos.md`; meta: que
-  pasen todos; 74 / 108 antes). La rama `army/e5`, todavía sin integrar, llega a 94 / 107 con
-  el algoritmo de tamaños intrínsecos de flex (su `pendiente/mac/e5.md`, "Ciclo de cierre,
-  ronda 1"). En `master` fallan 22:
+- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **95 / 107** en
+  `master` (Mac, 2026-11-13, E5, `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3"; meta: que
+  pasen todos; 86 / 108 en la ronda 6 de E5, 74 / 108 antes; el 108 contaba un test que hoy no
+  se puede ejecutar). Entró el algoritmo de tamaños intrínsecos de flex, §9.9.1 (E5, "Ciclo de
+  cierre, ronda 1"). `css/css-flexbox` en total: **803 / 949** (780 antes). Fallan 12:
   - `flex-wrap: balance` y `flex-line-count` (8). Son de CSS Flexbox 2, un borrador sin texto
-    estable, y no se implementan.
-  - El algoritmo de tamaños intrínsecos de flex, §9.9.1 (5).
-  - Un borde punteado con ancho fraccionario (2, de pintura).
-  - Sueltos (7). `Namespace::Other` y `Null` existen en `bf-infra`; el parser XML ya trata
-  un URI vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros
-  casos.
+    estable, y no se implementan; sacarlos del criterio es una decisión pendiente.
+  - Otros 4 (el desglose por causa de la ronda 6, en
+    `pendiente/mac/e5-flexbox-subconjuntos.md`, es anterior a §9.9.1).
+- **`Namespace::Other`**: `Other` y `Null` existen en `bf-infra`; el parser XML ya trata un
+  URI vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros casos.
 - **Falta**: `lookupNamespaceURI`/`isDefaultNamespace`, `@namespace` y `ns|E` en selectores,
   parser XML completo (bloques 2 y 3 de `pendiente/e10.md`).
 
@@ -531,8 +547,9 @@ y los list box se desplazan con la rueda.
   75.2 % (1470 / 1954). Desde la ronda 1 del ciclo de cierre (E6, `pendiente/mac/e6.md`) la
   ventana también las pide al desplazar (`Engine::update_view`).
 - **Falta**: el pintado del shell pide todos los `<img>` sin mirar `loading`
-  (`bf_paint::images::load_images_in`, hallazgo de E6); carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo;
-  `scroll-snap`, `overscroll-behavior`, scroll containers RTL.
+  (`bf_paint::images::load_images_in`, hallazgo de E6; lo resuelve `army/e2`, sin integrar);
+  carga incremental de imágenes; `scroll-behavior: smooth` es instantáneo; `scroll-snap`,
+  `overscroll-behavior`, scroll containers RTL.
 
 ---
 
@@ -561,12 +578,17 @@ y los list box se desplazan con la rueda.
     release.
 
 **Estado** (2 de 6 criterios cumplidos):
-- **Accesibilidad** (E1, en `master` desde `21ea345`; `pendiente/mac/e1.md`, "Ciclo de cierre,
-  ronda 1"):
+- **Accesibilidad** (E1, en `master`; `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" y
+  "Ciclo de cierre, ronda 3"):
   - El motor calcula el rol y el nombre accesible de cada elemento (HTML-AAM, ARIA 1.2,
     AccName 1.2, también a través de shadow roots y slots), y los expone a los tests con
     `test_driver.get_computed_role`/`get_computed_label`.
-  - `html-aam` **93.3 %** (829 / 889) y `wai-aria` **91.8 %** (540 / 588): criterio
+  - **Árbol de accesibilidad** del documento (`bf_dom::accessibility::tree`, WAI-ARIA 1.2
+    §7.1 y Core-AAM §5.1): qué entra y qué no, `aria-owns`, estados (`checked`, `pressed`,
+    `expanded`, `selected`, `disabled`, `level`, `value`) y una serialización en texto en
+    orden de lectura (`bf_web::html::accessibility`). Hay un test con un artículo de Wikipedia
+    (`bf-web/tests/accessibility.rs`).
+  - `html-aam` **93.4 %** (830 / 889) y `wai-aria` **95.7 %** (563 / 588): criterio
     cumplido (meta ≥ 50 %). `accname` 91.7 % y `core-aam` 8 / 8.
   - También en `master`: la reflexión ARIA en el DOM (`ARIAMixin`) y el zoom de texto (E11).
   - **Falta** exponer el árbol al sistema (`NSAccessibility`) para que un lector de pantalla
@@ -580,19 +602,21 @@ y los list box se desplazan con la rueda.
   - `Referrer-Policy` (`bf-net/src/referrer.rs`) y HSTS (`bf-net/src/hsts.rs`) (E6); COOP/COEP
     y `crossOriginIsolated` (E3, `bf-web/src/workers/isolation.rs`; el shell aún no pasa las
     cabeceras).
-  - **CSP 3 y Mixed Content** (E6, en `master` desde `21ea345`;
+  - **CSP 3 y Mixed Content** (E6, en `master`;
     `bf-net/src/{csp,mixed_content,security}.rs`, `bf-web/src/security.rs`;
-    `pendiente/mac/e6.md`, ronda 7 y "Ciclo de cierre, ronda 1"):
+    `pendiente/mac/e6.md`, ronda 7 y "Ciclo de cierre", rondas 1 y 3):
     - CSP desde la cabecera y desde `<meta>`: `script-src` con nonce, hash y
       `'strict-dynamic'`, `connect-src`, `frame-src`, `'unsafe-eval'` y `Report-Only`.
     - Contenido mixto: lo activo `http:` en una página `https:` se bloquea y las imágenes
       pasan a `https:`.
-    - WPT `content-security-policy` y `mixed-content`: 173 de 1782 subtests (152 de 1754
-      antes; la mayoría necesita cabeceras o subdominios de `wptserve`).
-    - Falta de CSP: `img-src` para los `<img>` de `bf-web`; `style-src` y `script-src-attr`
-      en línea; `securitypolicyviolation` y `report-uri`/`report-to`; `worker-src`;
-      `media-src`; `connect-src` de `WebSocket` y `EventSource`; `frame-ancestors`, `sandbox`,
-      `upgrade-insecure-requests` y `base-uri`.
+    - `img-src` (CSP 3 §6.1.6) en los `<img>` del motor y en el pintado, y el evento
+      `securitypolicyviolation` (§5.1, §5.3) con `SecurityPolicyViolationEvent`.
+    - WPT `content-security-policy` y `mixed-content`: **231 de 1782** subtests (173 antes;
+      la mayoría de los que faltan necesita cabeceras o subdominios de `wptserve`).
+    - Falta de CSP: `style-src` y `script-src-attr` en línea; `report-uri`/`report-to`;
+      `worker-src`; `media-src`; `connect-src` de `WebSocket` y `EventSource`;
+      `frame-ancestors`, `sandbox`, `upgrade-insecure-requests` y `base-uri`; la política
+      propia de los marcos y la de los workers.
   - Faltan Permissions Policy y Safe Browsing.
 - **Interfaz**:
   - Pestañas, historial persistente, marcadores, descargas con su barra, buscar en la página,
@@ -604,30 +628,41 @@ y los list box se desplazan con la rueda.
     desde `21ea345`; `pendiente/mac/e6.md`, ronda 7). El Finder todavía no le pasa el documento
     con «Abrir con» (`winit` no expone esos eventos).
   - Impresión (`@page`): falta.
-- **Rendimiento** (`pendiente/mac/e4.md`, "Cierre, ronda 1"; método y tabla en
-  [`rendimiento.md`](rendimiento.md)):
+- **Rendimiento** (método y tablas en [`rendimiento.md`](rendimiento.md)):
   - En `master`:
-    - índice de reglas en la cascada;
+    - índice de reglas en la cascada, por pseudoelemento;
     - raster en tiles de la página, en paralelo y con desplazamiento incremental;
     - capas superpuestas compuestas solo en su caja (`render_over`);
-    - la barra de la ventana guardada pintada.
-  - **Desplazamiento**: **53 fps a escala 1** (18.8 ms por cuadro, raster 15.3 ms) y **17 fps a
-    escala 2** (57.8 ms), con carga 57-85. Antes, 124 ms y 482 ms. Meta: 60 fps (16.7 ms).
-  - **Primera pintura de Wikipedia**: mediana **1205 ms** (meta < 500 ms). Desglose de una
-    carga típica:
+    - la barra de la ventana guardada pintada;
+    - el cuadro de la ventana reutilizado y los `sticky` en capa propia (E4, "Cierre, ronda
+      3");
+    - la cascada salta los `::before`/`::after` sin `content` (E4, "Cierre, ronda 3");
+    - con una VPN que da una ruta IPv6 que no sale, IPv4 va primero (RFC 6724 §6 en Happy
+      Eyeballs; E6, "Ciclo de cierre, ronda 5").
+  - **Desplazamiento** (mediana por cuadro, meta 16.7 ms = 60 fps):
+    - E4 (`pendiente/mac/e4.md`, "Cierre, ronda 3"), carga 15-36: **8.0 ms a densidad 1**
+      (raster 5.5) y **17.7 ms a densidad 2** (raster 10.8). Antes, 20.9 y 59.1 ms.
+    - El planificador sobre `0995c60`, carga 46-58: 12.6-15.3 ms a densidad 1 y 27.7-37.7 ms
+      a densidad 2.
+    - A densidad 1 cabe en 16.7 ms en las dos medidas; a densidad 2, no. Sin confirmar con
+      la máquina libre: el criterio no se da por cumplido.
+  - **Primera pintura de Wikipedia** (meta < 500 ms): no hay medida conjunta con los últimos
+    cambios (el planificador la toma al integrar `army/e3`). Por partes, cada una de su
+    fuente y con su carga:
 
-    | Fase | ms |
-    |---|---:|
-    | Red y caché | 287 |
-    | Parseo | 334 |
-    | Scripts | 26 |
-    | Hojas | 95 |
-    | Cascada | 238 |
-    | Imágenes | 11 |
-    | Maqueta | 168 |
-    | Lista | 9 |
+    | Fase | ms | Fuente |
+    |---|---:|---|
+    | Red y caché | 401 (mediana; 711 antes) | E6, "Ciclo de cierre, ronda 5" |
+    | Parseo | 60 (mediana; 307 antes) | E3, "Ciclo de cierre, ronda 5" (en `army/e3`) |
+    | Cascada | 76 (mediana; 105 antes) | E4, "Cierre, ronda 3" |
+    | Maqueta | 100-168 | E4, "Cierre, ronda 1" (168) y muestreo de "Cierre, ronda 3" (100) |
 
-    La red y la caché son validaciones que RFC 9111 obliga a hacer.
+    Medidas completas: 1076 ms (E4, carga 17-20, sin los cambios de E3 y E6), 1271 ms (E3,
+    carga 13, sin el de E6) y 1495 ms (E6, carga 9-11, sin el de E3).
+  - **Suelo de red**: el documento se valida en cada visita (`max-age=0, must-revalidate`) y
+    un proceso nuevo no tiene conexión abierta. TCP, TLS 1.3 y el 304 cuestan un viaje de ida
+    y vuelta cada uno, unos 115 ms en esta red: unos 345 ms antes de parsear (E6). Qué hacer
+    con eso es una decisión pendiente.
   - Falta la GPU.
 
 ---
