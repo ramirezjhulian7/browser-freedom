@@ -604,7 +604,23 @@ const WINDOW_ONLY: &[&str] = &[
 ];
 
 /// Instala el global del worker en `realm`.
+///
+/// E1: todo dentro de un ámbito de enraizado ([`Agent::rooting_scope`]), como
+/// `crate::register_all` en las ventanas: los instaladores crean objetos y después compilan y
+/// llaman a sus fábricas de JavaScript (`cache.js`, `service.js`, IndexedDB), que pueden
+/// recolectar antes de que lo creado quede enlazado al global.
 fn install(
+    agent: &mut Agent,
+    realm: RealmId,
+    url: &Url,
+    kind: &ScopeKind,
+    backend: Arc<dyn NetBackend>,
+) {
+    agent.rooting_scope(|agent| install_rooted(agent, realm, url, kind, backend));
+}
+
+/// El cuerpo de [`install`], ya dentro del ámbito de enraizado.
+fn install_rooted(
     agent: &mut Agent,
     realm: RealmId,
     url: &Url,

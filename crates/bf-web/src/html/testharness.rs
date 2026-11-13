@@ -418,6 +418,24 @@ pub const TESTHARNESS_REPORT: &str = r#"// testharnessreport.js de Freedom: los 
 })();
 "#;
 
+/// E1: el `testdriver-vendor.js` del runner: lo que implementa el navegador de
+/// `test_driver_internal` (WebDriver "Get Computed Role" y "Get Computed Label", con el
+/// cálculo de `html::accessibility`). Solo en la ventana del test (las funciones nativas son de
+/// su realm).
+pub const TESTDRIVER_VENDOR: &str = r#"// testdriver-vendor.js de Freedom.
+(function () {
+  var internal = window.test_driver_internal;
+  if (!internal || typeof __freedom_computed_role !== "function") return;
+  internal.get_computed_role = function (element) {
+    return Promise.resolve(__freedom_computed_role(element));
+  };
+  internal.get_computed_label = function (element) {
+    return Promise.resolve(__freedom_computed_label(element));
+  };
+  internal.get_computed_name = internal.get_computed_label;
+})();
+"#;
+
 // --- Ejecución ---
 
 /// Los hooks del runner: un reloj virtual (el bucle salta al próximo temporizador cuando no
@@ -517,6 +535,22 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
     );
     let g = rt.agent.realms[realm].global_object;
     bf_js::builtins::method(&mut rt.agent, g, "__freedom_report", 1, freedom_report);
+    // E1: el rol y el nombre accesibles para `test_driver.get_computed_role/label` (ver
+    // [`TESTDRIVER_VENDOR`]).
+    bf_js::builtins::method(
+        &mut rt.agent,
+        g,
+        "__freedom_computed_role",
+        1,
+        super::accessibility::role_native,
+    );
+    bf_js::builtins::method(
+        &mut rt.agent,
+        g,
+        "__freedom_computed_label",
+        1,
+        super::accessibility::label_native,
+    );
     let origin = Url::parse(&format!("{ORIGIN}/"), None).expect("origen");
     let https = Url::parse(&format!("{HTTPS_ORIGIN}/"), None).expect("origen");
     let loader = crate::net::wptserve::SubLoader(
@@ -529,6 +563,10 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         resources.overrides.insert(
             format!("{o}/resources/testharnessreport.js"),
             TESTHARNESS_REPORT.to_owned(),
+        );
+        resources.overrides.insert(
+            format!("{o}/resources/testdriver-vendor.js"),
+            TESTDRIVER_VENDOR.to_owned(),
         );
     }
     rt.agent.set_realm_data(realm, resources);

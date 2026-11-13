@@ -116,7 +116,15 @@ struct QueryOptions {
 
 /// Instala `Cache`, `CacheStorage` y `caches` en el global de `realm` (una ventana o un
 /// worker), solo si es un contexto seguro (§5.3.1 y §5.4/§5.5: `[SecureContext]`).
+///
+/// E1: dentro de un ámbito de enraizado ([`Agent::rooting_scope`]): crear los métodos y
+/// compilar `cache.js` pueden recolectar antes de que `native` quede enlazado (el fallo
+/// "Gc liberado" de `storage/idb.rs`).
 pub fn install(agent: &mut Agent, realm: RealmId) {
+    agent.rooting_scope(|agent| install_rooted(agent, realm));
+}
+
+fn install_rooted(agent: &mut Agent, realm: RealmId) {
     let url = WebContextHandle { realm }.get(agent).url.clone();
     if !crate::workers::isolation::is_potentially_trustworthy(&url) {
         return;
