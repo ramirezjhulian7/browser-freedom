@@ -32,9 +32,6 @@ Imprime tres líneas (los tiempos entre corchetes son segundos desde la navegaci
   - **hojas**: hojas externas y `@font-face` (`PageTimings::style` − cascada).
   - **cascada**: `style_document_with_sheets` (`PageTimings::cascade`).
   - **imágenes**, **maqueta**, **lista**: las fases de `bf_paint::prepare_page_animated`.
-- `perf maqueta del CSSOM: X ms` (E2): una cascada y una maqueta que el CSSOM hizo por su
-  cuenta (`cssom::current_layout`), fuera de las del pintado; antes de la primera pintura de
-  la ventana no debería haber ninguna.
 - `perf imágenes pedidas: N (M <img> perezosas aplazadas)` (E2): cuántas imágenes pide cada
   maqueta (`bf_paint::load_images_in`); las `loading=lazy` lejanas no se piden.
 - `perf primera pintura: X desde la navegación (raster R)`: el final del primer raster de la
