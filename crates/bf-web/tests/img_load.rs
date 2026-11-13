@@ -41,6 +41,8 @@ impl Page {
         bom::script::begin_parse(&mut rt.agent, realm, &url);
         bom::script::feed(&mut rt.agent, realm, html);
         bom::script::finish(&mut rt.agent, realm);
+        // Los marcos, como el hilo de la pestaña (`bf-shell`, `Engine::parse`).
+        bom::frames::sync_frames(&mut rt.agent, realm);
         bom::script::resources_loaded(&mut rt.agent, realm);
         rt.run_until_idle().expect("tareas");
         Page { rt, ctx }
@@ -162,4 +164,16 @@ fn parser_links_fire_load() {
     }
     // El `preload` que pasó a `stylesheet` ya es una hoja del documento.
     assert_eq!(p.show("document.styleSheets.length"), "2");
+}
+
+/// HTML §7.4.6.3 ("iframe load event steps"): el `load` del `<iframe>` sale después del
+/// `load` de su documento, que espera a sus imágenes; y el `load` de la ventana, después.
+#[test]
+fn iframe_load_waits_for_its_document() {
+    let mut p = Page::load(&format!(
+        "<script>var log = []; addEventListener('load', () => log.push('window'));</script>\
+         <iframe srcdoc=\"<img src='{GIF_1X1}' onload='parent.log.push(1)'>\" \
+         onload=\"log.push(2)\"></iframe>"
+    ));
+    assert_eq!(p.show("log.join()"), "1,2,window");
 }

@@ -302,12 +302,18 @@ pub(crate) fn resume_load(agent: &mut Agent, realm: RealmId) {
         return;
     }
     // Con el host que corresponde: el de la ventana (`bom::script`, en el navegador) o el de
-    // las páginas sin ventana (`html::scripting`, el runner de testharness).
+    // las páginas sin ventana (`html::scripting`, el runner de testharness); en el realm de esa
+    // ventana (puede llegar desde la tarea de un marco).
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
     if crate::bom::script::script_env(agent, realm).is_some() {
         crate::bom::script::with_parser(agent, realm, |p, host| p.run_tasks(host));
     } else {
         super::scripting::with_parser(agent, realm, |p, host| p.run_tasks(host));
     }
+    agent.current_realm = saved;
+    // Si es un marco y su documento acaba de terminar, el `load` de su `<iframe>`.
+    crate::bom::frames::frame_document_loaded(agent, realm);
 }
 
 /// Rechaza con `EncodingError` las promesas de `decode()` de `n` (cambió la petición o se
@@ -454,6 +460,10 @@ pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
         agent,
         req,
         Box::new(move |agent: &mut Agent, result: crate::net::NetResult| {
+            // La respuesta llega en el realm de la petición (el de un marco no es el de la
+            // ventana que corre el bucle de eventos).
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
             // Resource Timing: una entrada `img` por respuesta (no por error de red).
             if let (Some(start), Ok(r)) = (started, &result) {
                 let end = crate::bom::performance_observer::now_ms(agent).unwrap_or(start);
@@ -472,6 +482,7 @@ pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
             };
             finish(agent, n, id, pin, outcome);
             release_delay(agent, realm, n);
+            agent.current_realm = saved;
         }),
     );
 }
