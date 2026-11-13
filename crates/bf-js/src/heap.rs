@@ -267,6 +267,12 @@ pub struct GcStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandleScope(usize);
 
+/// Marca de un ámbito de enraizado ([`Heap::open_rooting`]): el tamaño de la lista de
+/// asignaciones enraizadas al abrirlo.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootingScope(usize);
+
 pub struct Heap {
     objects: Arena<Object>,
     symbols: Arena<Symbol>,
@@ -274,6 +280,9 @@ pub struct Heap {
     envs: Arena<Env>,
     /// Valores enraizados por el código Rust ([`HandleScope`]).
     handles: Vec<Value>,
+    /// Ámbitos de enraizado abiertos ([`Heap::open_rooting`]) y lo asignado mientras tanto.
+    rooting: u32,
+    rooted_allocs: Vec<GcRef>,
     allocated_since_gc: usize,
     /// Asignaciones entre recolecciones (se ajusta según lo vivo).
     threshold: usize,
@@ -299,6 +308,8 @@ impl Default for Heap {
             bigints: Arena::default(),
             envs: Arena::default(),
             handles: Vec::new(),
+            rooting: 0,
+            rooted_allocs: Vec::new(),
             allocated_since_gc: 0,
             threshold: MIN_THRESHOLD,
             collections: 0,
@@ -315,7 +326,11 @@ impl Default for Heap {
 impl Heap {
     pub fn alloc<T: HeapData>(&mut self, data: T) -> Gc<T> {
         self.allocated_since_gc += 1;
-        T::arena_mut(self).alloc(data)
+        let gc = T::arena_mut(self).alloc(data);
+        if self.rooting > 0 {
+            self.rooted_allocs.push(T::gc_ref(gc));
+        }
+        gc
     }
 
     pub fn is_alive<T: HeapData>(&self, gc: Gc<T>) -> bool {
@@ -369,11 +384,31 @@ impl Heap {
         self.handles.truncate(scope.0);
     }
 
+    // --- Ámbitos de enraizado ---
+
+    /// Abre un ámbito de enraizado: todo lo que se asigne hasta [`Heap::close_rooting`] es
+    /// raíz, sin que el código que lo crea tenga que enraizarlo a mano. Es para el código Rust
+    /// que crea objetos y después ejecuta JavaScript (que puede recolectar) antes de dejarlos
+    /// enlazados desde una raíz: un instalador que crea métodos y compila una fábrica, por
+    /// ejemplo. Lo que asigne el JavaScript que corre dentro también queda vivo hasta cerrar,
+    /// así que el ámbito debe envolver trabajo acotado, no la ejecución de una página.
+    pub fn open_rooting(&mut self) -> RootingScope {
+        self.rooting += 1;
+        RootingScope(self.rooted_allocs.len())
+    }
+
+    /// Cierra el ámbito: lo asignado desde que se abrió deja de ser raíz por sí mismo.
+    pub fn close_rooting(&mut self, scope: RootingScope) {
+        self.rooted_allocs.truncate(scope.0);
+        self.rooting = self.rooting.saturating_sub(1);
+    }
+
     /// Recolecta: marca desde `roots` (más los handles) y libera lo no alcanzado.
     pub fn collect(&mut self, mut roots: Tracer) {
         for v in &self.handles {
             roots.value(v);
         }
+        roots.work.extend(self.rooted_allocs.iter().copied());
         self.drain(&mut roots);
         self.mark_ephemerons(&mut roots);
         self.clear_weak_refs();
@@ -548,6 +583,34 @@ mod tests {
         heap.collect(Tracer::default());
         assert!(heap.is_alive(child));
         heap.close_scope(scope);
+    }
+
+    /// El patrón de los instaladores de `bf-web`: crear un objeto desde Rust, compilar y
+    /// correr una fábrica (que recolecta) y usar el objeto después. Con el ámbito abierto el
+    /// objeto sobrevive aunque nada lo enraíce; al cerrarlo vuelve a ser basura.
+    #[test]
+    fn rooting_scope_keeps_host_allocations_alive_across_js() {
+        let mut agent = Agent::new(AgentOptions::default());
+        agent.heap.set_threshold(1);
+        let (holder, method) = agent.rooting_scope(|agent| {
+            let holder = agent.new_plain_object();
+            let method = agent.new_plain_object();
+            let r = agent.eval_script(
+                "var junk = [];\n\
+                 for (var i = 0; i < 2000; i++) junk.push({ i: i });\n\
+                 junk = null; (function (o) { return o; })",
+                "fabrica.js",
+            );
+            assert!(r.is_ok(), "{r:?}");
+            assert!(agent.gc_stats().collections > 0, "la fábrica recolectó");
+            assert!(agent.heap.is_alive(holder) && agent.heap.is_alive(method));
+            (holder, method)
+        });
+        agent.collect();
+        assert!(
+            !agent.heap.is_alive(holder) && !agent.heap.is_alive(method),
+            "cerrado el ámbito, lo que nadie enlazó se libera"
+        );
     }
 
     #[test]

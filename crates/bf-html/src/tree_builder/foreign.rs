@@ -96,11 +96,13 @@ impl TreeBuilder {
                     adjust_svg_attributes(&mut tag);
                 }
                 adjust_foreign_attributes(&mut tag);
-                self.insert_foreign(&tag, ns);
+                let element = self.insert_foreign(&tag, ns);
                 if tag.self_closing {
-                    // Para `script` SVG: acknowledge y actuar como el end tag "script" de abajo,
-                    // que sin soporte de scripts SVG solo saca el elemento de la stack.
+                    // Para `script` SVG: acknowledge y actuar como el end tag "script" de abajo.
                     self.pop();
+                    if ns == Namespace::Svg && tag.name == "script" {
+                        self.svg_script_end = Some(element);
+                    }
                 }
             }
             Tok::End(ref t)
@@ -108,7 +110,11 @@ impl TreeBuilder {
                     && self.elem(self.current()).ns == Namespace::Svg
                     && self.elem(self.current()).name == "script" =>
             {
+                // Pop; los pasos siguientes (insertion point, nesting level, procesar el
+                // script SVG) los hace el parser al volver ([`Self::svg_script_end`]).
+                let script = self.current();
                 self.pop();
+                self.svg_script_end = Some(script);
             }
             Tok::End(ref t) => {
                 let mut i = self.open.len() - 1;

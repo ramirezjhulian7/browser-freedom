@@ -78,6 +78,24 @@ pub fn frame_of(agent: &Agent, realm: RealmId) -> Option<&Frame> {
     frames(agent)?.list.iter().find(|f| f.realm == realm)
 }
 
+/// E3: "completely finish loading" de un documento de marco que no terminó por una
+/// navegación (`document.open()`, `write()` y `close()` desde script): encola los *iframe load
+/// event steps* (HTML §4.8.5) en el `<iframe>` que lo contiene, si sigue siendo el mismo.
+pub fn queue_iframe_load(agent: &mut Agent, realm: RealmId) {
+    let Some((parent, element)) = frame_of(agent, realm).map(|f| (f.parent, f.element)) else {
+        return;
+    };
+    agent.queue_task(
+        TaskSource::DomManipulation,
+        Box::new(move |agent: &mut Agent| {
+            if frame_of(agent, realm).is_some_and(|f| f.parent == parent && f.element == element) {
+                let mut ev = Event::new("load", EventInit::default());
+                super::script::dispatch_trusted(agent, parent, EventTarget::Node(element), &mut ev);
+            }
+        }),
+    );
+}
+
 /// La ventana que contiene a `realm` (`None` para la de la pestaña).
 pub fn parent_of(agent: &Agent, realm: RealmId) -> Option<RealmId> {
     frame_of(agent, realm).map(|f| f.parent)
@@ -319,10 +337,29 @@ struct Fetched {
     encoding: Encoding,
 }
 
+/// Lo que [`fetch`] necesita de un recurso del loader o del blob URL store.
+struct BlobOrResource {
+    bytes: Vec<u8>,
+    content_type: Option<String>,
+    url: Url,
+}
+
 /// Lee el recurso de `url` con el loader de la ventana `realm` (UTF-8 si no hay BOM).
 fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
-    let loader = window_loader(agent, realm)?;
-    let res = loader.load(url)?;
+    // E3: una URL `blob:` sale del blob URL store (File API §8.3.2, "resolve a blob URL"),
+    // no del loader de la ventana (`iframe.src = URL.createObjectURL(blob)`).
+    let (bytes, content_type, res_url) = if url.scheme == "blob" {
+        let entry = bf_net::blob::resolve(url)?;
+        (entry.bytes.to_vec(), Some(entry.mime), url.clone())
+    } else {
+        let res = window_loader(agent, realm)?.load(url)?;
+        (res.bytes, res.content_type, res.url)
+    };
+    let res = BlobOrResource {
+        bytes,
+        content_type,
+        url: res_url,
+    };
     let xml = xml_type(res.content_type.as_deref(), &res.url);
     // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del
     // `Content-Type`, prescan de `<meta>`; si no, el del documento que contiene al marco

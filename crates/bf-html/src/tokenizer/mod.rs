@@ -72,6 +72,9 @@ pub struct Tokenizer {
     limit: Option<usize>,
     /// Un CR al final del último trozo agregado: si el siguiente empieza con LF, se descarta.
     pending_cr: bool,
+    /// La posición justo detrás del último trozo insertado con [`Tokenizer::insert`] si
+    /// terminaba en CR: un LF insertado ahí mismo es la segunda mitad del mismo salto.
+    inserted_cr_end: Option<usize>,
     /// El paso actual se topó con el final de la entrada disponible sin que sea EOF: su
     /// resultado no vale y se deshace (ver [`Tokenizer::next_token`]).
     starved: Cell<bool>,
@@ -137,6 +140,7 @@ impl Tokenizer {
             closed: true,
             limit: None,
             pending_cr: false,
+            inserted_cr_end: None,
             starved: Cell::new(false),
         }
     }
@@ -164,10 +168,21 @@ impl Tokenizer {
     /// stream just before the insertion point"); devuelve cuántos quedaron tras normalizar.
     pub fn insert(&mut self, at: usize, input: impl IntoIterator<Item = u32>) -> usize {
         debug_assert!(at >= self.pos && at <= self.input.len());
-        let chunk = preprocess(input);
+        // 13.2.3.5: un CR seguido de LF es un solo salto aunque lleguen en dos `write()`
+        // seguidos (`write("\r")` y después `write("\n")` justo detrás).
+        let mut chunk = input.into_iter().peekable();
+        if self.inserted_cr_end.take() == Some(at) && chunk.peek() == Some(&0x0A) {
+            chunk.next();
+        }
+        let chunk: Vec<u32> = chunk.collect();
+        let ends_with_cr = chunk.last() == Some(&0x0D);
+        let chunk = preprocess(chunk);
         let len = chunk.len();
         self.input.splice(at..at, chunk);
         self.checked = self.checked.min(at);
+        if ends_with_cr {
+            self.inserted_cr_end = Some(at + len);
+        }
         len
     }
 
