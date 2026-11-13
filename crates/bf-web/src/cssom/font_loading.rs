@@ -182,10 +182,7 @@ fn fetch_font(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Value::Object(list) = a.arg(0) else {
         return Ok(Value::Boolean(false));
     };
-    let len = agent
-        .get_str(list, "length")?
-        .as_number()
-        .unwrap_or(0.0) as usize;
+    let len = agent.get_str(list, "length")?.as_number().unwrap_or(0.0) as usize;
     let realm = WebContextHandle::current(agent).realm;
     let loader = agent
         .realm_data::<crate::html::scripting::PageResources>(realm)

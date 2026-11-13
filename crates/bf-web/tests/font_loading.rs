@@ -37,7 +37,8 @@ impl Page {
 
 /// La URL `file:` de la Ahem de WPT.
 fn ahem_url() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/fonts/Ahem.ttf");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/fonts/Ahem.ttf");
     let path = std::fs::canonicalize(path).expect("tests/wpt/fonts/Ahem.ttf");
     Url::from_file_path(&path).expect("url").serialize(false)
 }
@@ -106,7 +107,10 @@ fn font_face_descriptors() {
     assert_eq!(r, "error,SyntaxError,bold");
     assert_eq!(p.show("e3"), "SyntaxError");
     // Un nombre que no es <family-name> se guarda entre comillas.
-    assert_eq!(p.show("new FontFace('sans-serif', 'url(a)').family"), "\"sans-serif\"");
+    assert_eq!(
+        p.show("new FontFace('sans-serif', 'url(a)').family"),
+        "\"sans-serif\""
+    );
 }
 
 #[test]
@@ -124,12 +128,18 @@ fn font_face_set_membership_and_events() {
     ));
     assert_eq!(r, "2,true,loading,loading");
     assert_eq!(p.show("res.join()"), "true,loaded,NetworkError,error");
-    assert_eq!(p.show("events.join()"), "loading:0,loadingdone:1,loadingerror:1");
+    assert_eq!(
+        p.show("events.join()"),
+        "loading:0,loadingdone:1,loadingerror:1"
+    );
     assert_eq!(
         p.show("[document.fonts.status, document.fonts.check('20px Test'), [...document.fonts].length].join()"),
         "loaded,true,2"
     );
-    assert_eq!(p.show("document.fonts.delete(bad) + ',' + document.fonts.size"), "true,1");
+    assert_eq!(
+        p.show("document.fonts.delete(bad) + ',' + document.fonts.size"),
+        "true,1"
+    );
     assert_eq!(
         p.show("try { document.fonts.check('inherit') } catch (e) { e.name }"),
         "SyntaxError"
