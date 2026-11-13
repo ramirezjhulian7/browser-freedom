@@ -315,12 +315,155 @@ fn justification_slot(c: char, mode: TextJustify) -> bool {
     }
 }
 
+/// E5: todo lo que decide las líneas de un block container salvo su posición: la caja, el ancho
+/// y el alto del containing block de sus hijos, el estado de `Layout` que leen las líneas y
+/// sus cajas atómicas (base de los porcentajes de alto para los tamaños intrínsecos, `max-height`
+/// del flujo ortogonal y el marco) y los floats del contexto que pueden tocarlas. Los `f32` del
+/// containing block van como bits; los floats, relativos al containing block en 1/64 px.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InlineKey {
+    b: usize,
+    width: u32,
+    height: Option<u32>,
+    pct_height_basis: Option<u32>,
+    cb_max_height: Option<u32>,
+    frame: u8,
+    /// Floats que terminan por debajo del inicio de las líneas (los demás no las tocan: las
+    /// bandas y `clear` se miden desde ahí, CSS 2.2 §9.5.1), con su lado.
+    floats: Vec<(i32, i32, i32, i32, bool)>,
+    /// `last_top` (regla 5) por debajo del inicio de las líneas, o 0.
+    last_top: i32,
+}
+
+/// Posición relativa en 1/64 px (la precisión de las fuentes).
+fn rel(v: f32) -> i32 {
+    (v * 64.0).round() as i32
+}
+
+/// E5: las líneas maquetadas de una caja con su containing block en `(x, y)`, su altura, las
+/// cajas absolutas y fijas que registraron (con su posición estática) y los floats que
+/// colocaron.
+pub(crate) struct InlineResult<'a> {
+    x: f32,
+    y: f32,
+    frags: Vec<Fragment>,
+    height: f32,
+    abs: Vec<crate::block::PendingAbs<'a>>,
+    fixed: Vec<crate::block::PendingAbs<'a>>,
+    floats: Vec<crate::float::PlacedFloat>,
+    last_top: f32,
+}
+
 impl<'a> Layout<'a> {
+    /// [`Self::inline_content`] con las líneas de una maqueta anterior de la misma caja cuando
+    /// nada de lo que las decide cambió (solo optimización: el resultado es el mismo, movido a
+    /// la nueva posición). Un ítem flex o grid se maqueta una vez para medirlo y otra para
+    /// colocarlo (CSS Flexbox 1 §9.4, CSS Grid 2 §12.1), y en los contenedores anidados eso se
+    /// multiplica.
+    pub(crate) fn inline_content_cached(
+        &mut self,
+        b: &'a LayoutBox,
+        cb: Cb,
+        floats: &mut FloatContext,
+    ) -> (Vec<Fragment>, f32) {
+        if !self.caches {
+            return self.inline_content_measured(b, cb, floats);
+        }
+        let key = InlineKey {
+            b: b as *const LayoutBox as usize,
+            width: cb.width.to_bits(),
+            height: cb.height.map(f32::to_bits),
+            pct_height_basis: self.pct_height_basis.map(f32::to_bits),
+            cb_max_height: self.cb_max_height.map(f32::to_bits),
+            frame: self.frame as u8,
+            floats: floats
+                .floats
+                .iter()
+                .filter(|f| f.rect.bottom() > cb.y)
+                .map(|f| {
+                    (
+                        rel(f.rect.x - cb.x),
+                        rel(f.rect.y - cb.y),
+                        rel(f.rect.width),
+                        rel(f.rect.height),
+                        f.left,
+                    )
+                })
+                .collect(),
+            last_top: rel((floats.last_top() - cb.y).max(0.0)),
+        };
+        if let Some(r) = self.inline_cache.get(&key).cloned() {
+            let (dx, dy) = (cb.x - r.x, cb.y - r.y);
+            let mut frags = r.frags.clone();
+            if dx != 0.0 || dy != 0.0 {
+                for f in &mut frags {
+                    f.translate(dx, dy);
+                }
+            }
+            let shift = |p: &crate::block::PendingAbs<'a>| crate::block::PendingAbs {
+                static_x: p.static_x + dx,
+                static_y: p.static_y + dy,
+                ..*p
+            };
+            if let Some(frame) = self.abs_frames.last_mut() {
+                frame.extend(r.abs.iter().map(shift));
+            }
+            self.fixed.extend(r.fixed.iter().map(shift));
+            if !r.floats.is_empty() {
+                let placed = r.floats.iter().map(|f| {
+                    let mut f = *f;
+                    f.rect.translate(dx, dy);
+                    f
+                });
+                floats.restore(placed, r.last_top + dy);
+            }
+            return (frags, r.height);
+        }
+        let abs_mark = self.abs_frames.last().map_or(0, Vec::len);
+        let fixed_mark = self.fixed.len();
+        let floats_mark = floats.floats.len();
+        let (frags, height) = self.inline_content_measured(b, cb, floats);
+        let abs = self.abs_frames.last().map_or(Vec::new(), |f| {
+            f.get(abs_mark..).unwrap_or_default().to_vec()
+        });
+        let fixed = self.fixed.get(fixed_mark..).unwrap_or_default().to_vec();
+        let r = InlineResult {
+            x: cb.x,
+            y: cb.y,
+            frags: frags.clone(),
+            height,
+            abs,
+            fixed,
+            floats: floats
+                .floats
+                .get(floats_mark..)
+                .unwrap_or_default()
+                .to_vec(),
+            last_top: floats.last_top(),
+        };
+        self.inline_cache.insert(key, std::rc::Rc::new(r));
+        (frags, height)
+    }
+
+    fn inline_content_measured(
+        &mut self,
+        b: &'a LayoutBox,
+        cb: Cb,
+        floats: &mut FloatContext,
+    ) -> (Vec<Fragment>, f32) {
+        self.perf.enter_box(crate::perf::Part::Inline, b);
+        let r = self.inline_content(b, cb, floats);
+        self.perf.exit();
+        r
+    }
+
     /// Glifos de un run bidi de un solo sentido, con el espaciado de CSS aplicado.
     fn shape_run(&self, text: &str, style: &ComputedStyle, rtl: bool) -> Vec<Glyph> {
+        self.perf.enter(crate::perf::Part::Shape);
         let mut glyphs = self
             .fonts
             .shape_dir(text, &crate::font::font_request(style), rtl);
+        self.perf.exit();
         apply_spacing(&mut glyphs, text, style);
         glyphs
     }

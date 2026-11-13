@@ -107,6 +107,18 @@ impl FloatContext {
             .max_by(f32::total_cmp)
     }
 
+    /// E5: el top del último float colocado (regla 5).
+    pub(crate) fn last_top(&self) -> f32 {
+        self.last_top
+    }
+
+    /// E5: añade un float ya colocado (lo que colocó una maqueta anterior de las mismas
+    /// líneas, movida a su nueva posición) con el `last_top` resultante.
+    pub(crate) fn restore(&mut self, placed: impl IntoIterator<Item = PlacedFloat>, last_top: f32) {
+        self.floats.extend(placed);
+        self.last_top = last_top;
+    }
+
     /// Borde inferior de todos los floats (para la altura `auto` de un BFC root).
     pub fn bottom(&self) -> Option<f32> {
         self.floats

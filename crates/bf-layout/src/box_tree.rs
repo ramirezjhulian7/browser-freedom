@@ -213,6 +213,11 @@ pub fn build_box_tree_with(
     build_box_tree_report(doc, styles, images).0
 }
 
+/// E5: número de cajas del árbol (para la traza `perf maqueta`).
+pub(crate) fn count_boxes(b: &LayoutBox) -> usize {
+    1 + b.children.iter().map(count_boxes).sum::<usize>()
+}
+
 /// Como [`build_box_tree_with`], con el reporte de lo que se degradó.
 pub fn build_box_tree_report(
     doc: &Document,

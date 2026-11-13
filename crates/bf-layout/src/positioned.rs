@@ -109,6 +109,13 @@ impl<'a> Layout<'a> {
 
     /// Layout de una caja absoluta dentro del padding box `cb_rect` de su containing block.
     pub(crate) fn absolute(&mut self, p: PendingAbs<'a>, cb_rect: Rect) -> Fragment {
+        self.perf.enter_box(crate::perf::Part::Positioned, p.b);
+        let f = self.absolute_inner(p, cb_rect);
+        self.perf.exit();
+        f
+    }
+
+    fn absolute_inner(&mut self, p: PendingAbs<'a>, cb_rect: Rect) -> Fragment {
         let b = p.b;
         let s = &b.style;
         let cb = Cb {

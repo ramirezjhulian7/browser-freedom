@@ -52,8 +52,62 @@ pub struct FontDb {
     by_name: HashMap<String, usize>,
     loaded: Vec<OnceLock<Option<Arc<LoadedFace>>>>,
     files: Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>>,
+    /// E5: la tabla `cmap` de cada cara leída sola del archivo, para saber qué caracteres
+    /// tiene sin leer el archivo entero (ver [`FontDb::covers`]).
+    cmaps: Vec<OnceLock<Option<Vec<u8>>>>,
     fallback: Mutex<HashMap<char, Option<usize>>>,
     outlines: SizedOutlineCache,
+}
+
+/// E5: lee del archivo solo la tabla `cmap` de la cara `index` (sfnt o colección `ttcf`):
+/// la cabecera, el directorio de tablas y la tabla. `None` si el archivo no tiene esa forma o
+/// le falta alguna tabla sin la que `ttf_parser::Face::parse` falla (`head`, `hhea`, `maxp`);
+/// entonces se carga entero como antes.
+fn read_cmap(path: &Path, index: u32) -> Option<Vec<u8>> {
+    let mut file = File::open(path).ok()?;
+    let mut read_at = |offset: u64, len: usize| -> Option<Vec<u8>> {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut buf = vec![0; len];
+        file.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+    let u16_at = |b: &[u8], i: usize| -> Option<u16> {
+        Some(u16::from_be_bytes(b.get(i..i + 2)?.try_into().ok()?))
+    };
+    let u32_at = |b: &[u8], i: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?))
+    };
+    let head = read_at(0, 12)?;
+    let start = if head.get(0..4)? == b"ttcf" {
+        let count = u32_at(&head, 8)?;
+        if index >= count {
+            return None;
+        }
+        let off = read_at(12 + 4 * u64::from(index), 4)?;
+        u64::from(u32_at(&off, 0)?)
+    } else if index == 0 && matches!(head.get(0..4)?, [0, 1, 0, 0] | b"OTTO" | b"true") {
+        0
+    } else {
+        return None;
+    };
+    let header = if start == 0 {
+        head
+    } else {
+        read_at(start, 12)?
+    };
+    let tables = usize::from(u16_at(&header, 4)?);
+    let records = read_at(start + 12, 16 * tables)?;
+    let mut cmap = None;
+    let mut required = 0;
+    for r in records.as_chunks::<16>().0 {
+        match r.get(0..4)? {
+            b"cmap" => cmap = Some((u32_at(r, 8)?, u32_at(r, 12)?)),
+            b"head" | b"hhea" | b"maxp" => required += 1,
+            _ => {}
+        }
+    }
+    let (offset, len) = cmap.filter(|_| required == 3)?;
+    read_at(u64::from(offset), usize::try_from(len).ok()?)
 }
 
 /// Directorios de fuentes de Windows, Linux y macOS (los que existan).
@@ -364,11 +418,13 @@ impl FontDb {
             }
         }
         let loaded = (0..faces.len()).map(|_| OnceLock::new()).collect();
+        let cmaps = (0..faces.len()).map(|_| OnceLock::new()).collect();
         FontDb {
             faces,
             by_family,
             by_name,
             loaded,
+            cmaps,
             ..FontDb::default()
         }
     }
@@ -408,7 +464,32 @@ impl FontDb {
             .clone()
     }
 
+    ///
+    /// E5: si la cara todavía no se cargó, se mira solo su tabla `cmap` (unos KB leídos del
+    /// archivo): el fallback por carácter prueba muchas caras y algunos archivos son enormes
+    /// (Apple Color Emoji ocupa 192 MB). Igual que `ttf_parser::Face::glyph_index`: el primer
+    /// subtable Unicode que tenga el carácter.
     pub fn covers(&self, i: usize, c: char) -> bool {
+        let loaded = self.loaded.get(i).and_then(OnceLock::get).is_some()
+            || self.faces.get(i).is_some_and(|f| {
+                let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+                files.contains_key(&f.path)
+            });
+        if !loaded
+            && let Some(Some(cmap)) = self.cmaps.get(i).map(|slot| {
+                slot.get_or_init(|| {
+                    let f = self.faces.get(i)?;
+                    read_cmap(&f.path, f.index)
+                })
+            })
+        {
+            return ttf_parser::cmap::Table::parse(cmap).is_some_and(|t| {
+                t.subtables
+                    .into_iter()
+                    .filter(|s| s.is_unicode())
+                    .any(|s| s.glyph_index(u32::from(c)).is_some())
+            });
+        }
         self.load(i)
             .and_then(|f| f.face().and_then(|face| face.glyph_index(c)))
             .is_some()

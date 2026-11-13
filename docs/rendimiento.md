@@ -53,6 +53,15 @@ pseudoelementos, K sin content)` (`bf_style::cascade::Timings`):
   *sin content* son los `::before`/`::after` a los que no les aplica ninguna declaración
   `content` ni `all` y no se calculan.
 
+Y cada maqueta completa imprime `perf maqueta: T ms; árbol de cajas … (N cajas) · bloques … ·
+líneas … · shaping … · intrínsecos … · tablas … · flex … · grid … · flotantes … ·
+posicionados …` (`bf_layout::perf`). Por parte: el tiempo **propio** (lo que no se fue a una
+parte anidada: el shaping de las líneas de un ítem flex cuenta en *shaping*), el **total**
+desde la entrada más externa, las llamadas y en cuántas cajas distintas (si hay muchas más
+llamadas que cajas, algo se maqueta varias veces). *Líneas* e *intrínsecos* cuentan solo lo que
+no salió de sus cachés (`Layout::inline_cache`, `Layout::intrinsic_cache`). Con
+`BF_NO_LAYOUT_CACHE=1` las dos cachés se apagan, para compararlas en el mismo binario.
+
 La cascada corre dos veces al cargar Wikipedia: la primera la pide
 `bf_web::html::legacy_factories::check_lazy_images` durante el parseo (cuenta en **parseo**),
 la segunda es la de `prepare_page_animated` (la de **cascada**).
