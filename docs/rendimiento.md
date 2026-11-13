@@ -38,6 +38,38 @@ Imprime tres líneas (los tiempos entre corchetes son segundos desde la navegaci
 Para comparar la cascada con y sin el índice de reglas en el mismo binario y con la misma
 carga: `BF_NO_RULE_INDEX=1` usa el recorrido completo de antes.
 
+Con `BF_TRACE=1` cada cascada completa imprime además `perf cascada: emparejar … (índices …,
+N reglas) · declaraciones … · valores …; de eso, pseudoelementos … (E elementos, P llamadas de
+pseudoelementos, K sin content)` (`bf_style::cascade::Timings`):
+
+- **emparejar**: `RuleIndex::matching` en cada grupo de hojas (con `:host`, `::slotted()` y
+  los hints), y armar los índices.
+- **declaraciones**: atributo `style`, hints, ordenarlas y expandir los shorthands (`expand`
+  vuelve a analizar el valor de cada declaración en cada elemento).
+- **valores**: los valores computados y la herencia (`Styler::compute`, `cascaded_value`).
+- **pseudoelementos**: lo que de todo eso fue para `::before`, `::after` y `::marker`;
+  *sin content* son los `::before`/`::after` a los que no les aplica ninguna declaración
+  `content` ni `all` y no se calculan.
+
+La cascada corre dos veces al cargar Wikipedia: la primera la pide
+`bf_web::html::legacy_factories::check_lazy_images` durante el parseo (cuenta en **parseo**),
+la segunda es la de `prepare_page_animated` (la de **cascada**).
+
+### Por función, con el muestreador de macOS
+
+Para repartir **parseo**, **red/caché**, **hojas** o **maqueta** por funciones sin tocar el
+código, `sample` muestrea el proceso cada 1 ms. La sesión empieza en una página local con un
+enlace y espera ~1 s, así el muestreo ya corre cuando empieza la navegación:
+
+```sh
+echo '<a href="'$URL'">Ir al artículo</a>' > /tmp/ir.html
+FREEDOM_PROFILE=$PERFIL BF_TRACE=1 ./target/release/freedom session /tmp/ir.html \
+    wait wait wait wait link:Ir scrollbench:200:40 -o /tmp/fp &
+sample $(pgrep -n -f 'freedom session /tmp/ir.html') 4 1 -file /tmp/muestras.txt
+```
+
+El hilo del documento es `freedom-pestana-1`; cada muestra es ~1 ms.
+
 ## Desplazamiento
 
 ```sh
@@ -57,25 +89,39 @@ FREEDOM_PROFILE=$PERFIL BF_TRACE=1 ./target/release/freedom session $URL \
 
 Con `BF_TRACE=1`, `scrollbench` imprime además:
 
-- `perf raster: N cuadros incrementales, M en tiles enteros, K de una pasada (H hilos)`: cómo
-  se pintó cada cuadro (ver abajo).
-- `perf grupos: margen … ; fixed y=… alto=…, sticky y=… alto=…`: los grupos que se repintan
-  aparte al desplazar.
+- `perf raster: N cuadros incrementales, M en tiles enteros, K de una pasada (H hilos); L con
+  los sticky en capa propia`: cómo se pintó cada cuadro (ver abajo).
+- `perf grupos: margen … ; fixed x=… y=… ancho×alto, sticky x=… y=… ancho×alto`: los grupos
+  que se tratan aparte al desplazar (px CSS de la página).
 
 ## Cómo pinta la ventana (desde la ronda 7)
 
 `App::frame` ajusta el scroll a px de dispositivo enteros y pinta la página en **tiles fijos
 en la página** (`bf_paint::raster`, 256 × 64 px CSS por tile, en px de dispositivo):
 
-1. **Desplazamiento incremental** (`scroll_frame`): si el cuadro anterior es de la misma
-   lista, escala y tamaño, se corren sus filas y se pintan solo los tiles de la franja que
-   aparece y los de los grupos `fixed` y `sticky`, donde estaban y donde quedan.
-2. **Tiles enteros en paralelo** (`render_tiled`): para la primera pintura, una lista nueva
+1. **Desplazamiento incremental** (`TiledFrame::scrolled`): si el cuadro anterior es de la
+   misma lista, escala y tamaño, se corren sus filas (en el mismo pixmap) y se pintan solo los
+   tiles de la franja que aparece y los de los grupos `fixed`, donde estaban y donde quedan.
+   Los grupos `sticky` van **en capa propia** cuando se puede (desde el cierre 3): los tiles se
+   pintan sin ellos y cada grupo se pinta aparte en una capa que no depende del scroll (solo
+   de la fracción de px de dispositivo de su desplazamiento), que se reutiliza y se compone
+   encima en cada cuadro, recortada a los `overflow` rectangulares de sus ancestros. Se puede
+   si el grupo solo está dentro de recortes rectangulares (no de una capa de opacidad, una
+   máscara, un efecto ni un recorte redondeado) y nada pintado después de él en la lista cae
+   encima en ese cuadro: primero con la caja conservadora de cada ítem y, si toca, con la de
+   los contornos de sus glifos (`display_list::ink_bounds`). Si no, sus tiles se repintan
+   donde estaba y donde queda, como antes. En Wikipedia, el índice (351 × 495 px) y la barra
+   de arriba van en capa propia en todos los cuadros.
+2. **Tiles enteros en paralelo** (`TiledFrame::render`): para la primera pintura, una lista nueva
    (cambio de página, animaciones, el hilo del documento rehízo la maqueta) o un salto de más
    de un cuadro. Los tiles se reparten entre los núcleos (`set_raster_threads`, hasta 8), y en
    cada tile se saltan los ítems que no lo tocan.
 3. **Una pasada** (`render_scrolled`) si la lista no admite tiles (un `filter`, grupos
    `fixed`/`sticky` anidados) o el scroll no cae en px enteros.
+
+El cuadro de la ventana reutiliza su pixmap (`App::spare_frame`), copia la página encima y
+rellena con el color del cromo solo lo que la página no cubre (`fill_outside`); la barra opaca
+se copia sin componer.
 
 Encima de la página, el cuadro de la ventana lleva las barras de desplazamiento, los
 resaltados de buscar y de la selección y el cursor: se pintan con `render_over`, que
@@ -85,11 +131,14 @@ barra de la ventana se guarda pintada (`App::bar_cache`) y solo se vuelve a pint
 su maqueta, el tema, el DPI o, mientras algo carga, la fase de la animación (antes 4 ms a
 escala 1 y 13-17 ms a escala 2 en cada cuadro).
 
-Las dos primeras dan exactamente los mismos píxeles (`crates/bf-paint/tests/scroll_raster.rs`).
-Con la tercera difieren solo en el antialiasing de las curvas que cruzan el borde de un tile:
-tiny-skia corta el camino en el borde del pixmap y eso cambia la subdivisión de la curva. En la
-página de prueba son 9 canales de 307 200 a escala 1 y 63 de 1 228 800 a escala 2, con una
-diferencia máxima de 13. Los reftests siguen usando `render_scrolled`. `render_over` da los
+Las dos primeras dan exactamente los mismos píxeles (`crates/bf-paint/tests/scroll_raster.rs`;
+`sticky_layers_match_full_frame` desplaza con las capas `sticky` reutilizadas y compara cada
+cuadro con el entero). Con la tercera difieren en el antialiasing de las curvas que cruzan el
+borde de un tile (tiny-skia corta el camino en el borde del pixmap y eso cambia la subdivisión
+de la curva) y, con un `sticky` translúcido en capa propia, en el redondeo de componer la capa
+en 8 bits en vez de pintar directo sobre la página. En la página de prueba son 641 canales de
+307 200 a escala 1 y 3040 de 1 228 800 a escala 2 (0,2 %), con una diferencia máxima de 13;
+antes de las capas `sticky`, 9 y 63. Los reftests siguen usando `render_scrolled`. `render_over` da los
 mismos píxeles que la capa entera compuesta (`render_over_matches_full_layer`).
 
 ## Resultados
@@ -103,10 +152,22 @@ mismos píxeles que la capa entera compuesta (`render_over_matches_full_layer`).
 | 2026-11-13, cierre 1 | `eb7e5a3` + `master` `71444d2` | 36,2 ms (raster 16,9) | 173,6 ms (raster 99,5) | 30-49 |
 | 2026-11-13, cierre 1 | capas con `render_over`, barra en caché | 18,8 ms (raster 15,3) | 57,8 ms (raster 42,5) | 57-85 |
 | 2026-11-13, cierre 1 | lo mismo, repetido | 20,0 ms (raster 16,3) | 74,6 ms (raster 51,0) | 97-99 |
+| 2026-11-13, cierre 3 | antes (`master` `21ea345`) | 20,9 ms (raster 17,1) | 59,1 ms (raster 47,0) | 15-25 |
+| 2026-11-13, cierre 3 | `sticky` en capa propia, cuadro reutilizado | 8,0 ms (raster 5,5) | 17,7 ms (raster 10,8) | 21-36 |
+| 2026-11-13, cierre 3, A/B ×3 | antes (`21ea345`) | 7,4 ms (raster 6,3) | 37,4 ms (raster 29,7) | 17-57 |
+| 2026-11-13, cierre 3, A/B ×3 | después | 2,7 ms (raster 2,0) | 6,3 ms (raster 4,1) | 17-57 |
 
 Mediana por cuadro de 120 cuadros de 40 px en `https://es.wikipedia.org/wiki/Navegador_web`
 (área de página 1180 × 704 px CSS). La máquina estuvo muy cargada todo el tiempo: las cifras
 absolutas cambian mucho con la carga, por eso el A/B se midió con los dos binarios seguidos.
+
+**Cuadros por segundo** al cierre 3: con la máquina a carga 21-36, **125 fps a escala 1**
+(8,0 ms) y **56 fps a escala 2** (17,7 ms); en el A/B final, con los otros ejecutores ya
+parados (carga 17-57 bajando), 370 y 159 fps (2,7 y 6,3 ms, mediana de 3 corridas alternando
+los binarios: antes 7,4 y 37,4 ms). La meta de 60 fps se cumple a escala 1 con cualquier carga
+medida y a escala 2 cuando la máquina no está saturada. En el A/B, a escala 2 el binario de
+antes recibe una lista nueva (1530 ítems) porque Wikipedia rehace la maqueta tras sus eventos
+`scroll`; el de después termina los 120 cuadros antes de que llegue.
 
 **Cuadros por segundo** (1000 / mediana) al cierre 1: **53 fps a escala 1** (18,8 ms) y
 **17 fps a escala 2** (57,8 ms), con la máquina a carga 57-85. La meta de 60 fps (16,7 ms) no
@@ -118,3 +179,21 @@ tres veces seguidas): 1311, 1205 y 1162 ms (mediana **1205 ms**, raster 18-22 ms
 30-53; con carga 97-99, 2586, 1725 y 1975 ms. La meta de 500 ms no se cumple. En una carga
 típica (la segunda): red/caché 287 ms, parseo 334, scripts 26, hojas 95, cascada 238,
 imágenes 11, maqueta 168, lista 9 (4049 nodos).
+
+**Primera pintura y cascada** al cierre 3 (A/B, 5 corridas alternando los binarios, carga
+17-20; mediana):
+
+| | antes (`21ea345`) | después |
+|---|---:|---:|
+| primera pintura | 1100,5 ms | 1076,4 ms |
+| red/caché | 661,2 | 684,3 |
+| parseo | 154,6 | 135,3 |
+| hojas | 37,6 | 41,6 |
+| **cascada** | **105,3** | **76,4** |
+| maqueta | 68,4 | 78,6 |
+
+Con la máquina cargada (carga 31-62, el mismo A/B): cascada 387,7 → 256,0 ms y primera
+pintura 2143 → 1954 ms. Por partes, después y con carga 16: emparejar 46-50 ms, declaraciones
+10, valores 19-21; los pseudoelementos, 13-14 ms (4034 de 4444 sin `content`, sin calcular).
+La meta de 500 ms no se cumple: solo la red se lleva ~660 ms (ver la nota de E4,
+`docs/pendiente/mac/e4.md`, cierre 3, para el reparto por funciones).
