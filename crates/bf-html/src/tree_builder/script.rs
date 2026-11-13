@@ -51,6 +51,24 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
         let _ = (doc, script);
     }
 
+    /// 13.2.6.4.8, end tag "script", paso 1: "If the active speculative HTML parser is null
+    /// and the JavaScript execution context stack is empty, then perform a microtask
+    /// checkpoint". El parser no ve la pila de JavaScript: el host la comprueba (vacía cuando
+    /// el parser no corre dentro de un `document.write`) y corre los microtasks, que pueden
+    /// tocar el documento (un `MutationObserver` que cambia el `type` del script, por
+    /// ejemplo) antes de que se prepare.
+    fn microtask_checkpoint(&mut self, doc: &mut Parser) {
+        let _ = doc;
+    }
+
+    /// E3: "Process the SVG script element according to the SVG rules" (13.2.6.5, end tag
+    /// "script" con un `script` SVG como nodo actual). [`svg_script_source`] dice qué correr;
+    /// el host lo busca si hace falta y lo corre como un script clásico. Desde aquí el host
+    /// puede llamar a [`Parser::write`] (el parser está en pausa: no reentra).
+    fn process_svg_script(&mut self, doc: &mut Parser, script: NodeId) {
+        let _ = (doc, script);
+    }
+
     /// E10: el parser insertó el elemento `link` del namespace HTML en el documento (ya está
     /// conectado y tiene sus atributos). Es el momento en que el `link` "becomes
     /// browsing-context connected" (HTML §4.6.7) y el host puede buscar el recurso y, al
@@ -58,6 +76,14 @@ pub trait ScriptHost: bf_dom::events::ScriptHost {
     /// procesar el token siguiente.
     fn link_inserted(&mut self, doc: &mut Parser, link: NodeId) {
         let _ = (doc, link);
+    }
+
+    /// E2: el parser insertó un `img` del namespace HTML en el documento (conectado, con sus
+    /// atributos): "when an img element is created" el host empieza "update the image data"
+    /// (HTML §4.8.4.3.5) y puede demorar `load` mientras la busca. Se llama como
+    /// [`ScriptHost::link_inserted`].
+    fn img_inserted(&mut self, doc: &mut Parser, img: NodeId) {
+        let _ = (doc, img);
     }
 }
 
@@ -323,11 +349,21 @@ impl Parser {
                 return;
             };
             self.b.process_token(tok);
-            for link in std::mem::take(&mut self.b.inserted_links) {
-                host.link_inserted(self, link);
+            for el in std::mem::take(&mut self.b.inserted_links) {
+                if self.b.doc.element(el).is_some_and(|e| e.is_html("img")) {
+                    host.img_inserted(self, el);
+                } else {
+                    host.link_inserted(self, el);
+                }
             }
             if self.generation != generation {
                 return;
+            }
+            if let Some(script) = self.b.svg_script_end.take() {
+                self.svg_script_end_tag(host, script);
+                if self.generation != generation {
+                    return;
+                }
             }
             if let Some(script) = self.b.script_end.take() {
                 self.script_end_tag(host, script);
@@ -338,9 +374,15 @@ impl Parser {
         }
     }
 
-    /// 13.2.6.4.8, end tag "script", pasos 5 a 10.
+    /// 13.2.6.4.8, end tag "script", paso 1 y pasos 5 a 10 (el 2 a 4 ya los hizo el tree
+    /// builder al sacar el `script` de la stack).
     fn script_end_tag(&mut self, host: &mut dyn ScriptHost, script: NodeId) {
         let generation = self.generation;
+        // 1.
+        host.microtask_checkpoint(self);
+        if self.generation != generation {
+            return;
+        }
         // 5.
         let old = self.b.insertion_point;
         self.b.saved_insertion_points.push(old);
@@ -366,6 +408,34 @@ impl Parser {
                 self.run_parsing_blocking_scripts(host);
             }
         }
+    }
+
+    /// 13.2.6.5, end tag "script" con un `script` SVG como nodo actual, después del pop.
+    fn svg_script_end_tag(&mut self, host: &mut dyn ScriptHost, script: NodeId) {
+        let generation = self.generation;
+        // "Let the old insertion point have the same value as the current insertion point.
+        // Let the insertion point be just before the next input character."
+        let old = self.b.insertion_point;
+        self.b.saved_insertion_points.push(old);
+        self.b.insertion_point = Some(self.b.tokenizer.offset());
+        // "Increment the parser's script nesting level by one. Set the parser pause flag to
+        // true."
+        self.b.nesting += 1;
+        self.b.paused = true;
+        if self.b.scripting {
+            host.process_svg_script(self, script);
+        }
+        if self.generation != generation {
+            return;
+        }
+        // "Decrement the parser's script nesting level by one. If the parser's script nesting
+        // level is zero, then set the parser pause flag to false."
+        self.b.nesting -= 1;
+        if self.b.nesting == 0 {
+            self.b.paused = false;
+        }
+        // "Let the insertion point have the value of the old insertion point."
+        self.b.insertion_point = self.b.saved_insertion_points.pop().flatten();
     }
 
     /// 13.2.6.4.8 paso 10, con el nesting level en cero: ejecuta el *pending parsing-blocking
@@ -753,4 +823,75 @@ impl Parser {
         line.push('\n');
         self.write(host, &line)
     }
+}
+
+/// E3: qué corre un `script` SVG (SVG 2 §15.2, "process the SVG script element"): nada si su
+/// `type` no es un tipo MIME de JavaScript (sin `type`, el de SVG,
+/// `application/ecmascript`); el recurso de su `href` (o `xlink:href`) si lo tiene; si no, su
+/// texto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SvgScriptSource {
+    /// El texto del elemento.
+    Inline(String),
+    /// El valor de `href` (o `xlink:href`), sin resolver contra la URL base.
+    External(String),
+}
+
+/// "JavaScript MIME type essence match" (MIME Sniffing §4.6).
+const JAVASCRIPT_MIME_TYPES: [&str; 16] = [
+    "application/ecmascript",
+    "application/javascript",
+    "application/x-ecmascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "text/javascript",
+    "text/javascript1.0",
+    "text/javascript1.1",
+    "text/javascript1.2",
+    "text/javascript1.3",
+    "text/javascript1.4",
+    "text/javascript1.5",
+    "text/jscript",
+    "text/livescript",
+    "text/x-ecmascript",
+    "text/x-javascript",
+];
+
+/// Ver [`SvgScriptSource`]. `None` si el elemento no es un `script` SVG conectado o no hay
+/// nada que correr.
+pub fn svg_script_source(doc: &bf_dom::Document, el: NodeId) -> Option<SvgScriptSource> {
+    let element = doc.element(el)?;
+    if element.ns != bf_dom::Namespace::Svg || element.name != "script" || !doc.is_connected(el) {
+        return None;
+    }
+    if let Some(t) = element
+        .attrs
+        .iter()
+        .find(|a| a.ns.is_none() && a.name == "type")
+    {
+        let t = t.value.as_lossy_str();
+        let t = t.trim_matches(|c: char| c.is_ascii_whitespace());
+        if !t.is_empty()
+            && !JAVASCRIPT_MIME_TYPES
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(t))
+        {
+            return None;
+        }
+    }
+    let href = element
+        .attrs
+        .iter()
+        .find(|a| a.ns.is_none() && a.name == "href")
+        .or_else(|| {
+            element
+                .attrs
+                .iter()
+                .find(|a| a.ns == Some(bf_dom::Namespace::XLink) && a.name == "href")
+        });
+    if let Some(h) = href {
+        return Some(SvgScriptSource::External(h.value.to_string()));
+    }
+    let text = doc.child_text_content(el).to_string();
+    (!text.is_empty()).then_some(SvgScriptSource::Inline(text))
 }

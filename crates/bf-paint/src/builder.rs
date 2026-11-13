@@ -852,9 +852,13 @@ impl<'a> Builder<'a> {
             left: f.border.left + f.padding.left,
         };
         for i in (0..n).rev() {
-            let source = match &layers[i] {
+            // `image-set()`: la opción elegida y su resolución, que divide el tamaño natural.
+            let Some((layer, resolution)) = self.images.chosen(&layers[i]) else {
+                continue;
+            };
+            let source = match layer {
                 Image::Url(url) if self.images.for_url(url).is_some() => Source::Image(url),
-                Image::Url(_) | Image::None => continue,
+                Image::Url(_) | Image::None | Image::Set(_) => continue,
                 Image::Gradient(g) => Source::Gradient(g),
             };
             let boxed = |b: BackgroundBox| match b {
@@ -901,10 +905,18 @@ impl<'a> Builder<'a> {
             let (pw, ph) = (positioning.width, positioning.height);
             // Dimensiones naturales (ancho, alto, proporción), cada una opcional: un SVG puede no
             // tener ninguna; un gradiente no tiene ninguna (CSS Images 3 §3).
+            let scale = |v: f32| {
+                if resolution > 0.0 && resolution.is_finite() {
+                    v / resolution
+                } else {
+                    v
+                }
+            };
             let natural = match &source {
                 Source::Image(url) => self.images.natural_dimensions(url),
                 Source::Gradient(_) => None,
             }
+            .map(|(w, h, r)| (w.map(scale), h.map(scale), r))
             .unwrap_or((None, None, None));
             let (mut w, mut h) = background_tile_size(natural, size, (pw, ph));
             let (rx, ry) = s.background_repeat.0[pick(&s.background_repeat.0, i)];
@@ -1127,10 +1139,11 @@ impl<'a> Builder<'a> {
     /// Marcador con `list-style-image`: la imagen en lugar del texto, apoyada en la baseline
     /// y terminando donde termina el marcador.
     fn marker(&mut self, f: &'a Fragment, clip: &ClipChain) {
-        if let Image::Url(url) = &f.style.list_style_image
+        if let Some((Image::Url(url), resolution)) = self.images.chosen(&f.style.list_style_image)
             && let Some(image) = self.images.for_url(url).cloned()
         {
-            let (w, h) = (image.width() as f32, image.height() as f32);
+            let k = if resolution > 0.0 { resolution } else { 1.0 };
+            let (w, h) = (image.width() as f32 / k, image.height() as f32 / k);
             let baseline = f.baseline.unwrap_or(f.rect.bottom());
             let rect = Rect::new(f.rect.right() - w, baseline - h, w, h);
             if visible(&f.style) {

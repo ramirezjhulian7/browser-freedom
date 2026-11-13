@@ -21,6 +21,7 @@
 
 pub mod computed;
 pub mod declaration;
+pub mod font_loading; // E5: CSS Font Loading 3
 pub mod media;
 pub mod namespace;
 pub mod sheets;
@@ -201,11 +202,17 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
     style_decl::define_property_accessors(agent, realm);
     namespace::install(agent, realm);
     namespace::install_indexed_iterators(agent, realm);
+    font_loading::install(agent, realm); // E5
 }
 
 // --- Estado ---
 
 /// El estado del CSSOM del realm en curso.
+/// E2: olvida la geometría guardada (terminó de cargar una imagen y su caja cambia de tamaño).
+pub fn invalidate_layout(agent: &mut Agent) {
+    state(agent).layout = None;
+}
+
 pub fn state(agent: &mut Agent) -> &mut CssomState {
     let realm = WebContextHandle::current(agent).realm;
     if agent.realm_data::<CssomState>(realm).is_none() {
@@ -428,10 +435,16 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     }
     let viewport = window_metrics(agent).viewport;
     let mut provider = state(agent).provider.take();
+    // E2: sin navegador, las imágenes que ya cargó el documento (`img` con su tamaño).
+    let images = if provider.is_none() {
+        crate::html::legacy_factories::layout_image_sizes(agent)
+    } else {
+        bf_layout::ImageSizes::new()
+    };
     let doc = h.get(agent).document();
     let mut tree = match provider.as_mut() {
         Some(p) => p.layout(doc, &styles, viewport),
-        None => bf_layout::layout_document(doc, &styles, viewport, &TestFont),
+        None => bf_layout::layout_document_with_images(doc, &styles, viewport, &TestFont, &images),
     };
     state(agent).provider = provider;
     view::restore_element_scroll(agent, &mut tree); // E12

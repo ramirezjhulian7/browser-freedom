@@ -32,8 +32,10 @@ fn source(
     fonts: &dyn FontProvider,
     area: &Rect,
 ) -> Option<(Arc<Pixmap>, f32, f32)> {
-    match &f.style.border_image_source {
-        Image::None => None,
+    // `image-set()`: la opción elegida (su resolución no cambia los cortes aquí).
+    let (chosen, _) = images.chosen(&f.style.border_image_source)?;
+    match chosen {
+        Image::None | Image::Set(_) => None,
         Image::Url(u) => {
             let (w, h) = images.natural_size(u, (area.width, area.height))?;
             if !(w > 0.0 && h > 0.0) {

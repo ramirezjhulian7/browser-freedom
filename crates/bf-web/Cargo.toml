@@ -10,6 +10,8 @@ bf-dom = { path = "../bf-dom" }
 bf-html = { path = "../bf-html" }
 # E3: el tamaño natural de las imágenes que precarga `new Image()`
 bf-image = { path = "../bf-image" }
+# E2: el tamaño natural de los SVG que carga un `<img>` (`naturalWidth`, `decode()`)
+bf-svg = { path = "../bf-svg" }
 bf-infra = { path = "../bf-infra" }
 bf-js = { path = "../bf-js" }
 # E2: el CSSOM necesita la cascada y la maqueta

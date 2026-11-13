@@ -481,6 +481,7 @@ dependencies = [
  "bf-layout",
  "bf-net",
  "bf-style",
+ "bf-svg",
  "bf-url",
  "tiny-skia",
 ]

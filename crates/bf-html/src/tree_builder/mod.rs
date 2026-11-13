@@ -206,8 +206,12 @@ struct TreeBuilder {
     /// El `script` cuyo end tag se acaba de procesar en el modo text: el parser corre los
     /// pasos que siguen a sacarlo de la stack (13.2.6.4.8) apenas vuelve del dispatcher.
     script_end: Option<NodeId>,
+    /// E3: el `script` SVG cuyo end tag (o start tag con self-closing) se acaba de procesar en
+    /// contenido extranjero: el parser lo procesa (13.2.6.5) apenas vuelve del dispatcher.
+    svg_script_end: Option<NodeId>,
     /// E10: los `link` HTML que el parser insertó conectados al documento y de los que el host
-    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]).
+    /// todavía no se enteró ([`script::ScriptHost::link_inserted`]); E2: también los `img`
+    /// ([`script::ScriptHost::img_inserted`]).
     inserted_links: Vec<NodeId>,
     /// *Script nesting level* (13.2.4.4 "parser pause flag" y 13.2.6.4.8).
     nesting: u32,
@@ -245,6 +249,7 @@ impl TreeBuilder {
             stopped: false,
             errors: Vec::new(),
             script_end: None,
+            svg_script_end: None,
             inserted_links: Vec::new(),
             nesting: 0,
             paused: false,
@@ -312,6 +317,7 @@ impl TreeBuilder {
             };
             self.process_token(tok);
             self.script_end = None;
+            self.svg_script_end = None;
             self.inserted_links.clear();
         }
         // 13.2.7 The end: "Pop all the nodes off the stack of open elements." Después el event
@@ -784,6 +790,15 @@ impl TreeBuilder {
         Loc { parent, before }
     }
 
+    /// DOM §4.2.2: `ancestor` es un *host-including inclusive ancestor* de `node` si es un
+    /// inclusive ancestor suyo, o si la raíz de `node` tiene host (el template de un template
+    /// contents o el host de un shadow root) y `ancestor` es un host-including inclusive
+    /// ancestor de ese host. Sin el paso por el shadow root (o por un `template` creado por
+    /// script), un script que mete el common ancestor en un shadow root o en el contenido de
+    /// un template colgado del furthest block hacía que el adoption agency insertara el
+    /// furthest block dentro de sí mismo; con el shadow root, el ciclo colgaba a quien
+    /// recorriera el árbol (`html/syntax/parsing/adoption-agency-reparenting-shadow-cycle.html`
+    /// y `-template-cycle.html`).
     fn is_host_including_inclusive_ancestor(&self, ancestor: NodeId, node: NodeId) -> bool {
         let mut current = Some(node);
         while let Some(n) = current {
@@ -793,7 +808,10 @@ impl TreeBuilder {
             current = self
                 .doc
                 .parent(n)
-                .or_else(|| self.template_hosts.get(&n).copied());
+                .or_else(|| self.template_hosts.get(&n).copied())
+                // Un `template` creado por script no está en `template_hosts`.
+                .or_else(|| self.doc.template_host(n))
+                .or_else(|| self.doc.shadow_host(n));
         }
         false
     }
@@ -817,8 +835,11 @@ impl TreeBuilder {
         self.doc.insert_before(loc.parent, element, loc.before);
         // E10: un `link` que queda conectado (no en el contenido de un `template`) empieza a
         // procesar su recurso (HTML §4.6.7 "becomes browsing-context connected"): se avisa al
-        // host al volver del dispatcher.
-        if self.doc.element(element).is_some_and(|e| e.is_html("link"))
+        // host al volver del dispatcher. E2: un `img`, igual (pide su imagen, §4.8.4.3.5).
+        if self
+            .doc
+            .element(element)
+            .is_some_and(|e| e.is_html("link") || e.is_html("img"))
             && self.doc.is_connected(element)
         {
             self.inserted_links.push(element);
