@@ -10,8 +10,6 @@ comprobó en el código de `bf-web`, sin volver a abrir los sitios.
 
 | Falta | Síntoma en los sitios | Spec | Dónde va |
 |---|---|---|---|
-| `IntersectionObserver` | `undefined`: la carga diferida hecha con scripts y las listas infinitas no arrancan. El `loading=lazy` nativo ya funciona (ver abajo). En curso (E2). | Intersection Observer | 2.2 |
-| `ResizeObserver` | `undefined`. En curso (E2). | Resize Observer | 2.2 |
 | `crypto.subtle` | `undefined` (sí existe `crypto`). | Web Cryptography API | 2.2 |
 | `localStorage` en páginas `file:` | `SecurityError: The operation is insecure`. Chrome y Firefox lo permiten (origen opaco con almacenamiento propio por archivo o carpeta). | HTML §12.2 | 2.2, `bf-web` bom |
 
@@ -27,6 +25,21 @@ sitios):
   (`bf-web/src/cssom/mod.rs::window_metrics`).
 - `customElements`: `bf-web/src/html/custom_elements.rs` (E1).
 - `Worker` (y `SharedWorker`): `bf-web/src/workers/` (E3).
+
+Resueltos el 2026-11-13, en `master` desde `1070d8e` (E2, `pendiente/mac/e2.md`, "Ciclo nuevo,
+ronda 1"):
+- **`IntersectionObserver`** (`bf-web/src/cssom/intersection_observer.rs`). Antes faltaba, y
+  `asimetrix.co` caía en su pantalla de error. WPT `intersection-observer` 222 / 315
+  (70.5 %) y `intersection-observer/v2` 30 / 65. Lo que falla:
+  - `scrollMargin` no recorta los scroll containers intermedios (`scroll-margin-*`, 5 / 19);
+  - los objetivos SVG (`svg-*`, 13 / 50), que no tienen fragmentos en la maqueta;
+  - los `<iframe>` (2 / 26): la raíz implícita de un marco es el viewport de arriba;
+  - `transform` y `zoom`, que `getBoundingClientRect` no aplica;
+  - la v2 de visibilidad (`trackVisibility`, oclusión): `isVisible` es siempre `false`;
+  - sueltos: `text-target` (un `<br>` no tiene caja), `observe-007/012/013/014` y
+    `timestamp` (el tiempo de un observador de otro marco).
+- **`ResizeObserver`** (`bf-web/src/cssom/resize_observer.rs`). WPT `resize-observer` 94 / 115
+  (81.7 %). Falla `fragments` (un elemento con varios fragmentos).
 
 Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
 - **Carga de imágenes desde el documento y los scripts.** Los `<img>` siguen *update the image
@@ -45,9 +58,9 @@ Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
   - en la ventana se revisan con la maqueta del navegador, no con una propia del motor (E3,
     `pendiente/mac/e3.md`, "Ciclo de cierre, ronda 5"): las cercanas aparecen un cuadro
     después de la primera pintura, como pide HTML §8.1.7.3.
-  - Falta: las perezosas dentro de un `<iframe>` y dentro de contenedores con `overflow`; y
-    una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
-    dos veces si la respuesta no es cacheable (E6 lo tiene en curso, sin integrar).
+  - una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
+    una sola vez aunque la respuesta no sea cacheable (E6, en `master` desde `84e2dd0`).
+  - Falta: las perezosas dentro de un `<iframe>` y dentro de contenedores con `overflow`.
 - **CSS Font Loading** (`document.fonts`, `FontFace`, `FontFaceSet`): antes `document.fonts`
   no existía y `document.fonts.ready` lanzaba `TypeError` (E5, `pendiente/mac/e5.md`, ronda 7;
   `bf-web/tests/font_loading.rs`).
@@ -103,6 +116,7 @@ protegida por ellas en Freedom:
 | Sitio | Lo que se ve | Pista |
 |---|---|---|
 | Google (búsquedas) | Responde `429 Too Many Requests` y redirige a `/sorry` con reCAPTCHA; el reCAPTCHA falla con `TypeError: Type error.` dentro de `recaptcha__es_419.js`. Buscar desde la barra queda inutilizable. | Google es el buscador por defecto: es lo más visible para quien usa Freedom. Ver si el 429 depende del `User-Agent` nuevo, de las cabeceras (`Sec-CH-UA`, `Accept`) o del ritmo de peticiones, y qué operación falla en el reCAPTCHA. |
+| Aplicación de `app.asimetrix.co` (`/ASIMETRIX`, build `ce1e596`) | La pestaña se cae: "Esta página falló", con el detalle `el realm no tiene WebContext`. En la consola, `ChunkLoadError: Loading CSS chunk 9298 failed`, `TypeError: Illegal invocation` y dos promesas rechazadas sin manejar. | Tres fallos, detallados en `RETOMAR-EN-MAC.md`, sección 9c. El del chunk CSS coincide con el tropiezo 3b de `pendiente/mac/e6.md` (los `<link rel=stylesheet>` disparan `error` en la ventana). |
 | Aplicación Next.js (asimetrix.co) | `TypeError: Cannot read properties of undefined (reading 'dplId')` al registrar los chunks de Turbopack. | Algún global o propiedad que el runtime de Next.js espera y no existe. |
 | Aplicación Vite (emmavet.com.co) | `TypeError: Type error.` en la línea 1 del módulo principal: la aplicación no arranca. | Falla al evaluar un módulo ES; el mensaje no dice qué operación. |
 | Sitio de videos | `TypeError: Cannot read properties of undefined (reading 'protocol')` en su script de cabecera. | Algo devuelve `undefined` donde el sitio espera un objeto con `protocol` (¿`<a>.protocol`, `URL` de un recurso, `location` de un iframe?). |
