@@ -433,6 +433,12 @@ pub const TESTDRIVER_VENDOR: &str = r#"// testdriver-vendor.js de Freedom.
     return Promise.resolve(__freedom_computed_label(element));
   };
   internal.get_computed_name = internal.get_computed_label;
+  internal.get_accessibility_properties_for_element = function (element) {
+    return Promise.resolve(__freedom_accessibility_properties(element));
+  };
+  internal.get_accessibility_properties_for_accessibility_node = function (id) {
+    return Promise.resolve(__freedom_accessibility_node_properties(id));
+  };
 })();
 "#;
 
@@ -550,6 +556,20 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         "__freedom_computed_label",
         1,
         super::accessibility::label_native,
+    );
+    bf_js::builtins::method(
+        &mut rt.agent,
+        g,
+        "__freedom_accessibility_properties",
+        1,
+        super::accessibility::properties_native,
+    );
+    bf_js::builtins::method(
+        &mut rt.agent,
+        g,
+        "__freedom_accessibility_node_properties",
+        1,
+        super::accessibility::node_properties_native,
     );
     let origin = Url::parse(&format!("{ORIGIN}/"), None).expect("origen");
     let https = Url::parse(&format!("{HTTPS_ORIGIN}/"), None).expect("origen");

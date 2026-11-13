@@ -189,7 +189,49 @@ pub fn register(agent: &mut Agent) {
     for (name, _, _) in ARIA_ELEMENT_ATTRIBUTES {
         aria = aria.attribute(name, Some(aria_element_get), Some(aria_element_set));
     }
+    aria = aria.method("ariaNotify", 1, aria_notify);
     agent.host_extend_class(element, aria);
+    let document = crate::dom::classes(agent).document;
+    agent.host_extend_class(
+        document,
+        HostClass::new("Document").method("ariaNotify", 1, aria_notify),
+    );
+}
+
+/// `ariaNotify(announcement, options)` de `ARIANotifyMixin` (WAI-ARIA 1.3 §10.2, en
+/// `Element` y `Document`): convierte los argumentos como pide Web IDL (`DOMString` y el
+/// diccionario `AriaNotificationOptions` con el enum `AriaNotifyPriority`). El anuncio va a
+/// la tecnología de apoyo; mientras el árbol no se expone al sistema no hay a quién dárselo.
+fn aria_notify(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if a.is_empty() {
+        return agent.type_error("ariaNotify: 1 argument required, but only 0 present.");
+    }
+    bf_js::host::webidl::to_dom_string(agent, &a.arg(0))?;
+    let options = a.arg(1);
+    match &options {
+        Value::Undefined | Value::Null => {}
+        Value::Object(o) => {
+            let p = agent.get(
+                *o,
+                &bf_js::value::PropertyKey::from("priority"),
+                options.clone(),
+            )?;
+            if !matches!(p, Value::Undefined) {
+                let p = bf_js::host::webidl::to_dom_string(agent, &p)?.to_string_lossy();
+                if p != "normal" && p != "high" {
+                    return agent.type_error(&format!(
+                        "The provided value '{p}' is not a valid enum value of type \
+                         AriaNotifyPriority."
+                    ));
+                }
+            }
+        }
+        _ => {
+            return agent
+                .type_error("The provided value is not of type 'AriaNotificationOptions'.");
+        }
+    }
+    Ok(Value::Undefined)
 }
 
 fn classes(agent: &Agent) -> CeClasses {
@@ -1741,7 +1783,9 @@ fn aria_content_name(idl: &str) -> String {
 /// Los atributos de `ARIAMixin` que reflejan elementos (WAI-ARIA 1.3 §10.1; HTML §2.6.1
 /// "reflecting content attributes in IDL attributes", `Element?` y `FrozenArray<Element>?`):
 /// nombre IDL, atributo de contenido y si es una lista.
-const ARIA_ELEMENT_ATTRIBUTES: [(&str, &str, bool); 8] = [
+const ARIA_ELEMENT_ATTRIBUTES: [(&str, &str, bool); 9] = [
+    // `aria-actions` (propuesta w3c/aria#1805, en los tests `.tentative` de WPT).
+    ("ariaActionsElements", "aria-actions", true),
     (
         "ariaActiveDescendantElement",
         "aria-activedescendant",
@@ -1805,10 +1849,15 @@ fn aria_element_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Null);
     };
     let n = this_node(agent, a)?;
-    let Some(value) = crate::html::elements::attr_value(agent, n, content) else {
-        return Ok(Value::Null);
-    };
     let explicit = aria_elements(agent).explicit.get(&(n, idl)).cloned();
+    // `aria-actions` (propuesta w3c/aria#1805): los elementos puestos por IDL sobreviven a
+    // que se quite el atributo de contenido (solo el setter con `null` los borra). Los demás
+    // siguen HTML §2.6.1: sin atributo, `null`.
+    let value = match crate::html::elements::attr_value(agent, n, content) {
+        Some(v) => v,
+        None if idl == "ariaActionsElements" && explicit.is_some() => DomString::new(),
+        None => return Ok(Value::Null),
+    };
     let els: Vec<NodeRef> = match explicit {
         Some(els) if value.is_empty() => els,
         _ => {

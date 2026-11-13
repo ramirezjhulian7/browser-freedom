@@ -1137,6 +1137,11 @@ pub(super) fn input_current_value(agent: &Agent, n: NodeRef) -> String {
     current_value(agent, n)
 }
 
+/// El `indeterminate` IDL de un `input` (para `checked=mixed` en el árbol de accesibilidad).
+pub(super) fn input_indeterminate(agent: &Agent, n: NodeRef) -> bool {
+    state(agent, n).indeterminate
+}
+
 pub(super) fn textarea_value_of(agent: &Agent, n: NodeRef) -> String {
     textarea_api_value(agent, n)
 }
