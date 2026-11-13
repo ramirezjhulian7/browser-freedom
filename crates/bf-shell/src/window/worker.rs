@@ -17,7 +17,7 @@ use bf_infra::Url;
 use bf_js::host::ConsoleLevel;
 use bf_layout::Size;
 use bf_net::NetLoader;
-use bf_paint::{Page, PageContext, prepare_page_with_frames};
+use bf_paint::{Page, PageContext, prepare_page_animated, prepare_page_with_frames};
 
 use crate::internal;
 use crate::load::{ErrorKind, LoadContext, LoadError, Loaded, load_with};
@@ -81,6 +81,11 @@ pub struct View {
     pub device_pixel_ratio: f32,
     /// Zoom de texto del navegador (E11; 1 = sin zoom).
     pub text_zoom: f32,
+    /// E4: cuadros mandados a la ventana por el hilo y recibidos por ella. Mientras la
+    /// ventana va atrasada no se corren cuadros de animación (HTML §8.1.7.3: el agente puede
+    /// saltarse oportunidades de renderizado que no puede mostrar).
+    pub frames_sent: u64,
+    pub frames_taken: u64,
 }
 
 impl Default for View {
@@ -93,6 +98,8 @@ impl Default for View {
             scroll: (0.0, 0.0),
             device_pixel_ratio: 1.0,
             text_zoom: 1.0,
+            frames_sent: 0,
+            frames_taken: 0,
         }
     }
 }
@@ -160,6 +167,16 @@ impl Documents {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .text_zoom = zoom;
+    }
+
+    /// E4: la ventana recibió un cuadro de la pestaña `tab` (ver [`View::frames_taken`]).
+    pub fn frame_taken(&mut self, tab: u64) {
+        if let Some(t) = self.threads.get(&tab) {
+            t.view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .frames_taken += 1;
+        }
     }
 
     /// El zoom de texto con el que se maqueta la pestaña `tab`.
@@ -249,6 +266,11 @@ struct Current {
     /// E1: los bitmaps de los `<canvas>` y su versión (dibujar no cambia el documento).
     canvases: Vec<(bf_dom::NodeId, Arc<bf_paint::Pixmap>)>,
     canvas_version: u64,
+    /// E4: ¿había animaciones o transiciones CSS en curso en el último cuadro?
+    animating: bool,
+    /// E4: el último cuadro cambió los estilos animados: hay que volver a maquetar y pintar
+    /// aunque el documento no haya cambiado.
+    animation_frame: bool,
 }
 
 /// El estado del hilo.
@@ -367,6 +389,12 @@ impl State {
         self.view().viewport
     }
 
+    /// E4: ¿la ventana todavía no recibió el último cuadro que se le mandó?
+    fn window_behind(&self) -> bool {
+        let v = self.view();
+        v.frames_sent > v.frames_taken
+    }
+
     /// El desplazamiento o la escala cambiaron: el snapshot del layout se pone al día y, si
     /// cambió el scroll, el documento recibe `scroll` (CSSOM View §13.1).
     fn view_changed(&mut self) {
@@ -444,8 +472,10 @@ impl State {
                 current.canvases = engine.canvases();
                 canvas_changed = true;
             }
-            // E4: lo mismo si cambió el documento de un marco.
+            // E4: lo mismo si cambió el documento de un marco o si el cuadro movió las
+            // animaciones CSS.
             canvas_changed |= engine.take_frames_dirty();
+            canvas_changed |= std::mem::take(&mut current.animation_frame);
         }
         if canvas_changed || current.loaded.doc.version() != current.version {
             let wait = FRAME.saturating_sub(self.last_frame.elapsed());
@@ -464,7 +494,12 @@ impl State {
                 // Dormir hasta el próximo temporizador, el próximo cuadro (si hay callbacks de
                 // `requestAnimationFrame`; sin ellos no hay cuadros y el hilo duerme) o el
                 // próximo mensaje.
-                let to_frame = FRAME.saturating_sub(self.last_raf.elapsed());
+                // E4: con la ventana atrasada, el próximo intento es dentro de un cuadro.
+                let to_frame = if self.window_behind() {
+                    FRAME
+                } else {
+                    FRAME.saturating_sub(self.last_raf.elapsed())
+                };
                 let wait = self
                     .current
                     .as_mut()
@@ -647,6 +682,8 @@ impl State {
             version,
             canvases: Vec::new(),
             canvas_version: 0,
+            animating: false,
+            animation_frame: false,
         });
         self.layout(id, Some(ctx));
         // El primer layout cargó imágenes y hojas: ya puede salir `load` (13.2.7 paso 8).
@@ -665,12 +702,12 @@ impl State {
 
     /// Estilo, layout y lista de visualización del documento actual; `Done` a la ventana.
     fn layout(&mut self, id: u64, ctx: Option<LoadContext>) {
-        let Some(current) = &self.current else {
-            return;
-        };
         let viewport = self.viewport();
         let view_zoom = self.view().text_zoom;
         let fonts = self.fonts.clone();
+        let Some(current) = &mut self.current else {
+            return;
+        };
         let canvases = current.canvases.clone();
         // E4: los documentos de los `<iframe>`, que se pintan dentro de su caja.
         let frames = current
@@ -678,7 +715,9 @@ impl State {
             .as_ref()
             .map(|e| e.frame_docs(&self.frame_scroll))
             .unwrap_or_default();
-        let page = |loaded: &Loaded| {
+        // E4: con motor, los estilos de la cascada pasan por sus animaciones y transiciones
+        // CSS (el "style change event" del cuadro) antes de maquetar.
+        let page = |loaded: &Loaded, engine: Option<&mut Engine>| {
             let pctx = PageContext {
                 base: &loaded.base,
                 encoding: loaded.encoding,
@@ -687,12 +726,20 @@ impl State {
                 extra: &[],
                 text_zoom: view_zoom,
             };
-            catch_unwind(AssertUnwindSafe(|| {
-                prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames)
+            catch_unwind(AssertUnwindSafe(|| match engine {
+                Some(engine) => prepare_page_animated(
+                    &loaded.doc,
+                    &pctx,
+                    viewport,
+                    &canvases,
+                    &frames,
+                    &mut |styles| engine.animated_styles(styles),
+                ),
+                None => prepare_page_with_frames(&loaded.doc, &pctx, viewport, &canvases, &frames),
             }))
         };
         let loaded = current.loaded.clone();
-        let (loaded, mut page) = match page(&loaded) {
+        let (loaded, mut page) = match page(&loaded, current.engine.as_mut()) {
             Ok(p) => (loaded, p),
             // Un error del motor con este documento: se muestra como página de error en
             // lugar de terminar el hilo.
@@ -709,7 +756,7 @@ impl State {
                 });
                 let err = engine_error(message);
                 let shown = Arc::new(internal::error_page(&loaded.url, &err, &ctx));
-                let Ok(p) = page(&shown) else {
+                let Ok(p) = page(&shown, None) else {
                     return;
                 };
                 if let Some(c) = &mut self.current {
@@ -755,6 +802,10 @@ impl State {
             viewport,
         };
         if self.tx.send(FromDoc::Done(Box::new(done))).is_ok() {
+            self.view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .frames_sent += 1;
             (self.wake)();
         }
     }
@@ -762,6 +813,7 @@ impl State {
     /// Las tareas vencidas del documento; si cambiaron el DOM, un cuadro nuevo (como mucho
     /// uno cada [`FRAME`]).
     fn run_tasks(&mut self) {
+        let behind = self.window_behind();
         let Some(current) = &mut self.current else {
             return;
         };
@@ -770,10 +822,16 @@ impl State {
         };
         let mut ran = engine.run_due_tasks();
         // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
-        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME {
+        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME && !behind {
             self.last_raf = Instant::now();
             engine.run_animation_frames();
             ran += 1;
+            // E4: mientras haya animaciones o transiciones CSS (y en el cuadro en que terminan,
+            // para mostrar su estado final), cada cuadro se vuelve a maquetar y pintar. Sin
+            // ellas no se piden cuadros (`wants_frame`) y el hilo duerme.
+            let animating = engine.is_animating();
+            current.animation_frame |= animating || current.animating;
+            current.animating = animating;
         }
         if let Some((x, y)) = engine.take_scroll_request() {
             let _ = self.tx.send(FromDoc::Request {

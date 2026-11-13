@@ -305,6 +305,47 @@ pub fn transform_css(t: &Transform, size: (f32, f32)) -> String {
     matrix_css(&t.matrix(size.0, size.1))
 }
 
+/// Interpola dos listas de sombras (CSS Backgrounds 3 §7.2, "shadow list"; CSS Text Decoration
+/// 3 §4 para `text-shadow`): sombra a sombra, color y longitudes; la lista más corta se completa
+/// con sombras transparentes de longitud 0 (con el `inset` de la otra). Si un par no coincide
+/// en `inset`, la lista no se interpola (`None`: animación discreta).
+fn lerp_shadows(a: &[Shadow], b: &[Shadow], colors: (Rgba, Rgba), p: f64) -> Option<Vec<Shadow>> {
+    let zero = LengthPercentage::zero();
+    let none = |inset: bool| Shadow {
+        color: Color::Rgba(Rgba::TRANSPARENT),
+        x: zero.clone(),
+        y: zero.clone(),
+        blur: zero.clone(),
+        spread: zero.clone(),
+        inset,
+    };
+    let n = a.len().max(b.len());
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (x, y) = match (a.get(i), b.get(i)) {
+            (Some(x), Some(y)) => (x.clone(), y.clone()),
+            (Some(x), None) => (x.clone(), none(x.inset)),
+            (None, Some(y)) => (none(y.inset), y.clone()),
+            (None, None) => break,
+        };
+        if x.inset != y.inset {
+            return None;
+        }
+        out.push(Shadow {
+            color: lerp_color(&x.color, &y.color, colors, p),
+            x: lerp_lp(&x.x, &y.x, p),
+            y: lerp_lp(&x.y, &y.y, p),
+            blur: match lerp_lp(&x.blur, &y.blur, p) {
+                LengthPercentage::Length(l) if l.value < 0.0 => LengthPercentage::zero(),
+                other => other,
+            },
+            spread: lerp_lp(&x.spread, &y.spread, p),
+            inset: x.inset,
+        });
+    }
+    Some(out)
+}
+
 fn discrete(a: &Value, b: &Value, p: f64) -> Value {
     if p < 0.5 { a.clone() } else { b.clone() }
 }
@@ -491,6 +532,12 @@ pub fn interpolate(a: &Value, b: &Value, p: f64, colors: (Rgba, Rgba), size: (f3
         ) => Some(V::VerticalAlign(VerticalAlign::LengthPercentage(lerp_lp(
             x, y, p,
         )))),
+        (V::TextShadow(x), V::TextShadow(y)) => {
+            lerp_shadows(&x.0, &y.0, colors, p).map(|l| V::TextShadow(TextShadow(l)))
+        }
+        (V::BoxShadow(x), V::BoxShadow(y)) => {
+            lerp_shadows(&x.0, &y.0, colors, p).map(|l| V::BoxShadow(BoxShadow(l)))
+        }
         (V::RowGap(Gap::LengthPercentage(x)), V::RowGap(Gap::LengthPercentage(y))) => {
             Some(V::RowGap(Gap::LengthPercentage(clamp0(lerp_lp(x, y, p)))))
         }
@@ -847,6 +894,9 @@ pub struct CssAnimation {
     pub overridden: bool,
     /// El identificador (para la API de Web Animations).
     pub id: u64,
+    /// `cancel()` desde script (Web Animations 1 §4.4.14): sin efecto ni eventos hasta que
+    /// cambie su `animation-name` (CSS Animations 2 §3).
+    pub cancelled: bool,
 }
 
 impl CssAnimation {
@@ -914,6 +964,66 @@ pub struct Animator {
     /// Los estilos de la cascada del último "style change event": el "before-change style"
     /// de los elementos que todavía no tenían estado (CSS Transitions 1 §3).
     previous: StyleMap,
+    /// Las transiciones que terminaron, con su elemento y su último estado (`playState`
+    /// "finished" de un `CSSTransition` que el script todavía tiene). Se vacía al pasar de
+    /// [`FINISHED_LIMIT`].
+    finished: HashMap<u64, (Key, AnimationTimes)>,
+}
+
+/// Cuántas transiciones terminadas recuerda el [`Animator`].
+const FINISHED_LIMIT: usize = 4096;
+
+/// Una animación o transición del [`Animator`] para la API de Web Animations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationRef {
+    pub id: u64,
+    pub target: Key,
+    pub transition: bool,
+}
+
+/// El estado de tiempo de una animación para la API de Web Animations (Web Animations 1 §4.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationTimes {
+    pub start_time: Option<f64>,
+    pub hold_time: Option<f64>,
+    pub timing: Timing,
+    pub paused: bool,
+    pub cancelled: bool,
+    /// `animationName` o `transitionProperty`.
+    pub name: String,
+}
+
+impl AnimationTimes {
+    /// El tiempo local (el "current time" de la animación) en la hora `now` de la línea de
+    /// tiempo.
+    pub fn current_time(&self, now: f64) -> Option<f64> {
+        if self.cancelled {
+            return None;
+        }
+        match (self.hold_time, self.start_time) {
+            (Some(h), _) => Some(h),
+            (None, Some(s)) => Some(now - s),
+            _ => None,
+        }
+    }
+
+    /// `playState` (Web Animations 1 §4.4.16), con `playbackRate` 1.
+    pub fn play_state(&self, now: f64) -> &'static str {
+        if self.cancelled {
+            return "idle";
+        }
+        let Some(t) = self.current_time(now) else {
+            return "idle";
+        };
+        if self.paused || (self.hold_time.is_some() && self.start_time.is_none()) {
+            return "paused";
+        }
+        if t >= self.timing.end_time() {
+            "finished"
+        } else {
+            "running"
+        }
+    }
 }
 
 /// Lo que cada elemento animado necesita del documento para actualizarse.
@@ -1017,6 +1127,179 @@ impl Animator {
     fn id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    // --- API de Web Animations (Web Animations 1 §6, CSS Animations 2 §6, CSS Transitions 2
+    // §6) ---
+
+    /// Las animaciones y transiciones relevantes ("current" o "in effect", Web Animations 1
+    /// §5.4.2) de `doc` en la hora `now`, en orden de composición (CSS Transitions 2 §3.1 y CSS
+    /// Animations 2 §3.1: primero las transiciones, por elemento en orden de árbol y por orden
+    /// de creación; luego las animaciones, por elemento y por posición en `animation-name`).
+    pub fn relevant(&self, doc: &Document, now: f64) -> Vec<AnimationRef> {
+        let keys = self.keys(doc);
+        let mut out = Vec::new();
+        for key in &keys {
+            let mut ts: Vec<&Transition> = self.transitions(key).iter().collect();
+            ts.sort_by_key(|t| t.id);
+            out.extend(ts.into_iter().map(|t| AnimationRef {
+                id: t.id,
+                target: *key,
+                transition: true,
+            }));
+        }
+        for key in &keys {
+            for a in self.animations(key) {
+                if a.cancelled {
+                    continue;
+                }
+                let Some(local) = a.local_time(now) else {
+                    continue;
+                };
+                let ct = a.timing.at(local, false);
+                let fills = matches!(a.timing.fill, FillMode::Forwards | FillMode::Both);
+                if ct.phase != Phase::After || fills {
+                    out.push(AnimationRef {
+                        id: a.id,
+                        target: *key,
+                        transition: false,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// La animación o transición `id`, si sigue en el documento.
+    pub fn find(&self, id: u64) -> Option<AnimationRef> {
+        self.elements.iter().find_map(|(key, e)| {
+            if e.transitions.iter().any(|t| t.id == id) {
+                Some(AnimationRef {
+                    id,
+                    target: *key,
+                    transition: true,
+                })
+            } else if e.animations.iter().any(|a| a.id == id) {
+                Some(AnimationRef {
+                    id,
+                    target: *key,
+                    transition: false,
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    /// El elemento (y seudoelemento) de `id`, también si es una transición que terminó.
+    pub fn target_of(&self, id: u64) -> Option<Key> {
+        self.find(id)
+            .map(|r| r.target)
+            .or_else(|| self.finished.get(&id).map(|(k, _)| *k))
+    }
+
+    /// El estado de tiempo de `id` (el último, si es una transición que terminó).
+    pub fn times(&self, id: u64) -> Option<AnimationTimes> {
+        self.live_times(id)
+            .or_else(|| self.finished.get(&id).map(|(_, t)| t.clone()))
+    }
+
+    fn live_times(&self, id: u64) -> Option<AnimationTimes> {
+        self.elements.values().find_map(|e| {
+            if let Some(t) = e.transitions.iter().find(|t| t.id == id) {
+                return Some(AnimationTimes {
+                    start_time: if t.hold_time.is_some() {
+                        None
+                    } else {
+                        Some(t.start_time)
+                    },
+                    hold_time: t.hold_time,
+                    timing: t.timing.clone(),
+                    paused: t.hold_time.is_some(),
+                    cancelled: false,
+                    name: t.name.clone(),
+                });
+            }
+            e.animations
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| AnimationTimes {
+                    start_time: if a.hold_time.is_some() {
+                        None
+                    } else {
+                        a.start_time
+                    },
+                    hold_time: a.hold_time,
+                    timing: a.timing.clone(),
+                    paused: a.paused,
+                    cancelled: a.cancelled,
+                    name: a.name.clone(),
+                })
+        })
+    }
+
+    /// Cambia desde script el tiempo de `id` (`currentTime`, `startTime`, `pause()`,
+    /// `play()`, `finish()`): la hora de inicio, la retenida y la pausa. Una animación CSS
+    /// cambiada así deja de seguir a `animation-play-state` (CSS Animations 2 §3.9).
+    pub fn set_times(&mut self, id: u64, times: &AnimationTimes) {
+        for e in self.elements.values_mut() {
+            if let Some(t) = e.transitions.iter_mut().find(|t| t.id == id) {
+                if let Some(s) = times.start_time {
+                    t.start_time = s;
+                }
+                t.hold_time = times.hold_time;
+                self.active = true;
+                return;
+            }
+            if let Some(a) = e.animations.iter_mut().find(|a| a.id == id) {
+                a.start_time = times.start_time;
+                a.hold_time = times.hold_time;
+                a.paused = times.paused;
+                a.cancelled = times.cancelled;
+                a.overridden = true;
+                self.active = true;
+                return;
+            }
+        }
+    }
+
+    /// `cancel()` (Web Animations 1 §4.4.14): una transición se quita y una animación CSS queda
+    /// sin efecto; las dos encolan su evento de cancelación (`transitioncancel`,
+    /// `animationcancel`) si no estaban ya en reposo.
+    pub fn cancel(&mut self, id: u64, now: f64) {
+        let mut event = None;
+        for (key, e) in &mut self.elements {
+            if let Some(i) = e.transitions.iter().position(|t| t.id == id) {
+                let t = e.transitions.remove(i);
+                event = Some(cancel_event(*key, &t, now));
+                break;
+            }
+            if let Some(a) = e.animations.iter_mut().find(|a| a.id == id) {
+                if a.cancelled {
+                    return;
+                }
+                let elapsed = a.local_time(now).map_or(0.0, |t| {
+                    (t - a.timing.delay).clamp(0.0, a.timing.active_duration())
+                });
+                a.cancelled = true;
+                a.overridden = true;
+                a.start_time = None;
+                a.hold_time = None;
+                if a.last_phase.is_some() {
+                    event = Some(AnimationEvent {
+                        target: *key,
+                        kind: "animationcancel",
+                        name: a.name.clone(),
+                        elapsed: elapsed / 1000.0,
+                        time: now,
+                    });
+                }
+                a.last_phase = None;
+                a.last_iteration = None;
+                break;
+            }
+        }
+        self.events.extend(event);
     }
 
     /// El "style change event": actualiza las animaciones y transiciones con los estilos de la
@@ -1222,6 +1505,7 @@ impl Animator {
                         last_iteration: None,
                         overridden: false,
                         id,
+                        cancelled: false,
                     }
                 }
             };
@@ -1451,6 +1735,23 @@ impl Animator {
             }
             if ct.phase == Phase::After {
                 finished.push(ti);
+                if self.finished.len() >= FINISHED_LIMIT {
+                    self.finished.clear();
+                }
+                self.finished.insert(
+                    t.id,
+                    (
+                        key,
+                        AnimationTimes {
+                            start_time: Some(t.start_time),
+                            hold_time: None,
+                            timing: t.timing.clone(),
+                            paused: false,
+                            cancelled: false,
+                            name: t.name.clone(),
+                        },
+                    ),
+                );
                 continue;
             }
             self.active = true;
@@ -1467,6 +1768,9 @@ impl Animator {
 
         let mut anims = std::mem::take(&mut state.animations);
         for a in &mut anims {
+            if a.cancelled {
+                continue;
+            }
             let Some(rule) = input.keyframes.get(&a.name) else {
                 continue;
             };
