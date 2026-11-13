@@ -114,6 +114,7 @@ impl UiDoc {
             fonts,
             extra: &[],
             text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
         };
         let page = prepare_page(&doc, &ctx, size);
         UiDoc { doc, page, size }

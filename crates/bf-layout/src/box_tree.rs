@@ -325,8 +325,40 @@ fn replaced_size(doc: &Document, node: NodeId, images: &ImageSizes) -> Option<(S
         let ratio = (s.width > 0.0 && s.height > 0.0).then(|| s.width / s.height);
         return Some((s, ratio));
     }
+    // E2: un `<svg>` en línea sin `width` ni `height` (o con `auto`) y con `viewBox` no tiene
+    // ancho ni alto naturales, solo proporción (SVG 2 §8.2; CSS Images 3 §5.3.1): como un
+    // `<img>` con ese SVG (`ImageState::Ratio`), el tamaño lo pone el contexto, no 300×150.
+    if el.ns == Namespace::Svg
+        && el.name == "svg"
+        && let Some(r) = svg_view_box_ratio(el)
+    {
+        return Some((Size::default(), Some(r)));
+    }
     let no_ratio = |s: Option<Size>| s.map(|s| (s, None));
     no_ratio(replaced_default(el))
+}
+
+/// La proporción del `viewBox` de un `<svg>` sin `width` ni `height` (ausentes o `auto`).
+/// `viewBox` = `min-x min-y width height`, separados por espacios o comas (SVG 2 §8.6).
+fn svg_view_box_ratio(el: &bf_dom::Element) -> Option<f32> {
+    let unset = |name: &str| {
+        el.attr(name)
+            .is_none_or(|v| v.trim().eq_ignore_ascii_case("auto"))
+    };
+    if !(unset("width") && unset("height")) {
+        return None;
+    }
+    let nums: Vec<f32> = el
+        .attr("viewBox")?
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match nums.as_slice() {
+        [_, _, w, h] if *w > 0.0 && *h > 0.0 && (w / h).is_finite() => Some(w / h),
+        _ => None,
+    }
 }
 
 /// Dimensiones por defecto de los reemplazados sin imagen.

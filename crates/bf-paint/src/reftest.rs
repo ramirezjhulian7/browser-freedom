@@ -379,6 +379,7 @@ impl Harness {
             fonts: self.db.clone(),
             extra: &[],
             text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
         };
         crate::render_document(doc, &ctx, VIEWPORT, 1.0)
     }
@@ -396,6 +397,7 @@ impl Harness {
             fonts: self.db.clone(),
             extra: &[],
             text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
         };
         let page = crate::prepare_page(&doc, &ctx, VIEWPORT);
         Some(bf_layout::dump(&doc, &page.tree))

@@ -18,7 +18,7 @@ use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult, RealmId};
 
-use super::elements::{attr_value, class_named, parse_url, set_attr};
+use super::elements::{class_named, set_attr};
 use crate::dom::{mutated, wrap_node};
 use crate::{NodeRef, WebContextHandle, with_doc, with_doc_mut};
 
@@ -163,7 +163,11 @@ struct ImageRequests {
 /// Cambió el atributo `name` de `n` (lo llaman `setAttribute` y la reflexión de `src`).
 /// Un `<img>` fuera del documento carga su imagen ("relevant mutations": se puso `src`).
 pub fn img_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str) {
-    if !name.eq_ignore_ascii_case("src") {
+    // E2: también `srcset` y `sizes`, que eligen la fuente (§4.8.4.3.5 "relevant mutations").
+    if !["src", "srcset", "sizes"]
+        .iter()
+        .any(|a| name.eq_ignore_ascii_case(a))
+    {
         return;
     }
     let disconnected_img = with_doc(agent, n.doc, |d| {
@@ -174,7 +178,7 @@ pub fn img_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str) {
     }
 }
 
-/// *Update the image data* (§4.8.4.3.5), sin `srcset` ni `<picture>`: con `src` vacío o
+/// *Update the image data* (§4.8.4.3.5) con la fuente elegida por `srcset`/`<picture>`: sin fuente o
 /// que no es una URL, `error`; si no, la imagen se busca y se decodifica, y según el
 /// resultado se dispara `load` o `error`.
 fn update_image_data(agent: &mut Agent, n: NodeRef) {
@@ -190,9 +194,8 @@ fn update_image_data(agent: &mut Agent, n: NodeRef) {
     // script ya no lo referencie.
     let wrapper = wrap_node(agent, n);
     let pin = agent.host_pin(wrapper);
-    let url = attr_value(agent, n, "src")
-        .filter(|s| !s.is_empty())
-        .and_then(|s| parse_url(agent, n, &s.to_string_lossy()));
+    // E2: la fuente que eligen `srcset`/`sizes` (o `src`).
+    let url = super::misc::selected_source(agent, n).map(|(u, _)| u);
     let Some(url) = url else {
         agent.queue_task(
             bf_js::host::TaskSource::DomManipulation,

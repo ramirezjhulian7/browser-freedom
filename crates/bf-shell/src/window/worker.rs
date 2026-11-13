@@ -745,6 +745,7 @@ impl State {
     fn layout(&mut self, id: u64, ctx: Option<LoadContext>) {
         let viewport = self.viewport();
         let view_zoom = self.view().text_zoom;
+        let view_dpr = self.view().device_pixel_ratio;
         let fonts = self.fonts.clone();
         let Some(current) = &mut self.current else {
             return;
@@ -766,6 +767,7 @@ impl State {
                 fonts: fonts.clone(),
                 extra: &[],
                 text_zoom: view_zoom,
+                device_pixel_ratio: view_dpr,
             };
             catch_unwind(AssertUnwindSafe(|| match engine {
                 Some(engine) => prepare_page_animated(

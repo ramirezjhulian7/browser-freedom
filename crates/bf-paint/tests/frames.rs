@@ -36,6 +36,7 @@ fn paint(scroll: (f32, f32)) -> (Pixmap, bf_paint::Page) {
         fonts: Arc::new(FontDb::from_faces(Vec::new())),
         extra: &[],
         text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
     };
     let frames = [FrameDoc {
         node,

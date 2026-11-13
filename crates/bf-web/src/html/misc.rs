@@ -275,15 +275,41 @@ fn set_base_href(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 #[derive(Debug, Default, Clone)]
 pub struct ImageSizes(pub HashMap<String, (u32, u32)>);
 
-fn natural_size(agent: &Agent, n: NodeRef) -> Option<(u32, u32)> {
-    let src = attr_value(agent, n, "src")?;
-    let url = parse_url(agent, n, &src.to_string_lossy())?;
+/// E2: la fuente que eligen `srcset`, `sizes` y `<picture>` (HTML §4.8.4.3, "select an image
+/// source", en `bf_image::source`) con el viewport y la densidad de la ventana, resuelta contra
+/// la base del documento, y su densidad.
+pub(crate) fn selected_source(agent: &mut Agent, n: NodeRef) -> Option<(Url, f64)> {
+    let m = crate::cssom::window_metrics(agent);
+    let ctx = bf_css::media::MediaContext {
+        width: f64::from(m.viewport.width),
+        height: f64::from(m.viewport.height),
+        device_pixel_ratio: f64::from(m.dpr),
+        ..bf_css::media::MediaContext::default()
+    };
+    let chosen = with_doc(agent, n.doc, |d| {
+        bf_image::source::select_image_source(d, n.node, &ctx)
+    })?;
+    // Sin `trim`: el parser de URL ya quita los C0 y espacios de los extremos, y un NBSP es
+    // parte de la URL.
+    let url = parse_url(agent, n, &chosen.url)?;
+    Some((url, chosen.density))
+}
+
+/// El tamaño natural corregido por densidad (§4.8.4.4): los píxeles de la fuente elegida
+/// divididos por su densidad (un `2x` mide la mitad).
+fn natural_size(agent: &mut Agent, n: NodeRef) -> Option<(u32, u32)> {
+    let (url, density) = selected_source(agent, n)?;
     let realm = WebContextHandle::current(agent).realm;
-    agent
+    let (w, h) = agent
         .realm_data::<ImageSizes>(realm)?
         .0
         .get(&url.serialize(false))
-        .copied()
+        .copied()?;
+    if !(density > 0.0 && density.is_finite()) || density == 1.0 {
+        return Some((w, h));
+    }
+    let corrected = |v: u32| (f64::from(v) / density).round() as u32;
+    Some((corrected(w), corrected(h)))
 }
 
 /// `width`/`height` (§4.8.4.4): el tamaño renderizado; sin layout, el atributo si es un
@@ -356,12 +382,11 @@ fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Boolean(done))
 }
 
+/// `currentSrc` (§4.8.4.3): la URL de la fuente elegida ([`selected_source`]).
 fn img_current_src(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
-    let s = attr_value(agent, n, "src")
-        .filter(|s| !s.is_empty())
-        .and_then(|s| parse_url(agent, n, &s.to_string_lossy()))
-        .map(|u| u.serialize(false))
+    let s = selected_source(agent, n)
+        .map(|(u, _)| u.serialize(false))
         .unwrap_or_default();
     Ok(js_str(&s))
 }
