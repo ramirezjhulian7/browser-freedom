@@ -305,6 +305,10 @@ fn natural_size(agent: &mut Agent, n: NodeRef) -> Option<(u32, u32)> {
         .0
         .get(&url.serialize(false))
         .copied()?;
+    // Una densidad infinita (un `w` con `sizes` 0) da 0×0.
+    if density.is_infinite() && density > 0.0 {
+        return Some((0, 0));
+    }
     if !(density > 0.0 && density.is_finite()) || density == 1.0 {
         return Some((w, h));
     }
@@ -386,6 +390,11 @@ fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         _ => natural_size(agent, n).is_some(),
     };
     Ok(Value::Boolean(done))
+}
+
+/// El tamaño natural (corregido por densidad) de la imagen de `n`, si se conoce.
+pub(crate) fn natural_size_of(agent: &mut Agent, n: NodeRef) -> Option<(u32, u32)> {
+    natural_size(agent, n)
 }
 
 /// ¿Se conoce el tamaño natural de la imagen de `n`?
