@@ -137,6 +137,9 @@ pub(crate) struct Layout<'a> {
     >,
     /// E5: anchos intrínsecos ya calculados ([`Self::intrinsic_widths`]).
     pub intrinsic_cache: std::collections::HashMap<IntrinsicKey, (f32, f32)>,
+    /// E5: cajas cuyo subárbol puede leer el alto del containing block (ver
+    /// `Layout::reads_cb_height`, `inline.rs`).
+    pub cb_height_readers: std::collections::HashMap<usize, bool>,
     /// E5: `false` con `BF_NO_LAYOUT_CACHE` en el entorno: sin las dos cachés de arriba, para
     /// compararlas con el recorrido completo en el mismo binario.
     pub caches: bool,
@@ -381,6 +384,7 @@ impl<'a> Layout<'a> {
             perf: crate::perf::Perf::new(),
             inline_cache: std::collections::HashMap::new(),
             intrinsic_cache: std::collections::HashMap::new(),
+            cb_height_readers: std::collections::HashMap::new(),
             caches: std::env::var_os("BF_NO_LAYOUT_CACHE").is_none(),
         }
     }

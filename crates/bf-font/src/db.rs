@@ -110,6 +110,9 @@ fn read_cmap(path: &Path, index: u32) -> Option<Vec<u8>> {
     read_at(u64::from(offset), usize::try_from(len).ok()?)
 }
 
+/// La base de las fuentes del sistema ([`FontDb::system`]).
+static SYSTEM: OnceLock<Arc<FontDb>> = OnceLock::new();
+
 /// Directorios de fuentes de Windows, Linux y macOS (los que existan).
 pub fn system_font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -368,9 +371,15 @@ fn variable_instances(mut info: FaceInfo, raw: &RawFace<'_>) -> Vec<FaceInfo> {
 impl FontDb {
     /// Base de datos de las fuentes del sistema, escaneada una sola vez por proceso.
     pub fn system() -> Arc<FontDb> {
-        static DB: OnceLock<Arc<FontDb>> = OnceLock::new();
-        DB.get_or_init(|| Arc::new(FontDb::scan(&system_font_dirs())))
+        SYSTEM
+            .get_or_init(|| Arc::new(FontDb::scan(&system_font_dirs())))
             .clone()
+    }
+
+    /// E5: la base del sistema si ya se escaneó, con vida `'static` (vive hasta el final del
+    /// proceso): sus caras cargadas se pueden prestar a las caras de rustybuzz que se guardan.
+    pub(crate) fn system_if_loaded() -> Option<&'static Arc<FontDb>> {
+        SYSTEM.get()
     }
 
     /// Escanea los directorios dados (en paralelo).
@@ -449,19 +458,39 @@ impl FontDb {
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         files
             .entry(path.to_path_buf())
-            .or_insert_with(|| std::fs::read(path).ok().map(Arc::new))
+            .or_insert_with(|| {
+                let start = std::time::Instant::now();
+                let data = std::fs::read(path).ok().map(Arc::new);
+                // E5: con `BF_TRACE`, qué archivos de fuentes se leen y cuánto cuestan.
+                if std::env::var_os("BF_TRACE").is_some() {
+                    eprintln!(
+                        "perf fuente: {} ({:.1} MB) en {:.1} ms",
+                        path.display(),
+                        data.as_ref().map_or(0, |d| d.len()) as f64 / 1e6,
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                data
+            })
             .clone()
     }
 
     /// Datos completos de la cara `i` (se leen del disco la primera vez).
     pub fn load(&self, i: usize) -> Option<Arc<LoadedFace>> {
+        self.load_slot(i)?.clone()
+    }
+
+    /// E5: [`FontDb::load`] prestada (con la vida de la base).
+    pub(crate) fn load_ref(&self, i: usize) -> Option<&LoadedFace> {
+        self.load_slot(i)?.as_deref()
+    }
+
+    fn load_slot(&self, i: usize) -> Option<&Option<Arc<LoadedFace>>> {
         let info = self.faces.get(i)?;
-        self.loaded[i]
-            .get_or_init(|| {
-                let data = self.file(&info.path)?;
-                LoadedFace::new(data, info.index).map(|f| Arc::new(f.with_wght(info.wght)))
-            })
-            .clone()
+        Some(self.loaded[i].get_or_init(|| {
+            let data = self.file(&info.path)?;
+            LoadedFace::new(data, info.index).map(|f| Arc::new(f.with_wght(info.wght)))
+        }))
     }
 
     ///
