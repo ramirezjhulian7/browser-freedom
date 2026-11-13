@@ -15,6 +15,8 @@ mod internal;
 #[cfg(test)]
 mod lazy_paint_tests; // E2
 mod load;
+#[cfg(test)]
+mod observer_tests; // E2
 mod preload;
 mod profile;
 mod reftest_js;

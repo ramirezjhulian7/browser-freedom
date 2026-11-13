@@ -34,6 +34,9 @@ Imprime tres líneas (los tiempos entre corchetes son segundos desde la navegaci
   - **imágenes**, **maqueta**, **lista**: las fases de `bf_paint::prepare_page_animated`.
 - `perf imágenes pedidas: N (M <img> perezosas aplazadas)` (E2): cuántas imágenes pide cada
   maqueta (`bf_paint::load_images_in`); las `loading=lazy` lejanas no se piden.
+- `perf maqueta del CSSOM: X ms` (E2): una cascada y una maqueta que el motor hizo por su
+  cuenta (`cssom::current_layout`), fuera de las del navegador; antes de la primera pintura de
+  la ventana no debería haber ninguna.
 - `perf primera pintura: X desde la navegación (raster R)`: el final del primer raster de la
   página nueva en la ventana (`App::frame`), incluido el raster.
 
