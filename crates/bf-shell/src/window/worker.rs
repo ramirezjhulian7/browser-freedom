@@ -914,6 +914,22 @@ impl State {
                     super::ms(m.copy),
                 ));
             }
+            // E6: la caché HTTP en disco durante la carga (`bf_net::timing`).
+            let d = bf_net::timing::take_disk();
+            super::trace(&format!(
+                "perf disco: {} lecturas en el camino ({}, {} KB) · {} de la precarga, en \
+                 paralelo a la red ({}) · {} escrituras en el camino ({}) · {} en segundo plano \
+                 ({})",
+                d.reads,
+                super::ms(d.read),
+                d.read_bytes / 1024,
+                d.warm_reads,
+                super::ms(d.warm),
+                d.writes,
+                super::ms(d.write),
+                d.bg_writes,
+                super::ms(d.bg_write),
+            ));
         }
         let view = self.view();
         // E12: las posiciones de scroll de los elementos y lo `sticky` del viewport.

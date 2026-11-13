@@ -27,6 +27,12 @@ use crate::theme::Theme;
 pub struct CachedLoader {
     pub net: Arc<NetLoader>,
     entries: Mutex<HashMap<String, Option<Resource>>>,
+    /// E6: las peticiones en curso: otra a la misma URL espera su resultado en vez de salir
+    /// otra vez (lo que `entries` ya hace con las terminadas).
+    in_flight: Mutex<HashMap<String, Arc<InFlight>>>,
+    /// E6: el documento, para que sus peticiones de imagen se junten en la red con las del
+    /// motor web ([`bf_net::RequestOptions::client`]).
+    id: u64,
     /// E6: el cliente de los subrecursos (Fetch §2.2.5: el referente `"client"` es la URL del
     /// documento, Referrer Policy §8.3 paso 2) y la política de su *policy container* (HTML
     /// §7.1.2: la de la cabecera `Referrer-Policy`, cambiada luego por `<meta name=referrer>`).
@@ -38,9 +44,12 @@ pub struct CachedLoader {
 
 impl CachedLoader {
     pub fn new(net: Arc<NetLoader>) -> CachedLoader {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         CachedLoader {
             net,
             entries: Mutex::new(HashMap::new()),
+            in_flight: Mutex::default(),
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             client: Mutex::new(None),
             security: Mutex::new(None),
         }
@@ -56,6 +65,20 @@ impl CachedLoader {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// E6: el identificador del documento (ver [`bf_net::RequestOptions::client`]).
+    pub fn client_id(&self) -> u64 {
+        self.id
+    }
+
+    /// E6: el referente de los subrecursos (la URL del documento) y su política.
+    pub fn referrer(&self) -> (Option<Url>, ReferrerPolicy) {
+        self.client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map_or((None, ReferrerPolicy::Default), |(u, p)| (Some(u), p))
     }
 
     /// El documento que pide los subrecursos: su URL (el referente) y su política.
@@ -103,8 +126,17 @@ pub fn meta_referrer_policy(doc: &Document) -> Option<ReferrerPolicy> {
         .last()
 }
 
-impl ResourceLoader for CachedLoader {
-    fn load(&self, url: &Url) -> Option<Resource> {
+/// E6: una petición de [`CachedLoader`] en curso y su resultado, cuando llega.
+#[derive(Default)]
+struct InFlight {
+    result: Mutex<Option<Option<Resource>>>,
+    ready: std::sync::Condvar,
+}
+
+impl CachedLoader {
+    /// El recurso de `url` para `destination`: lo ya cargado por este documento, lo que está
+    /// cargando otra petición (se espera) o una petición nueva.
+    fn load_as(&self, url: &Url, destination: Option<bf_infra::Destination>) -> Option<Resource> {
         let key = url.href();
         if let Some(hit) = self
             .entries
@@ -114,32 +146,73 @@ impl ResourceLoader for CachedLoader {
         {
             return hit.clone();
         }
-        let (referrer, referrer_policy) = self
-            .client
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .map_or((None, ReferrerPolicy::Default), |(u, p)| (Some(u), p));
+        let (flight, leader) = {
+            let mut map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(&key) {
+                Some(f) => (f.clone(), false),
+                None => {
+                    let f = Arc::new(InFlight::default());
+                    map.insert(key.clone(), f.clone());
+                    (f, true)
+                }
+            }
+        };
+        if !leader {
+            let mut r = flight.result.lock().unwrap_or_else(|e| e.into_inner());
+            while r.is_none() {
+                r = flight.ready.wait(r).unwrap_or_else(|e| e.into_inner());
+            }
+            return r.clone().flatten();
+        }
+        // Quien carga entrega el resultado aunque la carga entre en pánico.
+        struct Deliver<'a>(&'a CachedLoader, &'a str, &'a InFlight);
+        impl Drop for Deliver<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(self.1);
+                let mut r = self.2.result.lock().unwrap_or_else(|e| e.into_inner());
+                if r.is_none() {
+                    *r = Some(None);
+                }
+                self.2.ready.notify_all();
+            }
+        }
+        let deliver = Deliver(self, &key, &flight);
+        let (referrer, referrer_policy) = self.referrer();
         let options = FetchOptions {
             referrer,
             referrer_policy,
+            destination,
+            client: Some(self.id),
             ..FetchOptions::default()
         };
         let result = self.net.load_with(url, &options);
         self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, result.clone());
+            .insert(key.clone(), result.clone());
+        *flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
+        drop(deliver);
         result
+    }
+}
+
+impl ResourceLoader for CachedLoader {
+    fn load(&self, url: &Url) -> Option<Resource> {
+        self.load_as(url, None)
     }
 
     /// E6: Mixed Content (bloquear o pasar a `https:`) y CSP con la directiva del
     /// `destination`; lo bloqueado queda en los mensajes de la política para la consola.
     fn load_for(&self, url: &Url, destination: bf_infra::Destination) -> Option<Resource> {
-        match self.security() {
-            Some(p) => self.load(&p.check_request(url, destination, None)?),
-            None => self.load(url),
-        }
+        let url = match self.security() {
+            Some(p) => p.check_request(url, destination, None)?,
+            None => url.clone(),
+        };
+        self.load_as(&url, Some(destination))
     }
 
     /// E2: la imagen que ya descargó el motor web (un `<img>`, HTML §4.8.4.3.5): el pintado
@@ -408,16 +481,37 @@ pub fn fetch_document_with(
 ) -> Result<Loaded, LoadError> {
     let start = Instant::now();
     let mut options = FetchOptions::document();
+    // E6: mientras se valida una copia guardada, la precarga lee del disco el documento y sus
+    // hojas y scripts frescos (`preload`); solo se usa con un 304.
+    // `BF_NO_PRECARGA=1` la apaga (para comparar en el mismo binario).
+    let warmup = (post.is_none() && std::env::var_os("BF_NO_PRECARGA").is_none())
+        .then(|| crate::preload::Warmup::start(&net, url))
+        .flatten();
     if let Some(body) = post {
         options.method = bf_net::Method::Post;
         options.body = Some(body);
     }
     bf_net::timing::take();
-    let response = net
-        .fetcher
-        .fetch(url, &options)
-        .map_err(|e| LoadError::from_fetch(&e))?;
+    let response = net.fetcher.fetch(url, &options);
+    let warm = warmup.map(|w| {
+        let validated = response
+            .as_ref()
+            .is_ok_and(|r| r.cache == bf_net::CacheUse::Revalidated && r.redirects == 0);
+        w.finish(validated)
+    });
+    let response = response.map_err(|e| LoadError::from_fetch(&e))?;
     trace_fetch(&response, start.elapsed());
+    if let Some(w) = warm
+        && std::env::var_os("BF_TRACE").is_some()
+    {
+        eprintln!(
+            "perf precarga: {} hojas, scripts e imágenes en la copia guardada · {} frescos listos \
+             al llegar la respuesta{}",
+            w.found,
+            w.ready,
+            if w.done { "" } else { " (sigue)" }
+        );
+    }
     if !response.ok() {
         eprintln!(
             "aviso: {} respondió {} {}",
@@ -1381,5 +1475,162 @@ mod lazy_images {
         run_until(&mut engine, &log, "lejos-cargó");
         assert!(log.borrow().iter().any(|l| l == "lejos-cargó"), "{log:?}");
         assert_eq!(*paths.lock().unwrap(), ["/cerca.gif", "/lejos.gif"]);
+    }
+}
+
+/// E6: dos caminos que piden a la vez la misma imagen no cacheable (el `<img>` del motor web y
+/// el pintado) comparten una sola petición; un `fetch` cualquiera no.
+#[cfg(test)]
+mod shared_requests {
+    use super::*;
+    use crate::script::DocumentNet;
+    use bf_web::net::{NetBackend, NetRequest};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Responde a todo `img` con `Cache-Control: no-store` tras `delay`; cuenta las peticiones.
+    fn slow_server(delay: Duration) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut r = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        // Una petición entera: hasta la línea en blanco.
+                        loop {
+                            let mut h = String::new();
+                            if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                                break;
+                            }
+                        }
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(delay);
+                        let body = b"img";
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/x-prueba\r\n\
+                             Cache-Control: no-store\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        if stream.write_all(head.as_bytes()).is_err()
+                            || stream.write_all(body).is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, count)
+    }
+
+    fn setup(port: u16) -> (Url, Arc<CachedLoader>, Arc<DocumentNet>) {
+        let net = Arc::new(NetLoader::with_cache(bf_net::HttpCache::in_memory()));
+        let loader = Arc::new(CachedLoader::new(net.clone()));
+        let page = Url::parse(&format!("http://127.0.0.1:{port}/pagina"), None).unwrap();
+        loader.set_client(page, ReferrerPolicy::Default);
+        let backend = Arc::new(DocumentNet {
+            net,
+            loader: loader.clone(),
+        });
+        let img = Url::parse(&format!("http://127.0.0.1:{port}/foto.png"), None).unwrap();
+        (img, loader, backend)
+    }
+
+    #[test]
+    fn engine_and_paint_share_one_image_request() {
+        let (port, count) = slow_server(Duration::from_millis(300));
+        let (img, loader, backend) = setup(port);
+        let req = NetRequest {
+            url: img.clone(),
+            options: bf_net::RequestOptions {
+                destination: Some(bf_infra::Destination::Image),
+                ..Default::default()
+            },
+        };
+        let engine = {
+            let backend = backend.clone();
+            std::thread::spawn(move || backend.fetch(&req).map(|r| r.body))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let paint = loader.load_for(&img, bf_infra::Destination::Image);
+        let engine = engine.join().unwrap().expect("respuesta del motor web");
+        assert_eq!(engine, b"img");
+        assert_eq!(paint.map(|r| r.bytes), Some(b"img".to_vec()));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "una sola petición");
+        assert_eq!(*backend.net.fetcher.shared_requests.lock().unwrap(), 1);
+        // Ya terminada, otra petición del motor web sale de nuevo (`no-store`): solo se
+        // juntan las que se cruzan.
+        let again = NetRequest {
+            url: img.clone(),
+            options: bf_net::RequestOptions {
+                destination: Some(bf_infra::Destination::Image),
+                ..Default::default()
+            },
+        };
+        assert!(backend.fetch(&again).is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Un `fetch` sin *destination* `image` (o de otro documento) no se junta.
+    #[test]
+    fn other_requests_are_not_shared() {
+        let (port, count) = slow_server(Duration::from_millis(300));
+        let (img, loader, backend) = setup(port);
+        let req = NetRequest {
+            url: img.clone(),
+            options: bf_net::RequestOptions::default(),
+        };
+        let script = {
+            let backend = backend.clone();
+            std::thread::spawn(move || backend.fetch(&req).map(|r| r.body))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let paint = loader.load_for(&img, bf_infra::Destination::Image);
+        assert!(script.join().unwrap().is_ok());
+        assert!(paint.is_some());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        // Dos documentos distintos tampoco.
+        let other = Arc::new(CachedLoader::new(loader.net.clone()));
+        let a = {
+            let loader = loader.clone();
+            let img = img.clone();
+            std::thread::spawn(move || {
+                // El primer documento ya la tiene (su `entries`): otra URL.
+                let mut u = img.clone();
+                u.query = Some("b".into());
+                loader.load_for(&u, bf_infra::Destination::Image)
+            })
+        };
+        let mut u = img.clone();
+        u.query = Some("b".into());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(other.load_for(&u, bf_infra::Destination::Image).is_some());
+        assert!(a.join().unwrap().is_some());
+        assert_eq!(count.load(Ordering::SeqCst), 4);
+    }
+
+    /// Dentro del documento, dos cargas simultáneas de la misma URL esperan a una.
+    #[test]
+    fn loader_waits_for_its_own_request() {
+        let (port, count) = slow_server(Duration::from_millis(300));
+        let (img, loader, _) = setup(port);
+        let first = {
+            let (loader, img) = (loader.clone(), img.clone());
+            std::thread::spawn(move || loader.load(&img))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(loader.load(&img).is_some());
+        assert!(first.join().unwrap().is_some());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

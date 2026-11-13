@@ -26,6 +26,24 @@ pub enum FetchError {
     NotFound,
 }
 
+impl FetchError {
+    /// E6: el mismo error (para las peticiones que compartieron la red, que reciben cada una
+    /// el suyo).
+    pub fn duplicate(&self) -> FetchError {
+        let io = |e: &io::Error| io::Error::new(e.kind(), e.to_string());
+        match self {
+            FetchError::UnsupportedScheme(s) => FetchError::UnsupportedScheme(s.clone()),
+            FetchError::InvalidUrl => FetchError::InvalidUrl,
+            FetchError::Io(e) => FetchError::Io(io(e)),
+            FetchError::Dns(e) => FetchError::Dns(io(e)),
+            FetchError::Timeout => FetchError::Timeout,
+            FetchError::Tls(t) => FetchError::Tls(t.clone()),
+            FetchError::TooManyRedirects => FetchError::TooManyRedirects,
+            FetchError::NotFound => FetchError::NotFound,
+        }
+    }
+}
+
 /// La causa de un [`FetchError`], para elegir el mensaje de la página de error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetErrorKind {

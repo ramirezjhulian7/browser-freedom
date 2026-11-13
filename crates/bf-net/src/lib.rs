@@ -86,6 +86,10 @@ pub struct FetchOptions {
     pub accept: String,
     /// El *cache mode* de Fetch (si el `Fetcher` tiene caché).
     pub cache: CacheMode,
+    /// E6: el *destination* (Fetch §2.2.5) y el cliente (el documento) que pide: ver
+    /// [`RequestOptions::client`].
+    pub destination: Option<bf_infra::Destination>,
+    pub client: Option<u64>,
 }
 
 impl Default for FetchOptions {
@@ -97,6 +101,8 @@ impl Default for FetchOptions {
             referrer_policy: ReferrerPolicy::Default,
             accept: "*/*".into(),
             cache: CacheMode::Default,
+            destination: None,
+            client: None,
         }
     }
 }
@@ -414,6 +420,10 @@ pub struct Fetcher {
     pub cookies: CookieJar,
     /// Conexiones abiertas (para los tests de keep-alive).
     pub connections_opened: Mutex<usize>,
+    /// E6: las peticiones de imagen en vuelo que otras idénticas esperan
+    /// ([`Fetcher::send_shared`]), y cuántas se juntaron con otra (para los tests).
+    in_flight: Mutex<HashMap<FlightKey, Arc<Flight>>>,
+    pub shared_requests: Mutex<usize>,
     /// HTTP/2 sobre TCP sin TLS con conocimiento previo (RFC 9113 §3.3), para `http:`.
     pub h2_prior_knowledge: bool,
     /// Raíces de confianza propias (en vez de las de webpki-roots): configuraciones TLS
@@ -795,6 +805,7 @@ impl Fetcher {
                 credentials: true,
                 cache: opts.cache,
                 referrer_policy: policy,
+                share: image_share(opts.destination, opts.client),
             };
             let mut response = self.http(&url, &extra, referrer, &opts.accept)?;
             response.redirects = redirects;
@@ -1028,7 +1039,7 @@ impl Fetcher {
     ) -> Result<Response, FetchError> {
         let method = extra.method;
         let response = match &self.cache {
-            None => self.send(url, extra, headers, target)?,
+            None => self.send_shared(url, extra, headers, target)?,
             Some(cache) => {
                 let req = cache::CacheRequest {
                     method,
@@ -1043,7 +1054,7 @@ impl Fetcher {
                 let mut on_network = Duration::ZERO;
                 let result = cache.fetch_mut(&req, |h| {
                     let sent = Instant::now();
-                    let r = self.send(url, extra, h, target);
+                    let r = self.send_shared(url, extra, h, target);
                     on_network += sent.elapsed();
                     let r = r?;
                     protocol = r.protocol;
@@ -1117,6 +1128,7 @@ impl Fetcher {
                 credentials: rv.credentials,
                 cache: CacheMode::NoCache,
                 referrer_policy: ReferrerPolicy::Default,
+                share: None,
             };
             let target = request_target(&rv.url);
             let _ = cache.revalidate(&rv, |h| {
@@ -1129,6 +1141,72 @@ impl Fetcher {
                 })
             });
         });
+    }
+
+    /// E6: [`Fetcher::send`], compartido con una petición idéntica en vuelo si las dos son de
+    /// imagen del mismo documento ([`RequestOptions::client`]): mismo método seguro sin cuerpo,
+    /// misma URL, mismas credenciales y las mismas cabeceras (cookies, `Referer`, `Accept`,
+    /// validadores…), así que la red recibiría dos veces la misma petición. Va una; las demás
+    /// esperan su respuesta. Cada una sigue después con lo suyo (redirecciones, CORS).
+    fn send_shared(
+        &self,
+        url: &Url,
+        extra: &HttpExtra<'_>,
+        headers: &Headers,
+        target: &str,
+    ) -> Result<Response, FetchError> {
+        let shareable = extra.body.is_none()
+            && (extra.method.eq_ignore_ascii_case("GET")
+                || extra.method.eq_ignore_ascii_case("HEAD"));
+        let Some(client) = extra.share.filter(|_| shareable) else {
+            return self.send(url, extra, headers, target);
+        };
+        let mut bare = url.clone();
+        bare.fragment = None;
+        let key: FlightKey = (
+            client,
+            extra.method.to_ascii_uppercase(),
+            bare.href(),
+            extra.credentials,
+            headers.0.clone(),
+        );
+        let (flight, leader) = {
+            let mut map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(&key) {
+                Some(f) => (f.clone(), false),
+                None => {
+                    let f = Arc::new(Flight::default());
+                    map.insert(key.clone(), f.clone());
+                    (f, true)
+                }
+            }
+        };
+        if !leader {
+            *self
+                .shared_requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) += 1;
+            let mut done = flight.result.lock().unwrap_or_else(|e| e.into_inner());
+            while done.is_none() {
+                done = flight.ready.wait(done).unwrap_or_else(|e| e.into_inner());
+            }
+            return match done.as_ref() {
+                Some(Ok(r)) => Ok(r.clone()),
+                Some(Err(e)) => Err(e.duplicate()),
+                None => unreachable!("se esperó a la respuesta"),
+            };
+        }
+        let guard = FlightGuard {
+            fetcher: self,
+            key,
+            flight,
+        };
+        let result = self.send(url, extra, headers, target);
+        guard.complete(match &result {
+            Ok(r) => Ok(r.clone()),
+            Err(e) => Err(e.duplicate()),
+        });
+        result
     }
 
     /// Un salto por la red (HTTP/2 si hay conexión o se negocia, si no HTTP/1.1) con
@@ -1320,6 +1398,48 @@ impl Fetcher {
     }
 }
 
+/// E6: una petición compartida ([`Fetcher::send_shared`]): documento, método, URL sin
+/// fragmento, credenciales y cabeceras.
+type FlightKey = (u64, String, String, bool, Vec<(String, String)>);
+
+/// La respuesta de una petición compartida, cuando llega.
+#[derive(Default)]
+struct Flight {
+    result: Mutex<Option<Result<Response, FetchError>>>,
+    ready: Condvar,
+}
+
+/// Quien hace la petición compartida: al terminar (o si se interrumpe) entrega el resultado
+/// a las que esperan y la quita de las que están en vuelo.
+struct FlightGuard<'a> {
+    fetcher: &'a Fetcher,
+    key: FlightKey,
+    flight: Arc<Flight>,
+}
+
+impl FlightGuard<'_> {
+    fn complete(self, result: Result<Response, FetchError>) {
+        *self.flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.fetcher
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+        let mut r = self.flight.result.lock().unwrap_or_else(|e| e.into_inner());
+        if r.is_none() {
+            *r = Some(Err(FetchError::Io(io::Error::other(
+                "se interrumpió la petición compartida",
+            ))));
+        }
+        self.flight.ready.notify_all();
+    }
+}
+
 /// Las credenciales de un intento de autenticación (para guardarlas si el servidor las acepta).
 struct Attempt {
     realm: String,
@@ -1352,6 +1472,17 @@ struct HttpExtra<'a> {
     credentials: bool,
     cache: CacheMode,
     referrer_policy: ReferrerPolicy,
+    /// E6: el documento de una petición de imagen que puede compartir la red con otra
+    /// idéntica en vuelo ([`Fetcher::send_shared`]).
+    share: Option<u64>,
+}
+
+/// E6: el cliente con el que una petición de imagen comparte la red (ver
+/// [`RequestOptions::client`]).
+fn image_share(destination: Option<bf_infra::Destination>, client: Option<u64>) -> Option<u64> {
+    (destination == Some(bf_infra::Destination::Image))
+        .then_some(client)
+        .flatten()
 }
 
 /// El modo de redirección de una petición (Fetch §2.2.5, "redirect mode").
@@ -1380,6 +1511,15 @@ pub struct RequestOptions {
     pub referrer_policy: ReferrerPolicy,
     /// El *cache mode* (Fetch §2.2.5, `RequestInit.cache`).
     pub cache: CacheMode,
+    /// E6: el *destination* de la petición (Fetch §2.2.5).
+    pub destination: Option<bf_infra::Destination>,
+    /// E6: el documento que pide (un identificador del navegador). Dos peticiones de imagen
+    /// idénticas del mismo documento que se cruzan comparten una sola petición a la red. RFC
+    /// 9111 §4 deja juntar peticiones (*collapsed requests*) si la respuesta se puede reutilizar
+    /// para todas; para las imágenes de un documento esa reutilización la da la *list of
+    /// available images* de HTML (§4.8.4.3), aunque HTTP no permita guardarla. Otras
+    /// peticiones (un `fetch` de una respuesta `no-store`) no se juntan.
+    pub client: Option<u64>,
 }
 
 impl Default for RequestOptions {
@@ -1393,6 +1533,8 @@ impl Default for RequestOptions {
             referrer: None,
             referrer_policy: ReferrerPolicy::Default,
             cache: CacheMode::Default,
+            destination: None,
+            client: None,
         }
     }
 }
@@ -1543,6 +1685,7 @@ impl Fetcher {
                 credentials: req.credentials,
                 cache,
                 referrer_policy: policy,
+                share: image_share(req.destination, req.client),
             };
             let mut response = self.http(&url, &extra, referrer, "*/*")?;
             response.redirects = redirects;

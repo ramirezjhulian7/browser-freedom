@@ -13,7 +13,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bf_url::Url;
@@ -401,6 +403,59 @@ struct Inner {
     /// RFC 5861 §3: revalidaciones por hacer en segundo plano, y las claves en curso.
     revalidations: Mutex<Vec<Revalidation>>,
     in_flight: Mutex<HashSet<String>>,
+    /// E6: el hilo que guarda en disco, en orden, las actualizaciones por 304 (§4.3.4) fuera
+    /// del camino de la respuesta.
+    writer: Mutex<Option<(Sender<Job>, JoinHandle<()>)>>,
+}
+
+/// Un trabajo del hilo de escritura.
+enum Job {
+    Write {
+        dir: PathBuf,
+        key: String,
+        entries: Vec<Entry>,
+    },
+    /// Avisa cuando todo lo anterior está escrito.
+    Flush(Sender<()>),
+}
+
+impl Drop for Inner {
+    /// Lo pendiente de escribir se escribe antes de soltar la caché.
+    fn drop(&mut self) {
+        let writer = self
+            .writer
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((tx, handle)) = writer {
+            drop(tx);
+            let _ = handle.join();
+        }
+    }
+}
+
+/// E6: una respuesta guardada leída del disco para la precarga (HTML §13.2.8, *speculative
+/// HTML parsing*) y todavía sin usar: no entra en la caché en memoria hasta
+/// [`HttpCache::adopt`], que se llama solo si el documento que la nombra se validó con un 304
+/// (RFC 9111 §4.3.4: lo guardado no se usa hasta validarlo).
+#[derive(Debug)]
+pub struct Staged {
+    key: String,
+    entries: Vec<Entry>,
+    /// ¿Está fresca (§4.2) para una petición sin directivas?
+    pub fresh: bool,
+}
+
+impl Staged {
+    /// El cuerpo de la respuesta más reciente y su `Content-Type`.
+    pub fn body(&self) -> Option<(&[u8], Option<&str>)> {
+        let e = self
+            .entries
+            .iter()
+            .filter(|e| e.range.is_none())
+            .max_by(|a, b| a.response_time.total_cmp(&b.response_time))?;
+        Some((&e.response.body, e.response.headers.get("content-type")))
+    }
 }
 
 /// Una revalidación en segundo plano (RFC 5861 §3): se sirvió una respuesta caducada dentro de
@@ -462,6 +517,7 @@ impl HttpCache {
                 clock: Box::new(SystemTime::now),
                 revalidations: Mutex::default(),
                 in_flight: Mutex::default(),
+                writer: Mutex::default(),
             }),
         }
     }
@@ -527,22 +583,188 @@ impl HttpCache {
         let Some(dir) = &self.inner.dir else {
             return Vec::new();
         };
+        let started = std::time::Instant::now();
         let entries = disk::read(&disk::path(dir, key), key).unwrap_or_default();
+        use crate::timing::{Disk, disk_add, disk_op};
+        disk_op(Disk::Reads, Disk::ReadNanos, started.elapsed());
+        let bytes: usize = entries.iter().map(|e| e.response.body.len()).sum();
+        disk_add(Disk::ReadBytes, bytes as u64);
         if !entries.is_empty() {
             self.remember(key, entries.clone(), false);
         }
         entries
     }
 
+    /// E6: como [`HttpCache::remember`] con `persist`, pero el disco se escribe en el hilo de
+    /// escritura (las actualizaciones por 304: la memoria ya tiene lo nuevo y lo guardado en
+    /// disco sigue siendo válido mientras tanto).
+    fn remember_later(&self, key: &str, entries: Vec<Entry>) {
+        // `BF_NO_PRECARGA=1`: como antes, en el momento (para comparar en el mismo binario).
+        if std::env::var_os("BF_NO_PRECARGA").is_some() {
+            self.remember(key, entries, true);
+            return;
+        }
+        if let Some(dir) = &self.inner.dir
+            && !entries.is_empty()
+        {
+            let job = Job::Write {
+                dir: dir.clone(),
+                key: key.to_owned(),
+                entries: entries.clone(),
+            };
+            self.write_job(job);
+        }
+        self.remember(key, entries, false);
+    }
+
+    /// Manda `job` al hilo de escritura (lo crea la primera vez).
+    fn write_job(&self, job: Job) {
+        let mut writer = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if writer.is_none() {
+            let (tx, rx) = mpsc::channel::<Job>();
+            let handle = std::thread::Builder::new()
+                .name("bf-net-cache-disco".into())
+                .spawn(move || {
+                    for job in rx {
+                        match job {
+                            Job::Write { dir, key, entries } => {
+                                let started = std::time::Instant::now();
+                                let path = disk::path(&dir, &key);
+                                if disk::write(&dir, &path, &key, &entries).is_ok() {
+                                    disk::trim(&dir, DISK_LIMIT);
+                                }
+                                use crate::timing::{Disk, disk_op};
+                                disk_op(Disk::BgWrites, Disk::BgWriteNanos, started.elapsed());
+                            }
+                            Job::Flush(ack) => {
+                                let _ = ack.send(());
+                            }
+                        }
+                    }
+                });
+            match handle {
+                Ok(h) => *writer = Some((tx, h)),
+                // Sin hilo: se escribe aquí.
+                Err(_) => {
+                    if let Job::Write { dir, key, entries } = job {
+                        let path = disk::path(&dir, &key);
+                        let _ = disk::write(&dir, &path, &key, &entries);
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some((tx, _)) = writer.as_ref() {
+            let _ = tx.send(job);
+        }
+    }
+
+    /// Espera a que el hilo de escritura guarde en disco todo lo pendiente.
+    pub fn flush(&self) {
+        let (ack, done) = mpsc::channel();
+        let pending = self
+            .inner
+            .writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(tx, _)| tx.send(Job::Flush(ack)).is_ok());
+        if pending {
+            let _ = done.recv();
+        }
+    }
+
+    /// E6: lee del disco lo guardado para `url` sin meterlo en la memoria ni usarlo (ver
+    /// [`Staged`]). `None` si ya está en memoria (no hace falta) o no hay nada.
+    pub fn stage(&self, url: &Url, credentials: bool) -> Option<Staged> {
+        let key = Self::key(url, credentials);
+        if self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .contains_key(&key)
+        {
+            return None;
+        }
+        let dir = self.inner.dir.as_ref()?;
+        let started = std::time::Instant::now();
+        let entries = disk::read(&disk::path(dir, &key), &key)?;
+        use crate::timing::{Disk, disk_op};
+        disk_op(Disk::WarmReads, Disk::WarmNanos, started.elapsed());
+        let now = self.now();
+        let fresh = entries
+            .iter()
+            .any(|e| e.range.is_none() && usable(e, &Directives::default(), now));
+        (!entries.is_empty()).then_some(Staged {
+            key,
+            entries,
+            fresh,
+        })
+    }
+
+    /// E6: el cuerpo guardado para `url` (el de la respuesta completa más reciente) y su
+    /// `Content-Type`, de la memoria o del disco, sin usarlo como respuesta ni cambiar la
+    /// caché: para que el escáner de precarga lea el documento mientras se valida.
+    pub fn stored_body(&self, url: &Url, credentials: bool) -> Option<(Vec<u8>, Option<String>)> {
+        let key = Self::key(url, credentials);
+        let from_memory = self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .get(&key)
+            .map(|(e, _)| e.clone());
+        let entries = match from_memory {
+            Some(e) => e,
+            None => {
+                let dir = self.inner.dir.as_ref()?;
+                let started = std::time::Instant::now();
+                let e = disk::read(&disk::path(dir, &key), &key)?;
+                use crate::timing::{Disk, disk_op};
+                disk_op(Disk::WarmReads, Disk::WarmNanos, started.elapsed());
+                e
+            }
+        };
+        let staged = Staged {
+            key,
+            entries,
+            fresh: false,
+        };
+        let (body, ct) = staged.body()?;
+        Some((body.to_vec(), ct.map(str::to_owned)))
+    }
+
+    /// E6: pone en la memoria de la caché lo leído con [`HttpCache::stage`], si la memoria no
+    /// tiene ya esa clave (lo que se haya guardado después es más nuevo). Desde ahí se sirve
+    /// con las reglas de siempre (§4), como si se hubiera leído del disco en ese momento.
+    pub fn adopt(&self, staged: Staged) {
+        let present = self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .contains_key(&staged.key);
+        if !present {
+            self.remember(&staged.key, staged.entries, false);
+        }
+    }
+
     /// Guarda las entradas de `key` (en memoria y, con `persist`, en disco).
     fn remember(&self, key: &str, entries: Vec<Entry>, persist: bool) {
         if persist && let Some(dir) = &self.inner.dir {
+            let started = std::time::Instant::now();
             let path = disk::path(dir, key);
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&path);
             } else if disk::write(dir, &path, key, &entries).is_ok() {
                 disk::trim(dir, DISK_LIMIT);
             }
+            use crate::timing::{Disk, disk_op};
+            disk_op(Disk::Writes, Disk::WriteNanos, started.elapsed());
         }
         let mut mem = self.inner.memory.lock().unwrap_or_else(|e| e.into_inner());
         let size = |v: &Vec<Entry>| v.iter().map(|e| e.response.body.len()).sum::<usize>();
@@ -846,7 +1068,7 @@ impl HttpCache {
             entry.response_time = response_time;
             let served = self.serve(&entry, &method, None, req, response_time);
             if self.storable(&method, &entry.response, req, mode, false) {
-                self.store(&key, entry);
+                self.store_validated(&key, entry);
             }
             return Ok((served, CacheUse::Revalidated));
         }
@@ -864,12 +1086,13 @@ impl HttpCache {
             {
                 let mut entries = self.load(&key);
                 entries.retain(|e| e.range.is_some() || e.vary != old_vary);
-                self.remember(&key, entries, true);
+                self.remember(&key, entries, false);
                 entry.vary = names
                     .iter()
                     .map(|n| (n.clone(), vary_value(req.headers, n)))
                     .collect();
-                self.store(&key, entry);
+                // E6: el disco, en el hilo de escritura (una sola vez, con las dos cosas).
+                self.store_validated(&key, entry);
             }
             return Ok((served, CacheUse::Revalidated));
         }
@@ -1011,7 +1234,20 @@ impl HttpCache {
 
     /// Guarda `entry` en lugar de las variantes con los mismos valores de `Vary`. Una parcial
     /// se combina con las guardadas que puede (§3.4); una completa reemplaza a las parciales.
-    fn store(&self, key: &str, mut entry: Entry) {
+    fn store(&self, key: &str, entry: Entry) {
+        let entries = self.merged(key, entry);
+        self.remember(key, entries, true);
+    }
+
+    /// E6: [`HttpCache::store`] de una respuesta validada con un 304 (§4.3.4): el disco se
+    /// pone al día en el hilo de escritura.
+    fn store_validated(&self, key: &str, entry: Entry) {
+        let entries = self.merged(key, entry);
+        self.remember_later(key, entries);
+    }
+
+    /// Las entradas de `key` con `entry` agregada (y las que reemplaza, fuera).
+    fn merged(&self, key: &str, mut entry: Entry) -> Vec<Entry> {
         let mut entries = self.load(key);
         if entry.range.is_some() {
             while let Some(i) = entries
@@ -1039,7 +1275,7 @@ impl HttpCache {
             entries.sort_by(|a, b| b.response_time.total_cmp(&a.response_time));
             entries.truncate(8);
         }
-        self.remember(key, entries, true);
+        entries
     }
 
     /// La respuesta a servir desde `entry`: con `Age` (§5.1), sin cuerpo para HEAD y
@@ -2091,6 +2327,71 @@ mod tests {
         );
         r.advance(20);
         assert_eq!(r.get(&[], d, &[], 304).1, CacheUse::Revalidated);
+    }
+
+    /// E6: lo que actualiza un 304 se escribe en disco en el hilo de la caché; `flush` (o
+    /// soltar la caché) lo deja escrito.
+    #[test]
+    fn validated_update_reaches_the_disk() {
+        let dir = std::env::temp_dir().join(format!("freedom-cache-304-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = rig(Some(&dir));
+        let d = CacheMode::Default;
+        r.get(
+            &[],
+            d,
+            &[("Cache-Control", "max-age=0"), ("ETag", "\"v\"")],
+            200,
+        );
+        r.advance(5);
+        let (_, used, sent) = r.get(&[], d, &[("Cache-Control", "max-age=600")], 304);
+        assert_eq!(used, CacheUse::Revalidated);
+        assert_eq!(sent.get("if-none-match"), Some("\"v\""));
+        r.cache.flush();
+        // Otra caché sobre la misma carpeta (otro proceso): fresca por el 304, sin red.
+        let r2 = rig(Some(&dir));
+        r2.advance(10);
+        let (res, used, _) = r2.get(&[], d, &[], 500);
+        assert_eq!((used, &res.body[..]), (CacheUse::Hit, &b"cuerpo"[..]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E6: `stage` lee del disco sin tocar la memoria; `adopt` la pone solo si no hay nada.
+    #[test]
+    fn stage_and_adopt() {
+        let dir = std::env::temp_dir().join(format!("freedom-cache-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let r = rig(Some(&dir));
+            r.get(
+                &[],
+                CacheMode::Default,
+                &[("Cache-Control", "max-age=60")],
+                200,
+            );
+        }
+        let r = rig(Some(&dir));
+        assert!(r.cache.is_empty());
+        let staged = r.cache.stage(&r.url, true).expect("en disco");
+        assert!(staged.fresh);
+        assert_eq!(staged.body().map(|(b, _)| b), Some(&b"cuerpo"[..]));
+        assert!(r.cache.is_empty(), "stage no usa ni guarda en memoria");
+        assert!(r.cache.stage(&r.url, false).is_none(), "otra clave");
+        assert_eq!(
+            r.cache.stored_body(&r.url, true).map(|(b, _)| b),
+            Some(b"cuerpo".to_vec())
+        );
+        assert!(r.cache.is_empty());
+        r.cache.adopt(staged);
+        assert_eq!(r.cache.len(), 1);
+        // En memoria: `stage` ya no hace falta.
+        assert!(r.cache.stage(&r.url, true).is_none());
+        // Caducada: se lee, pero no está fresca.
+        r.advance(120);
+        let r2 = rig(Some(&dir));
+        r2.advance(120);
+        assert!(!r2.cache.stage(&r2.url, true).expect("en disco").fresh);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
