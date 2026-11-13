@@ -5,6 +5,7 @@
 
 pub mod internal;
 mod property_map;
+pub(crate) use property_map::{FastHashMap, FastHashSet};
 pub mod proxy;
 
 use std::collections::{HashSet, VecDeque};

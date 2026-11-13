@@ -15,10 +15,17 @@ use crate::value::{PropertyKey, Value};
 /// Las tablas de claves de los shapes y diccionarios (E3): un hash multiplicativo rápido (al
 /// estilo Fx) en lugar de SipHash. Las claves de un objeto las elige la página, que a lo sumo
 /// se hace lenta a sí misma.
-type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<KeyHasher>>;
+type HashMap<K, V> = FastHashMap<K, V>;
+
+/// E3: un `HashMap` con [`KeyHasher`] (también para el internado de nombres y las tablas de
+/// constantes del compilador, con el mismo criterio).
+pub(crate) type FastHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<KeyHasher>>;
+
+/// E3: un `HashSet` con [`KeyHasher`].
+pub(crate) type FastHashSet<K> = std::collections::HashSet<K, BuildHasherDefault<KeyHasher>>;
 
 #[derive(Default)]
-struct KeyHasher(u64);
+pub(crate) struct KeyHasher(u64);
 
 impl KeyHasher {
     const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;

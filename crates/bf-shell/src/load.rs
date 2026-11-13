@@ -214,6 +214,17 @@ impl ResourceLoader for CachedLoader {
         };
         self.load_as(&url, Some(destination))
     }
+
+    /// E2: la imagen que ya descargó el motor web (un `<img>`, HTML §4.8.4.3.5): el pintado
+    /// la toma de aquí en lugar de pedirla otra vez (las `loading=lazy`, §4.8.4.3.9, las pinta
+    /// solo cuando el motor ya las tiene).
+    fn remember(&self, url: &Url, resource: &Resource) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = entries.entry(url.href()).or_insert(None);
+        if slot.is_none() {
+            *slot = Some(resource.clone());
+        }
+    }
 }
 
 /// Por qué no se pudo cargar un documento.

@@ -299,6 +299,32 @@ fn fresh_snapshot(agent: &Agent) -> Option<LayoutSnapshot> {
         .then(|| snap.clone())
 }
 
+/// E3: ¿la ventana `realm` maqueta con el navegador (tiene proveedor) y ni la maqueta que el
+/// navegador le pasó ni la que el CSSOM tiene en caché son del documento de ahora? Entonces
+/// pedir una geometría maqueta el documento entero, y la del navegador está por llegar.
+pub fn awaiting_shell_layout(agent: &Agent, realm: RealmId) -> bool {
+    let Some(st) = agent.realm_data::<CssomState>(realm) else {
+        return false;
+    };
+    if st.provider.is_none() {
+        return false;
+    }
+    let Some(ctx) = agent.realm_data::<crate::WebContext>(realm) else {
+        return false;
+    };
+    let version = ctx.document().version();
+    let generation = sheets_generation(agent, realm);
+    let shell = ctx
+        .layout
+        .as_ref()
+        .is_some_and(|s| s.version == version && s.sheets_generation == generation);
+    let cached = st
+        .layout
+        .as_ref()
+        .is_some_and(|(v, g, _)| *v == version && *g == generation);
+    !shell && !cached
+}
+
 /// Las dimensiones de la ventana: viewport, scroll, dpr, posición y tamaño exterior.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowMetrics {

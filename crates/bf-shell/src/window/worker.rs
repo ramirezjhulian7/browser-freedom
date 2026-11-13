@@ -884,6 +884,36 @@ impl State {
                 super::ms(t.paint),
                 page.report.dom_nodes,
             ));
+            // E3: el detalle del parseo (`Engine::parse`): lo que queda del parser después de
+            // lo que hizo en el navegador es el tokenizador y el tree builder.
+            if let Some(engine) = self.current.as_ref().and_then(|c| c.engine.as_ref()) {
+                let m = engine.parse_marks();
+                let p = m.profile;
+                let html = m
+                    .parser
+                    .saturating_sub(scripts)
+                    .saturating_sub(p.script_fetch)
+                    .saturating_sub(p.links)
+                    .saturating_sub(p.images)
+                    .saturating_sub(p.checkpoints)
+                    .saturating_sub(p.writes);
+                super::trace(&format!(
+                    "perf parseo {}: ventana {} · parser {} (tokenizador y árbol {} · buscar \
+                     scripts {} · link {} · img {} · microtasks {} · write {}) · después {} · \
+                     copia {}",
+                    loaded.url,
+                    super::ms(m.window),
+                    super::ms(m.parser),
+                    super::ms(html),
+                    super::ms(p.script_fetch),
+                    super::ms(p.links),
+                    super::ms(p.images),
+                    super::ms(p.checkpoints),
+                    super::ms(p.writes),
+                    super::ms(m.after),
+                    super::ms(m.copy),
+                ));
+            }
             // E6: la caché HTTP en disco durante la carga (`bf_net::timing`).
             let d = bf_net::timing::take_disk();
             super::trace(&format!(
