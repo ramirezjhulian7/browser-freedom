@@ -246,6 +246,9 @@ pub struct Document {
     pub character_set: DomString,
     /// ¿Documento HTML (y no XML)?
     pub is_html: bool,
+    /// E6: ¿*scripting is enabled* para el documento (HTML §8.1.3.1)? Lo pone el parser
+    /// (`ParseOptions::scripting`); la media feature `scripting` (Media Queries 5 §8.1) lo lee.
+    pub scripting: bool,
     /// Contador de mutaciones del árbol y de atributos: invalida las colecciones vivas.
     version: u64,
     /// Mapa id → primer elemento en tree order, reconstruido cuando cambia `version`.
@@ -288,6 +291,7 @@ impl Document {
             content_type: "text/html".into(),
             character_set: "UTF-8".into(),
             is_html: true,
+            scripting: false,
             version: 0,
             id_cache: IdCache::default(),
             attr_nodes: HashMap::new(),

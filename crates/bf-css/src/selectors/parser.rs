@@ -484,6 +484,37 @@ impl<'a> Parser<'a> {
                                 }
                                 Ok(Pseudo::Part(names))
                             }
+                            // E6: reconocidos sin caja (ver `PseudoElement::DetailsContent`), con su
+                            // argumento: `<pt-name-selector>` (un nombre o `*`) en los de View
+                            // Transitions, un nombre en `::highlight()`.
+                            name @ ("view-transition-group"
+                            | "view-transition-image-pair"
+                            | "view-transition-old"
+                            | "view-transition-new"
+                            | "highlight") => {
+                                let args: Vec<_> =
+                                    f.value.iter().filter(|v| !v.is_whitespace()).collect();
+                                let ok = match args.as_slice() {
+                                    [v] => match v.token() {
+                                        Some(TokenKind::Ident(_)) => true,
+                                        Some(TokenKind::Delim('*')) => name != "highlight",
+                                        _ => false,
+                                    },
+                                    _ => false,
+                                };
+                                if !ok {
+                                    return Err(SelectorError);
+                                }
+                                Ok(Pseudo::Element(match name {
+                                    "view-transition-group" => PseudoElement::ViewTransitionGroup,
+                                    "view-transition-image-pair" => {
+                                        PseudoElement::ViewTransitionImagePair
+                                    }
+                                    "view-transition-old" => PseudoElement::ViewTransitionOld,
+                                    "view-transition-new" => PseudoElement::ViewTransitionNew,
+                                    _ => PseudoElement::Highlight,
+                                }))
+                            }
                             _ => Err(SelectorError),
                         };
                     }
@@ -673,6 +704,14 @@ fn pseudo_element(name: &str) -> Option<PseudoElement> {
         "marker" => PseudoElement::Marker,
         "placeholder" => PseudoElement::Placeholder,
         "selection" => PseudoElement::Selection,
+        // E6: reconocidos (Selectors 4 §3.1), sin caja todavía.
+        "backdrop" => PseudoElement::Backdrop,
+        "file-selector-button" => PseudoElement::FileSelectorButton,
+        "details-content" => PseudoElement::DetailsContent,
+        "target-text" => PseudoElement::TargetText,
+        "spelling-error" => PseudoElement::SpellingError,
+        "grammar-error" => PseudoElement::GrammarError,
+        "view-transition" => PseudoElement::ViewTransition,
         _ => return None,
     })
 }
@@ -707,6 +746,13 @@ fn pseudo_class(lower: &str) -> Option<PseudoClass> {
         "scope" => PseudoClass::Scope,
         "defined" => PseudoClass::Defined,
         "popover-open" => PseudoClass::PopoverOpen, // E5
+        // E6: ver `PseudoClass::Unmatched`.
+        "user-valid" => PseudoClass::Unmatched("user-valid"),
+        "user-invalid" => PseudoClass::Unmatched("user-invalid"),
+        "autofill" => PseudoClass::Unmatched("autofill"),
+        "-webkit-autofill" => PseudoClass::Unmatched("-webkit-autofill"),
+        "fullscreen" => PseudoClass::Unmatched("fullscreen"),
+        "picture-in-picture" => PseudoClass::Unmatched("picture-in-picture"),
         "valid" => PseudoClass::Valid,
         "invalid" => PseudoClass::Invalid,
         "host" => PseudoClass::Host(None),

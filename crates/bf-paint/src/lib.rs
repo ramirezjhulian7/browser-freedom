@@ -251,6 +251,9 @@ pub fn prepare_page_animated(
         height: f64::from(viewport.height),
         text_zoom: f64::from(ctx.text_zoom),
         device_pixel_ratio: f64::from(ctx.device_pixel_ratio),
+        // E6: `@media (scripting)` (Media Queries 5 §8.1), con lo que dice el documento: con
+        // scripts, la regla UA `noscript { display: none }` (HTML §15.3.1) se aplica.
+        scripting: bf_css::media::Scripting::of(doc.scripting),
         ..MediaContext::default()
     };
     let sheets = document_stylesheets(
