@@ -18,6 +18,11 @@ use crate::net::blob::{self, BlobData};
 const IDB1: &str = include_str!("idb1.js");
 const IDB2: &str = include_str!("idb2.js");
 
+/// E3: el JavaScript de IndexedDB tal como se evalúa (para precompilarlo, `crate::precompile_window_scripts`).
+pub(crate) fn source() -> String {
+    format!("{IDB1}\n{IDB2}")
+}
+
 /// Evalúa IndexedDB en `realm` con sus funciones nativas.
 pub fn install(agent: &mut Agent, realm: RealmId) {
     let saved = agent.current_realm;
@@ -51,9 +56,9 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     for (name, len, f) in fns {
         bf_js::builtins::method(agent, native, name, len, f);
     }
-    let src = format!("{IDB1}\n{IDB2}");
+    let src = source();
     let g = Value::Object(agent.realms[realm].global_object);
-    if let Ok(f) = agent.eval_script(&src, "bf-web:idb.js") {
+    if let Ok(f) = agent.eval_script_cached(&src, "bf-web:idb.js") {
         let _ = agent.call(&f, Value::Undefined, &[g, Value::Object(native)]);
     }
     agent.host_unpin(native_pin);

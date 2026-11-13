@@ -265,10 +265,53 @@ pub fn with_doc_mut<R>(agent: &mut Agent, doc: DocIndex, f: impl FnOnce(&mut Doc
 /// Instala `ctx` como la ventana de `realm`: registra todas las clases y convierte el objeto
 /// global en el `Window`.
 pub fn install(agent: &mut Agent, realm: RealmId, ctx: WebContext) -> WebContextHandle {
+    let start = std::time::Instant::now();
+    let before = bf_js::code_cache::stats();
     agent.set_realm_data(realm, ctx);
     let h = WebContextHandle { realm };
     register_all(agent, realm, &h);
+    // E3: con `BF_TRACE`, cuánto costó y cuánto JavaScript propio hubo que compilar (la
+    // segunda ventana del hilo lo copia de la caché de código).
+    if std::env::var_os("BF_TRACE").is_some() {
+        let after = bf_js::code_cache::stats();
+        eprintln!(
+            "perf ventana: {:.1} ms; JavaScript propio: {} compilados ({} KB), {} copiados del \
+             hilo, {} de la caché del proceso",
+            start.elapsed().as_secs_f64() * 1000.0,
+            after.compiled - before.compiled,
+            (after.compiled_bytes - before.compiled_bytes) / 1024,
+            after.thread_hits - before.thread_hits,
+            after.process_hits - before.process_hits,
+        );
+    }
     h
+}
+
+/// E3: el JavaScript propio de una ventana, con el nombre y el texto con que lo evalúan los
+/// instaladores (la clave de la caché de código).
+fn window_scripts() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
+    vec![
+        ("bf-web:streams.js", net::streams::SOURCE.into()),
+        ("bf-web:idb.js", storage::idb::source().into()),
+        ("bf-web:service.js", workers::service::SERVICE_JS.into()),
+        (
+            "bf-web:font_loading.js",
+            cssom::font_loading::FONT_LOADING_JS.into(),
+        ),
+        ("bf-web:cache.js", workers::cache::CACHE_JS.into()),
+        ("dataset", html::dataset::FACTORY.into()),
+        ("storage", bom::storage::NAMED_PROPERTIES.into()),
+    ]
+}
+
+/// E3: precompila el JavaScript propio de las ventanas en la caché de código del proceso
+/// (`bf_js::code_cache::warm`) sin crear ninguna ventana, para que [`install`] solo tenga que
+/// copiarlo. Se puede llamar desde cualquier hilo (por ejemplo, al empezar una navegación,
+/// mientras se espera a la red); llamarlo otra vez no compila nada.
+pub fn precompile_window_scripts() {
+    for (name, source) in window_scripts() {
+        bf_js::code_cache::warm(name, None, &source);
+    }
 }
 
 /// Registra las clases de todas las áreas en `realm` (cada área agrega su línea).

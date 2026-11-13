@@ -8,6 +8,7 @@ pub mod abstract_ops;
 pub mod ast;
 pub mod bigint;
 pub mod builtins;
+pub mod code_cache; // E3: caché de código compilado del proceso
 pub mod compiler;
 pub mod estree;
 pub mod heap;

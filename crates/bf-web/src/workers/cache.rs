@@ -50,7 +50,7 @@ use crate::net::body::Body;
 use crate::net::fetch::{RequestData, ResponseData};
 use crate::net::headers::{self, Guard, HeaderList};
 
-const CACHE_JS: &str = include_str!("cache.js");
+pub(crate) const CACHE_JS: &str = include_str!("cache.js");
 
 /// La clave del almacén: (partición del proceso, origen serializado).
 pub type StorageKey = (u64, String);
@@ -152,7 +152,7 @@ fn install_rooted(agent: &mut Agent, realm: RealmId) {
         bf_js::builtins::method(agent, native, name, len, f);
     }
     let g = Value::Object(agent.realms[realm].global_object);
-    if let Ok(f) = agent.eval_script(CACHE_JS, "bf-web:cache.js") {
+    if let Ok(f) = agent.eval_script_cached(CACHE_JS, "bf-web:cache.js") {
         let _ = agent.call(&f, Value::Undefined, &[g, Value::Object(native)]);
     }
     agent.current_realm = saved;

@@ -426,7 +426,7 @@ impl WebScripts<'_> {
         let start = std::time::Instant::now();
         let r = self.guarded(|agent| {
             agent
-                .compile_script_text(source, url)
+                .compile_script_cached(source, url)
                 .and_then(|code| agent.script_evaluation(code))
         });
         if let Some(env) = env_mut(self.agent, self.realm) {

@@ -11,7 +11,7 @@ use bf_js::vm::{Agent, JsResult, RealmId};
 
 use bf_js::builtins::web::encoding::new_uint8_array;
 
-const SOURCE: &str = include_str!("streams.js");
+pub(crate) const SOURCE: &str = include_str!("streams.js");
 
 /// Los helpers de `streams.js` de un realm (fijados).
 pub struct StreamHelpers(pub HostHandle);
@@ -24,7 +24,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
     }
     let saved = agent.current_realm;
     agent.current_realm = realm;
-    let f = agent.eval_script(SOURCE, "bf-web:streams.js");
+    let f = agent.eval_script_cached(SOURCE, "bf-web:streams.js");
     let g = Value::Object(agent.realms[realm].global_object);
     let helpers = match f {
         Ok(f) => agent.call(&f, Value::Undefined, &[g]).ok(),

@@ -36,7 +36,7 @@ use bf_style::properties::CssWide;
 
 use crate::WebContextHandle;
 
-const FONT_LOADING_JS: &str = include_str!("font_loading.js");
+pub(crate) const FONT_LOADING_JS: &str = include_str!("font_loading.js");
 
 /// Evalúa `font_loading.js` en `realm` (la ventana) con sus funciones nativas.
 pub fn install(agent: &mut Agent, realm: RealmId) {
@@ -55,7 +55,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
         bf_js::builtins::method(agent, native, name, len, f);
     }
     let g = Value::Object(agent.realms[realm].global_object);
-    if let Ok(f) = agent.eval_script(FONT_LOADING_JS, "bf-web:font_loading.js") {
+    if let Ok(f) = agent.eval_script_cached(FONT_LOADING_JS, "bf-web:font_loading.js") {
         let _ = agent.call(&f, Value::Undefined, &[g, Value::Object(native)]);
     }
     agent.current_realm = saved;
