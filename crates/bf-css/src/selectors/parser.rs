@@ -706,6 +706,7 @@ fn pseudo_class(lower: &str) -> Option<PseudoClass> {
         "placeholder-shown" => PseudoClass::PlaceholderShown,
         "scope" => PseudoClass::Scope,
         "defined" => PseudoClass::Defined,
+        "popover-open" => PseudoClass::PopoverOpen, // E5
         "valid" => PseudoClass::Valid,
         "invalid" => PseudoClass::Invalid,
         "host" => PseudoClass::Host(None),

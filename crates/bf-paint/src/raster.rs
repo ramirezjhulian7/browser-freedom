@@ -1631,6 +1631,22 @@ fn render_region(
     pixels: (u32, u32),
     cull: bool,
 ) -> Pixmap {
+    render_items(&dl.items, &[], scale, bg, scroll, start, pixels, cull)
+}
+
+/// [`render_region`] de `items` sin los de los rangos `skip` (grupos completos, de su `Push` a
+/// su `Pop`: los grupos `sticky` que van en capa propia).
+#[allow(clippy::too_many_arguments)]
+fn render_items(
+    items: &[DisplayItem],
+    skip: &[std::ops::Range<usize>],
+    scale: f32,
+    bg: Rgba,
+    scroll: (f32, f32),
+    start: (f32, f32),
+    pixels: (u32, u32),
+    cull: bool,
+) -> Pixmap {
     let width = pixels.0.max(1);
     let height = pixels.1.max(1);
     let origin = Transform::from_translate(-start.0, -start.1);
@@ -1648,7 +1664,10 @@ fn render_region(
         width,
         height,
     };
-    for item in &dl.items {
+    for (i, item) in items.iter().enumerate() {
+        if skip.iter().any(|r| r.contains(&i)) {
+            continue;
+        }
         if cull
             && let Some(b) = crate::display_list::item_bounds(item)
             && !device_hits(&canvas.ts(), &b, width, height)
@@ -1806,16 +1825,6 @@ fn render_region(
     canvas.layers.pop().expect("capa base").0
 }
 
-/// E4: copia las filas `from` de `src` en `dst` a partir de la fila `at` (mismo ancho).
-fn copy_rows(dst: &mut Pixmap, at: u32, src: &Pixmap, from: std::ops::Range<u32>) {
-    let stride = dst.width() as usize * 4;
-    debug_assert_eq!(src.width(), dst.width());
-    let n = from.end.saturating_sub(from.start) as usize;
-    let s = from.start as usize * stride;
-    let d = at as usize * stride;
-    dst.data_mut()[d..d + n * stride].copy_from_slice(&src.data()[s..s + n * stride]);
-}
-
 // --- E4: raster en tiles de la página (desplazamiento incremental y en paralelo) ---
 //
 // El cuadro se arma con tiles horizontales fijos en la página: el tile `k` son las filas de
@@ -1892,6 +1901,7 @@ type Tile = (i64, i64);
 fn paint_tiles(
     out: &mut Pixmap,
     dl: &DisplayList,
+    skip: &[std::ops::Range<usize>],
     scale: f32,
     bg: Rgba,
     scroll: (f32, f32),
@@ -1906,8 +1916,9 @@ fn paint_tiles(
         // En coordenadas del cuadro: la página está corrida `-s_dev`.
         let x0 = c * tw - s_dev.0 - m;
         let y0 = r * th - s_dev.1 - m;
-        render_region(
-            dl,
+        render_items(
+            &dl.items,
+            skip,
             scale,
             bg,
             scroll,
@@ -1994,8 +2005,9 @@ fn tile_margin(info: &crate::display_list::ScrollInfo, scale: f32) -> u32 {
 }
 
 /// E4: el cuadro de [`render_scrolled`] pintado en tiles de la página (en los hilos de
-/// [`set_raster_threads`]). `None` si el scroll no cae en px de dispositivo enteros o la lista
-/// no admite tiles (un `filter`, grupos `fixed`/`sticky` anidados: ver
+/// [`set_raster_threads`]), con los `sticky` en capa propia cuando se puede (ver
+/// [`TiledFrame`]). `None` si el scroll no cae en px de dispositivo enteros o la lista no
+/// admite tiles (un `filter`, grupos `fixed`/`sticky` anidados: ver
 /// [`crate::display_list::scroll_info`]).
 pub fn render_tiled(
     dl: &DisplayList,
@@ -2004,123 +2016,478 @@ pub fn render_tiled(
     bg: Rgba,
     scroll: (f32, f32),
 ) -> Option<Pixmap> {
-    let s_dev = device_scroll(scroll, scale)?;
-    let info = crate::display_list::scroll_info(dl)?;
-    let (width, height) = frame_size(size, scale);
-    let (tw, th) = tile_size(scale);
-    let tiles: Vec<Tile> = tiles_for(
-        (0, 0, i64::from(width), i64::from(height)),
-        s_dev,
-        i64::from(tw),
-        i64::from(th),
-    )
-    .collect();
-    let mut out = Pixmap::new(width, height)?;
-    paint_tiles(
-        &mut out,
-        dl,
-        scale,
-        bg,
-        scroll,
-        s_dev,
-        &tiles,
-        tile_margin(&info, scale),
-    );
-    Some(out)
+    TiledFrame::render(dl, size, scale, bg, scroll).map(|f| f.to_pixmap())
 }
 
-/// E4: el cuadro de [`render_tiled`] en `scroll` a partir del de `prev_scroll` (`prev`, también
-/// en tiles), sin pintarlo entero: se corren sus filas lo que se desplazó la página y se pintan
-/// solo los tiles de la franja que aparece y de los grupos `fixed` y `sticky` (donde estaban y
-/// donde quedan). Da los mismos píxeles que [`render_tiled`] en `scroll`. `None` si no se puede:
-/// otro tamaño, desplazamiento horizontal o que no cae en px de dispositivo enteros, más de un
-/// cuadro de distancia, o una lista que no admite tiles.
-pub fn scroll_frame(
-    dl: &DisplayList,
-    prev: &Pixmap,
-    prev_scroll: (f32, f32),
-    size: Size,
+/// E4: un cuadro de la página en tiles, listo para el siguiente desplazamiento incremental.
+///
+/// Si los grupos `sticky` lo permiten (ninguno dentro de un recorte, una capa ni un efecto, y
+/// nada pintado después de ellos en la lista cae encima en este cuadro), van en **capa
+/// propia**: los tiles de la página (`under`) se pintan sin ellos y cada grupo se pinta aparte
+/// en una capa que no depende del scroll (solo de la fracción de px de dispositivo de su
+/// desplazamiento), que se compone encima en el orden de la lista. Al desplazar, `under` se
+/// corre sin repintar nada del `sticky` y la capa se reutiliza mientras no cambie su
+/// contenido ni esa fracción; solo cambia dónde se compone. CSS Positioned Layout 3 §3.4 no
+/// cambia: el grupo queda donde lo pone su desplazamiento `sticky` y encima de lo que pinta
+/// antes que él. Es solo un caché.
+///
+/// El cuadro entero ([`TiledFrame::render`]) y el incremental ([`TiledFrame::scrolled`]) usan
+/// el mismo modelo, así que dan los mismos píxeles. Contra el raster de una pasada cambia,
+/// además del antialiasing de las curvas en el borde de un tile, el redondeo de componer la
+/// capa (`source-over` en 8 bits) en vez de pintar directo sobre la página.
+pub struct TiledFrame {
     scale: f32,
-    bg: Rgba,
+    s_dev: (i64, i64),
+    under: Pixmap,
+    /// Las capas `sticky` (en el orden de la lista) con dónde va su píxel (0, 0) en el cuadro y
+    /// su recorte; `None` si los `sticky` van pintados en los tiles.
+    layers: Option<Vec<PlacedLayer>>,
+}
+
+/// Una capa `sticky`, dónde va su píxel (0, 0) en el cuadro y su recorte.
+type PlacedLayer = (StickyLayer, (i64, i64), Option<DevClip>);
+
+/// Un recorte en px de dispositivo del cuadro: `[x0, y0, x1, y1]`.
+type DevClip = [f32; 4];
+
+/// La capa de un grupo `sticky`: su píxel `(u, v)` es el punto `q` de la página (px CSS) con
+/// `scale · q + frac − origin = (u, v)`.
+struct StickyLayer {
+    frac: (f32, f32),
+    pixmap: Pixmap,
+}
+
+/// Dónde queda un grupo `sticky` en un cuadro: la fracción de su desplazamiento, el origen
+/// de su capa (px de dispositivo de la página) y el tamaño de la capa.
+struct LayerPlace {
+    frac: (f32, f32),
+    origin: (i64, i64),
+    pixels: (u32, u32),
+    /// Dónde va el píxel (0, 0) de la capa en el cuadro.
+    at: (i64, i64),
+    /// El recorte de los ancestros del grupo en el cuadro (quieto en la página).
+    clip: Option<DevClip>,
+}
+
+/// El desplazamiento del grupo `g` en el cuadro con scroll `s` (px CSS), en px CSS.
+fn sticky_shift(g: &crate::display_list::StickyGroup, s: (f32, f32)) -> (f32, f32) {
+    let view = Rect::new(s.0, s.1, g.viewport.width, g.viewport.height);
+    let (dx, dy) = g.constraints.offset(view);
+    (dx - g.applied.0 - s.0, dy - g.applied.1 - s.1)
+}
+
+/// Dónde van las capas de los `sticky` en el cuadro de `scroll`, o `None` si no van en capa
+/// propia (ver [`TiledFrame`]).
+fn layer_plan(
+    dl: &DisplayList,
+    info: &crate::display_list::ScrollInfo,
     scroll: (f32, f32),
-) -> Option<Pixmap> {
-    let (width, height) = frame_size(size, scale);
-    let (px, py) = device_scroll(prev_scroll, scale)?;
-    let s_dev = device_scroll(scroll, scale)?;
-    if prev.width() != width || prev.height() != height || s_dev.0 != px {
+    scale: f32,
+    size: Size,
+) -> Option<Vec<LayerPlace>> {
+    if info.sticky.is_empty() || info.sticky.iter().any(|g| !g.own_layer) {
         return None;
     }
-    let di = s_dev.1 - py;
-    let (w, h) = (i64::from(width), i64::from(height));
-    if di.abs() >= h {
-        return None;
-    }
-    let info = crate::display_list::scroll_info(dl)?;
-    // Lo que hay que pintar (rectángulos del cuadro nuevo).
-    let mut dirty: Vec<DevBox> = Vec::new();
-    if di > 0 {
-        dirty.push((0, h - di, w, di));
-    } else if di < 0 {
-        dirty.push((0, 0, w, -di));
-    }
-    let dev = |r: &Rect, dx: f32, dy: f32| -> DevBox {
-        let x0 = (f64::from(r.x + dx) * f64::from(scale)).floor() as i64 - 1;
-        let y0 = (f64::from(r.y + dy) * f64::from(scale)).floor() as i64 - 1;
-        let x1 = (f64::from(r.x + r.width + dx) * f64::from(scale)).ceil() as i64 + 1;
-        let y1 = (f64::from(r.y + r.height + dy) * f64::from(scale)).ceil() as i64 + 1;
-        (x0, y0, x1 - x0, y1 - y0)
+    let (fw, fh) = frame_size(size, scale);
+    let view = Rect::new(0.0, 0.0, size.width, size.height);
+    let hits = |a: &Rect, b: &Rect| {
+        a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     };
-    for r in &info.fixed {
-        // Quieto en el viewport: donde está y donde dejó la copia corrida del cuadro anterior.
-        let (x, y, bw, bh) = dev(r, 0.0, 0.0);
-        dirty.push((x, y, bw, bh));
-        dirty.push((x, y - di, bw, bh));
-    }
+    let mut plan = Vec::with_capacity(info.sticky.len());
     for g in &info.sticky {
-        let at = |s: (f32, f32)| {
-            let view = Rect::new(s.0, s.1, g.viewport.width, g.viewport.height);
-            let (dx, dy) = g.constraints.offset(view);
-            dev(&g.rect, dx - g.applied.0 - s.0, dy - g.applied.1 - s.1)
-        };
-        dirty.push(at(scroll));
-        let (x, y, bw, bh) = at(prev_scroll);
-        dirty.push((x, y - di, bw, bh));
+        let shift = sticky_shift(g, scroll);
+        // Lo que pinta el grupo en el cuadro (px CSS) y, de eso, lo que se ve.
+        let at = Rect::new(
+            g.rect.x + shift.0,
+            g.rect.y + shift.1,
+            g.rect.width,
+            g.rect.height,
+        );
+        let clip = g
+            .clip
+            .map(|c| Rect::new(c.x - scroll.0, c.y - scroll.1, c.width, c.height));
+        let seen = hits(&at, &view) && clip.as_ref().is_none_or(|c| hits(&at, c));
+        if seen {
+            // Lo que se pinta después del grupo no puede caer encima (quedaría debajo de la
+            // capa). Con la caja conservadora primero; si toca, con la de los contornos.
+            let in_frame = |b: &Rect, fixed: bool| {
+                if fixed {
+                    *b
+                } else {
+                    Rect::new(b.x - scroll.0, b.y - scroll.1, b.width, b.height)
+                }
+            };
+            let covers = |b: &Rect| {
+                hits(b, &at) && hits(b, &view) && clip.as_ref().is_none_or(|c| hits(b, c))
+            };
+            for (i, b, fixed, m) in info.after_sticky.iter().filter(|e| e.0 >= g.items.end) {
+                if covers(&in_frame(b, *fixed))
+                    && crate::display_list::ink_bounds(&dl.items[*i], m)
+                        .is_none_or(|ink| covers(&in_frame(&ink, *fixed)))
+                {
+                    return None;
+                }
+            }
+        }
+        let k = (
+            f64::from(shift.0) * f64::from(scale),
+            f64::from(shift.1) * f64::from(scale),
+        );
+        let ki = (k.0.floor(), k.1.floor());
+        let frac = ((k.0 - ki.0) as f32, (k.1 - ki.1) as f32);
+        let x0 = (f64::from(g.rect.x * scale + frac.0)).floor() as i64 - 1;
+        let y0 = (f64::from(g.rect.y * scale + frac.1)).floor() as i64 - 1;
+        let x1 = (f64::from(g.rect.right() * scale + frac.0)).ceil() as i64 + 1;
+        let y1 = (f64::from(g.rect.bottom() * scale + frac.1)).ceil() as i64 + 1;
+        let pixels = ((x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
+        // Una capa más grande que el cuadro no compensa.
+        if u64::from(pixels.0) * u64::from(pixels.1) > u64::from(fw) * u64::from(fh) {
+            return None;
+        }
+        plan.push(LayerPlace {
+            frac,
+            origin: (x0, y0),
+            pixels,
+            at: (x0 + ki.0 as i64, y0 + ki.1 as i64),
+            clip: clip.map(|c| {
+                [
+                    c.x * scale,
+                    c.y * scale,
+                    c.right() * scale,
+                    c.bottom() * scale,
+                ]
+            }),
+        });
     }
-    let mut out = Pixmap::new(width, height)?;
-    let (from, at) = if di >= 0 {
-        (di as u32..height, 0)
+    Some(plan)
+}
+
+/// Los rangos de ítems que los tiles no pintan: los grupos `sticky` si van en capa propia.
+fn layer_skip(
+    info: &crate::display_list::ScrollInfo,
+    layered: bool,
+) -> Vec<std::ops::Range<usize>> {
+    if layered {
+        info.sticky.iter().map(|g| g.items.clone()).collect()
     } else {
-        (0..(h + di) as u32, (-di) as u32)
+        Vec::new()
+    }
+}
+
+/// Pinta la capa del grupo `g` en `place` (sin fondo; los ítems de dentro del grupo).
+fn render_layer(
+    dl: &DisplayList,
+    g: &crate::display_list::StickyGroup,
+    place: &LayerPlace,
+    scale: f32,
+) -> StickyLayer {
+    let inner = &dl.items[g.items.start + 1..g.items.end.saturating_sub(1).max(g.items.start + 1)];
+    // `scale · (p + translate) + frac − origin`: `p` en las coordenadas del grupo.
+    let pixmap = render_items(
+        inner,
+        &[],
+        scale,
+        Rgba::TRANSPARENT,
+        (-g.translate.0, -g.translate.1),
+        (
+            place.origin.0 as f32 - place.frac.0,
+            place.origin.1 as f32 - place.frac.1,
+        ),
+        place.pixels,
+        true,
+    );
+    StickyLayer {
+        frac: place.frac,
+        pixmap,
+    }
+}
+
+/// Compone `layer` (premultiplicada, `source-over`) sobre `target` con su píxel (0, 0) en
+/// `at`, solo dentro de las filas `rows` de `target` y del recorte `clip` (px de dispositivo
+/// de `target`; en sus bordes, con la parte del píxel que cubre).
+fn compose_over(
+    target: &mut Pixmap,
+    layer: &Pixmap,
+    at: (i64, i64),
+    rows: (i64, i64),
+    clip: Option<DevClip>,
+) {
+    let (tw, lw) = (i64::from(target.width()), i64::from(layer.width()));
+    let [cx0, cy0, cx1, cy1] = clip.unwrap_or([f32::MIN, f32::MIN, f32::MAX, f32::MAX]);
+    let x0 = at.0.max(0).max(cx0.floor() as i64);
+    let x1 = (at.0 + lw).min(tw).min(cx1.ceil() as i64);
+    let y0 = at.1.max(rows.0).max(0).max(cy0.floor() as i64);
+    let y1 = (at.1 + i64::from(layer.height()))
+        .min(rows.1)
+        .min(i64::from(target.height()))
+        .min(cy1.ceil() as i64);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    // La parte (0 a 255) del píxel `p` que cubre el intervalo `[a, b)`.
+    let cover = |p: i64, a: f32, b: f32| -> u32 {
+        let lo = (p as f32).max(a);
+        let hi = ((p + 1) as f32).min(b);
+        ((hi - lo).clamp(0.0, 1.0) * 255.0).round() as u32
     };
-    copy_rows(&mut out, at, prev, from);
-    let (tw, th) = tile_size(scale);
-    let mut tiles: Vec<Tile> = Vec::new();
-    for (x, y, bw, bh) in dirty {
-        // Recortado al cuadro.
-        let (ax, ay) = (x.max(0), y.max(0));
-        let (bx, by) = ((x + bw).min(w), (y + bh).min(h));
-        if ax < bx && ay < by {
-            tiles.extend(tiles_for(
-                (ax, ay, bx - ax, by - ay),
-                s_dev,
-                i64::from(tw),
-                i64::from(th),
-            ));
+    let cols: Vec<u32> = (x0..x1).map(|x| cover(x, cx0, cx1)).collect();
+    let src = layer.data();
+    let dst = target.data_mut();
+    for y in y0..y1 {
+        let cy = cover(y, cy0, cy1);
+        let s = (((y - at.1) * lw + (x0 - at.0)) * 4) as usize;
+        let d = ((y * tw + x0) * 4) as usize;
+        let n = ((x1 - x0) * 4) as usize;
+        for ((d, s), &cx) in dst[d..d + n]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src[s..s + n].as_chunks::<4>().0)
+            .zip(&cols)
+        {
+            let mut s = *s;
+            let c = if cx == 255 { cy } else { (cx * cy + 127) / 255 };
+            if c < 255 {
+                s = s.map(|v| ((u32::from(v) * c + 127) / 255) as u8);
+            }
+            match s[3] {
+                0 => {}
+                255 => *d = s,
+                a => {
+                    let k = 255 - u32::from(a);
+                    for i in 0..4 {
+                        let v = u32::from(s[i]) + (u32::from(d[i]) * k + 127) / 255;
+                        d[i] = v.min(255) as u8;
+                    }
+                }
+            }
         }
     }
-    tiles.sort_unstable();
-    tiles.dedup();
-    paint_tiles(
-        &mut out,
-        dl,
-        scale,
-        bg,
-        scroll,
-        s_dev,
-        &tiles,
-        tile_margin(&info, scale),
-    );
-    Some(out)
+}
+
+/// Corre las filas de `p` `di` filas hacia arriba (o hacia abajo si es negativo).
+fn shift_rows(p: &mut Pixmap, di: i64) {
+    let stride = p.width() as usize * 4;
+    let h = p.height() as usize;
+    let n = di.unsigned_abs() as usize;
+    if n == 0 || n >= h {
+        return;
+    }
+    let data = p.data_mut();
+    if di > 0 {
+        data.copy_within(n * stride..h * stride, 0);
+    } else {
+        data.copy_within(0..(h - n) * stride, n * stride);
+    }
+}
+
+impl TiledFrame {
+    /// El cuadro entero en `scroll`. `None` como [`render_tiled`].
+    pub fn render(
+        dl: &DisplayList,
+        size: Size,
+        scale: f32,
+        bg: Rgba,
+        scroll: (f32, f32),
+    ) -> Option<TiledFrame> {
+        let s_dev = device_scroll(scroll, scale)?;
+        let info = crate::display_list::scroll_info(dl)?;
+        let (width, height) = frame_size(size, scale);
+        let plan = layer_plan(dl, &info, scroll, scale, size);
+        let (tw, th) = tile_size(scale);
+        let tiles: Vec<Tile> = tiles_for(
+            (0, 0, i64::from(width), i64::from(height)),
+            s_dev,
+            i64::from(tw),
+            i64::from(th),
+        )
+        .collect();
+        let mut under = Pixmap::new(width, height)?;
+        paint_tiles(
+            &mut under,
+            dl,
+            &layer_skip(&info, plan.is_some()),
+            scale,
+            bg,
+            scroll,
+            s_dev,
+            &tiles,
+            tile_margin(&info, scale),
+        );
+        let layers = plan.map(|plan| {
+            plan.iter()
+                .zip(&info.sticky)
+                .map(|(place, g)| (render_layer(dl, g, place, scale), place.at, place.clip))
+                .collect()
+        });
+        Some(TiledFrame {
+            scale,
+            s_dev,
+            under,
+            layers,
+        })
+    }
+
+    /// E4: este cuadro llevado a `scroll` sin pintarlo entero: se corren sus filas lo que se
+    /// desplazó la página y se pintan solo los tiles de la franja que aparece y de los grupos
+    /// `fixed` (donde estaban y donde quedan). Los `sticky` en capa propia no repintan nada (su
+    /// capa se reutiliza); si no, se repintan sus tiles donde estaban y donde quedan. Da los
+    /// mismos píxeles que [`TiledFrame::render`] en `scroll`. `None` si no se puede: otra
+    /// escala o tamaño, desplazamiento horizontal o que no cae en px de dispositivo enteros,
+    /// más de un cuadro de distancia, una lista que no admite tiles o que los `sticky` pasen de
+    /// ir en capa propia a no ir (o al revés).
+    pub fn scrolled(
+        mut self,
+        dl: &DisplayList,
+        size: Size,
+        scale: f32,
+        bg: Rgba,
+        scroll: (f32, f32),
+    ) -> Option<TiledFrame> {
+        let (width, height) = frame_size(size, scale);
+        let s_dev = device_scroll(scroll, scale)?;
+        if self.scale != scale
+            || (self.under.width(), self.under.height()) != (width, height)
+            || s_dev.0 != self.s_dev.0
+        {
+            return None;
+        }
+        let di = s_dev.1 - self.s_dev.1;
+        let (w, h) = (i64::from(width), i64::from(height));
+        if di.abs() >= h {
+            return None;
+        }
+        let info = crate::display_list::scroll_info(dl)?;
+        let plan = layer_plan(dl, &info, scroll, scale, size);
+        if plan.is_some() != self.layers.is_some() {
+            return None;
+        }
+        let prev_scroll = (self.s_dev.0 as f32 / scale, self.s_dev.1 as f32 / scale);
+        // Lo que hay que pintar (rectángulos del cuadro nuevo).
+        let mut dirty: Vec<DevBox> = Vec::new();
+        if di > 0 {
+            dirty.push((0, h - di, w, di));
+        } else if di < 0 {
+            dirty.push((0, 0, w, -di));
+        }
+        let dev = |r: &Rect, dx: f32, dy: f32| -> DevBox {
+            let x0 = (f64::from(r.x + dx) * f64::from(scale)).floor() as i64 - 1;
+            let y0 = (f64::from(r.y + dy) * f64::from(scale)).floor() as i64 - 1;
+            let x1 = (f64::from(r.x + r.width + dx) * f64::from(scale)).ceil() as i64 + 1;
+            let y1 = (f64::from(r.y + r.height + dy) * f64::from(scale)).ceil() as i64 + 1;
+            (x0, y0, x1 - x0, y1 - y0)
+        };
+        for r in &info.fixed {
+            // Quieto en el viewport: donde está y donde dejó la copia corrida del cuadro anterior.
+            let (x, y, bw, bh) = dev(r, 0.0, 0.0);
+            dirty.push((x, y, bw, bh));
+            dirty.push((x, y - di, bw, bh));
+        }
+        if plan.is_none() {
+            for g in &info.sticky {
+                let now = sticky_shift(g, scroll);
+                dirty.push(dev(&g.rect, now.0, now.1));
+                let before = sticky_shift(g, prev_scroll);
+                let (x, y, bw, bh) = dev(&g.rect, before.0, before.1);
+                dirty.push((x, y - di, bw, bh));
+            }
+        }
+        shift_rows(&mut self.under, di);
+        let (tw, th) = tile_size(scale);
+        let mut tiles: Vec<Tile> = Vec::new();
+        for (x, y, bw, bh) in dirty {
+            // Recortado al cuadro.
+            let (ax, ay) = (x.max(0), y.max(0));
+            let (bx, by) = ((x + bw).min(w), (y + bh).min(h));
+            if ax < bx && ay < by {
+                tiles.extend(tiles_for(
+                    (ax, ay, bx - ax, by - ay),
+                    s_dev,
+                    i64::from(tw),
+                    i64::from(th),
+                ));
+            }
+        }
+        tiles.sort_unstable();
+        tiles.dedup();
+        paint_tiles(
+            &mut self.under,
+            dl,
+            &layer_skip(&info, plan.is_some()),
+            scale,
+            bg,
+            scroll,
+            s_dev,
+            &tiles,
+            tile_margin(&info, scale),
+        );
+        if let Some(plan) = plan {
+            let mut old = self.layers.take().unwrap_or_default();
+            let reuse = old.len() == plan.len();
+            let layers = plan
+                .iter()
+                .zip(&info.sticky)
+                .enumerate()
+                .map(|(i, (place, g))| {
+                    let layer = match old.get_mut(i) {
+                        Some((l, _, _)) if reuse && l.frac == place.frac => StickyLayer {
+                            frac: l.frac,
+                            pixmap: std::mem::replace(&mut l.pixmap, Pixmap::new(1, 1)?),
+                        },
+                        _ => render_layer(dl, g, place, scale),
+                    };
+                    Some((layer, place.at, place.clip))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            self.layers = Some(layers);
+        }
+        self.s_dev = s_dev;
+        Some(self)
+    }
+
+    /// El tamaño del cuadro en px de dispositivo.
+    pub fn size(&self) -> (u32, u32) {
+        (self.under.width(), self.under.height())
+    }
+
+    /// Si los `sticky` van en capa propia en este cuadro.
+    pub fn has_layers(&self) -> bool {
+        self.layers.as_ref().is_some_and(|l| !l.is_empty())
+    }
+
+    /// Copia el cuadro en `target` desde la fila `top` (px de dispositivo; el fondo es opaco,
+    /// así que se copia sin componer) y compone encima las capas `sticky`.
+    pub fn compose_into(&self, target: &mut Pixmap, top: f32) {
+        let top = top.round().max(0.0) as usize;
+        let tw = target.width() as usize * 4;
+        let pw = self.under.width() as usize * 4;
+        let w = tw.min(pw);
+        let rows = (target.height() as usize)
+            .saturating_sub(top)
+            .min(self.under.height() as usize);
+        let src = self.under.data();
+        let dst = target.data_mut();
+        for r in 0..rows {
+            let d = (top + r) * tw;
+            let s = r * pw;
+            dst[d..d + w].copy_from_slice(&src[s..s + w]);
+        }
+        let (top, end) = (top as i64, (top + rows) as i64);
+        for (layer, at, clip) in self.layers.iter().flatten() {
+            let clip = clip.map(|[x0, y0, x1, y1]| [x0, y0 + top as f32, x1, y1 + top as f32]);
+            compose_over(target, &layer.pixmap, (at.0, at.1 + top), (top, end), clip);
+        }
+    }
+
+    /// El cuadro como un solo pixmap.
+    pub fn to_pixmap(&self) -> Pixmap {
+        let mut out = self.under.clone();
+        let end = i64::from(out.height());
+        for (layer, at, clip) in self.layers.iter().flatten() {
+            compose_over(&mut out, &layer.pixmap, *at, (0, end), *clip);
+        }
+        out
+    }
 }
 
 /// E4: compone una capa de opacidad (`source-over` con `opacity`) solo en la franja de filas

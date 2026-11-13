@@ -133,6 +133,7 @@ fn prepare(agent: &mut Agent, realm: RealmId, el: NodeId) -> Option<(Ready, bool
             &url,
             bf_infra::Destination::Script,
             Some(&nonce),
+            Some(bf_web::NodeRef::new(0, el)),
         ) else {
             simple_event(agent, realm, EventTarget::Node(el), "error", false);
             return None;
@@ -141,7 +142,14 @@ fn prepare(agent: &mut Agent, realm: RealmId, el: NodeId) -> Option<(Ready, bool
     }
     // E6: CSP para los scripts en línea.
     let source = info.source_text.to_string();
-    if !bf_web::security::allow_inline_script(agent, realm, None, Some(&nonce), &source) {
+    if !bf_web::security::allow_inline_script(
+        agent,
+        realm,
+        None,
+        Some(&nonce),
+        &source,
+        Some(bf_web::NodeRef::new(0, el)),
+    ) {
         return None;
     }
     Some((

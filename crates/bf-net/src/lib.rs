@@ -28,13 +28,14 @@ pub mod referrer;
 pub mod security; // E6: las políticas de un documento
 pub mod sniff;
 pub mod streaming; // E2: respuestas por partes (EventSource)
+pub mod timing; // E6: el tiempo de las peticiones por partes (BF_TRACE)
 pub mod websocket; // E2: cliente WebSocket (RFC 6455)
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bf_infra::resource::load_local;
 use bf_infra::{Resource, ResourceLoader};
@@ -314,7 +315,7 @@ fn connect_tcp_with(
     read_timeout: Duration,
 ) -> Result<TcpStream, FetchError> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let resolution = dns.resolve(bare).map_err(|e| {
+    let resolution = timing::time(|t| &mut t.dns, || dns.resolve(bare)).map_err(|e| {
         if dns::has_route() {
             FetchError::Dns(e)
         } else {
@@ -326,12 +327,17 @@ fn connect_tcp_with(
     })?;
     let addrs = eyeballs::interleave(Dns::socket_addrs(&resolution.addrs, port));
     let late = resolution.late.map(|rx| (rx, port));
-    let tcp = eyeballs::race_with_late(
-        addrs,
-        late,
-        eyeballs::ATTEMPT_DELAY,
-        CONNECT_TIMEOUT,
-        attempt_tcp,
+    let tcp = timing::time(
+        |t| &mut t.tcp,
+        || {
+            eyeballs::race_with_late(
+                addrs,
+                late,
+                eyeballs::ATTEMPT_DELAY,
+                CONNECT_TIMEOUT,
+                attempt_tcp,
+            )
+        },
     )?;
     tcp.set_read_timeout(Some(read_timeout))?;
     tcp.set_write_timeout(Some(read_timeout))?;
@@ -487,6 +493,7 @@ impl Fetcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(key);
+        timing::count(true);
         let mut tcp = connect_tcp_with(
             &self.dns,
             host,
@@ -495,7 +502,11 @@ impl Fetcher {
         )?;
         if !tls {
             if allow_h2 && self.h2_prior_knowledge {
-                return Ok(Opened::H2(http2::start(http2::Transport::Plain(tcp))?));
+                let c = timing::time(
+                    |t| &mut t.h2_setup,
+                    || http2::start(http2::Transport::Plain(tcp)),
+                )?;
+                return Ok(Opened::H2(c));
             }
             return Ok(Opened::H1(Stream::Plain(tcp)));
         }
@@ -507,9 +518,11 @@ impl Fetcher {
         };
         let mut conn = rustls::ClientConnection::new(config, server_name(host)?)
             .map_err(|e| FetchError::Tls(TlsError::from_rustls(&e)))?;
+        let handshake = Instant::now();
         while conn.is_handshaking() {
             conn.complete_io(&mut tcp).map_err(error::tls_io_error)?;
         }
+        timing::add(|t| &mut t.tls, handshake.elapsed());
         if conn.alpn_protocol() == Some(b"h2") {
             let certs = conn
                 .peer_certificates()
@@ -522,7 +535,8 @@ impl Fetcher {
                     .insert(key.clone(), (peer.ip(), certs));
             }
             let transport = http2::Transport::Tls(Box::new(conn), tcp);
-            return Ok(Opened::H2(http2::start(transport)?));
+            let c = timing::time(|t| &mut t.h2_setup, || http2::start(transport))?;
+            return Ok(Opened::H2(c));
         }
         let stream = rustls::StreamOwned::new(conn, tcp);
         Ok(Opened::H1(Stream::Tls(Box::new(stream))))
@@ -676,7 +690,10 @@ impl Fetcher {
         let body = if raw.is_empty() {
             raw
         } else {
-            http::decode_content(raw, &headers.list("content-encoding"))?
+            timing::time(
+                |t| &mut t.decode,
+                || http::decode_content(raw, &headers.list("content-encoding")),
+            )?
         };
         Ok(Response {
             url: url.clone(),
@@ -1021,8 +1038,14 @@ impl Fetcher {
                     credentials: extra.credentials,
                 };
                 let mut protocol = Protocol::Local;
-                let (r, used) = cache.fetch_mut(&req, |h| {
-                    let r = self.send(url, extra, h, target)?;
+                // E6: el tiempo de la caché sin el de la red (`BF_TRACE`).
+                let started = Instant::now();
+                let mut on_network = Duration::ZERO;
+                let result = cache.fetch_mut(&req, |h| {
+                    let sent = Instant::now();
+                    let r = self.send(url, extra, h, target);
+                    on_network += sent.elapsed();
+                    let r = r?;
                     protocol = r.protocol;
                     Ok::<_, FetchError>(cache::CacheResponse {
                         status: r.status,
@@ -1030,7 +1053,12 @@ impl Fetcher {
                         headers: r.headers,
                         body: r.body,
                     })
-                })?;
+                });
+                timing::add(
+                    |t| &mut t.cache,
+                    started.elapsed().saturating_sub(on_network),
+                );
+                let (r, used) = result?;
                 for rv in cache.take_revalidations() {
                     self.revalidate_in_background(cache.clone(), rv);
                 }
@@ -1137,7 +1165,8 @@ impl Fetcher {
                     headers,
                     body.map(|(b, _)| b),
                 );
-                match conn.request(req) {
+                timing::count(false);
+                match timing::time(|t| &mut t.h2, || conn.request(req)) {
                     Ok(r) => {
                         let status = (r.status, String::new());
                         return self.finish(url, extra, status, r.headers, r.body, Protocol::H2);
@@ -1237,7 +1266,9 @@ impl Fetcher {
                     }
                 }
             };
+            timing::count(false);
             let result = (|| -> Result<(http::Head, Vec<u8>, bool), FetchError> {
+                let sent = Instant::now();
                 http::write_request(
                     conn.get_mut(),
                     method,
@@ -1250,8 +1281,12 @@ impl Fetcher {
                 while (100..200).contains(&head.status) && head.status != 101 {
                     head = http::read_head(&mut conn)?;
                 }
+                timing::add(|t| &mut t.wait, sent.elapsed());
                 let kind = http::body_kind(&head, method.eq_ignore_ascii_case("HEAD"));
-                let raw = http::read_body(&mut conn, kind, MAX_BODY)?;
+                let raw = timing::time(
+                    |t| &mut t.body,
+                    || http::read_body(&mut conn, kind, MAX_BODY),
+                )?;
                 let close = kind == http::BodyKind::UntilEof
                     || head.headers.list("connection").iter().any(|c| c == "close")
                     || (head.version == (1, 0)

@@ -9,9 +9,9 @@ use std::collections::{HashMap, HashSet};
 
 use bf_css::selectors::PseudoElement;
 use bf_dom::NodeId;
-use bf_dom::accessibility::{self, A11yEnv};
+use bf_dom::accessibility::{self, A11yEnv, AxNode};
 use bf_js::string::JsString;
-use bf_js::value::Value;
+use bf_js::value::{PropertyKey, Value};
 use bf_js::vm::function::CallArgs;
 use bf_js::vm::{Agent, JsResult};
 
@@ -27,6 +27,7 @@ struct StyleEnv {
     after: HashMap<NodeId, String>,
     values: HashMap<NodeId, String>,
     transforms: HashMap<NodeId, String>,
+    indeterminate: HashSet<NodeId>,
 }
 
 impl A11yEnv for StyleEnv {
@@ -56,6 +57,10 @@ impl A11yEnv for StyleEnv {
 
     fn text_transform(&self, n: NodeId) -> Option<String> {
         self.transforms.get(&n).cloned()
+    }
+
+    fn indeterminate(&self, n: NodeId) -> bool {
+        self.indeterminate.contains(&n)
     }
 }
 
@@ -170,6 +175,9 @@ fn env_for(agent: &mut Agent, doc: DocIndex) -> StyleEnv {
             Some("input") => {
                 env.values
                     .insert(n, super::forms::input_current_value(agent, r));
+                if super::forms::input_indeterminate(agent, r) {
+                    env.indeterminate.insert(n);
+                }
             }
             Some("textarea") => {
                 env.values
@@ -210,6 +218,121 @@ pub fn computed_description(agent: &mut Agent, n: NodeRef) -> String {
     with_doc(agent, n.doc, |d| {
         accessibility::accessible_description(d, n.node, &env)
     })
+}
+
+/// El árbol de accesibilidad del documento `doc` con su estilo (ver
+/// [`bf_dom::accessibility::tree`]).
+pub fn accessibility_tree(agent: &mut Agent, doc: DocIndex) -> AxNode {
+    let env = env_for(agent, doc);
+    with_doc(agent, doc, |d| accessibility::accessibility_tree(d, &env))
+}
+
+/// La serialización de texto de [`accessibility_tree`] (una línea por nodo, sangrada).
+pub fn accessibility_tree_text(agent: &mut Agent, doc: DocIndex) -> String {
+    accessibility::serialize(&accessibility_tree(agent, doc))
+}
+
+/// El id de un nodo de accesibilidad para `test_driver` (`"<doc>:<nodo>"`).
+fn acc_id(doc: DocIndex, n: NodeId) -> String {
+    format!("{doc}:{}", n.index())
+}
+
+/// Las propiedades de WebDriver "Get Accessibility Properties" (propuesta de WPT,
+/// `test_driver.get_accessibility_properties_for_element`): `role`, `label`, `description`,
+/// los estados que aplican (`checked`, `pressed`, `expanded`, `selected`, `disabled`, `level`,
+/// `value`) y `children`, los ids de sus hijos de accesibilidad.
+fn properties(agent: &mut Agent, n: NodeRef) -> JsResult<Value> {
+    let env = env_for(agent, n.doc);
+    let (role, label, description, states, children) =
+        with_doc(
+            agent,
+            n.doc,
+            |d| match accessibility::accessibility_subtree(d, n.node, &env) {
+                Some(ax) => (
+                    ax.role,
+                    ax.name,
+                    ax.description,
+                    ax.states,
+                    ax.children.iter().map(|c| c.node).collect::<Vec<_>>(),
+                ),
+                None => (
+                    accessibility::computed_role(d, n.node, &env),
+                    accessibility::accessible_name(d, n.node, &env),
+                    accessibility::accessible_description(d, n.node, &env),
+                    accessibility::accessible_states(d, n.node, &env),
+                    Vec::new(),
+                ),
+            },
+        );
+    let o = agent.new_plain_object();
+    let put = |agent: &mut Agent, k: &str, v: Value| {
+        agent.create_data_property_or_throw(o, PropertyKey::from(k), v)
+    };
+    put(agent, "role", Value::String(JsString::from(role.as_str())))?;
+    put(
+        agent,
+        "label",
+        Value::String(JsString::from(label.as_str())),
+    )?;
+    put(
+        agent,
+        "description",
+        Value::String(JsString::from(description.as_str())),
+    )?;
+    if let Some(c) = states.checked {
+        put(agent, "checked", Value::str(c.as_str()))?;
+    }
+    if let Some(p) = states.pressed {
+        put(agent, "pressed", Value::str(p.as_str()))?;
+    }
+    if let Some(e) = states.expanded {
+        put(agent, "expanded", Value::Boolean(e))?;
+    }
+    if let Some(s) = states.selected {
+        put(agent, "selected", Value::Boolean(s))?;
+    }
+    put(agent, "disabled", Value::Boolean(states.disabled))?;
+    if let Some(l) = states.level {
+        put(agent, "level", Value::Number(f64::from(l)))?;
+    }
+    if let Some(v) = &states.value {
+        put(agent, "value", Value::String(JsString::from(v.as_str())))?;
+    }
+    let ids: Vec<Value> = children
+        .into_iter()
+        .map(|c| Value::String(JsString::from(acc_id(n.doc, c).as_str())))
+        .collect();
+    let arr = agent.create_array_from_list(&ids)?;
+    put(agent, "children", Value::Object(arr))?;
+    Ok(Value::Object(o))
+}
+
+/// `__freedom_accessibility_properties(el)` (`get_accessibility_properties_for_element`).
+pub fn properties_native(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let n = crate::dom::arg_node(agent, &a.arg(0), "get_accessibility_properties_for_element")?;
+    properties(agent, n)
+}
+
+/// `__freedom_accessibility_node_properties(id)`
+/// (`get_accessibility_properties_for_accessibility_node`, con los ids de `children`).
+pub fn node_properties_native(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let id = bf_js::host::webidl::to_dom_string(agent, &a.arg(0))?.to_string_lossy();
+    let parsed = id
+        .split_once(':')
+        .and_then(|(d, n)| Some((d.parse::<DocIndex>().ok()?, n.parse::<usize>().ok()?)));
+    let found = parsed.and_then(|(doc, idx)| {
+        with_doc(agent, doc, |d| {
+            d.descendants(d.root())
+                .into_iter()
+                .chain(d.shadow_roots().into_iter().flat_map(|r| d.descendants(r)))
+                .find(|n| n.index() == idx)
+        })
+        .map(|n| NodeRef::new(doc, n))
+    });
+    match found {
+        Some(n) => properties(agent, n),
+        None => Ok(Value::Null),
+    }
 }
 
 /// `__freedom_computed_role(el)` del runner de WPT (`test_driver.get_computed_role`).

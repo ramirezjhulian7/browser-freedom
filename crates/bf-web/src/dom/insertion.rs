@@ -146,8 +146,13 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
         }
         // E6: Mixed Content y CSP (`script-src`, con el `nonce` del elemento).
         let nonce = info.nonce.to_string();
-        let Some(url) = crate::security::check_inserted_script(agent, realm, &url, Some(&nonce))
-        else {
+        let Some(url) = crate::security::check_inserted_script(
+            agent,
+            realm,
+            &url,
+            Some(&nonce),
+            Some(crate::NodeRef::new(doc, el)),
+        ) else {
             queue_element_event(agent, doc, el, "error");
             return;
         };
@@ -183,6 +188,7 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
         realm,
         Some(&info.nonce.to_string()),
         &source,
+        Some(crate::NodeRef::new(doc, el)),
     ) {
         return;
     }

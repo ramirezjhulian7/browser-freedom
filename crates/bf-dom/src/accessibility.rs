@@ -18,6 +18,12 @@ use std::collections::HashSet;
 
 use crate::{Document, NodeData, NodeId};
 
+pub mod tree;
+pub use tree::{
+    AxNode, AxStates, Tristate, accessibility_subtree, accessibility_tree, accessible_states,
+    serialize,
+};
+
 /// Lo que el cálculo necesita de fuera del DOM.
 pub trait A11yEnv {
     /// ¿El elemento tiene `display: none` (él, no sus ancestros)?
@@ -47,6 +53,11 @@ pub trait A11yEnv {
     /// se aplica a sus nodos de texto.
     fn text_transform(&self, _n: NodeId) -> Option<String> {
         None
+    }
+    /// ¿El `input type=checkbox` está indeterminado (IDL `indeterminate`, que no es un
+    /// atributo)? Da `checked=mixed` en el árbol (HTML-AAM §4).
+    fn indeterminate(&self, _n: NodeId) -> bool {
+        false
     }
 }
 
@@ -402,6 +413,20 @@ fn implicit_role(doc: &Document, n: NodeId, env: &dyn A11yEnv) -> &'static str {
         };
     };
     let has = |a: &str| attr(doc, n, a).is_some();
+    // WAI-ARIA 1.2 §9.3 "Presentational Roles Conflict Resolution" / §5.2.x "required owned
+    // elements": los elementos que la lista o la tabla presentacional exige (`li`; filas,
+    // grupos y celdas) heredan el rol `none`.
+    let presentational =
+        |c: Option<NodeId>| c.and_then(|c| explicit_role(doc, c, env)).as_deref() == Some("none");
+    match name.as_str() {
+        "li" if presentational(parent_element(doc, n)) => return "none",
+        "tr" | "td" | "th" | "thead" | "tbody" | "tfoot"
+            if presentational(ancestor_table(doc, n)) =>
+        {
+            return "none";
+        }
+        _ => {}
+    }
     match name.as_str() {
         "a" => {
             if has("href") {
@@ -699,10 +724,13 @@ pub fn accessible_description(doc: &Document, n: NodeId, env: &dyn A11yEnv) -> S
             .map(|r| {
                 cx.visited.clear();
                 let hidden = is_hidden(doc, r, env);
+                // §4.3.2 2B: cada nodo referenciado se calcula en recursión, así que su
+                // contenido cuenta (2F: "referenced by aria-labelledby or aria-describedby").
                 cx.name(
                     r,
                     Mode {
                         referenced: true,
+                        recursion: true,
                         allow_hidden: hidden,
                         ..Mode::default()
                     },
@@ -1121,8 +1149,16 @@ impl Cx<'_> {
         // de w3c/accname#167): los del shadow root de un host y los nodos asignados de un
         // `slot` (o su contenido por defecto).
         let children: Vec<NodeId> = doc.flat_tree_children(n);
+        // `aria-actions` (propuestas w3c/aria#1805 y #2208): los hijos directos que el
+        // anfitrión lista como acciones no entran en su nombre desde el contenido.
+        let actions: Vec<&str> = attr(doc, n, "aria-actions")
+            .map(|v| v.split(is_ascii_ws).filter(|i| !i.is_empty()).collect())
+            .unwrap_or_default();
         for c in children {
             if doc.element(c).is_some() && is_hidden(doc, c, self.env) && !mode.allow_hidden {
+                continue;
+            }
+            if !actions.is_empty() && attr(doc, c, "id").is_some_and(|id| actions.contains(&id)) {
                 continue;
             }
             // Un `slot` no tiene rol ni caja (`display: contents`): es transparente y su

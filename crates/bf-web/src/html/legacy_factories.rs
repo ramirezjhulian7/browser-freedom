@@ -586,6 +586,21 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
         queue_finish(agent, realm, n, id, pin, Outcome::Loaded(key, size));
         return;
     }
+    // E6: Mixed Content (§4.1: se pide por `https:`) y CSP `img-src` (CSP 3 §6.1.6, con
+    // `default-src` de respaldo): una petición bloqueada es un error de red, y la imagen queda
+    // rota con `error` (HTML §4.8.4.3.5, "update the image data", paso 26).
+    let Some(url) = crate::security::check_request(
+        agent,
+        realm,
+        None,
+        &url,
+        bf_infra::Destination::Image,
+        None,
+        Some(n),
+    ) else {
+        queue_finish(agent, realm, n, id, pin, Outcome::Broken { event: true });
+        return;
+    };
     delay_load(agent, n, true);
     let started = crate::bom::performance_observer::now_ms(agent);
     let requested = url.clone();

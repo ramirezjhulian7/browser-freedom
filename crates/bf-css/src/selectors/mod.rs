@@ -144,6 +144,9 @@ pub enum PseudoClass {
     Dir(Dir),
     Scope,
     Defined,
+    /// E5: `:popover-open` (HTML §4.16.3): elementos HTML con `popover` cuya *popover
+    /// visibility state* es `showing`.
+    PopoverOpen,
     /// `:heading` (vacío) o `:heading(<integer>#)` de HTML: elementos `h1`–`h6` con esos
     /// niveles.
     Heading(Vec<i32>),
@@ -622,6 +625,7 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
         PseudoClass::PlaceholderShown => "placeholder-shown",
         PseudoClass::Scope => "scope",
         PseudoClass::Defined => "defined",
+        PseudoClass::PopoverOpen => "popover-open",
         PseudoClass::Valid => "valid",
         PseudoClass::Invalid => "invalid",
     };

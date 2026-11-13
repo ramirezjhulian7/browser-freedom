@@ -38,12 +38,13 @@ pub mod mutation;
 mod names;
 mod node;
 pub mod observer;
+mod popover; // E5: popover visibility state (HTML §6.12)
 pub mod range; // E3
 pub mod script;
 mod serialize;
 pub mod shadow; // E1
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 pub use bf_infra::{Atom, DomString, Namespace, Url};
@@ -261,7 +262,9 @@ pub struct Document {
     /// E10: la validez que anota el host (`:valid`/`:invalid`, ver `constraint_validity`).
     constraint_validity: HashMap<NodeId, bool>,
     /// E2: las imágenes `loading=lazy` que el host aplazó (ver `deferred_images`).
-    deferred_images: std::collections::HashSet<NodeId>,
+    deferred_images: HashSet<NodeId>,
+    /// E5: los elementos en la *popover visibility state* `showing` (ver `popover`).
+    popover_showing: HashSet<NodeId>,
     pub(crate) shadow: shadow::ShadowState, // E1
     pub(crate) custom: custom::CustomState, // E1
     /// E1: los form owners que asoció el parser (HTML §13.2.6.1, *parser inserted flag*).
@@ -295,7 +298,8 @@ impl Document {
             live_ranges: range::LiveRanges::default(), // E3
             custom_states: HashMap::new(),
             constraint_validity: HashMap::new(),    // E10
-            deferred_images: Default::default(),    // E2
+            deferred_images: HashSet::new(),        // E2
+            popover_showing: HashSet::new(),        // E5
             shadow: shadow::ShadowState::default(), // E1
             custom: custom::CustomState::default(), // E1
             parser_form_owners: HashMap::new(),     // E1

@@ -889,6 +889,15 @@ pub fn matching_declarations_in<'a>(
 /// HTML no distinguen mayúsculas; para los demás, el grupo es un superconjunto).
 pub struct RuleIndex<'a> {
     rules: Vec<IndexedRule<'a>>,
+    /// Los grupos de cada pseudoelemento (`None`: el elemento mismo). Un complex selector
+    /// solo coincide con el pseudoelemento que nombra (`matching_specificity_in`), así que
+    /// para `::before` solo se prueban las reglas con algún selector `::before`.
+    buckets: Vec<(Option<PseudoElement>, Buckets)>,
+}
+
+/// Las reglas de un pseudoelemento, por el compound de más a la derecha de cada selector.
+#[derive(Default)]
+struct Buckets {
     by_id: HashMap<String, Vec<u32>>,
     by_class: HashMap<String, Vec<u32>>,
     by_type: HashMap<String, Vec<u32>>,
@@ -943,10 +952,7 @@ impl<'a> RuleIndex<'a> {
         let layer_indexes = layer_indexes(sheets);
         let mut index = RuleIndex {
             rules: Vec::new(),
-            by_id: HashMap::new(),
-            by_class: HashMap::new(),
-            by_type: HashMap::new(),
-            rest: Vec::new(),
+            buckets: Vec::new(),
         };
         let mut source_order = 0;
         for sheet in sheets {
@@ -989,11 +995,23 @@ impl<'a> RuleIndex<'a> {
                     });
                     *source_order += style.declarations.len();
                     for sel in &style.selectors.0 {
+                        let at = match self
+                            .buckets
+                            .iter()
+                            .position(|(p, _)| *p == sel.pseudo_element)
+                        {
+                            Some(i) => i,
+                            None => {
+                                self.buckets.push((sel.pseudo_element, Buckets::default()));
+                                self.buckets.len() - 1
+                            }
+                        };
+                        let b = &mut self.buckets[at].1;
                         let bucket = match index_key(sel) {
-                            IndexKey::Id(k) => self.by_id.entry(k).or_default(),
-                            IndexKey::Class(k) => self.by_class.entry(k).or_default(),
-                            IndexKey::Type(k) => self.by_type.entry(k).or_default(),
-                            IndexKey::Rest => &mut self.rest,
+                            IndexKey::Id(k) => b.by_id.entry(k).or_default(),
+                            IndexKey::Class(k) => b.by_class.entry(k).or_default(),
+                            IndexKey::Type(k) => b.by_type.entry(k).or_default(),
+                            IndexKey::Rest => &mut b.rest,
                         };
                         if bucket.last() != Some(&id) {
                             bucket.push(id);
@@ -1055,13 +1073,17 @@ impl<'a> RuleIndex<'a> {
         &self,
         doc: &Document,
         node: NodeId,
+        pseudo: Option<PseudoElement>,
         shadow: crate::selectors::ShadowMatch,
     ) -> Vec<u32> {
         let el = match (shadow.mode, doc.element(node)) {
             (crate::selectors::ShadowMode::Tree, Some(el)) => el,
             _ => return (0..self.rules.len() as u32).collect(),
         };
-        let mut out: Vec<u32> = self.rest.clone();
+        let Some((_, b)) = self.buckets.iter().find(|(p, _)| *p == pseudo) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u32> = b.rest.clone();
         let mut key = String::new();
         let mut add = |map: &HashMap<String, Vec<u32>>, k: &str, out: &mut Vec<u32>| {
             key.clear();
@@ -1070,16 +1092,16 @@ impl<'a> RuleIndex<'a> {
                 out.extend_from_slice(ids);
             }
         };
-        add(&self.by_type, el.name.as_ref(), &mut out);
+        add(&b.by_type, el.name.as_ref(), &mut out);
         if let Some(id) = el.attr("id") {
-            add(&self.by_id, id, &mut out);
+            add(&b.by_id, id, &mut out);
         }
         if let Some(classes) = el.attr("class") {
             for c in classes
                 .split([' ', '\t', '\n', '\r', '\x0C'])
                 .filter(|c| !c.is_empty())
             {
-                add(&self.by_class, c, &mut out);
+                add(&b.by_class, c, &mut out);
             }
         }
         out.sort_unstable();
@@ -1098,7 +1120,7 @@ impl<'a> RuleIndex<'a> {
         shadow: crate::selectors::ShadowMatch,
     ) -> Vec<MatchedDeclaration<'a>> {
         let mut out = Vec::new();
-        for id in self.candidates(doc, node, shadow) {
+        for id in self.candidates(doc, node, pseudo, shadow) {
             let rule = &self.rules[id as usize];
             let Some(specificity) =
                 matching_specificity_in(rule.selectors, doc, node, pseudo, ctx, shadow)

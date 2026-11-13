@@ -1,7 +1,8 @@
 //! E4: el raster en tiles de la página (`raster::render_tiled`), en uno o varios hilos, y el
-//! desplazamiento incremental (`raster::scroll_frame`) dan exactamente los mismos píxeles que
-//! el raster en tiles entero en la misma posición: con elementos `fixed` y `sticky`, un scroll
-//! container anidado, capas con opacidad, sombras desenfocadas, texto y transformaciones.
+//! desplazamiento incremental (`raster::TiledFrame::scrolled`) dan exactamente los mismos
+//! píxeles que el raster en tiles entero en la misma posición: con elementos `fixed` y
+//! `sticky` (también en capa propia), un scroll container anidado, capas con opacidad,
+//! sombras desenfocadas, texto y transformaciones.
 //! Contra el raster de una pasada (`render_scrolled`) solo cambia el antialiasing de las curvas
 //! que cruzan el borde de un tile; el último test lo acota.
 
@@ -12,7 +13,7 @@ use bf_html::{ParseOptions, parse_document};
 use bf_infra::Url;
 use bf_infra::encoding::Encoding;
 use bf_layout::Size;
-use bf_paint::raster::{render_tiled, scroll_frame, set_raster_threads};
+use bf_paint::raster::{TiledFrame, render_tiled, set_raster_threads};
 use bf_paint::{PageContext, Pixmap, prepare_page_with_frames, render_scrolled};
 use bf_style::values::color::Rgba;
 
@@ -101,49 +102,113 @@ fn tiled(p: &bf_paint::Page, scale: f32, scroll: (f32, f32), threads: usize) -> 
         .unwrap_or_else(|| panic!("sin raster en tiles en {scroll:?} a escala {scale}"))
 }
 
+fn tiled_frame(p: &bf_paint::Page, scale: f32, scroll: (f32, f32)) -> TiledFrame {
+    TiledFrame::render(&p.display_list, VIEWPORT, scale, Rgba::WHITE, scroll)
+        .unwrap_or_else(|| panic!("sin raster en tiles en {scroll:?} a escala {scale}"))
+}
+
+/// Desplaza `frame` de `scroll` a cada paso de `steps` por el camino incremental y compara
+/// cada cuadro con el entero; devuelve cuántos cuadros llevaron los `sticky` en capa propia.
+fn scroll_steps(p: &bf_paint::Page, scale: f32, steps: &[f32]) -> usize {
+    let mut scroll = (0.0f32, 0.0f32);
+    set_raster_threads(1);
+    let mut frame = Some(tiled_frame(p, scale, scroll));
+    let mut layered = 0;
+    set_raster_threads(3);
+    for dy in steps {
+        let next = (0.0, (scroll.1 + dy).max(0.0));
+        // A escala 1 medio px CSS no es un px de dispositivo entero: no hay tiles, y desde
+        // un cuadro así no hay incremental.
+        if device_fraction(next.1, scale) {
+            assert!(render_tiled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next).is_none());
+            frame = None;
+            scroll = next;
+            continue;
+        }
+        set_raster_threads(1);
+        let full = tiled_frame(p, scale, next);
+        set_raster_threads(3);
+        let had_layers = frame.as_ref().is_some_and(TiledFrame::has_layers);
+        let fast = frame
+            .take()
+            .and_then(|f| f.scrolled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next));
+        let far = (next.1 - scroll.1).abs() >= VIEWPORT.height;
+        // Si los `sticky` pasan de ir en capa propia a no ir (o al revés) no hay incremental.
+        let switch = had_layers != full.has_layers();
+        if device_fraction(scroll.1, scale) || far || switch {
+            assert!(fast.is_none(), "{scroll:?} → {next:?}");
+            frame = Some(full);
+        } else {
+            let fast = fast.unwrap_or_else(|| panic!("sin incremental {scroll:?} → {next:?}"));
+            assert_eq!(fast.has_layers(), full.has_layers(), "{next:?}");
+            if fast.has_layers() {
+                layered += 1;
+            }
+            if let Some(d) = diff(&fast.to_pixmap(), &full.to_pixmap()) {
+                panic!("scroll {next:?} a escala {scale}: {d}");
+            }
+            // Se sigue desde el incremental: así las capas `sticky` se reutilizan varios
+            // cuadros seguidos.
+            frame = Some(fast);
+        }
+        scroll = next;
+    }
+    layered
+}
+
 #[test]
 fn incremental_scroll_matches_tiled_raster() {
     let p = page(PAGE);
     for scale in [1.0f32, 2.0] {
-        let mut scroll = (0.0f32, 0.0f32);
-        let mut frame = tiled(&p, scale, scroll, 1);
-        set_raster_threads(3);
         // Hacia abajo y hacia arriba, con pasos de varios tamaños.
-        for dy in [
-            7.0, 40.0, 23.5, 120.0, 1.0, -33.0, -80.0, 65.0, -12.5, 200.0, -64.0,
-        ] {
-            let next = (0.0, (scroll.1 + dy).max(0.0));
-            // A escala 1 medio px CSS no es un px de dispositivo entero: no hay tiles, y desde
-            // un cuadro así no hay incremental.
-            if device_fraction(next.1, scale) {
-                assert!(
-                    render_tiled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next).is_none()
-                );
-                frame = render_scrolled(&p.display_list, VIEWPORT, scale, Rgba::WHITE, next);
-                scroll = next;
-                continue;
-            }
-            let full = tiled(&p, scale, next, 1);
-            let fast = scroll_frame(
-                &p.display_list,
-                &frame,
-                scroll,
-                VIEWPORT,
-                scale,
-                Rgba::WHITE,
-                next,
-            );
-            if device_fraction(scroll.1, scale) || (next.1 - scroll.1).abs() >= VIEWPORT.height {
-                assert!(fast.is_none(), "{scroll:?} → {next:?}");
-            } else {
-                let fast = fast.unwrap_or_else(|| panic!("sin incremental {scroll:?} → {next:?}"));
-                if let Some(d) = diff(&fast, &full) {
-                    panic!("scroll {next:?} a escala {scale}: {d}");
-                }
-            }
-            frame = full;
-            scroll = next;
-        }
+        scroll_steps(
+            &p,
+            scale,
+            &[
+                7.0, 40.0, 23.5, 120.0, 1.0, -33.0, -80.0, 65.0, -12.5, 200.0, -64.0,
+            ],
+        );
+    }
+}
+
+/// Como el índice de Wikipedia: un `sticky` dentro de una columna con `overflow: hidden`, y
+/// otro translúcido y redondeado sobre el texto. Van en capa propia (la capa se reutiliza
+/// mientras se desplaza) y dan los mismos píxeles que el cuadro entero en cada posición.
+const STICKY_PAGE: &str = "<!doctype html><style>
+  body { margin: 0; font: 14px sans-serif }
+  header { height: 40px; background: #eee; font-size: 22px }
+  .wrap { display: flex }
+  .col { width: 90px; overflow: hidden; flex: none }
+  nav { position: sticky; top: 0; padding: 4px }
+  nav a { display: block; color: #36c; margin: 2px 0 }
+  main { flex: 1; padding: 0 8px }
+  .side { position: sticky; top: 6px; height: 30px; background: rgba(255, 200, 0, .7);
+          border-radius: 8px }
+</style><header>Título</header><div class=wrap><div class=col><nav>
+<a>Uno</a><a>Dos</a><a>Tres</a><a>Cuatro</a><a>Cinco</a><a>Seis</a></nav></div>
+<main><div class=side>pegajoso</div>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.</p>
+<p>Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip.</p>
+<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore.</p>
+<p>Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia.</p>
+<div style='height: 900px; background: linear-gradient(#fff, #9cf)'></div>
+<p>Final.</p></main></div>";
+
+#[test]
+fn sticky_layers_match_full_frame() {
+    let p = page(STICKY_PAGE);
+    for scale in [1.0f32, 2.0] {
+        let layered = scroll_steps(
+            &p,
+            scale,
+            &[
+                10.0, 20.0, 40.0, 40.0, 3.0, 40.0, -25.0, 100.0, 40.0, -60.0, 150.0, 40.0,
+            ],
+        );
+        assert!(
+            layered >= 8,
+            "los sticky deberían ir en capa propia (escala {scale}: {layered} cuadros)"
+        );
     }
 }
 
@@ -177,7 +242,8 @@ fn parallel_tiles_match_sequential_tiles() {
 }
 
 /// Contra el raster de una pasada: lo que no son curvas que cruzan el borde de un tile sale
-/// igual, y donde cambia es solo antialiasing (pocos píxeles, diferencia acotada).
+/// igual, y donde cambia es el antialiasing y el redondeo de componer la capa de un `sticky`
+/// translúcido (pocos píxeles, diferencia acotada).
 #[test]
 fn tiles_match_single_pass_up_to_antialiasing() {
     let rects = page(
@@ -207,8 +273,8 @@ fn tiles_match_single_pass_up_to_antialiasing() {
         let total = one.data().len();
         println!("escala {scale}: {n} canales distintos de {total}, diferencia máxima {max}");
         assert!(
-            n * 1000 < total,
-            "demasiados canales distintos: {n} de {total}"
+            n * 200 < total && max <= 32,
+            "demasiados canales distintos: {n} de {total} (máx. {max})"
         );
     }
 }
@@ -217,12 +283,9 @@ fn tiles_match_single_pass_up_to_antialiasing() {
 #[test]
 fn incremental_scroll_falls_back() {
     let p = page(PAGE);
-    let frame = tiled(&p, 1.0, (0.0, 0.0), 1);
-    let at = |prev: (f32, f32), next: (f32, f32), scale: f32| {
-        scroll_frame(
+    let at = |next: (f32, f32), scale: f32| {
+        tiled_frame(&p, 1.0, (0.0, 0.0)).scrolled(
             &p.display_list,
-            &frame,
-            prev,
             VIEWPORT,
             scale,
             Rgba::WHITE,
@@ -230,15 +293,12 @@ fn incremental_scroll_falls_back() {
         )
     };
     assert!(
-        at((0.0, 0.0), (0.0, 0.3), 1.0).is_none(),
+        at((0.0, 0.3), 1.0).is_none(),
         "px de dispositivo no enteros"
     );
-    assert!(at((0.0, 0.0), (5.0, 0.0), 1.0).is_none(), "horizontal");
-    assert!(
-        at((0.0, 0.0), (0.0, 500.0), 1.0).is_none(),
-        "más de un cuadro"
-    );
-    assert!(at((0.0, 0.0), (0.0, 10.0), 2.0).is_none(), "otra escala");
+    assert!(at((5.0, 0.0), 1.0).is_none(), "horizontal");
+    assert!(at((0.0, 500.0), 1.0).is_none(), "más de un cuadro");
+    assert!(at((0.0, 10.0), 2.0).is_none(), "otra escala");
     let filtered = page("<div style='filter: blur(2px); height: 50px'></div>");
     assert!(
         render_tiled(
