@@ -272,3 +272,231 @@ impl DisplayList {
         self.items.push(item);
     }
 }
+
+// --- E4: lo que depende del scroll (desplazamiento incremental y raster por bandas) ---
+
+/// Un grupo `sticky` del viewport: su rectángulo (px CSS de página, sin el desplazamiento
+/// `sticky`) y lo que hace falta para saber dónde se pinta con cada scroll.
+#[derive(Debug, Clone, Copy)]
+pub struct StickyGroup {
+    pub rect: Rect,
+    pub constraints: StickyConstraints,
+    pub applied: (f32, f32),
+    pub viewport: Size,
+}
+
+/// Lo que necesitan el desplazamiento incremental y el raster por bandas
+/// ([`crate::raster::scroll_frame`], [`crate::raster::render_parallel`]).
+#[derive(Debug, Clone, Default)]
+pub struct ScrollInfo {
+    /// Cuántos px CSS alrededor de un tile hay que rasterizar para que los desenfoques se vean
+    /// continuos de un tile al siguiente (leen píxeles vecinos).
+    pub margin: f32,
+    /// El desenfoque más grande de la lista (px CSS; 0 si no hay).
+    pub blur: f32,
+    /// Lo que pinta cada grupo `fixed`, en px CSS del viewport (no se mueve con el scroll).
+    pub fixed: Vec<Rect>,
+    /// Los grupos `sticky` del viewport (se mueven distinto que la página).
+    pub sticky: Vec<StickyGroup>,
+}
+
+/// Una transformación afín `[a, b, c, d, e, f]` (como `matrix()`).
+type Affine = [f32; 6];
+
+const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+fn concat(m: &Affine, n: &Affine) -> Affine {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
+}
+
+fn map_rect(m: &Affine, r: &Rect) -> Rect {
+    let pts = [
+        (r.x, r.y),
+        (r.x + r.width, r.y),
+        (r.x, r.y + r.height),
+        (r.x + r.width, r.y + r.height),
+    ]
+    .map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in pts {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+
+fn union(a: Option<Rect>, b: Rect) -> Rect {
+    match a {
+        None => b,
+        Some(a) => {
+            let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+            let x1 = (a.x + a.width).max(b.x + b.width);
+            let y1 = (a.y + a.height).max(b.y + b.height);
+            Rect::new(x0, y0, x1 - x0, y1 - y0)
+        }
+    }
+}
+
+fn inflate(r: &Rect, d: f32) -> Rect {
+    Rect::new(r.x - d, r.y - d, r.width + 2.0 * d, r.height + 2.0 * d)
+}
+
+/// Lo que puede pintar `item` (px CSS en sus coordenadas), con margen para el antialiasing.
+/// `None`: no pinta nada por sí mismo (recortes, capas, transformaciones).
+pub(crate) fn item_bounds(item: &DisplayItem) -> Option<Rect> {
+    let r = match item {
+        DisplayItem::Rect { rect, .. }
+        | DisplayItem::Border { rect, .. }
+        | DisplayItem::Image { rect, .. }
+        | DisplayItem::Widget { rect, .. }
+        | DisplayItem::Line { rect, .. } => *rect,
+        DisplayItem::BackgroundImage { area, .. } | DisplayItem::Gradient { area, .. } => *area,
+        DisplayItem::BoxShadow { rect, shadow, .. } => inflate(
+            rect,
+            shadow.blur * 2.0
+                + shadow.spread.abs()
+                + shadow.offset.0.abs().max(shadow.offset.1.abs()),
+        ),
+        DisplayItem::Text {
+            glyphs,
+            size,
+            origin,
+            ..
+        } => {
+            let (mut x0, mut x1, mut y0, mut y1) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for g in glyphs {
+                x0 = x0.min(g.x);
+                x1 = x1.max(g.x);
+                y0 = y0.min(g.y);
+                y1 = y1.max(g.y);
+            }
+            Rect::new(
+                origin.0 + x0 - size,
+                origin.1 + y0 - 2.0 * size,
+                x1 - x0 + 3.0 * size,
+                y1 - y0 + 3.0 * size,
+            )
+        }
+        DisplayItem::Path { ops, stroke, .. } => {
+            let mut b: Option<Rect> = None;
+            for op in ops {
+                let pts: &[(f32, f32)] = &match *op {
+                    PathOp::MoveTo(x, y) | PathOp::LineTo(x, y) => vec![(x, y)],
+                    PathOp::QuadTo(a, b, x, y) => vec![(a, b), (x, y)],
+                    PathOp::CubicTo(a, b, c, d, x, y) => vec![(a, b), (c, d), (x, y)],
+                    PathOp::Close => vec![],
+                };
+                for &(x, y) in pts {
+                    b = Some(union(b, Rect::new(x, y, 0.0, 0.0)));
+                }
+            }
+            inflate(&b?, stroke.map_or(0.0, |s| s.0))
+        }
+        DisplayItem::PushShadow { bounds, blur } => inflate(bounds, blur * 2.0),
+        _ => return None,
+    };
+    Some(inflate(&r, 2.0))
+}
+
+/// Analiza la lista para el raster en tiles y el desplazamiento incremental
+/// ([`crate::raster::render_tiled`]). `None` si algo lo impide: un `filter` (puede leer
+/// cualquier píxel de su capa, así que un tile no basta), un grupo `fixed` o `sticky` dentro
+/// de otro, o un `sticky` bajo una transformación que no es una traslación (no se sabe dónde
+/// queda con otro scroll). Esas listas se rasterizan enteras, de una pasada.
+pub fn scroll_info(dl: &DisplayList) -> Option<ScrollInfo> {
+    enum Group {
+        Fixed,
+        Sticky(StickyConstraints, (f32, f32), Size),
+    }
+    let mut info = ScrollInfo::default();
+    let mut blur: f32 = 0.0;
+    let mut stack: Vec<Affine> = vec![IDENTITY];
+    // El grupo abierto: su clase, la profundidad de la pila al abrirlo y lo que pinta.
+    let mut group: Option<(Group, usize, Option<Rect>)> = None;
+    for item in &dl.items {
+        let top = *stack.last().unwrap_or(&IDENTITY);
+        match item {
+            DisplayItem::PopEffect(fx) if fx.filter.is_some() => return None,
+            DisplayItem::BoxShadow { shadow, .. } => blur = blur.max(shadow.blur),
+            DisplayItem::PushShadow { blur: b, .. } => blur = blur.max(*b),
+            _ => {}
+        }
+        match item {
+            DisplayItem::PushTransform { dx, dy } => {
+                stack.push(concat(&top, &[1.0, 0.0, 0.0, 1.0, *dx, *dy]));
+            }
+            DisplayItem::PushMatrix(m) => stack.push(concat(&top, m)),
+            DisplayItem::PushFixed => {
+                if group.is_some() {
+                    return None;
+                }
+                stack.push(IDENTITY);
+                group = Some((Group::Fixed, stack.len(), None));
+            }
+            DisplayItem::PushSticky {
+                constraints,
+                applied,
+                viewport,
+            } => {
+                if group.is_some() || top[0] != 1.0 || top[1] != 0.0 || top[2] != 0.0 {
+                    return None;
+                }
+                if top[3] != 1.0 {
+                    return None;
+                }
+                stack.push(top);
+                group = Some((
+                    Group::Sticky(*constraints, *applied, *viewport),
+                    stack.len(),
+                    None,
+                ));
+            }
+            DisplayItem::PopTransform | DisplayItem::PopFixed | DisplayItem::PopSticky => {
+                if let Some((_, depth, _)) = &group
+                    && *depth == stack.len()
+                {
+                    let (kind, _, rect) = group.take().expect("grupo abierto");
+                    if let Some(rect) = rect {
+                        match kind {
+                            Group::Fixed => info.fixed.push(rect),
+                            Group::Sticky(constraints, applied, viewport) => {
+                                info.sticky.push(StickyGroup {
+                                    rect,
+                                    constraints,
+                                    applied,
+                                    viewport,
+                                });
+                            }
+                        }
+                    }
+                }
+                if stack.len() > 1 {
+                    stack.pop();
+                }
+            }
+            other => {
+                if let (Some((_, _, acc)), Some(b)) = (&mut group, item_bounds(other)) {
+                    *acc = Some(union(*acc, map_rect(&top, &b)));
+                }
+            }
+        }
+    }
+    if group.is_some() {
+        return None;
+    }
+    // σ = blur / 2: tres σ (1,5 × blur) alcanzan para el desenfoque; el resto cubre el
+    // antialiasing de lo que la banda corta y las regiones de sombra recortadas al lienzo
+    // (medido: hasta 15 filas con un `text-shadow` de 3 px).
+    info.margin = blur * 3.0 + 16.0;
+    info.blur = blur;
+    Some(info)
+}

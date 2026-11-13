@@ -639,3 +639,24 @@ fn supports_callback() {
     assert!(bf_style::is_supported("color", &v("var(--x)")));
     assert!(bf_style::is_supported("--anything", &v("{}")));
 }
+
+/// E4 (pedido de E5): con `font-family: monospace` sola, `medium` vale 13 px y las palabras
+/// clave escalan igual; un tamaño heredado o relativo (`em`, `%`) de una palabra clave sigue esa
+/// razón, y una longitud explícita no cambia (como en Gecko y Blink).
+#[test]
+fn monospace_medium_is_13px() {
+    let page = "<!DOCTYPE html><style>
+        #m { font-family: monospace } #s { font-family: monospace; font-size: small }
+        #e { font-size: 2em } #p { font-size: 50% } #px { font-family: monospace; font-size: 20px }
+        #two { font-family: monospace, serif } #back { font-family: serif }
+      </style><div id=m><p id=e>x</p><p id=p>x</p><p id=back>x</p></div>
+      <div id=s>x</div><div id=px>x</div><div id=two>x</div>";
+    let size = |sel: &str| computed(page, sel, "font-size");
+    assert_eq!(size("#m"), "13px");
+    assert_eq!(size("#e"), "26px");
+    assert_eq!(size("#p"), "6.5px");
+    assert_eq!(size("#back"), "16px");
+    assert_eq!(size("#s"), "11.556px");
+    assert_eq!(size("#px"), "20px");
+    assert_eq!(size("#two"), "16px");
+}

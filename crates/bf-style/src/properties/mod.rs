@@ -86,6 +86,11 @@ macro_rules! longhands {
             /// `display` antes de la blockificación (para la posición estática de las cajas
             /// absolutas, CSS Position 3 §4.3).
             pub original_display: types::Display,
+            /// E4: si el `font-size` sale de una palabra clave (`medium`…, heredada o escalada
+            /// con `em`, `%`, `smaller`, `larger`), su factor respecto de `medium`. El tamaño
+            /// de `medium` depende de la familia genérica: 13 px con `monospace` sola, como en
+            /// los navegadores (CSS Fonts 4 §2.5 deja el tamaño de las palabras clave al agente).
+            pub font_size_keyword: Option<f32>,
         }
 
         /// La tabla de longhands, indexada por `LonghandId as usize`.
@@ -127,6 +132,7 @@ macro_rules! longhands {
                 $($field: match next() { Value::$id(v) => v, _ => unreachable!() },)+
                 custom: Arc::new(CustomProperties::new()),
                 original_display: types::Display::Inline,
+                font_size_keyword: Some(1.0),
             }
         }
     };
