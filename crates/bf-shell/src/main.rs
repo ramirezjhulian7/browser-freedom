@@ -13,6 +13,7 @@ mod find;
 mod history;
 mod internal;
 mod load;
+mod preload;
 mod profile;
 mod reftest_js;
 mod restore;

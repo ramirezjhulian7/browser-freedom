@@ -574,7 +574,11 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
     let started = crate::bom::performance_observer::now_ms(agent);
     let req = crate::net::NetRequest {
         url,
-        options: bf_net::RequestOptions::default(),
+        // E6: el *destination* `image` (Fetch §2.2.5, HTML §4.8.4.3.5 "update the image data").
+        options: bf_net::RequestOptions {
+            destination: Some(bf_infra::Destination::Image),
+            ..Default::default()
+        },
     };
     crate::net::start(
         agent,

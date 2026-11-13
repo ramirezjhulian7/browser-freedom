@@ -340,6 +340,7 @@ fn preflight(
             referrer_policy: bf_net::ReferrerPolicy::parse(&p.referrer_policy).unwrap_or_default(),
             // E6: el preflight no se guarda ni se busca en la caché HTTP (OPTIONS).
             cache: bf_net::CacheMode::NoStore,
+            ..Default::default()
         },
     };
     let res = backend.fetch(&req)?;
@@ -568,6 +569,7 @@ pub fn main_fetch(
                 referrer_policy: bf_net::ReferrerPolicy::parse(&p.referrer_policy)
                     .unwrap_or_default(),
                 cache: p.cache,
+                ..Default::default()
             },
         };
         let mut sink = HopSink {

@@ -7,6 +7,7 @@
 //! su hilo y no cuentan.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Lo acumulado desde el último [`take`].
@@ -78,4 +79,64 @@ pub(crate) fn count(connection: bool) {
             t.requests += 1;
         }
     });
+}
+
+/// La caché HTTP en disco, sumada en todos los hilos desde el último [`take_disk`]: lecturas
+/// de entradas (las que hace la precarga aparte), escrituras y recortes de la carpeta.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DiskTimings {
+    pub reads: u64,
+    pub read: Duration,
+    pub read_bytes: u64,
+    /// Lecturas hechas por la precarga mientras se validaba el documento.
+    pub warm_reads: u64,
+    pub warm: Duration,
+    pub writes: u64,
+    pub write: Duration,
+    /// Escrituras del hilo de la caché (las actualizaciones por 304), fuera del camino.
+    pub bg_writes: u64,
+    pub bg_write: Duration,
+}
+
+static DISK: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+
+/// Índices de [`DISK`].
+#[derive(Clone, Copy)]
+pub(crate) enum Disk {
+    Reads = 0,
+    ReadNanos = 1,
+    ReadBytes = 2,
+    WarmReads = 3,
+    WarmNanos = 4,
+    Writes = 5,
+    WriteNanos = 6,
+    BgWrites = 7,
+    BgWriteNanos = 8,
+}
+
+/// Suma `n` al contador `c`.
+pub(crate) fn disk_add(c: Disk, n: u64) {
+    DISK[c as usize].fetch_add(n, Ordering::Relaxed);
+}
+
+/// Suma una operación de disco que tardó `d` (contador `count` y tiempo `nanos`).
+pub(crate) fn disk_op(count: Disk, nanos: Disk, d: Duration) {
+    disk_add(count, 1);
+    disk_add(nanos, u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+}
+
+/// Lo acumulado en disco desde la última vez (y empieza de cero).
+pub fn take_disk() -> DiskTimings {
+    let get = |c: Disk| DISK[c as usize].swap(0, Ordering::Relaxed);
+    DiskTimings {
+        reads: get(Disk::Reads),
+        read: Duration::from_nanos(get(Disk::ReadNanos)),
+        read_bytes: get(Disk::ReadBytes),
+        warm_reads: get(Disk::WarmReads),
+        warm: Duration::from_nanos(get(Disk::WarmNanos)),
+        writes: get(Disk::Writes),
+        write: Duration::from_nanos(get(Disk::WriteNanos)),
+        bg_writes: get(Disk::BgWrites),
+        bg_write: Duration::from_nanos(get(Disk::BgWriteNanos)),
+    }
 }
