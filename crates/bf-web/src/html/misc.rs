@@ -378,9 +378,12 @@ fn img_complete(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     // E2: con petición, `complete` es "no está pendiente" (disponible o rota).
     if let Some(state) = super::legacy_factories::image_state(agent, n) {
-        return Ok(Value::Boolean(
-            state != super::legacy_factories::ImageState::Pending,
-        ));
+        // Pendiente o aplazada (`loading=lazy`, sin pedir todavía): no está completa.
+        return Ok(Value::Boolean(!matches!(
+            state,
+            super::legacy_factories::ImageState::Pending
+                | super::legacy_factories::ImageState::Deferred
+        )));
     }
     let src = attr_value(agent, n, "src");
     let srcset = attr_value(agent, n, "srcset");

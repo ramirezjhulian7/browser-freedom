@@ -159,7 +159,13 @@ pub enum ImageState {
     Pending,
     Available,
     Broken,
+    /// E2: `loading=lazy` lejos del viewport: todavía no se pidió (HTML §4.8.4.3.9).
+    Deferred,
 }
+
+/// "Lazy load root margin" (HTML §4.8.4.3.9; la cifra la decide el navegador): se piden las
+/// imágenes perezosas a menos de esto del viewport, como hace Chrome con buena red.
+const LAZY_MARGIN: f32 = 1250.0;
 
 /// Las peticiones de imagen de la ventana: la última de cada elemento (una nueva aborta la
 /// anterior, §4.8.4.3.5 paso 13: solo la vigente dispara eventos), su estado y las promesas
@@ -172,6 +178,9 @@ struct ImageRequests {
     /// La URL de la petición en curso de cada elemento.
     urls: HashMap<NodeRef, String>,
     decodes: HashMap<NodeRef, Vec<HostHandle>>,
+    /// E2: los `<img loading=lazy>` aplazados, que [`check_lazy_images`] pide al acercarse al
+    /// viewport.
+    lazy: Vec<NodeRef>,
 }
 
 /// El estado de la petición actual de `n` (`None` si nunca se pidió su imagen).
@@ -302,12 +311,18 @@ pub(crate) fn resume_load(agent: &mut Agent, realm: RealmId) {
         return;
     }
     // Con el host que corresponde: el de la ventana (`bom::script`, en el navegador) o el de
-    // las páginas sin ventana (`html::scripting`, el runner de testharness).
+    // las páginas sin ventana (`html::scripting`, el runner de testharness); en el realm de esa
+    // ventana (puede llegar desde la tarea de un marco).
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
     if crate::bom::script::script_env(agent, realm).is_some() {
         crate::bom::script::with_parser(agent, realm, |p, host| p.run_tasks(host));
     } else {
         super::scripting::with_parser(agent, realm, |p, host| p.run_tasks(host));
     }
+    agent.current_realm = saved;
+    // Si es un marco y su documento acaba de terminar, el `load` de su `<iframe>`.
+    crate::bom::frames::frame_document_loaded(agent, realm);
 }
 
 /// Rechaza con `EncodingError` las promesas de `decode()` de `n` (cambió la petición o se
@@ -345,7 +360,8 @@ pub fn img_decode(agent: &mut Agent, n: NodeRef) -> Value {
     }
     let p = agent.new_internal_promise();
     let ok = match image_state(agent, n) {
-        Some(ImageState::Pending) => {
+        // Pendiente o aplazada (`loading=lazy`): espera a que termine.
+        Some(ImageState::Pending | ImageState::Deferred) => {
             let h = agent.host_pin(Value::Object(p));
             let realm = WebContextHandle::current(agent).realm;
             let mut reqs = agent
@@ -380,8 +396,80 @@ pub fn img_decode(agent: &mut Agent, n: NodeRef) -> Value {
 /// - si no, se busca y se decodifica (demorando el `load` del documento) y según el
 ///   resultado se dispara `load` o `error`.
 pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
+    update_image_data_with(agent, n, None);
+}
+
+/// "Will lazy load element steps" (HTML §4.8.4.3.9): `loading=lazy` en un `<img>` conectado
+/// del documento de la ventana, con scripts (si no, las imágenes perezosas cargan como las
+/// demás).
+fn will_lazy_load(agent: &Agent, n: NodeRef) -> bool {
     let realm = WebContextHandle::current(agent).realm;
-    let url = super::misc::selected_source(agent, n).map(|(u, _)| u);
+    n.doc == 0
+        && !crate::bom::frames::scripting_disabled(agent, realm)
+        && with_doc(agent, n.doc, |d| {
+            d.is_connected(n.node)
+                && d.element(n.node)
+                    .and_then(|e| e.attr("loading"))
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("lazy"))
+        })
+}
+
+/// E2: pide las imágenes `loading=lazy` aplazadas de la ventana `realm` cuya caja está a menos
+/// de [`LAZY_MARGIN`] del viewport ("lazy load intersection observer", HTML §4.8.4.3.9). Las
+/// que ya no son perezosas (cambió `loading`) también; las que no se pintan (`display: none`)
+/// siguen esperando. Lo llama `bom::frames::sync_frames`, el punto en que el bucle de eventos
+/// queda sin trabajo.
+pub fn check_lazy_images(agent: &mut Agent, realm: RealmId) {
+    let waiting = agent
+        .realm_data::<ImageRequests>(realm)
+        .map(|r| r.lazy.clone())
+        .unwrap_or_default();
+    if waiting.is_empty() {
+        return;
+    }
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let viewport = crate::cssom::window_metrics(agent).viewport;
+    let mut ready = Vec::new();
+    for n in waiting {
+        let near = !will_lazy_load(agent, n)
+            // Una caja vacía (la imagen sin cargar mide 0×0) también cuenta; sin caja, no.
+            || crate::cssom::view::client_rect(agent, n).is_some_and(|(x, y, w, h)| {
+                x + w >= -LAZY_MARGIN
+                    && y + h >= -LAZY_MARGIN
+                    && x <= viewport.width + LAZY_MARGIN
+                    && y <= viewport.height + LAZY_MARGIN
+            });
+        if near {
+            ready.push(n);
+        }
+    }
+    if let Some(r) = agent.realm_data_mut::<ImageRequests>(realm) {
+        r.lazy.retain(|n| !ready.contains(n));
+    }
+    for n in ready {
+        if image_state(agent, n) == Some(ImageState::Deferred) {
+            // Con la URL que se resolvió al aplazarla: la base del documento de entonces.
+            let url = agent
+                .realm_data::<ImageRequests>(realm)
+                .and_then(|r| r.urls.get(&n).cloned())
+                .and_then(|u| bf_infra::Url::parse(&u, None).ok());
+            update_image_data_with(agent, n, Some(url));
+        }
+    }
+    agent.current_realm = saved;
+}
+
+/// [`update_image_data`]. `resume`: una imagen perezosa que se pide ahora, con la URL que se
+/// resolvió al aplazarla (`None` dentro: la vuelve a elegir); sin `resume`, una imagen
+/// perezosa se aplaza.
+fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<bf_infra::Url>>) {
+    let realm = WebContextHandle::current(agent).realm;
+    let may_defer = resume.is_none();
+    let url = match resume.flatten() {
+        Some(u) => Some(u),
+        None => super::misc::selected_source(agent, n).map(|(u, _)| u),
+    };
     let key = url.as_ref().map(|u| u.serialize(false));
     // La misma URL que la petición que sigue en curso: no se empieza otra (§4.8.4.3.5,
     // "if … urlString is the same as the pending request's current URL, return").
@@ -392,6 +480,29 @@ pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
             && r.urls.get(&n) == key.as_ref()
     });
     if same_pending {
+        return;
+    }
+    // `loading=lazy`: sin pedirla (ni demorar `load`) hasta que se acerque al viewport. La
+    // petición anterior, si la había, queda abortada.
+    // Una que ya está en la lista de imágenes disponibles no espera (el paso 7 va antes).
+    let available = key.as_ref().is_some_and(|k| {
+        agent
+            .realm_data::<super::misc::ImageSizes>(realm)
+            .is_some_and(|s| s.0.contains_key(k))
+    });
+    if may_defer && !available && key.is_some() && will_lazy_load(agent, n) {
+        let mut reqs = agent
+            .take_realm_data::<ImageRequests>(realm)
+            .unwrap_or_default();
+        reqs.current.remove(&n);
+        reqs.state.insert(n, ImageState::Deferred);
+        if let Some(k) = &key {
+            reqs.urls.insert(n, k.clone());
+        }
+        if !reqs.lazy.contains(&n) {
+            reqs.lazy.push(n);
+        }
+        agent.set_realm_data(realm, reqs);
         return;
     }
     // Una petición nueva: los `decode()` de la anterior se rechazan.
@@ -454,6 +565,10 @@ pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
         agent,
         req,
         Box::new(move |agent: &mut Agent, result: crate::net::NetResult| {
+            // La respuesta llega en el realm de la petición (el de un marco no es el de la
+            // ventana que corre el bucle de eventos).
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
             // Resource Timing: una entrada `img` por respuesta (no por error de red).
             if let (Some(start), Ok(r)) = (started, &result) {
                 let end = crate::bom::performance_observer::now_ms(agent).unwrap_or(start);
@@ -472,6 +587,7 @@ pub fn update_image_data(agent: &mut Agent, n: NodeRef) {
             };
             finish(agent, n, id, pin, outcome);
             release_delay(agent, realm, n);
+            agent.current_realm = saved;
         }),
     );
 }
@@ -589,7 +705,8 @@ fn set_state(agent: &mut Agent, realm: RealmId, n: NodeRef, id: u64, outcome: &O
 /// servir un formato que el motor pinta.
 fn image_size(r: &crate::net::NetResponse) -> Option<(u32, u32)> {
     let mime = r.headers.get("content-type");
-    match bf_image::decode(&r.body, mime.as_deref()) {
+    // E2: la caché del proceso, compartida con `bf-paint` (que la pinta): una decodificación.
+    match bf_image::decode_frames_shared(&r.body, mime.as_deref()) {
         Ok(img) => Some((img.width, img.height)),
         Err(bf_image::ImageError::Unsupported("image/svg+xml")) => {
             let svg = bf_svg::Svg::parse_bytes(&r.body).ok()?;

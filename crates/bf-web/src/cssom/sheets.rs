@@ -863,8 +863,11 @@ fn schedule_preload(agent: &mut Agent, n: NodeRef) {
         agent,
         req,
         Box::new(move |agent: &mut Agent, r: crate::net::NetResult| {
+            let saved = agent.current_realm;
+            agent.current_realm = realm;
             let ok = r.is_ok_and(|r| (200..300).contains(&r.status));
             fire(agent, ok);
+            agent.current_realm = saved;
         }),
     );
 }
