@@ -22,8 +22,10 @@
 pub mod computed;
 pub mod declaration;
 pub mod font_loading; // E5: CSS Font Loading 3
+pub mod intersection_observer; // E2: Intersection Observer
 pub mod media;
 pub mod namespace;
+pub mod resize_observer; // E2: Resize Observer
 pub mod sheets;
 pub mod style_decl;
 pub mod value;
@@ -118,6 +120,9 @@ pub struct CssomState {
     /// El desplazamiento de los elementos con overflow.
     pub element_scroll: HashMap<NodeRef, (f32, f32)>,
     pub provider: Option<Box<dyn LayoutProvider>>,
+    /// E2: sube cada vez que se olvida la maqueta por un cambio que no sube la versión del
+    /// documento (una imagen que terminó de cargar), para [`RenderingKey`].
+    pub(crate) layout_epoch: u64,
 }
 
 impl Default for CssomState {
@@ -137,6 +142,7 @@ impl Default for CssomState {
             scroll_request: None,
             element_scroll: HashMap::new(),
             provider: None,
+            layout_epoch: 0,
         }
     }
 }
@@ -155,6 +161,12 @@ pub struct CssomClasses {
     pub rect_read_only: bf_js::host::HostClassId,
     pub rect: bf_js::host::HostClassId,
     pub rect_list: bf_js::host::HostClassId,
+    /// E2: Intersection Observer y Resize Observer.
+    pub intersection_observer: bf_js::host::HostClassId,
+    pub intersection_observer_entry: bf_js::host::HostClassId,
+    pub resize_observer: bf_js::host::HostClassId,
+    pub resize_observer_entry: bf_js::host::HostClassId,
+    pub resize_observer_size: bf_js::host::HostClassId,
 }
 
 /// Las clases del CSSOM del agente.
@@ -172,6 +184,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             sheets::register_classes(agent);
         let media_query_list = media::register_class(agent);
         let (rect_read_only, rect, rect_list) = view::register_classes(agent);
+        let (intersection_observer, intersection_observer_entry) =
+            intersection_observer::register_classes(agent);
+        let (resize_observer, resize_observer_entry, resize_observer_size) =
+            resize_observer::register_classes(agent);
         agent.set_embedder_data(CssomClasses {
             style_declaration,
             style_sheet,
@@ -184,6 +200,11 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
             rect_read_only,
             rect,
             rect_list,
+            intersection_observer,
+            intersection_observer_entry,
+            resize_observer,
+            resize_observer_entry,
+            resize_observer_size,
         });
         // Los partial interfaces sobre las clases del DOM.
         let dom = crate::dom::classes(agent).clone();
@@ -210,7 +231,87 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
 /// El estado del CSSOM del realm en curso.
 /// E2: olvida la geometría guardada (terminó de cargar una imagen y su caja cambia de tamaño).
 pub fn invalidate_layout(agent: &mut Agent) {
-    state(agent).layout = None;
+    let st = state(agent);
+    st.layout = None;
+    st.layout_epoch += 1;
+}
+
+// --- E2: los observadores de *update the rendering* ---
+
+/// Lo que determina la geometría de la ventana: si no cambió desde la última vez, los
+/// observadores (`IntersectionObserver`, `ResizeObserver`) no tienen nada nuevo que ver.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderingKey {
+    version: u64,
+    sheets: u64,
+    layout_epoch: u64,
+    viewport: (u32, u32),
+    scroll: (u32, u32),
+    dpr: u32,
+    element_scroll: u64,
+}
+
+pub(crate) fn rendering_key(agent: &Agent, realm: RealmId) -> RenderingKey {
+    let ctx = agent.realm_data::<crate::WebContext>(realm);
+    let version = ctx.map_or(0, |c| c.document().version());
+    let snap = ctx.and_then(|c| c.layout.as_ref());
+    let st = agent.realm_data::<CssomState>(realm);
+    let (viewport, scroll, dpr) = match (snap, st) {
+        (Some(s), Some(st)) if st.scroll_request.is_some() => {
+            (s.viewport, st.scroll, s.device_pixel_ratio)
+        }
+        (Some(s), _) => (s.viewport, s.scroll, s.device_pixel_ratio),
+        (None, Some(st)) => (st.viewport, st.scroll, st.device_pixel_ratio),
+        (None, None) => (Size::default(), (0.0, 0.0), 1.0),
+    };
+    let mut element_scroll = 0u64;
+    if let Some(st) = st {
+        for (n, (x, y)) in &st.element_scroll {
+            element_scroll = element_scroll
+                .wrapping_mul(31)
+                .wrapping_add(n.key().0 ^ u64::from(x.to_bits()) ^ (u64::from(y.to_bits()) << 32));
+        }
+    }
+    RenderingKey {
+        version,
+        sheets: sheets_generation(agent, realm),
+        layout_epoch: st.map_or(0, |s| s.layout_epoch),
+        viewport: (viewport.width.to_bits(), viewport.height.to_bits()),
+        scroll: (scroll.0.to_bits(), scroll.1.to_bits()),
+        dpr: dpr.to_bits(),
+        element_scroll,
+    }
+}
+
+/// E2: los pasos de los observadores en *update the rendering* (HTML §8.1.7.3) de la ventana
+/// `realm`, después de los callbacks de `requestAnimationFrame` y de maquetar: los de
+/// `ResizeObserver` (paso 14, Resize Observer §3.4.1) y "run the update intersection
+/// observations steps" (paso 19, Intersection Observer §3.2.8). Con navegador, si su maqueta
+/// del documento de ahora no llegó, esperan a ella (el navegador los corre en
+/// `Engine::set_layout`) en vez de maquetar a medio cargar.
+pub fn update_observations(agent: &mut Agent, realm: RealmId) {
+    if awaiting_shell_layout(agent, realm) {
+        return;
+    }
+    resize_observer::run_steps(agent, realm);
+    intersection_observer::update_observations(agent, realm);
+}
+
+/// E2: ¿la ventana `realm` necesita un cuadro para sus observadores? (Una observación nueva, o
+/// cambió algo de lo que depende la geometría desde la última vez.)
+pub fn observations_pending(agent: &Agent, realm: RealmId) -> bool {
+    let any = agent
+        .realm_data::<intersection_observer::IoState>(realm)
+        .is_some()
+        || agent
+            .realm_data::<resize_observer::RoState>(realm)
+            .is_some();
+    if !any || awaiting_shell_layout(agent, realm) {
+        return false;
+    }
+    let key = rendering_key(agent, realm);
+    resize_observer::pending(agent, realm, &key)
+        || intersection_observer::pending(agent, realm, &key)
 }
 
 pub fn state(agent: &mut Agent) -> &mut CssomState {
@@ -444,6 +545,11 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     }
     let version = h.get(agent).document().version();
     let generation = sheets_generation(agent, h.realm);
+    // E2: para medir (`docs/rendimiento.md`): cada maqueta que hace el CSSOM por su cuenta,
+    // con su cascada si hace falta.
+    let traced = std::env::var_os("BF_TRACE")
+        .is_some()
+        .then(std::time::Instant::now);
     // E4: los estilos mostrados (con animaciones y transiciones) también son parte de la
     // clave: mientras algo se anima cambian sin que cambie el documento, y la geometría
     // (`getBoundingClientRect`, el valor resuelto de `width`…) debe seguirlos.
@@ -474,6 +580,12 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     };
     state(agent).provider = provider;
     view::restore_element_scroll(agent, &mut tree); // E12
+    if let Some(t) = traced {
+        eprintln!(
+            "perf maqueta del CSSOM: {:.1} ms (cascada y maqueta propias)",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     let tree = Arc::new(tree);
     let st = state(agent);
     st.layout = Some((version, generation, tree.clone()));
