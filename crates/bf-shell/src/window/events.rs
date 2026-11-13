@@ -469,9 +469,41 @@ pub fn handle(
                 ),
             );
         }
+        // HTML §4.10.21.2: con botón de envío, un `click` sintético en el botón por defecto
+        // (que lo envía como *submitter*, con su nombre y valor), salvo que esté desactivado;
+        // sin botón, el formulario se envía solo si tiene a lo sumo un campo que bloquea el
+        // envío implícito.
         UserInput::ImplicitSubmit { field } => {
             if let Some(form) = super::form_of(t.doc(), field) {
-                submit(&mut t, form, None, &mut out);
+                match super::default_button(t.doc(), form) {
+                    Some(button) => {
+                        let disabled = t
+                            .doc()
+                            .element(button)
+                            .is_some_and(|e| e.attr("disabled").is_some());
+                        if !disabled {
+                            t.doc_mut().take_activations();
+                            let click = mouse_event(
+                                "click",
+                                true,
+                                true,
+                                (0.0, 0.0),
+                                (0.0, 0.0),
+                                0,
+                                0,
+                                Mods::default(),
+                                0,
+                                None,
+                            );
+                            t.dispatch(EventTarget::Node(button), click);
+                            activations(&mut t, Mods::default(), &mut out);
+                        }
+                    }
+                    None if super::fields_blocking_implicit_submission(t.doc(), form) <= 1 => {
+                        submit(&mut t, form, None, &mut out);
+                    }
+                    None => {}
+                }
             }
         }
         UserInput::Focus(node) => focus(&mut t, state, node),
