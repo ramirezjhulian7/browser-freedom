@@ -24,7 +24,7 @@ use bf_infra::encoding::Encoding;
 use bf_infra::{ResourceLoader, Url};
 use bf_layout::{FragmentTree, Size};
 use bf_style::values::color::Rgba;
-use bf_style::{Resources, document_stylesheets, font_face_rules, style_document_with_sheets};
+use bf_style::{Resources, document_stylesheets, font_face_rules, style_document_parallel};
 
 pub use builder::{
     build_display_list, build_display_list_with_frames, build_display_list_with_images,
@@ -262,20 +262,32 @@ pub fn prepare_page_animated(
             encoding: ctx.encoding,
         }),
     );
+    // E4: cuántas hojas externas salieron de `bf_style::sheet_cache` y cuántas se parsearon.
+    if std::env::var_os("BF_TRACE").is_some() {
+        let st = bf_style::sheet_cache::take_stats();
+        eprintln!(
+            "perf hojas: {} de la caché, {} parseadas ({:.1} ms de parseo)",
+            st.hits,
+            st.parsed,
+            st.parse_time.as_secs_f64() * 1000.0
+        );
+    }
     let mut all: Vec<&Stylesheet> = sheets.iter().collect();
     all.extend(extra.iter().copied());
     let mut fonts = Fonts::new(db);
     fonts.add_font_faces(&font_face_rules(&all, &media), font_loader);
     let match_ctx = MatchContext::for_document(doc);
-    let metrics = bf_layout::StyleMetrics(&fonts);
     let cascade_start = Instant::now();
-    let styles = std::sync::Arc::new(style_document_with_sheets(
+    // E4: la cascada en varios hilos (`bf_style::style_document_parallel`, mismo resultado).
+    let sync_metrics = SyncMetrics(&fonts);
+    let styles = std::sync::Arc::new(style_document_parallel(
         doc,
         &sheets,
         extra,
         &media,
         &match_ctx,
-        Some(&metrics),
+        Some(&sync_metrics),
+        cascade_threads(),
     ));
     let cascade = cascade_start.elapsed();
     let shown = animate(&styles);
@@ -401,4 +413,31 @@ pub fn render_document(
 ) -> Pixmap {
     let page = prepare_page(doc, ctx, viewport);
     render(&page.display_list, viewport, scale, Rgba::WHITE)
+}
+
+/// E4: las métricas de `ex` y `ch` de la cascada sobre las fuentes de la página, que se
+/// pueden usar desde varios hilos (`Fonts` guarda sus cachés tras `Mutex`).
+struct SyncMetrics<'a>(&'a Fonts);
+
+impl bf_style::FontMetricsSource for SyncMetrics<'_> {
+    fn ex_ch(&self, style: &bf_style::ComputedStyle) -> (f32, f32) {
+        bf_style::FontMetricsSource::ex_ch(&bf_layout::StyleMetrics(self.0), style)
+    }
+}
+
+/// E4: los hilos de la cascada: `BF_CASCADE_THREADS` (1 = en orden, para medir) o los
+/// núcleos, hasta 4.
+fn cascade_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("BF_CASCADE_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .min(4)
+            })
+            .max(1)
+    })
 }
