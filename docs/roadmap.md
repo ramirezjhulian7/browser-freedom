@@ -47,7 +47,7 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 
 | Apartado | Criterio | Cifra actual | Meta | Fuente |
 |---|---|---|---|---|
-| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8150 / 8166 subtests (99.8 %), 236 documentos | 0 fallos | `pendiente/mac/e3.md`, ronda 6 |
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8155 / 8166 subtests (99.9 %), 236 documentos; los 11 que quedan necesitan cambios grandes o se contradicen entre sí | 0 fallos | `pendiente/mac/e3.md`, ciclo de cierre, ronda 2 |
 | 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 86 / 108 | pasan | `pendiente/mac/e5-flexbox-subconjuntos.md` |
 | 5 | WPT `html-aam` y `wai-aria` | 0 % y 21.8 % en `master`; 93.3 % y 91.8 % en `army/e1`, en integración | ≥ 50 % | `pendiente/mac/e1.md` de `army/e1`, ronda 5 |
 | 5 | Un lector de pantalla lee Wikipedia | no: el árbol de accesibilidad está a medias en `army/e1` y no se expone al sistema | lo lee | `pendiente/mac/e1.md` de `army/e1` |
@@ -232,12 +232,20 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   - En la ronda 6 de E6, sobre `master`, los reftests con JavaScript ejecutados subieron a
     387 / 402 (96.3 %) (`pendiente/mac/e6.md`, ronda 6). La cifra combinada no se volvió a
     medir.
-- **Parcial**: `html/syntax/parsing` **8150 / 8166 subtests (99.8 %)** en 236 documentos (E3
-  ronda 6, con las variantes `?file=…` de `html5lib_url`, `html5lib_write` y
-  `html5lib_write_single`, que antes no corrían: todas pasan). Quedan 16: custom elements que
-  mueven nodos durante el parseo (5), foster parenting (4), adoption agency entre documentos
-  (4) y "the end" (3). El árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0
-  fallos.
+- **Parcial**: `html/syntax/parsing` **8155 / 8166 subtests (99.9 %)** en 236 documentos (Mac,
+  2026-11-13, E3, `pendiente/mac/e3.md`, ciclo de cierre, ronda 2; 8150 en la ronda 6). Las
+  variantes `?file=…` de `html5lib_url`, `html5lib_write` y `html5lib_write_single` pasan
+  todas (5423 / 5423), y el árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0
+  fallos. Quedan 11:
+  - Construcción síncrona de custom elements y los *children changed steps* de un `script` en
+    mitad de un token (5). Las dos necesitan que el tree builder pueda llamar al host en mitad
+    de un paso; hoy solo lo hace entre tokens.
+  - Nodos que un script lleva a otro documento (4). Al adoptar se copia el nodo en la arena del
+    otro documento, y el parser sigue con el original.
+  - `DOMContentLoaded-defer.html` (1): pide lo contrario que
+    `DOMContentLoaded-defer-task-order.tentative.html`, que pasa.
+  - `adoption-agency-reparenting-pagehide.tentative.html` (1): espera un `pagehide` que el
+    estándar no dispara.
 - **Falta**: `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`. En el runner de reftests con
   JavaScript, los errores de todos los grupos bajaron de 141 a 114 con CSS Font Loading
   (`pendiente/mac/e5.md`, ronda 7). Siguen faltando `Element.animate()` y algunos `load`

@@ -77,34 +77,43 @@ cualquier programa del Mac.
 
 ### Tu privacidad
 
-- El historial existe solo mientras Freedom está abierto y se borra al cerrarlo. Las cookies
-  de sesión también se borran al cerrar; las cookies persistentes (las que el sitio guarda con
-  fecha de caducidad) se conservan hasta que caducan, como en cualquier navegador, así que
+- El historial se conserva al cerrar Freedom. Puedes borrarlo desde la página del historial
+  (`Ctrl+H`, `⌘Y` en macOS): la última hora, el día de hoy o todo.
+- Las cookies de sesión se borran al cerrar. Las cookies persistentes (las que el sitio guarda
+  con fecha de caducidad) se conservan hasta que caducan, como en cualquier navegador, así que
   algunas sesiones iniciadas en los sitios siguen abiertas al volver.
 - Freedom guarda en tu equipo, como cualquier navegador:
-  - las cookies persistentes y la lista de sitios que exigen HTTPS (HSTS), en la carpeta del
-    perfil (`cookies.txt`, `hsts.txt`);
+  - en la carpeta del perfil:
+    - el historial, los marcadores, las descargas, las opciones y las ventanas y pestañas
+      abiertas, que vuelven a abrirse al arrancar (se puede desactivar en las opciones);
+    - las cookies persistentes y la lista de sitios que exigen HTTPS (HSTS), en
+      `cookies.txt` y `hsts.txt`;
   - la caché de páginas e imágenes descargadas (hasta 512 MB);
   - el almacenamiento local de los sitios (`localStorage` e IndexedDB).
 
   Las carpetas de cada sistema están en [Plataformas](#plataformas).
 
   Para borrar todo eso, elimina esas carpetas con Freedom cerrado. Fuera de eso, Freedom solo
-  escribe archivos cuando tú lo pides, como al guardar una imagen.
+  escribe archivos cuando tú lo pides, como al guardar una imagen o descargar un archivo.
 - No envía datos de uso: solo se conecta a los sitios que visitas (y a Google cuando buscas).
 - Se presenta ante los sitios como lo que es, Freedom: no se hace pasar por Chrome ni por
   otro navegador.
 
 ### Qué funciona y qué todavía no
 
-- **Funciona:** páginas hechas con HTML y CSS, con su texto, imágenes PNG, JPEG, GIF y APNG
-  animados, WebP, BMP, ICO y SVG, tablas y la mayoría de los diseños (también texto de derecha
-  a izquierda, como árabe y hebreo); enlaces, pestañas, atrás y adelante; formularios simples
-  (buscar, escribir y enviar); zoom; copiar y pegar; los scripts de las páginas, con buena
-  parte de las funciones del navegador que usan.
-- **Todavía no:** parte de las funciones de JavaScript que usan los sitios, animaciones y
-  transformaciones de CSS, video y audio, imágenes AVIF, favoritos, historial que se conserve
-  al cerrar y descargas de archivos. El plan está en
+- **Funciona:**
+  - **Páginas:** HTML y CSS, con su texto, tablas y la mayoría de los diseños, incluido el
+    texto de derecha a izquierda (árabe, hebreo) y el vertical (japonés, chino).
+  - **Imágenes:** PNG, JPEG, GIF y APNG animados, WebP, BMP, ICO y SVG.
+  - **Movimiento:** animaciones, transiciones y transformaciones de CSS.
+  - **Scripts:** los de las páginas, con buena parte de las funciones del navegador que usan.
+  - **Navegación:** enlaces, pestañas y varias ventanas, atrás y adelante, buscar en la
+    página, zoom, y copiar y pegar.
+  - **Formularios:** buscar, escribir y enviar.
+  - **Lo que se guarda:** historial, marcadores, descargas de archivos y abrir otra vez las
+    pestañas de la última vez.
+- **Todavía no:** parte de las funciones de JavaScript que usan los sitios, video y audio
+  (no se reproducen), imágenes AVIF e imprimir. El plan está en
   [`docs/roadmap.md`](docs/roadmap.md).
 
 ### ¿Algo no funciona?
@@ -130,7 +139,7 @@ Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, 
 historial, scroll y zoom.
 
 Las **fases 2 a 4** cumplen 43 de sus 45 criterios. Faltan dos:
-- `html/syntax/parsing` sin ningún fallo; está en 99.8 %.
+- `html/syntax/parsing` sin ningún fallo; está en 99.9 %.
 - Los reftests de css-flexbox con palabras clave de tamaño; pasan 86 de 108.
 
 Lo que ya está:
@@ -158,7 +167,7 @@ Sus recuentos son los de la última corrida con resumen y no se han vuelto a ano
 |---|---|---|---|---|
 | Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) | `cargo test -p bf-html --test html5lib_tokenizer` |
 | Tree construction | HTML §13.2.6, §13.4 | árboles de WPT `html/syntax/parsing`, sin JavaScript | **3900** pasan, 0 fallan (4 omitidos) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
-| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8150 / 8166** subtests (99.8 %) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
+| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8155 / 8166** subtests (99.9 %) | [`docs/roadmap.md`](docs/roadmap.md), 2.3 |
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) | `cargo test -p bf-css --test css_parsing_tests` |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan; los 7 casos de `percent-encoding.json` también pasan (Mac) | `cargo test -p bf-url --test wpt_url`; [`docs/roadmap.md`](docs/roadmap.md), 3.5 |
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, Transforms, Writing Modes, SVG 2… | WPT reftests (30 grupos) | **9935 / 12 548 ejecutables (79.2 %)** | [`docs/wpt-status.md`](docs/wpt-status.md), "Reftests en macOS" |

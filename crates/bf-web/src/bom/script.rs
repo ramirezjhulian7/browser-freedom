@@ -583,6 +583,56 @@ pub fn dispatch_trusted(
     r
 }
 
+/// E3: `pageshow` al final de "the end" (HTML §13.2.7, después del `load` de la ventana):
+/// "fire a page transition event" `pageshow` en el `Window` de `realm` con `persisted` falso.
+/// Es un `PageTransitionEvent` de confianza que burbujea y es cancelable (como en los
+/// navegadores, whatwg/html#6794) y se despacha con el *legacy target override flag*: su
+/// `target` es el documento. El documento de la ventana (o el parser que lo tiene) tiene que
+/// estar en el contexto.
+pub fn fire_pageshow(agent: &mut Agent, realm: RealmId) {
+    use bf_dom::events::{Event, EventInit, EventTarget};
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let class = crate::dom::classes(agent).page_transition_event;
+    let init = EventInit {
+        bubbles: true,
+        cancelable: true,
+        composed: false,
+    };
+    let mut event = Event::new("pageshow", init);
+    event.is_trusted = true;
+    let o = crate::dom::events::create_event_object(
+        agent,
+        crate::dom::events::EventIface::Class(class),
+        Rc::new(RefCell::new(event)),
+        0,
+    );
+    // Los dos slots de todo evento y el de `persisted` (como el constructor).
+    if let Some(s) = agent.host_slots_mut(o) {
+        s.push(Value::Boolean(false));
+    }
+    let root = WebContextHandle { realm }.get_mut(agent).doc_mut(0).root();
+    let pin = agent.host_pin(Value::Object(o));
+    let r = crate::dom::events::dispatch_js_event_with_override(
+        agent,
+        0,
+        EventTarget::Window,
+        o,
+        false,
+        Some(EventTarget::Node(root)),
+    );
+    agent.host_unpin(pin);
+    if let Err(Throw::Value(e)) = r {
+        agent.report_exception(&e);
+    }
+    if agent.frames.is_empty()
+        && let Err(Throw::Value(e)) = agent.perform_microtask_checkpoint()
+    {
+        agent.report_exception(&e);
+    }
+    agent.current_realm = saved;
+}
+
 /// Despacha un `WheelEvent` de confianza (UI Events §5.4.3: `deltaMode` `DOM_DELTA_PIXEL` y
 /// los deltas en px) en `target` del documento de `realm`; `false` si se canceló. `event`
 /// trae los datos de `MouseEvent`.
@@ -753,6 +803,14 @@ impl bf_html::ScriptHost for WebScripts<'_> {
             self.agent.report_exception(&e);
         }
         self.agent.current_realm = saved;
+        *doc = take_parser(self.agent, self.realm);
+    }
+
+    /// E3: `pageshow` tras el `load` de la ventana (HTML §13.2.7).
+    fn page_shown(&mut self, doc: &mut Parser) {
+        let parser = std::mem::replace(doc, Parser::new(&parse_options()));
+        put_parser(self.agent, self.realm, parser);
+        fire_pageshow(self.agent, self.realm);
         *doc = take_parser(self.agent, self.realm);
     }
 }
