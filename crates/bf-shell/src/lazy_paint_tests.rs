@@ -149,3 +149,65 @@ fn lazy_image_is_painted_without_a_second_request() {
     assert_eq!(shown, (true, true));
     assert_eq!(*paths.lock().unwrap(), ["/cerca.gif", "/lejos.gif"]);
 }
+
+/// En la ventana (`defer_load`: el navegador maqueta antes de `load` y pasa cada maqueta al
+/// motor), las imágenes perezosas no se revisan al terminar el parseo, lo que obligaba a
+/// maquetar el documento a medio cargar: se revisan con la maqueta del navegador
+/// ([`Engine::set_layout`], el *update the rendering* de HTML §8.1.7.3).
+#[test]
+fn window_checks_lazy_images_with_its_layout() {
+    let (port, paths) = server();
+    let net = Arc::new(NetLoader::new());
+    let ctx = LoadContext {
+        net: net.clone(),
+        fonts: bf_font::FontDb::system(),
+        viewport: Size {
+            width: 800.0,
+            height: 600.0,
+        },
+        recent: Vec::new(),
+        theme: Theme::for_system(None),
+        post: None,
+    };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+        sink.borrow_mut().push(e.text)
+    }));
+    let env = PageEnv {
+        defer_load: true,
+        ..PageEnv::cli(net)
+    };
+    let url = bf_infra::Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+    let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+    assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+    engine.sync_frames();
+    for _ in 0..20 {
+        engine.run_due_tasks();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Sin maqueta del navegador, ninguna perezosa se pidió.
+    assert!(
+        paths.lock().unwrap().is_empty(),
+        "{:?}",
+        paths.lock().unwrap()
+    );
+
+    // La primera maqueta de la ventana: la cercana se pide; la lejana espera.
+    let doc = engine.render_copy().unwrap();
+    let pctx = bf_paint::PageContext {
+        base: &loaded.base,
+        encoding: loaded.encoding,
+        loader: loaded.loader.clone(),
+        fonts: ctx.fonts.clone(),
+        extra: &[],
+        text_zoom: 1.0,
+        device_pixel_ratio: 1.0,
+    };
+    let page = bf_paint::prepare_page(&doc, &pctx, ctx.viewport);
+    engine.set_layout(&page, doc.version(), (0.0, 0.0), 1.0);
+    engine.resources_loaded();
+    run_until(&mut engine, &log, "cerca-cargó");
+    assert!(log.borrow().iter().any(|l| l == "cerca-cargó"), "{log:?}");
+    assert_eq!(*paths.lock().unwrap(), ["/cerca.gif"]);
+}

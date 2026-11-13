@@ -439,11 +439,38 @@ fn remember_image(agent: &Agent, realm: RealmId, url: &bf_infra::Url, r: &crate:
     bf_infra::ResourceLoader::remember(&*env.loader(), url, &resource);
 }
 
+/// Marca de una ventana cuyo embebedor revisa las imágenes perezosas con cada maqueta que hace
+/// ([`check_lazy_images_on_rendering`]).
+struct LazyChecksOnRendering;
+
+/// E2: el embebedor de la ventana `realm` (el navegador) maqueta y pinta el documento, pasa
+/// cada maqueta al motor y llama entonces a [`check_lazy_images`] con ella al día. Ese es el
+/// momento en que el estándar evalúa la intersección con el viewport: el "lazy load
+/// intersection observer" (HTML §4.8.4.3.9) se actualiza en *update the rendering* (HTML
+/// §8.1.7.3, "run the update intersection observations steps"). Desde entonces
+/// `bom::frames::sync_frames` no revisa las perezosas de esa ventana: hacerlo obligaba a
+/// maquetar por su cuenta el documento a medio cargar (al terminar el parseo, y otra vez con
+/// cada cambio del DOM antes de la maqueta del navegador).
+pub fn check_lazy_images_on_rendering(agent: &mut Agent, realm: RealmId) {
+    agent.set_realm_data(realm, LazyChecksOnRendering);
+}
+
+/// Lo que hace `bom::frames::sync_frames`, el punto en que el bucle de eventos queda sin
+/// trabajo: [`check_lazy_images`], salvo en una ventana cuyo embebedor lo hace con cada maqueta
+/// ([`check_lazy_images_on_rendering`]). Sin embebedor que maquete (el runner de WPT, los
+/// tests) este es el único momento.
+pub(crate) fn check_lazy_images_when_idle(agent: &mut Agent, realm: RealmId) {
+    if agent.realm_data::<LazyChecksOnRendering>(realm).is_some() {
+        return;
+    }
+    check_lazy_images(agent, realm);
+}
+
 /// E2: pide las imágenes `loading=lazy` aplazadas de la ventana `realm` cuya caja está a menos
 /// de [`LAZY_MARGIN`] del viewport ("lazy load intersection observer", HTML §4.8.4.3.9). Las
 /// que ya no son perezosas (cambió `loading`) también; las que no se pintan (`display: none`)
-/// siguen esperando. Lo llama `bom::frames::sync_frames`, el punto en que el bucle de eventos
-/// queda sin trabajo.
+/// siguen esperando. Sin imágenes aplazadas no mira la maqueta. Lo llaman `sync_frames`
+/// ([`check_lazy_images_when_idle`]) y el navegador tras cada maqueta y al desplazar.
 pub fn check_lazy_images(agent: &mut Agent, realm: RealmId) {
     let waiting = agent
         .realm_data::<ImageRequests>(realm)

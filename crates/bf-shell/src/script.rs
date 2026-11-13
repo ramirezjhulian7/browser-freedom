@@ -632,6 +632,14 @@ impl Engine {
             };
             bf_web::cssom::set_layout_provider(&mut self.rt.agent, realm, Box::new(provider));
         }
+        // E2: la ventana maqueta antes de `load` y pasa cada maqueta ([`Engine::set_layout`]):
+        // las imágenes `loading=lazy` se revisan entonces, sin maquetar a medio parseo.
+        if env.defer_load {
+            bf_web::html::legacy_factories::check_lazy_images_on_rendering(
+                &mut self.rt.agent,
+                realm,
+            );
+        }
     }
 
     /// El layout que acaba de hacer el navegador (para el CSSOM View: `getBoundingClientRect`,
@@ -666,6 +674,9 @@ impl Engine {
         if let Some(ctx) = self.rt.agent.realm_data_mut::<WebContext>(realm) {
             ctx.layout = Some(snapshot);
         }
+        // E2: cada maqueta nueva revisa las imágenes `loading=lazy` (HTML §4.8.4.3.9), aunque
+        // el desplazamiento no cambie: el DOM pudo acercarlas.
+        self.lazy_view = None;
         self.update_view(scroll, device_pixel_ratio);
     }
 

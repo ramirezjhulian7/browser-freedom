@@ -645,13 +645,14 @@ pub fn sync_frames(agent: &mut Agent, realm: RealmId) -> bool {
         }
     }
     // E2: las imágenes `loading=lazy` que ya están cerca del viewport (de la ventana y de sus
-    // marcos) se piden: este es el punto en que el bucle queda sin trabajo.
-    crate::html::legacy_factories::check_lazy_images(agent, realm);
+    // marcos) se piden: este es el punto en que el bucle queda sin trabajo. En la ventana del
+    // navegador no: lo hace él con cada maqueta (`check_lazy_images_on_rendering`).
+    crate::html::legacy_factories::check_lazy_images_when_idle(agent, realm);
     let frame_realms: Vec<RealmId> = frames(agent)
         .map(|f| f.list.iter().map(|f| f.realm).collect())
         .unwrap_or_default();
     for r in frame_realms {
-        crate::html::legacy_factories::check_lazy_images(agent, r);
+        crate::html::legacy_factories::check_lazy_images_when_idle(agent, r);
     }
     // E2: los `<iframe>` que esperaban a que su documento terminara de cargar.
     let waiting: Vec<RealmId> = frames(agent)

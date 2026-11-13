@@ -418,6 +418,11 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     }
     let version = h.get(agent).document().version();
     let generation = sheets_generation(agent, h.realm);
+    // E2: para medir (`docs/rendimiento.md`): cada maqueta que hace el CSSOM por su cuenta,
+    // con su cascada si hace falta.
+    let traced = std::env::var_os("BF_TRACE")
+        .is_some()
+        .then(std::time::Instant::now);
     // E4: los estilos mostrados (con animaciones y transiciones) también son parte de la
     // clave: mientras algo se anima cambian sin que cambie el documento, y la geometría
     // (`getBoundingClientRect`, el valor resuelto de `width`…) debe seguirlos.
@@ -448,6 +453,12 @@ pub fn current_layout(agent: &mut Agent) -> Arc<FragmentTree> {
     };
     state(agent).provider = provider;
     view::restore_element_scroll(agent, &mut tree); // E12
+    if let Some(t) = traced {
+        eprintln!(
+            "perf maqueta del CSSOM: {:.1} ms (cascada y maqueta propias)",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     let tree = Arc::new(tree);
     let st = state(agent);
     st.layout = Some((version, generation, tree.clone()));
