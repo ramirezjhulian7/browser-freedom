@@ -123,6 +123,8 @@ pub struct CssomState {
     /// E2: sube cada vez que se olvida la maqueta por un cambio que no sube la versión del
     /// documento (una imagen que terminó de cargar), para [`RenderingKey`].
     pub(crate) layout_epoch: u64,
+    /// E2: hay un trabajo esperando a que llegue una fuente web ([`watch_web_fonts`]).
+    fonts_watched: bool,
 }
 
 impl Default for CssomState {
@@ -143,6 +145,7 @@ impl Default for CssomState {
             element_scroll: HashMap::new(),
             provider: None,
             layout_epoch: 0,
+            fonts_watched: false,
         }
     }
 }
@@ -345,6 +348,48 @@ pub fn set_layout_provider(agent: &mut Agent, realm: RealmId, provider: Box<dyn 
     let s = state_of(agent, realm);
     s.provider = Some(provider);
     s.layout = None;
+    // E2: en la ventana del navegador (red en hilos), las fuentes web llegan en segundo plano
+    // (CSS Fonts 4 §4.9, CSS Font Loading 3 §2.2): la maqueta no las espera y, cuando llega
+    // una, la página se vuelve a pintar ([`watch_web_fonts`]).
+    if !state_of(agent, realm).fonts_watched && crate::net::is_threaded(agent, realm) {
+        state_of(agent, realm).fonts_watched = true;
+        bf_font::set_async_web_fonts(true);
+        watch_web_fonts(agent, realm);
+    }
+}
+
+/// E2: un trabajo de red que espera a que termine de cargarse alguna fuente web
+/// (`bf_font::wait_web_fonts_change`) y, en una tarea de la ventana `realm`, olvida su
+/// geometría y marca el documento para volver a pintar (con la fuente ya en la caché). Se
+/// vuelve a armar mientras exista la ventana; cada espera dura como mucho 30 s.
+fn watch_web_fonts(agent: &mut Agent, realm: RealmId) {
+    let since = bf_font::web_fonts_generation();
+    let job = Box::new(move || {
+        let now = bf_font::wait_web_fonts_change(since, std::time::Duration::from_secs(30));
+        Ok(crate::net::NetResponse {
+            url_list: Vec::new(),
+            status: if now > since { 200 } else { 204 },
+            status_text: String::new(),
+            headers: crate::net::headers::HeaderList(Vec::new()),
+            body: Vec::new(),
+        })
+    });
+    let done = Box::new(move |agent: &mut Agent, r: crate::net::NetResult| {
+        if agent.realm_data::<crate::WebContext>(realm).is_none() {
+            return;
+        }
+        if r.is_ok_and(|res| res.status == 200) {
+            let s = state_of(agent, realm);
+            s.styles = None;
+            s.layout = None;
+            s.layout_epoch += 1;
+            if let Some(ctx) = agent.realm_data_mut::<crate::WebContext>(realm) {
+                ctx.mutated();
+            }
+        }
+        watch_web_fonts(agent, realm);
+    });
+    crate::net::spawn_job(agent, realm, job, done);
 }
 
 /// E1: el documento de la ventana `realm` fue reemplazado por otro en el mismo realm (un marco
@@ -527,16 +572,48 @@ fn cascade_styles(agent: &mut Agent) -> Arc<StyleMap> {
     let media = media_context(agent);
     let doc_sheets = sheets::document_sheets(agent, &media);
     let doc = h.get(agent).document();
-    let styles = Arc::new(bf_style::style_document_with_sheets(
+    // E2: en varios hilos, como la cascada del pintado (`bf_style::style_document_parallel`,
+    // mismo resultado). En el barrido, cada consulta de geometría de un script que llegaba
+    // tras un cambio del DOM rehacía la cascada en un hilo: en www.rae.es, 60 veces de
+    // 250–300 ms de emparejar selectores.
+    let styles = Arc::new(bf_style::style_document_parallel(
         doc,
         &doc_sheets,
         &[],
         &media,
         &MatchContext::for_document(doc),
-        Some(&StyleMetrics(&TestFont)),
+        Some(&TestMetrics),
+        cascade_threads(),
     ));
     state(agent).styles = Some((version, generation, styles.clone()));
     styles
+}
+
+/// E2: las métricas de `TestFont` para `ex`/`ch` (las de la cascada del CSSOM), compartibles
+/// entre hilos.
+struct TestMetrics;
+
+impl bf_style::FontMetricsSource for TestMetrics {
+    fn ex_ch(&self, style: &bf_style::ComputedStyle) -> (f32, f32) {
+        bf_style::FontMetricsSource::ex_ch(&StyleMetrics(&TestFont), style)
+    }
+}
+
+/// E2: hilos de la cascada del CSSOM (`BF_CASCADE_THREADS`, o los núcleos hasta 4, como el
+/// pintado).
+fn cascade_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("BF_CASCADE_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .min(4)
+            })
+            .max(1)
+    })
 }
 
 /// La maqueta del documento de la ventana (ver la política en la documentación del módulo).

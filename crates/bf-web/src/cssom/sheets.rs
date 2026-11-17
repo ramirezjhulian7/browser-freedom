@@ -1600,21 +1600,62 @@ pub fn wrap_sheet(agent: &mut Agent, id: SheetId) -> Value {
 
 /// El wrapper de una regla.
 pub fn wrap_rule(agent: &mut Agent, r: RuleRef) -> Value {
+    let kind = state(agent).sheets.rule(r).map(|x| rule_class_of(&x.kind));
+    match kind {
+        Some(k) => wrap_rule_as(agent, r, k),
+        None => Value::Null,
+    }
+}
+
+/// E2: la clase de una regla, sin buscarla otra vez por su id.
+#[derive(Clone, Copy)]
+enum RuleClass {
+    Style,
+    NestedDeclarations,
+    Media,
+    Supports,
+    Import,
+    FontFace,
+    Page,
+    Namespace,
+    Keyframes,
+    Keyframe,
+    LayerBlock,
+    LayerStatement,
+}
+
+fn rule_class_of(kind: &RuleKind) -> RuleClass {
+    match kind {
+        RuleKind::Style { .. } => RuleClass::Style,
+        RuleKind::NestedDeclarations { .. } => RuleClass::NestedDeclarations,
+        RuleKind::Media { .. } => RuleClass::Media,
+        RuleKind::Supports { .. } => RuleClass::Supports,
+        RuleKind::Import { .. } => RuleClass::Import,
+        RuleKind::FontFace { .. } => RuleClass::FontFace,
+        RuleKind::Page { .. } => RuleClass::Page,
+        RuleKind::Namespace { .. } => RuleClass::Namespace,
+        RuleKind::Keyframes { .. } => RuleClass::Keyframes,
+        RuleKind::Keyframe { .. } => RuleClass::Keyframe,
+        RuleKind::LayerBlock { .. } => RuleClass::LayerBlock,
+        RuleKind::LayerStatement { .. } => RuleClass::LayerStatement,
+    }
+}
+
+fn wrap_rule_as(agent: &mut Agent, r: RuleRef, kind: RuleClass) -> Value {
     let c = classes(agent).rules.clone();
-    let class = match state(agent).sheets.rule(r).map(|x| &x.kind) {
-        Some(RuleKind::Style { .. }) => c.style,
-        Some(RuleKind::NestedDeclarations { .. }) => c.nested_declarations,
-        Some(RuleKind::Media { .. }) => c.media,
-        Some(RuleKind::Supports { .. }) => c.supports,
-        Some(RuleKind::Import { .. }) => c.import,
-        Some(RuleKind::FontFace { .. }) => c.font_face,
-        Some(RuleKind::Page { .. }) => c.page,
-        Some(RuleKind::Namespace { .. }) => c.namespace,
-        Some(RuleKind::Keyframes { .. }) => c.keyframes,
-        Some(RuleKind::Keyframe { .. }) => c.keyframe,
-        Some(RuleKind::LayerBlock { .. }) => c.layer_block,
-        Some(RuleKind::LayerStatement { .. }) => c.layer_statement,
-        None => return Value::Null,
+    let class = match kind {
+        RuleClass::Style => c.style,
+        RuleClass::NestedDeclarations => c.nested_declarations,
+        RuleClass::Media => c.media,
+        RuleClass::Supports => c.supports,
+        RuleClass::Import => c.import,
+        RuleClass::FontFace => c.font_face,
+        RuleClass::Page => c.page,
+        RuleClass::Namespace => c.namespace,
+        RuleClass::Keyframes => c.keyframes,
+        RuleClass::Keyframe => c.keyframe,
+        RuleClass::LayerBlock => c.layer_block,
+        RuleClass::LayerStatement => c.layer_statement,
     };
     let realm = agent.current_realm;
     Value::Object(agent.host_wrap(
@@ -1637,20 +1678,30 @@ fn list_items(agent: &mut Agent, owner: ListOwner) -> Vec<Value> {
         ListOwner::Sheet(s) => s,
         ListOwner::Rule(r) => r.sheet,
     };
-    let ids: Vec<RuleId> = state(agent)
+    // E2: la clase de cada regla sale de la lista, sin buscarla otra vez por su id (antes
+    // cada una era una búsqueda lineal en la hoja: cuadrático con hojas grandes).
+    let ids: Vec<(RuleId, RuleClass)> = state(agent)
         .sheets
         .list(owner)
-        .map(|l| l.iter().map(|r| r.id).collect())
+        .map(|l| l.iter().map(|r| (r.id, rule_class_of(&r.kind))).collect())
         .unwrap_or_default();
     ids.into_iter()
-        .map(|rule| wrap_rule(agent, RuleRef { sheet, rule }))
+        .map(|(rule, kind)| wrap_rule_as(agent, RuleRef { sheet, rule }, kind))
         .collect()
 }
 
 /// El wrapper de una `CSSRuleList` (con sus índices al día).
+///
+/// E2: CSSOM §6.4.1 (`[SameObject] readonly attribute CSSRuleList cssRules`): el mismo
+/// objeto mientras viva la hoja; sus índices se rellenan al crearlo y los ponen al día los
+/// cambios de la lista ([`refresh_rule_list`]). Antes cada lectura de `cssRules` rehacía todos
+/// los índices (`document.fonts` de excalidraw.com lo leía en cada operación).
 fn wrap_rule_list(agent: &mut Agent, owner: ListOwner) -> Value {
     let class = classes(agent).rule_list;
     let realm = agent.current_realm;
+    if let Some(o) = agent.host_lookup(realm, list_key(owner)) {
+        return Value::Object(o);
+    }
     let o = agent.host_wrap(realm, list_key(owner), class, Box::new(owner));
     let items = list_items(agent, owner);
     set_indexed(agent, o, &items);
