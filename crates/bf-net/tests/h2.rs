@@ -773,6 +773,53 @@ fn tls_without_h2_uses_http_1_1() {
     server.join().unwrap();
 }
 
+/// E3: una conexión nueva con un servidor ya visitado reanuda la sesión TLS 1.3 con el ticket
+/// que mandó (RFC 8446 §2.2; la caché de sesiones de la configuración de rustls), sin 0-RTT.
+#[test]
+fn tls_sessions_are_resumed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tls_server_config(&[b"http/1.1"]);
+    let server = thread::spawn(move || {
+        let mut kinds = Vec::new();
+        for _ in 0..2 {
+            let mut stream = tls_accept(&listener, config.clone());
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut tmp).unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            kinds.push(stream.conn.handshake_kind());
+            assert!(stream.conn.early_data().is_none(), "sin 0-RTT");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+            stream.conn.send_close_notify();
+            let _ = stream.flush();
+        }
+        kinds
+    });
+    let f = test_fetcher();
+    let u = Url::parse(&format!("https://127.0.0.1:{port}/"), None).unwrap();
+    let _ = bf_net::timing::take();
+    assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().body, b"ok");
+    let first = bf_net::timing::take();
+    assert_eq!((first.connections, first.resumed), (1, 0));
+    assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().body, b"ok");
+    let second = bf_net::timing::take();
+    assert_eq!((second.connections, second.resumed), (1, 1));
+    let kinds = server.join().unwrap();
+    assert_eq!(
+        kinds,
+        [
+            Some(rustls::HandshakeKind::Full),
+            Some(rustls::HandshakeKind::Resumed)
+        ]
+    );
+}
+
 #[test]
 fn tls_bad_certificate_is_a_tls_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
