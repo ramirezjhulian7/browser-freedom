@@ -1245,6 +1245,89 @@ fn cross_origin_window_proxy_is_restricted() {
     );
 }
 
+/// E1: la `Location` de un marco de otro origen (HTML §7.10.6, §7.2.3): solo `href` (escritura)
+/// y `replace()`; leer `hash` (o cualquier otra) lanza `SecurityError` en vez de dar
+/// `undefined`. Los descriptores y las claves siguen "CrossOriginGetOwnPropertyHelper" y
+/// "CrossOriginOwnPropertyKeys".
+#[test]
+fn cross_origin_location_is_restricted() {
+    let mut p = framed(
+        "<iframe id=f src=https://otro.test/p.html></iframe>",
+        &[("https://otro.test/p.html", "<p>otro")],
+    );
+    assert_eq!(
+        p.show(
+            "(function () { var w = document.getElementById('f').contentWindow; \
+             var l = w.location, r = []; \
+             function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+             for (const k of ['hash', 'href', 'pathname', 'host', 'search', 'toString', \
+                              'assign', 'reload', 'valueOf', 'custom']) \
+               r.push(k + ':' + err(() => l[k])); \
+             r.push('set-hash:' + err(() => { l.hash = 'x'; })); \
+             r.push('desc-hash:' + err(() => Object.getOwnPropertyDescriptor(l, 'hash'))); \
+             var d = Object.getOwnPropertyDescriptor(l, 'href'); \
+             r.push(d.get === undefined && typeof d.set === 'function' && d.configurable && !d.enumerable); \
+             var rd = Object.getOwnPropertyDescriptor(l, 'replace'); \
+             r.push(typeof rd.value === 'function' && rd.writable === false && l.replace === l.replace); \
+             r.push(l === w.location, Object.getPrototypeOf(l) === null, l.then === undefined, \
+                    l[Symbol.toStringTag] === undefined, 'replace' in l); \
+             r.push(Reflect.ownKeys(l).map(String).join('+')); \
+             return r.join(); })()"
+        ),
+        "hash:SecurityError,href:SecurityError,pathname:SecurityError,host:SecurityError,\
+         search:SecurityError,toString:SecurityError,assign:SecurityError,reload:SecurityError,\
+         valueOf:SecurityError,custom:SecurityError,set-hash:SecurityError,desc-hash:SecurityError,\
+         true,true,true,true,true,true,true,\
+         href+replace+then+Symbol(Symbol.toStringTag)+Symbol(Symbol.hasInstance)+Symbol(Symbol.isConcatSpreadable)"
+    );
+}
+
+/// E1: el `WindowProxy` de otro origen: descriptores, claves e `in` (HTML §7.2.3.5, §7.2.3.10).
+#[test]
+fn cross_origin_window_descriptors_and_keys() {
+    let mut p = framed(
+        "<iframe id=f src=https://otro.test/p.html></iframe>",
+        &[("https://otro.test/p.html", "<iframe srcdoc=x></iframe>")],
+    );
+    let realm = p.ctx.realm;
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    p.idle();
+    assert_eq!(
+        p.show(
+            "(function () { var w = document.getElementById('f').contentWindow, r = []; \
+             function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+             var pm = Object.getOwnPropertyDescriptor(w, 'postMessage'); \
+             r.push(typeof pm.value, pm.writable, pm.enumerable, pm.configurable); \
+             var loc = Object.getOwnPropertyDescriptor(w, 'location'); \
+             r.push(typeof loc.get, typeof loc.set); \
+             r.push('0' in w, 'closed' in w, err(() => 'document' in w), \
+                    err(() => Object.getOwnPropertyDescriptor(w, 'document')), \
+                    err(() => Object.defineProperty(w, 'x', {value: 1})), \
+                    err(() => delete w.closed), err(() => Object.preventExtensions(w)), \
+                    Object.setPrototypeOf(w, null) === w, err(() => Object.setPrototypeOf(w, {}))); \
+             var keys = Reflect.ownKeys(w).map(String); \
+             r.push(keys[0], keys.includes('postMessage'), keys.includes('then'), keys.length); \
+             return r.join(); })()"
+        ),
+        "function,false,false,true,function,function,true,true,SecurityError,SecurityError,\
+         SecurityError,SecurityError,TypeError,true,TypeError,0,true,true,18"
+    );
+}
+
+/// E1: `closed` de la ventana de un marco quitado es `true` (HTML §7.2.2: su contexto de
+/// navegación ya no existe); el de la propia ventana sigue `false`.
+#[test]
+fn removed_frame_window_is_closed() {
+    let mut p = framed("<iframe id=f srcdoc=x></iframe>", &[]);
+    assert_eq!(
+        p.show(
+            "(function () { var f = document.getElementById('f'), w = f.contentWindow; \
+             var antes = w.closed; f.remove(); return [antes, w.closed, window.closed].join(); })()"
+        ),
+        "false,true,false"
+    );
+}
+
 #[test]
 fn frame_navigation_and_removal() {
     let mut p = framed(

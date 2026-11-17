@@ -277,15 +277,25 @@ pub(crate) fn with_lent_document(
 /// la búsqueda "delays the load event"; el parser lo mira en el paso 8 de "the end"). Solo los
 /// `<img>` conectados al documento de la ventana.
 pub(crate) fn delay_load(agent: &mut Agent, n: NodeRef, on: bool) {
+    let realm = WebContextHandle::current(agent).realm;
+    delay_load_in(agent, realm, n, on);
+}
+
+/// [`delay_load`] en el documento de la ventana `realm` (no en la del realm en curso): `n` es
+/// un nodo de esa ventana. E1: lo usa [`release_delay`], que puede correr desde la tarea o la
+/// respuesta de red de un marco.
+pub(crate) fn delay_load_in(agent: &mut Agent, realm: RealmId, n: NodeRef, on: bool) {
     if n.doc != 0 {
         return;
     }
-    with_doc_mut(agent, n.doc, |d| {
-        if on && !d.is_connected(n.node) {
-            return;
-        }
-        d.script_state_mut(n.node).delaying_load_event = on;
-    });
+    let Some(ctx) = WebContextHandle { realm }.try_get_mut(agent) else {
+        return;
+    };
+    let d = ctx.doc_mut(n.doc);
+    if on && !d.is_connected(n.node) {
+        return;
+    }
+    d.script_state_mut(n.node).delaying_load_event = on;
 }
 
 /// Deja de demorar el `load` del documento por `n` si ya no tiene ninguna petición en curso
@@ -295,7 +305,7 @@ fn release_delay(agent: &mut Agent, realm: RealmId, n: NodeRef) {
         .realm_data::<ImageRequests>(realm)
         .is_some_and(|r| r.current.contains_key(&n));
     if !busy {
-        delay_load(agent, n, false);
+        delay_load_in(agent, realm, n, false);
     }
     resume_load(agent, realm);
 }
@@ -809,5 +819,65 @@ fn finish(agent: &mut Agent, n: NodeRef, id: u64, pin: HostHandle, outcome: Outc
             EventInit::default(),
             EventKind::Event,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bf_infra::Url;
+
+    use super::*;
+    use crate::{DocumentOwner, WebContext};
+
+    /// E1: `release_delay` suelta la demora del `load` en el documento de la ventana de la
+    /// imagen (`realm`), aunque el realm en curso sea otro. Antes lo hacía en el del realm en
+    /// curso: con la imagen de un marco y la ventana en curso, el `load` del marco quedaba
+    /// retenido para siempre (y se tocaba un nodo cualquiera de la ventana).
+    #[test]
+    fn release_delay_uses_the_image_window() {
+        let mut rt = bf_js::host::Runtime::new(Box::new(bf_js::host::DefaultHooks));
+        let window = rt.main_realm();
+        let url = Url::parse("https://example.test/", None).unwrap();
+        let html =
+            "<p id=w>ventana</p><img id=wi><iframe srcdoc='<p>a</p><p>b</p><img id=f>'></iframe>";
+        let (doc, _) = bf_html::parse_document(html, &bf_html::ParseOptions::default());
+        crate::install(
+            &mut rt.agent,
+            window,
+            WebContext::new(DocumentOwner::Document(Box::new(doc)), url),
+        );
+        crate::bom::frames::sync_frames(&mut rt.agent, window);
+        let frame = crate::bom::frames::children_of(&rt.agent, window)[0];
+        let id_in = |agent: &Agent, realm: RealmId, id: &str| {
+            WebContextHandle { realm }
+                .get(agent)
+                .doc(0)
+                .get_element_by_id(&DomString::from(id))
+                .expect("elemento")
+        };
+        let img = NodeRef::new(0, id_in(&rt.agent, frame, "f"));
+        let delaying = |agent: &Agent, realm: RealmId, node| {
+            WebContextHandle { realm }
+                .get(agent)
+                .doc(0)
+                .script_state(node)
+                .delaying_load_event
+        };
+        // La imagen del marco empieza a demorar el `load` del marco.
+        delay_load_in(&mut rt.agent, frame, img, true);
+        assert!(delaying(&rt.agent, frame, img.node));
+        // Termina mientras el realm en curso es el de la ventana.
+        rt.agent.current_realm = window;
+        // Su petición terminó (`finish` la quita de las que siguen en curso).
+        if let Some(r) = rt.agent.realm_data_mut::<ImageRequests>(frame) {
+            r.current.remove(&img);
+        }
+        release_delay(&mut rt.agent, frame, img);
+        assert!(
+            !delaying(&rt.agent, frame, img.node),
+            "el marco sigue retenido"
+        );
+        let wi = id_in(&rt.agent, window, "wi");
+        assert!(!delaying(&rt.agent, window, wi));
     }
 }
