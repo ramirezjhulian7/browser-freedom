@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<!-- CSS Cascade 5 §6.5: los presentational hints (width/height de <img> e <iframe>) van en un
+     origen propio debajo del de autor, así que una regla de autor dentro de @layer les gana.
+     HTML §15.4.3: width/height de <img> también dan `aspect-ratio: auto 2932 / 1368`, así que
+     sin imagen cargada el alto es 438 × 1368 / 2932 = 204.36. -->
+<style>body{margin:0} @layer utilities { .w-full { width: 100% } .h-auto { height: auto } .h-full { height: 100% } }</style><div style="width:438px"><img class="w-full h-auto" width="2932" height="1368"></div><div style="width:300px;height:100px"><iframe class="w-full h-full" width="640" height="360"></iframe></div>
+<!-- expect
+Block <html> 0,0 800×307.56
+  Block <body> 0,0 800×307.56
+    Block <div> 0,0 438×207.56
+      Line 0,0 438×207.56
+        Replaced <img.w-full.h-auto> 0,0 438×204.36
+    Block <div> 0,207.56 300×100
+      Line 0,207.56 300×107.2
+        Replaced <iframe.w-full.h-full> 0,207.56 304×104
+-->

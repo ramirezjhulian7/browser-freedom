@@ -1740,7 +1740,8 @@ mod page_loader_pages {
         assert!(has("fuente-ok"), "{log:?}");
         assert!(has("marco-fuente-ok"), "{log:?}");
         assert!(!log.iter().any(|l| l.contains("NetworkError")), "{log:?}");
-        // Pendiente (E4): la hoja del `<link>` en el CSSOM sigue sin red en el navegador.
-        assert!(has("link-error"), "¿ya se arregló el CSSOM? {log:?}");
+        // E2: la hoja del `<link>` carga con el loader de la ventana: `load` y sus dos reglas
+        // (HTML §4.6.7.2, CSSOM §6.1 `cssRules`).
+        assert!(has("link-load 2"), "{log:?}");
     }
 }

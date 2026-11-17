@@ -387,7 +387,7 @@ pub fn modified_document_sheets(
     agent.current_realm = realm;
     let r = sheets::document_sheets(agent, media);
     agent.current_realm = saved;
-    Some(r)
+    Some(Arc::unwrap_or_clone(r))
 }
 
 /// El snapshot del shell si está al día con el documento y las hojas.
@@ -487,10 +487,16 @@ pub fn window_metrics(agent: &mut Agent) -> WindowMetrics {
 /// El contexto de las media queries de la ventana.
 pub fn media_context(agent: &mut Agent) -> MediaContext {
     let m = window_metrics(agent);
+    // E6: `scripting` (Media Queries 5 §8.1): el documento de la ventana lo sabe.
+    let scripting = WebContextHandle::current(agent)
+        .get(agent)
+        .document()
+        .scripting;
     MediaContext {
         width: f64::from(m.viewport.width),
         height: f64::from(m.viewport.height),
         device_pixel_ratio: f64::from(m.dpr),
+        scripting: bf_css::media::Scripting::of(scripting),
         ..MediaContext::default()
     }
 }

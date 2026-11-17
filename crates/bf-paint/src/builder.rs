@@ -2052,36 +2052,69 @@ fn extent_with_descendants(f: &Fragment, through_clip: bool) -> Rect {
     Rect::new(r.0, r.1, r.2 - r.0, r.3 - r.1)
 }
 
-/// Extensión del documento: la unión de las cajas de todos los fragmentos.
+/// Extensión del documento: la unión de las cajas de todos los fragmentos, cada una recortada
+/// por los `overflow` que la recortan.
+///
+/// E2: CSS 2.2 §11.1.1: el recorte de `overflow` afecta a todos los descendientes "except
+/// those whose containing block is the viewport or an ancestor of the element"; CSS Overflow 3
+/// §2.2: el desbordamiento desplazable solo cuenta lo que no queda recortado. Así que una caja
+/// en flujo (o `relative`/`sticky`) toma el recorte de su padre; una `absolute`, el que había
+/// en su bloque contenedor (el antepasado posicionado o transformado más cercano, CSS Position
+/// 3 §2.1); y una `fixed`, solo el de un antepasado transformado (si no, su bloque contenedor
+/// es el viewport). Antes las cajas posicionadas bajo un recorte no se recortaban nunca: el
+/// `<div class="absolute left-1/2 w-full">` dentro del vídeo con `relative overflow-hidden` de
+/// asimetrix.co ensanchaba el documento a 1658 px en una ventana de 1180.
 pub fn document_extent(tree: &FragmentTree) -> Rect {
-    fn walk(f: &Fragment, r: &mut (f32, f32)) {
+    /// Hasta dónde llega lo que se ve en cada eje (derecha, abajo).
+    type Limit = (f32, f32);
+    #[derive(Clone, Copy)]
+    struct Clips {
+        flow: Limit,
+        absolute: Limit,
+        fixed: Limit,
+    }
+    fn walk(f: &Fragment, clips: Clips, r: &mut (f32, f32)) {
+        let position = if is_box(f) {
+            f.style.position
+        } else {
+            Position::Static
+        };
+        let limit = match position {
+            Position::Absolute => clips.absolute,
+            Position::Fixed => clips.fixed,
+            _ => clips.flow,
+        };
         let m = f.margin_rect();
-        r.0 = r.0.max(m.right());
-        r.1 = r.1.max(m.bottom());
-        match f.clip {
-            None => {
-                for c in &f.children {
-                    walk(c, r);
-                }
-            }
-            Some(clip) => {
-                for c in &f.children {
-                    if positioned(c) {
-                        walk(c, r);
-                    } else {
-                        // E12: hasta el borde de recorte (todo en un eje que no recorta).
-                        let mut inner = *r;
-                        walk(c, &mut inner);
-                        r.0 = r.0.max(inner.0.min(clip.right()));
-                        r.1 = r.1.max(inner.1.min(clip.bottom()));
-                    }
-                }
-            }
+        r.0 = r.0.max(m.right().min(limit.0));
+        r.1 = r.1.max(m.bottom().min(limit.1));
+        // E12: hasta el borde de recorte (todo en un eje que no recorta).
+        let inner = match f.clip {
+            Some(clip) => (limit.0.min(clip.right()), limit.1.min(clip.bottom())),
+            None => limit,
+        };
+        let transformed = transformed(f);
+        let children = Clips {
+            flow: inner,
+            absolute: if positioned(f) || transformed {
+                inner
+            } else {
+                clips.absolute
+            },
+            fixed: if transformed { inner } else { clips.fixed },
+        };
+        for c in &f.children {
+            walk(c, children, r);
         }
     }
     let mut r = (tree.viewport.width, tree.viewport.height);
     if let Some(root) = &tree.root {
-        walk(root, &mut r);
+        let none = (f32::INFINITY, f32::INFINITY);
+        let clips = Clips {
+            flow: none,
+            absolute: none,
+            fixed: none,
+        };
+        walk(root, clips, &mut r);
     }
     Rect::new(0.0, 0.0, r.0, r.1)
 }

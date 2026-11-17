@@ -685,6 +685,8 @@ impl Matcher<'_> {
             PseudoClass::Defined => self.doc.is_defined_element(node),
             // E5: HTML §4.16.3: "any HTML element whose popover attribute is not in the No
             // Popover state and whose popover visibility state is showing".
+            // E6: ver `PseudoClass::Unmatched`.
+            PseudoClass::Unmatched(_) => false,
             PseudoClass::PopoverOpen => {
                 html && el.attr("popover").is_some() && self.doc.is_popover_showing(node)
             }

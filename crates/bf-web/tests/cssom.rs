@@ -551,6 +551,42 @@ fn link_stylesheet_rules_are_loaded() {
     );
 }
 
+/// E2: la hoja de un `<link>` entra en la cascada del CSSOM ya parseada (compartida con el
+/// pintado por `bf_style::sheet_cache`) y sus `cssRules` se crean al pedirlas; `insertRule`
+/// sobre ella (antes o después de leer `cssRules`) cambia los estilos.
+#[test]
+fn link_stylesheet_is_shared_and_its_rules_are_lazy() {
+    let html = "<!DOCTYPE html><html><head><link rel=stylesheet href='data:text/css,p%7Bcolor:red%7D'></head><body><p id=p>x</p><b id=b>y</b></body></html>";
+    for read_rules_first in [false, true] {
+        let mut p = Page::new(html);
+        let realm = p.ctx.realm;
+        p.rt.agent.set_realm_data(
+            realm,
+            bf_web::html::scripting::PageResources::new(std::sync::Arc::new(
+                bf_infra::resource::FileLoader::new(),
+            )),
+        );
+        // Sin tocar `cssRules`, la hoja ya aplica.
+        assert_eq!(
+            p.s("getComputedStyle(document.getElementById('p')).color"),
+            "rgb(255, 0, 0)"
+        );
+        if read_rules_first {
+            assert_eq!(p.s("document.styleSheets[0].cssRules.length"), "1");
+        }
+        p.run("document.styleSheets[0].insertRule('b { color: blue }', 1)");
+        assert_eq!(
+            p.s("getComputedStyle(document.getElementById('b')).color + ' ' + getComputedStyle(document.getElementById('p')).color + ' ' + document.styleSheets[0].cssRules.length"),
+            "rgb(0, 0, 255) rgb(255, 0, 0) 2"
+        );
+        p.run("document.styleSheets[0].deleteRule(0)");
+        assert_eq!(
+            p.s("getComputedStyle(document.getElementById('p')).color"),
+            "rgb(0, 0, 0)"
+        );
+    }
+}
+
 case!(
     media_query_list_event_ctor,
     "(function () { var e = new MediaQueryListEvent('change', {media: 'x', matches: true}); return [e.type, e.media, e.matches, e.isTrusted, e instanceof Event].join(); })()",

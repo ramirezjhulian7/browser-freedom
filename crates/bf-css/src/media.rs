@@ -31,6 +31,9 @@ pub struct MediaContext {
     /// son relativos a la fuente del padre (ver `bf_style::cascade`). No afecta a las media
     /// queries.
     pub text_zoom: f64,
+    /// E6: la media feature `scripting` (Media Queries 5 §8.1): si el documento ejecuta
+    /// scripts.
+    pub scripting: Scripting,
 }
 
 impl Default for MediaContext {
@@ -50,6 +53,30 @@ impl Default for MediaContext {
             monochrome_bits: 0,
             font_size: 16.0,
             text_zoom: 1.0,
+            scripting: Scripting::None,
+        }
+    }
+}
+
+/// E6: los valores de la media feature `scripting` (Media Queries 5 §8.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scripting {
+    /// El documento no ejecuta scripts.
+    #[default]
+    None,
+    /// Solo durante la carga (impresión, por ejemplo).
+    InitialOnly,
+    /// Los scripts corren y pueden cambiar la página.
+    Enabled,
+}
+
+impl Scripting {
+    /// `Enabled` si el documento tiene scripting (`bf_dom::Document::scripting`), si no `None`.
+    pub fn of(enabled: bool) -> Scripting {
+        if enabled {
+            Scripting::Enabled
+        } else {
+            Scripting::None
         }
     }
 }
@@ -319,6 +346,15 @@ fn actual_value(name: &str, ctx: &MediaContext) -> Option<(Actual, bool)> {
         ),
         "pointer" => (pointer(ctx.pointer), false),
         "any-pointer" => (pointer(ctx.any_pointer), false),
+        // E6: Media Queries 5 §8.1. En contexto booleano, cierta salvo con `none`.
+        "scripting" => (
+            Actual::Ident(match ctx.scripting {
+                Scripting::None => "none",
+                Scripting::InitialOnly => "initial-only",
+                Scripting::Enabled => "enabled",
+            }),
+            false,
+        ),
         _ => return None,
     })
 }

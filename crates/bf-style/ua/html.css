@@ -34,6 +34,9 @@ input[type=hidden i] { display: none !important; }
 
 /* §15.3.2 The page */
 html, body { display: block; }
+/* E6/E2: HTML §15.3.2 ("The page") da los 8px por omisión dentro del hint de los atributos de
+ * márgenes; aquí van en la hoja UA, como en los motores de los navegadores (ver src/hints.rs). */
+body { margin: 8px; }
 
 /* §15.3.3 Flow content */
 address, blockquote, center, dialog, div, figure, figcaption, footer, form,

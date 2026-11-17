@@ -135,10 +135,18 @@ fn hacker_news() {
     assert_eq!(s.title(), "Hacker News", "{}", s.log);
 }
 
-/// E6: `https://asimetrix.co/` (Next.js). Hoy muestra su propia pantalla de error ("This page
-/// couldn't load") porque el motor no tiene `IntersectionObserver` (lo implementa E2); la lista
-/// de tropiezos está en `docs/pendiente/mac/e6.md`. Comprueba que la consola no tiene errores
-/// (`[pestaña N] …` en stderr) y, con la barra de búsqueda, que la pantalla de error no está.
+/// E6: `https://asimetrix.co/` (Next.js con Tailwind v4); los tropiezos están en
+/// `docs/pendiente/mac/e6.md`. Comprueba:
+/// - que la consola no tiene errores (`[pestaña N] …` en stderr);
+/// - con la barra de búsqueda, que no está la pantalla de error del sitio ("This page
+///   couldn't load") ni el texto del `<noscript>` de Google Tag Manager (con scripts no se
+///   muestra: `@media (scripting)`);
+/// - que el documento no desborda en horizontal: la flecha derecha no lo desplaza (con el
+///   *preflight* de Tailwind aplicado, `scrollWidth <= clientWidth`). E2: también cubre el
+///   logo de "Ecosistema" (`<img width=2932 class="w-full">`, que con los hints por encima de
+///   `@layer utilities` medía 2932 px) y el `absolute` centrado dentro del vídeo con
+///   `overflow: hidden`, que `document_extent` no recortaba;
+/// - E2: que ninguna hoja enlazada falla en el CSSOM (sin `ChunkLoadError` en la consola).
 #[test]
 #[ignore = "red: asimetrix.co"]
 fn asimetrix() {
@@ -149,8 +157,14 @@ fn asimetrix() {
             "wait",
             "wait",
             "wait",
+            "key:right",
+            "key:right",
+            "key:right",
             "key:f3",
             "type:This page couldn",
+            "wait",
+            "key:mod+a",
+            "type:googletagmanager.com/ns.html",
             "wait",
         ],
     );
@@ -165,9 +179,31 @@ fn asimetrix() {
         s.log
     );
     assert!(
-        s.last
-            .contains("buscar=\"This page couldn\" \"Sin resultados\""),
+        !s.log.contains("ChunkLoadError"),
+        "una hoja enlazada falló en el CSSOM:\n{}",
+        s.log
+    );
+    let step = |label: &str| {
+        s.log
+            .lines()
+            .rfind(|l| l.contains(&format!(" {label}: ")))
+            .unwrap_or_else(|| panic!("sin el paso {label}:\n{}", s.log))
+            .to_owned()
+    };
+    assert!(
+        step("key:right").contains(" scroll=0,"),
+        "el documento desborda en horizontal:\n{}",
+        s.log
+    );
+    assert!(
+        step("type:This page couldn").contains("\"Sin resultados\""),
         "la pantalla de error del sitio sigue a la vista:\n{}",
+        s.log
+    );
+    assert!(
+        s.last
+            .contains("buscar=\"googletagmanager.com/ns.html\" \"Sin resultados\""),
+        "se ve el texto del <noscript>:\n{}",
         s.log
     );
     assert!(s.title().contains("Asimetrix"), "{}", s.log);

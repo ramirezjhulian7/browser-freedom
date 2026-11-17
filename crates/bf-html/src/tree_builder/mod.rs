@@ -264,7 +264,12 @@ impl TreeBuilder {
     fn new(input: &str, opts: &ParseOptions) -> Self {
         TreeBuilder {
             tokenizer: Tokenizer::new(input),
-            doc: Document::new(),
+            // E6: el documento sabe si tiene scripting (Media Queries 5 §8.1, `scripting`).
+            doc: {
+                let mut doc = Document::new();
+                doc.scripting = opts.scripting;
+                doc
+            },
             mode: Mode::Initial,
             original_mode: Mode::Initial,
             template_modes: Vec::new(),

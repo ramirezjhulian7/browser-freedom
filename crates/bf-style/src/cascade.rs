@@ -2,7 +2,7 @@
 //!
 //! Fuentes de declaraciones, en orden: hoja UA (`ua/html.css`, más `ua/quirks.css` y las
 //! reglas de §15.3.9 en quirks mode), presentational hints (`ua/hints.css` y `hints.rs`, origen
-//! author con especificidad cero), las hojas `<style>` del documento (respetando `media`), las
+//! propio entre el de usuario y el de autor: CSS Cascade 5 §6.5), las hojas `<style>` del documento (respetando `media`), las
 //! hojas adicionales del llamador y el atributo `style`.
 
 use std::collections::{HashMap, HashSet};
@@ -107,14 +107,26 @@ struct Precedence {
     order: u64,
 }
 
-fn band(origin: Origin, important: bool) -> u8 {
+/// La banda de origen e importancia. Los presentational hints (`hint`) van en una banda propia
+/// entre las normales de usuario y las de autor: CSS Cascade 5 §6.5, "All document
+/// language-based styling must be translated to corresponding CSS rules and enter the cascade as
+/// rules in either the UA-origin or a special-purpose author presentational hint origin between
+/// the regular user origin and the regular author origin. [...] For the purpose of cascading
+/// this author presentational hint origin is treated as an independent origin; however for the
+/// purpose of the revert keyword (but not for the revert-layer keyword) it is considered part of
+/// the author origin." HTML §15.2 los declara "author-level zero-specificity presentational
+/// hints". Así quedan debajo de toda regla de autor, también de las que están en `@layer`; y
+/// `revert-layer` en la capa de autor más baja vuelve a ellos (la banda es distinta), mientras
+/// que `revert` los salta (su `Origin` es `Author`).
+fn band(origin: Origin, important: bool, hint: bool) -> u8 {
     match (origin, important) {
         (Origin::UserAgent, false) => 0,
         (Origin::User, false) => 1,
-        (Origin::Author, false) => 2,
-        (Origin::Author, true) => 3,
-        (Origin::User, true) => 4,
-        (Origin::UserAgent, true) => 5,
+        (Origin::Author, false) if hint => 2,
+        (Origin::Author, false) => 3,
+        (Origin::Author, true) => 4,
+        (Origin::User, true) => 5,
+        (Origin::UserAgent, true) => 6,
     }
 }
 
@@ -133,6 +145,9 @@ struct Source<'a> {
     /// De una hoja: vive toda la cascada y su expansión se guarda (las generadas, del
     /// atributo `style` y los hints, son de cada elemento).
     shared: bool,
+    /// Un presentational hint (`ua/hints.css` o `hints.rs`): su banda va debajo de las
+    /// declaraciones de autor ([`band`]).
+    hint: bool,
 }
 
 impl Source<'_> {
@@ -148,7 +163,7 @@ impl Source<'_> {
             self.layer
         };
         Precedence {
-            band: band(self.origin, self.important),
+            band: band(self.origin, self.important, self.hint),
             context: if self.important {
                 self.depth
             } else {
@@ -1146,6 +1161,7 @@ impl<'a> Styler<'a> {
                 order: (group << 40) | m.source_order as u64,
                 decl: m.declaration,
                 shared: true,
+                hint: *group == 2,
             });
         }
         for (i, (origin, attached, decl)) in owned.iter().enumerate() {
@@ -1173,6 +1189,7 @@ impl<'a> Styler<'a> {
                 order: (group << 40) | i as u64,
                 decl,
                 shared: false,
+                hint: group == 3,
             });
         }
         sources
