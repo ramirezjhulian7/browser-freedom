@@ -196,6 +196,53 @@ seguir).
 - **Queda:** un solo script largo del marco sigue siendo una tarea larga; no se puede partir
   sin pausar el intérprete.
 
+## Segundo barrido (ronda 6, 2026-11-17)
+
+- **Método:** los mismos 27 sitios y los mismos pasos (`wait wait wait dump`), con el release de
+  `master` `2238e5c`. Incluye lo del primer barrido; no incluye lo de la ronda 6 (el marco
+  lento, el nonce de `<link rel=preload>`).
+- **Carga:** 10-15.
+- **Caché:** ya tenía los sitios, así que la primera pintura no es de primera visita como en el
+  primero y no se puede comparar sin más.
+- **Ningún sitio tumbó la pestaña.**
+- **Clasificación:** un subagente comparó las capturas del último paso de los dos barridos.
+
+| Sitio | 1.ª pintura (ms), 1.º → 2.º | Errores de consola, 1.º → 2.º | Captura, 2.º frente a 1.º |
+|---|---|---|---|
+| es.wikipedia.org | 944 → 477 | 0 → 0 | igual (bien) |
+| en.wikipedia.org | 1771 → 680 | 0 → 0 | **mejor**: la imagen de la ficha y el candado de "semi-protected" ya salen; el logo sigue cortado |
+| bbc.com | 4387 → 1452 | 0 → 0 | igual: sigue sin estilos |
+| elpais.com | 5015 → 2211 | 1 → 1 (`gsi/client`, 403) | **mejor** (poco): el selector de edición tiene texto |
+| eltiempo.com | 19 742 → 9390 | 1 → 1 (`gsi/client`, 403) | igual |
+| nytimes.com | 38 702 → 1749 | 6 → 0 | **peor, pero no es el motor**: el sitio respondió 403 con la verificación de DataDome (`captcha-delivery.com`) en vez de la portada |
+| google.com | 671 → 376 | 0 → 0 | igual (bien) |
+| duckduckgo.com | 5349 → 2639 | 0 → 0 | igual: sin resultados |
+| bing.com | 782 → 512 | 0 → 0 | igual |
+| developer.mozilla.org | 3167 → 1692 | 0 → 0 | igual (bien) |
+| doc.rust-lang.org | 1010 → 358 | 0 → 0 | igual (bien) |
+| docs.python.org | 603 → 700 | 1 → 1 (`select.add`) | igual (bien) |
+| github.com | 18 573 → 12 261 | 0 → 0 | igual |
+| gitlab.com | 7472 → 2273 | 5 → 5 (`SVGElement`) | **mejor**: el avatar del proyecto ya sale; sigue sin la barra superior |
+| news.ycombinator.com | 568 → 505 | 0 → 0 | igual (bien) |
+| reddit.com | 159 → 2917 | 9 → 0 (los módulos de CSP) | igual a la vista, sin reto JS esta vez |
+| stackoverflow.com | 237 → 206 | 0 → 0 | igual: con 3 esperas el reto de Cloudflare aún no terminó (necesita ~5,6 s) |
+| amazon.com | 766 → 1451 | 0 → 0 | **mejor**: las 4 tarjetas del carrusel tienen imagen y texto; aparece un desborde horizontal |
+| mercadolibre.com.co | 12 033 → 17 828 | 4 → 4 | **mejor**: ya no termina en "Esquema no soportado". Sus 4 errores eran ahora de `<link rel=preload as=script nonce>`; con la rama `army/e3` de la ronda 6, 0 errores |
+| openstreetmap.org | 1676 → 1088 | 0 → 0 | igual: el mapa gris |
+| youtube.com | 28 185 → 18 010 | 2 → 2 | igual: esqueletos |
+| vimeo.com | 7354 → 2949 | 0 → 0 | igual (el menú salió en inglés: probablemente el sitio) |
+| excalidraw.com | 3415 → 2476 | 0 → 0 | igual: en blanco |
+| react.dev | 10 658 → 5058 | 0 → 0 | igual: la lupa gigante |
+| rae.es | 28 054 → 9617 | 0 → 8 | **mejor**: sale la noticia principal, aunque desplazada a la derecha. Los 8 son avisos de CSP en "solo informe" del sitio, que ahora sirve un reto de Cloudflare; salían duplicados, y con la rama `army/e3` de la ronda 6 salen una vez cada uno (6) |
+| gov.co | 3417 → 1585 | 0 → 0 | igual: en blanco |
+| apple.com/es | 3730 → 1971 | 5 → 5 (`DOMMatrix`) | dudoso: cambia el color de la franja de financiación |
+
+**Resumen del segundo barrido:**
+- 6 mejoran: Wikipedia en inglés, El País, GitLab, Amazon, Mercado Libre y la RAE.
+- 19 siguen igual.
+- NYT sale peor porque el sitio sirvió su verificación antibots.
+- Apple queda dudoso.
+
 ## Lo que no encontré
 
 - **"El sitio tardó demasiado"** (un tiempo de lectura agotado en `bf-net`, que vio E4): no
