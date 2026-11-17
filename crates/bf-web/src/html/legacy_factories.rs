@@ -614,11 +614,26 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
     delay_load(agent, n, true);
     let started = crate::bom::performance_observer::now_ms(agent);
     let requested = url.clone();
+    // E1: el documento es el *client* de la petición (HTML §4.8.4.3.5, "update the image
+    // data": "Let request be the result of creating a potential-CORS request … " con el
+    // documento del elemento): su URL es el referente (Fetch §4.1, Referrer Policy §8.3), con
+    // la política del atributo `referrerpolicy` del `<img>` si la tiene (antes el navegador
+    // ponía el referente del documento con su política y el atributo se perdía).
+    let (referrer, referrer_policy) = with_doc(agent, n.doc, |d| {
+        let policy = d
+            .element(n.node)
+            .and_then(|e| e.attr("referrerpolicy"))
+            .and_then(bf_net::referrer::ReferrerPolicy::parse)
+            .unwrap_or_default();
+        (d.url.clone(), policy)
+    });
     let req = crate::net::NetRequest {
         url,
         // E6: el *destination* `image` (Fetch §2.2.5, HTML §4.8.4.3.5 "update the image data").
         options: bf_net::RequestOptions {
             destination: Some(bf_infra::Destination::Image),
+            referrer: Some(referrer),
+            referrer_policy,
             ..Default::default()
         },
     };

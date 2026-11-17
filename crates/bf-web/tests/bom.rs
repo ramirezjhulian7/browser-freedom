@@ -1801,3 +1801,27 @@ fn frame_navigation_retires_the_old_document() {
         "fin,true,true,dos,1,true,true"
     );
 }
+
+/// E1: HTML §8.1.4.2: el module map se indexa por URL y tipo, no por las opciones de la petición:
+/// el mismo módulo pedido por dos `<script type=module>` (con y sin `crossorigin`) y por un
+/// `import` se evalúa una vez. Antes, NYT definía sus custom elements dos veces.
+#[test]
+fn module_evaluated_once_per_url() {
+    let mut p = Page::scripted(
+        "<script type=module src=https://example.test/m.js></script>\
+         <script type=module src=https://example.test/m.js crossorigin></script>\
+         <script type=module>import './m.js'; window.importado = window.veces;</script>",
+        &[(
+            "https://example.test/m.js",
+            "window.veces = (window.veces || 0) + 1; \
+             customElements.define('x-uno', class extends HTMLElement {});",
+        )],
+    );
+    p.idle();
+    assert_eq!(p.show("[window.veces, window.importado].join()"), "1,1");
+    assert!(
+        !p.console().iter().any(|l| l.contains("already")),
+        "{:?}",
+        p.console()
+    );
+}

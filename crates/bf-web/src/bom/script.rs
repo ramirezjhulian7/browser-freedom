@@ -516,7 +516,14 @@ impl WebScripts<'_> {
         }
         let start = std::time::Instant::now();
         let r = self.guarded(|agent| {
-            let m = agent.parse_module_record(url, source)?;
+            // E1: HTML §8.1.5.4 ("fetch a single module script"): si la URL ya está en el module
+            // map (otro `<script type=module>` con otras opciones, p. ej. sin `crossorigin`, o un
+            // `import`), es ese mismo módulo y no se vuelve a evaluar. Antes se creaba otro
+            // registro: NYT definía cinco custom elements dos veces ("already defined").
+            let m = match agent.module_in_map(url) {
+                Some(m) => m,
+                None => agent.parse_module_record(url, source)?,
+            };
             agent.load_requested_modules(m)?;
             agent.link_module(m)?;
             let p = agent.evaluate_module(m)?;

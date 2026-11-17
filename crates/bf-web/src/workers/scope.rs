@@ -651,6 +651,8 @@ fn install_rooted(
     crate::dom::window::track_rejections(agent, realm);
     // E1: `crypto.subtle` (`[Exposed=(Window,Worker)]`).
     crate::crypto::register(agent, realm, &h);
+    // E1: Geometry Interfaces (`[Exposed=(Window,Worker)]`).
+    crate::dom::geometry::install(agent, realm, false);
     // IndexedDB (E2) también está expuesto en los workers.
     crate::storage::register(agent, realm, &h);
     // `caches` (SW §5.5, `[SecureContext]`).

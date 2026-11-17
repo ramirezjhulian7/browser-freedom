@@ -5265,6 +5265,46 @@ mod tests {
         assert!(!shown.contains("token"), "{shown}");
     }
 
+    /// E1: HTML §12.2.2: el `sessionStorage` es de la pestaña y sobrevive a las recargas. Una
+    /// página `file:` que recarga una vez con una marca en `sessionStorage` recargaba sin fin:
+    /// cada documento empezaba con el área vacía. Aquí la primera recarga la pide el navegador y
+    /// la segunda el script (`location.reload()` al ver la marca), para que el test termine
+    /// también sin el arreglo (con "cargas 1").
+    #[test]
+    fn session_storage_survives_reload() {
+        crate::profile::set_ephemeral();
+        let dir = std::env::temp_dir().join(format!("freedom-e1-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("recarga.html");
+        std::fs::write(
+            &file,
+            "<script>var n = Number(sessionStorage.getItem('veces') || 0) + 1; \
+             sessionStorage.setItem('veces', n); document.title = 'cargas ' + n; \
+             if (n === 2) location.reload();</script>",
+        )
+        .unwrap();
+        let fonts = FontDb::system();
+        let worker = Documents::new(fonts.clone(), || {});
+        let net = Arc::new(NetLoader::new());
+        let mut app = App::new(worker, fonts, None, Theme::for_system(None), net);
+        app.headless = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let title = |app: &App| app.current.as_ref().and_then(|c| c.title());
+        let url = Url::parse(&format!("file://{}", file.display()), None).unwrap();
+        app.start_load(url.clone(), Navigation::Push);
+        app.settle();
+        let first = title(&app);
+        app.start_load(url, Navigation::Reload);
+        app.settle();
+        app.settle();
+        let last = title(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(first.as_deref(), Some("cargas 1"));
+        assert_eq!(last.as_deref(), Some("cargas 3"));
+    }
+
     fn page(html: &str) -> Arc<Loaded> {
         let url = Url::parse("https://example.test/", None).unwrap();
         Arc::new(Loaded::generated(

@@ -290,3 +290,48 @@ fn lazy_images_wait_for_the_browser_layout() {
     assert_eq!(show(&mut rt, "log.join()"), "cerca");
     assert_eq!(layouts.get(), 1, "la revisión usa la maqueta que ya hay");
 }
+
+/// Un backend que anota el referente y la política de cada petición (y contesta 404).
+struct Recorder(std::sync::Mutex<Vec<(String, Option<String>, bf_net::referrer::ReferrerPolicy)>>);
+
+impl bf_web::net::NetBackend for Recorder {
+    fn fetch(&self, req: &bf_web::net::NetRequest) -> bf_web::net::NetResult {
+        self.0.lock().unwrap().push((
+            req.url.href(),
+            req.options.referrer.as_ref().map(Url::href),
+            req.options.referrer_policy,
+        ));
+        Ok(bf_web::net::NetResponse {
+            url_list: vec![req.url.clone()],
+            status: 404,
+            status_text: "Not Found".into(),
+            headers: Default::default(),
+            body: Vec::new(),
+        })
+    }
+}
+
+/// E1: HTML §4.8.4.3.5: la petición de un `<img>` lleva el documento como referente (Fetch
+/// §4.1, Referrer Policy §8.3), con la política de su atributo `referrerpolicy`. Antes la
+/// petición no traía referente y el navegador ponía el del documento con su política: el
+/// `referrerpolicy` del elemento se perdía.
+#[test]
+fn image_requests_carry_the_document_referrer() {
+    let mut p = Page::load("<p>x</p>");
+    let rec = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+    let realm = p.ctx.realm;
+    bf_web::net::set_backend(&mut p.rt.agent, realm, rec.clone(), false);
+    p.show(
+        "const a = new Image(); a.src = 'https://tiles.test/1.png'; document.body.append(a); \
+         const b = document.createElement('img'); b.referrerPolicy = 'no-referrer'; \
+         b.src = 'https://tiles.test/2.png'; document.body.append(b);",
+    );
+    p.idle();
+    let got = rec.0.lock().unwrap().clone();
+    let one = got.iter().find(|r| r.0.ends_with("/1.png")).expect("1.png");
+    let two = got.iter().find(|r| r.0.ends_with("/2.png")).expect("2.png");
+    assert_eq!(one.1.as_deref(), Some("https://example.test/"));
+    assert_eq!(one.2, bf_net::referrer::ReferrerPolicy::Default);
+    assert_eq!(two.1.as_deref(), Some("https://example.test/"));
+    assert_eq!(two.2, bf_net::referrer::ReferrerPolicy::NoReferrer);
+}

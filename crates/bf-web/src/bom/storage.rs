@@ -127,13 +127,28 @@ fn area<'a>(agent: &'a mut Agent, this: &Value) -> &'a mut StorageArea {
             .as_mut()
             .expect("localStorage cargado")
     } else {
+        // E1: el de la pestaña (HTML §12.2.2), la primera vez que se usa.
+        if !state(agent).session_loaded {
+            let origin = origin_of(&window_url(agent));
+            let items = state_mut(agent).hooks.load_session_storage(&origin);
+            let s = state_mut(agent);
+            s.session_loaded = true;
+            if let Some(items) = items {
+                s.session_storage = StorageArea { items };
+            }
+        }
         &mut state_mut(agent).session_storage
     }
 }
 
-/// Después de cambiar `localStorage`: se guarda.
+/// Después de cambiar un área: se guarda (`localStorage` en disco; E1: `sessionStorage` en la
+/// pestaña).
 fn persist(agent: &mut Agent, this: &Value) {
     if !is_local(agent, this) {
+        let origin = origin_of(&window_url(agent));
+        let s = state_mut(agent);
+        let items = s.session_storage.items.clone();
+        s.hooks.save_session_storage(&origin, &items);
         return;
     }
     let origin = origin_of(&window_url(agent));

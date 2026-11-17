@@ -8,6 +8,7 @@
 //! las peticiones a la interfaz ([`PageRequest`]: navegar, diálogos, pestañas nuevas).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -265,6 +266,14 @@ impl WebHooks for ShellWeb {
     }
 }
 
+thread_local! {
+    /// E1: el `sessionStorage` de la pestaña por origen (HTML §12.2.2: el del *top-level
+    /// traversable*). Cada pestaña tiene su hilo (`window::worker`), así que un `thread_local`
+    /// es de la pestaña y sobrevive a sus documentos (navegaciones y `location.reload()`).
+    static SESSION_STORAGE: RefCell<HashMap<String, Vec<(String, String)>>> =
+        RefCell::new(HashMap::new());
+}
+
 /// Los hooks del BOM: cookies de `bf-net`, `localStorage` en disco y la interfaz.
 struct ShellBom {
     env: PageEnv,
@@ -325,6 +334,16 @@ impl BomHooks for ShellBom {
             .fetcher
             .cookies
             .set_cookie_from_script(url, value);
+    }
+
+    fn load_session_storage(&mut self, origin: &str) -> Option<Vec<(String, String)>> {
+        Some(SESSION_STORAGE.with(|m| m.borrow().get(origin).cloned().unwrap_or_default()))
+    }
+
+    fn save_session_storage(&mut self, origin: &str, items: &[(String, String)]) {
+        SESSION_STORAGE.with(|m| {
+            m.borrow_mut().insert(origin.to_owned(), items.to_vec());
+        });
     }
 
     fn load_storage(&mut self, origin: &str) -> Vec<(String, String)> {

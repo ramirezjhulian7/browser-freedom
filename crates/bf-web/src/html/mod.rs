@@ -16,6 +16,7 @@ pub mod named;
 pub mod reflect;
 pub mod scripting;
 pub mod submission;
+pub mod svg; // E1: SVGElement y compañía
 pub mod table;
 pub mod tables;
 pub mod testharness;
@@ -30,8 +31,23 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     crate::dom::shadow::register(agent);
     crate::dom::serializer::register(agent); // E1
     custom_elements::register(agent);
+    svg::register(agent); // E1
     submission::register(agent);
     forms::register_collections(agent); // E1
     elements::register(agent, realm, ctx);
     legacy_factories::register(agent, realm); // E3: `Image`, `Audio`, `Option`
+}
+
+/// E1: `HTMLSelectElement.prototype.add` y `remove(index)` (`select.js`).
+pub const SELECT_JS: &str = include_str!("select.js");
+
+/// Evalúa `select.js` en la ventana `realm`.
+pub fn install_select(agent: &mut Agent, realm: RealmId) {
+    let saved = agent.current_realm;
+    agent.current_realm = realm;
+    let g = bf_js::value::Value::Object(agent.realms[realm].global_object);
+    if let Ok(f) = agent.eval_script_cached(SELECT_JS, "bf-web:select.js") {
+        let _ = agent.call(&f, bf_js::value::Value::Undefined, &[g]);
+    }
+    agent.current_realm = saved;
 }

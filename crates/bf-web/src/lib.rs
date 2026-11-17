@@ -355,6 +355,8 @@ fn window_scripts() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ),
         ("bf-web:cache.js", workers::cache::CACHE_JS.into()),
         ("dataset", html::dataset::FACTORY.into()),
+        ("bf-web:geometry.js", dom::geometry::GEOMETRY_JS.into()),
+        ("bf-web:select.js", html::SELECT_JS.into()),
         ("storage", bom::storage::NAMED_PROPERTIES.into()),
     ]
 }
@@ -386,5 +388,7 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         storage::register(agent, realm, ctx); // E2
         workers::register(agent, realm, ctx); // E3
         crypto::register(agent, realm, ctx); // E1
+        dom::geometry::install(agent, realm, true); // E1
+        html::install_select(agent, realm); // E1
     });
 }

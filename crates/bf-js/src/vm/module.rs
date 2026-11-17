@@ -278,6 +278,15 @@ impl Agent {
         &self.modules.records[m]
     }
 
+    /// E1: el módulo de JavaScript de `url` que ya está en el module map del realm actual (HTML
+    /// §8.1.4.2: el mapa se indexa por URL y tipo de módulo, no por las opciones de la petición).
+    pub fn module_in_map(&self, url: &str) -> Option<ModuleId> {
+        self.modules
+            .map
+            .get(&(self.current_realm, url.to_owned(), false))
+            .copied()
+    }
+
     /// ParseModule (§16.2.1.6.1) del texto de `url` en el realm actual, y su registro en el
     /// module map.
     pub fn parse_module_record(&mut self, url: &str, text: &str) -> JsResult<ModuleId> {
