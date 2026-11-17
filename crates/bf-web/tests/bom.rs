@@ -1287,7 +1287,10 @@ fn cross_origin_location_is_restricted() {
 fn cross_origin_window_descriptors_and_keys() {
     let mut p = framed(
         "<iframe id=f src=https://otro.test/p.html></iframe>",
-        &[("https://otro.test/p.html", "<iframe name=hijo srcdoc=x></iframe>")],
+        &[(
+            "https://otro.test/p.html",
+            "<iframe name=hijo srcdoc=x></iframe>",
+        )],
     );
     let realm = p.ctx.realm;
     bom::frames::sync_frames(&mut p.rt.agent, realm);
@@ -1798,4 +1801,3 @@ fn frame_navigation_retires_the_old_document() {
         "fin,true,true,dos,1,true,true"
     );
 }
-
