@@ -418,6 +418,8 @@ pub fn load(arg: &str) -> Result<Loaded, String> {
 /// Carga para la ventana: nunca falla; los errores se muestran como `about:error`. Con
 /// `engine`, los scripts del documento se ejecutan con él.
 pub fn load_with(url: &Url, ctx: &LoadContext, engine: Option<(&mut Engine, &PageEnv)>) -> Loaded {
+    // E2: fuentes WOFF y WOFF2 también en páginas sin scripts.
+    bf_web::cssom::font_loading::register_font_decompressors();
     if internal::is_internal(url) {
         return internal::page(url, ctx);
     }

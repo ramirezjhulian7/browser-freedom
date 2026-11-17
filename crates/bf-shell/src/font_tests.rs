@@ -6,6 +6,9 @@
 //!   siguiente la usa;
 //! - `FontFace.load()` descarga en segundo plano: el `load` del documento no la espera, su
 //!   promesa se resuelve después y `document.fonts.ready`, después de ella.
+//!
+//! E2: lo mismo con una fuente WOFF 1.0 (`format('woff')`): la primera pintura usa la de
+//! respaldo y la siguiente, la fuente ya descomprimida.
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
@@ -22,7 +25,7 @@ use crate::script::{Engine, PageEnv};
 use crate::theme::Theme;
 
 const PAGE: &str = "<!doctype html><style>\
-    @font-face { font-family: Lenta; src: url(/lenta.ttf) format('truetype') }\
+    @font-face { font-family: Lenta; src: url(/lenta.FORMATO) format('FORMATO') }\
     body { margin: 0 } p { font: 16px Lenta, serif }</style>\
     <p><span id=t>XXXX</span></p>\
     <script>\
@@ -33,15 +36,15 @@ const PAGE: &str = "<!doctype html><style>\
     document.fonts.ready.then(() => console.log('ready'));\
     </script>";
 
-/// `/` la página; `/lenta.ttf` y `/otra.ttf`, Ahem al cabo de 2 s.
-fn server(font: Vec<u8>) -> u16 {
+/// `/` la página; `/lenta.*` y `/otra.ttf`, Ahem al cabo de 2 s (`/lenta.woff`, en WOFF).
+fn server(page: String, font: Vec<u8>, woff: Vec<u8>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let font = Arc::new(font);
+    let (page, font, woff) = (Arc::new(page), Arc::new(font), Arc::new(woff));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            let font = font.clone();
+            let (page, font, woff) = (page.clone(), font.clone(), woff.clone());
             std::thread::spawn(move || {
                 let mut r = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
@@ -54,7 +57,10 @@ fn server(font: Vec<u8>) -> u16 {
                 }
                 let path = line.split(' ').nth(1).unwrap_or("/").to_owned();
                 let (ty, body): (&str, &[u8]) = if path == "/" {
-                    ("text/html; charset=utf-8", PAGE.as_bytes())
+                    ("text/html; charset=utf-8", page.as_bytes())
+                } else if path.ends_with(".woff") {
+                    std::thread::sleep(Duration::from_secs(2));
+                    ("font/woff", &woff)
                 } else {
                     std::thread::sleep(Duration::from_secs(2));
                     ("font/ttf", &font)
@@ -72,15 +78,57 @@ fn server(font: Vec<u8>) -> u16 {
     port
 }
 
+/// Un WOFF 1.0 con las tablas sin comprimir (WOFF §5: `compLength` igual a `origLength`).
+fn woff_of(ttf: &[u8]) -> Vec<u8> {
+    let be16 = |at: usize| usize::from(u16::from_be_bytes([ttf[at], ttf[at + 1]]));
+    let be32 = |at: usize| u32::from_be_bytes([ttf[at], ttf[at + 1], ttf[at + 2], ttf[at + 3]]);
+    let n = be16(4);
+    let mut out = vec![0u8; 44 + 20 * n];
+    out[0..4].copy_from_slice(b"wOFF");
+    out[4..8].copy_from_slice(&ttf[0..4]);
+    out[12..14].copy_from_slice(&(n as u16).to_be_bytes());
+    out[16..20].copy_from_slice(&(ttf.len() as u32).to_be_bytes());
+    for i in 0..n {
+        let e = 12 + 16 * i;
+        let (off, len) = (be32(e + 8) as usize, be32(e + 12));
+        let at = out.len() as u32;
+        let d = 44 + 20 * i;
+        out[d..d + 4].copy_from_slice(&ttf[e..e + 4]);
+        out[d + 4..d + 8].copy_from_slice(&at.to_be_bytes());
+        out[d + 8..d + 12].copy_from_slice(&len.to_be_bytes());
+        out[d + 12..d + 16].copy_from_slice(&len.to_be_bytes());
+        out[d + 16..d + 20].copy_from_slice(&ttf[e + 4..e + 8]);
+        out.extend_from_slice(&ttf[off..off + len as usize]);
+        out.resize(out.len().div_ceil(4) * 4, 0);
+    }
+    let total = out.len() as u32;
+    out[8..12].copy_from_slice(&total.to_be_bytes());
+    out
+}
+
 #[test]
 fn web_fonts_do_not_block_the_page() {
+    web_fonts_arrive_later("truetype");
+}
+
+#[test]
+fn woff_fonts_do_not_block_the_page() {
+    web_fonts_arrive_later("woff");
+}
+
+fn web_fonts_arrive_later(format: &str) {
     let ahem =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/fonts/Ahem.ttf");
     let Ok(font) = std::fs::read(&ahem) else {
         eprintln!("aviso: sin Ahem ({}), test omitido", ahem.display());
         return;
     };
-    let port = server(font);
+    let woff = woff_of(&font);
+    let ext = if format == "woff" { "woff" } else { "ttf" };
+    let page = PAGE
+        .replace("lenta.FORMATO", &format!("lenta.{ext}"))
+        .replace("FORMATO", format);
+    let port = server(page, font, woff);
     let net = Arc::new(NetLoader::new());
     let ctx = LoadContext {
         net: net.clone(),

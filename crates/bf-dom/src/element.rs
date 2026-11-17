@@ -95,6 +95,8 @@ impl Document {
             next: None,
         });
         self.bump_version();
+        // E2: para la cascada incremental del CSSOM.
+        self.log_attribute_change(el);
         // Attribute change steps de HTML.
         if ns.is_none() {
             self.attribute_changed(el, local);
