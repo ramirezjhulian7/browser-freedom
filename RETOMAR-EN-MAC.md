@@ -192,8 +192,8 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
 criterios: 88.9 %** de las fases 2 a 5 (91.1 % contando la fase 1). Lo que falta está en la
-lista "Criterios no cumplidos" del roadmap; los cuatro criterios que quedan esperan una
-decisión del usuario (roadmap, "Decisiones pendientes del usuario").
+lista "Criterios no cumplidos" del roadmap. Dos de los cuatro criterios que quedan no se
+cumplirán por decisión del usuario, y los otros dos siguen abiertos (sección 9a).
 
 ## 8. Ramas en integración
 
@@ -202,43 +202,69 @@ nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y q
 
 ## 9. Lo primero al retomar
 
-Estado del 2026-11-17, `master` `3a7c372`, con las rondas 1 a 6 de la sesión del día
-integradas. **Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios. Lo que los
-ejecutores tengan en curso en sus ramas no está en `master` (`git log --oneline
-master..army/e<n>`).
+Estado del 2026-11-17, al cerrar la tanda (ronda 8). `master` está en `eb9776d`, con la ronda 8
+de E2 integrada. **Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios.
 
 Lo primero, en este orden:
-1. **Las decisiones del usuario** (9a). Los cuatro criterios que faltan dependen de ellas, y
-   hay una más sobre el `User-Agent`.
-2. **Fuentes web asíncronas** (E2, en curso en la ronda 7). `FontFace.load()` y
-   `document.fonts` descargan en síncrono en el hilo de la pestaña (CSS Font Loading §2.2 pide
-   que sea asíncrono), y `document.fonts` recorre todas las reglas en cada operación. Por eso
-   excalidraw queda en blanco y gov.co no termina de montarse (`pendiente/mac/e1.md`, "Sesión
-   nueva, ronda 6", "Páginas en blanco o a medias").
-3. **Velocidad de JavaScript** (E1, en curso en la ronda 7). Es lo que más deja a medias las
-   aplicaciones grandes del barrido: YouTube (25 s de scripts), DuckDuckGo (los resultados
-   llegan a los 3-7 s) y El Tiempo.
+1. **Integrar lo que quedó en las ramas** (9b): `army/e1` y `army/e3` traen la ronda 8 sin
+   integrar.
+2. **Las aplicaciones de JavaScript pesado** (E1). Son la mayor parte de los defectos graves
+   del cuarto barrido: YouTube (ya con caja de búsqueda y 7,4 s de scripts en vez de 24,8),
+   Vimeo, Reddit y los esqueletos de GitHub y GitLab.
+3. **`ShellLayout` con las `@font-face` del documento** (E3, `bf-shell/src/script.rs`; propuesta
+   de E2 en su nota de la ronda 8). La maqueta que usan los scripts mide con las fuentes del
+   sistema y la del pintado con las del documento. Por eso `ResizeObserver` avisa de un bucle
+   de más (Apple, DuckDuckGo) y `getBoundingClientRect` oscila.
+4. **Imágenes que no salen** (E2, sin diagnosticar): Apple (la portada mide 0 de ancho),
+   GitLab y los iconos de los controles de OpenStreetMap; El País y Amazon según E2.
+5. **Estilo incremental** (E2, diseño en su nota de la ronda 8): las maquetas forzadas de
+   El Tiempo, RAE y GitHub recalculan todo el estilo.
 
 ### 9a. Las decisiones del usuario
 
-Los cuatro criterios que faltan dependen de ellas (roadmap, "Decisiones pendientes del
-usuario"). El planificador se las preguntó por teléfono el 2026-11-17, sin respuesta todavía:
-- **Excluir los 12 tests que ningún navegador cumple:**
-  - 2 de `html/syntax/parsing` (8164 / 8166);
-  - 10 de los reftests de flexbox de 3.6 (97 / 107): 8 de CSS Flexbox 2 y 2 cuya referencia
-    contradice §4.5.
+Decididas el 2026-11-17 (roadmap, "Lo que decidió el usuario y lo que sigue abierto"):
+- **No se excluyen los 12 tests que ningún navegador cumple** (2 de `html/syntax/parsing` y 10
+  reftests de flexbox de 3.6). Los criterios 2.3 y 3.6 siguen sin cumplirse.
+- **No se añade `accesskit`.** El lector de pantalla sigue sin cumplirse: el árbol de
+  accesibilidad del motor no llega a `NSAccessibility`.
 
-  Con eso, el avance subiría a 93.3 % con la fase 1.
-- **Lector de pantalla:** hace falta un crate externo (`accesskit`, la recomendación del
-  planificador) o FFI con `unsafe`.
-- **Fuzzer de IPC:** pide separar el motor en procesos.
+Siguen abiertas:
+- **Fuzzer de IPC:** pide separar el motor en procesos (navegador y contenido).
 - **El `User-Agent` de Freedom y Google:** `accounts.google.com/gsi/client` responde 403 al
-  de Freedom. La regla es no imitar a Chrome, y `identity.rs` no se toca.
+  de Freedom. La regla es no imitar a Chrome, y `identity.rs` no se toca; el planificador lo
+  deja así salvo que el usuario diga otra cosa.
 
-### 9b. `app.asimetrix.co` con sesión iniciada
+### 9b. Las ramas y lo que deja cada ejecutor
 
-Solo el usuario puede probarlo: sin entrar no se reproducen ni la pestaña que se caía (`el
-realm no tiene WebContext`) ni el `ChunkLoadError`. Lo que cambió desde la captura:
+Según la nota de cada uno en la ronda 8:
+- **`army/e1`** (sin integrar; la nota de la ronda 8 estaba a medio escribir al cerrar):
+  - commits `9b1ae22` (la consola dice qué script se cortó por tiempo agotado), `dd023c1` (la
+    página de los tests en worker lleva `timeout=long`) y `8e88842` (`crypto.subtle` con
+    AES-CBC, AES-CTR y AES-GCM, PBKDF2 y HKDF, que pide Amazon);
+  - **en curso:** cambios en `bf-web/src/crypto.rs` y `tests/subtle.rs` sin commit;
+  - **diagnósticos:** excalidraw espera ~111 `FontFace.load()` de fuentes CJK y monta tras 8-10 s
+    (con 25 esperas en su máquina; en el cuarto barrido, con más carga, seguía en "Loading
+    scene…"); el `TypeError` de gov.co es el código del sitio sin sesión iniciada.
+- **`army/e2`** (integrada en `eb9776d`):
+  - **hecho:** `element.style` sin re-parsear, los stacking contexts con `mix-blend-mode` como
+    grupo aislado (el mapa de OpenStreetMap ya se ve) y una sola descarga por imagen;
+  - **deja pendiente:** el estilo incremental, `ShellLayout` con las `@font-face` (para E3), las
+    imágenes de El País, Amazon y Apple, y perfilar el emparejamiento de selectores de RAE y
+    GitHub.
+- **`army/e3`** (sin integrar):
+  - **hecho:** una conexión HTTP/1.1 reutilizada y cerrada se repite solo con métodos
+    idempotentes (RFC 9110 §9.2.2); tests de los tres fallos de red; `FREEDOM_NET_LOG=cabeceras`
+    también en las peticiones de los scripts; `Freedom.app` reconstruida y probada sin ventana;
+    el cuarto barrido y los documentos;
+  - **gov.co:** la red está bien (88 respuestas 200/204, CORS correcto); queda del lado de
+    JavaScript;
+  - **deja pendiente:** `ShellLayout` con las `@font-face`.
+
+### 9c. `app.asimetrix.co` con sesión iniciada
+
+**Pendiente: solo el usuario puede probarlo**, porque sin entrar no se reproducen ni la pestaña
+que se caía (`el realm no tiene WebContext`) ni el `ChunkLoadError`. Lo que cambió desde la
+captura:
 - E1 quitó los pánicos de `WebContextHandle` y añadió el diagnóstico de caídas (`Esta página
   falló` dice qué pasó; `pendiente/mac/e1.md`, "Sesión nueva, ronda 3");
 - E2 hizo que las hojas enlazadas carguen en la ventana, la causa probable del
@@ -246,20 +272,26 @@ realm no tiene WebContext`) ni el `ChunkLoadError`. Lo que cambió desde la capt
 
 En `https://asimetrix.co/` a 1180 px ya no salen el texto del `<noscript>`, las franjas
 laterales ni el desborde horizontal; el logo de "Ecosistema" mide 446×208 y el hueco del vídeo
-1068×600 (negro: el motor no reproduce vídeo). El titular grande de la portada ya no aparece en
-la captura del planificador: era una animación de entrada que terminaba entre dos pintados
-(E2), y un `<iframe>` de YouTube que retenía la pestaña 2,7 s (E3). Las dos cosas están
-arregladas desde `3a7c372`.
+1068×600 (negro: el motor no reproduce vídeo). El titular grande de la portada ya sale: era una
+animación de entrada que terminaba entre dos pintados (E2) y un `<iframe>` de YouTube que
+retenía la pestaña 2,7 s (E3), los dos arreglados desde `3a7c372`.
 
-### 9c. Uso diario
+### 9d. Uso diario
 
-El barrido de sitios de E3 (`docs/pendiente/mac/barrido-sitios.md`) dice qué le falta al
-navegador en 27 sitios públicos conocidos, con las carencias ordenadas por número de sitios y
-un dueño propuesto. Hay tres barridos, con una columna de cambio entre uno y otro. `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de
-maqueta y la consola de cada sitio para depurarlo (`docs/rendimiento.md`, "Volcado de una
-sesión").
+- **El barrido de sitios** (`docs/pendiente/mac/barrido-sitios.md`) dice qué le falta al
+  navegador en 27 sitios públicos conocidos, con las carencias ordenadas por número de sitios
+  y un dueño propuesto.
+  - Hay cuatro barridos, con una columna de cambio entre uno y otro.
+  - En el cuarto (`master` `cb41001`, 25 esperas), 7 sitios están bien, 12 tienen defectos
+    menores y 8 graves. Con `eb9776d`, OpenStreetMap pasa a menores: 7, 13 y 7.
+- `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de maqueta y la consola
+  de cada sitio para depurarlo (`docs/rendimiento.md`, "Volcado de una sesión").
+- `FREEDOM_NET_LOG=1` registra cada petición, también las de los scripts y las que fallan;
+  `FREEDOM_NET_LOG=cabeceras` añade las cabeceras de cada salto.
+- **`Freedom.app`:** `sh packaging/macos/build.sh` la deja en `dist/` (0.1.0, universal,
+  58 MB; `.dmg` de 26 MB). No está instalada en `/Applications`.
 
-### 9d. Método
+### 9e. Método
 
 - Rondas de dos o tres ejecutores, con `CARGO_BUILD_JOBS=2` y una compilación a la vez por
   ejecutor, para que las medidas de tiempo valgan (sección 6, "Medidas de tiempo"). Con

@@ -77,14 +77,16 @@ Resueltos en la ronda 6 del 2026-11-17 (en `master` desde `3a7c372`):
   - GitHub, de unos 4 s a menos de 1 en la maqueta.
 - **E3:** el marco lento y el reto de Cloudflare (abajo).
 
-En la rama `army/e3` (ronda 7, sin integrar todavía):
+En `master` desde `cb41001` (ronda 7):
 - **Las teselas de OpenStreetMap salían con la imagen "418 Access blocked".**
   - Las imágenes iban con `Accept: */*`. Fetch §4 recomienda, para el destino `image`,
     `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`.
   - El servidor de teselas solo da la tesela a las peticiones con `Referer` de
     `openstreetmap.org` si piden una imagen así. Con ese `Accept`, las 30 teselas llegan.
-  - El mapa sigue sin verse: las teselas cargadas (`leaflet-tile-loaded`, `opacity: 1`) no se
-    pintan dentro de las capas de Leaflet (E2).
+  - El mapa ya se ve desde `eb9776d` (ronda 8 de E2): Leaflet pone `mix-blend-mode:
+    plus-lighter` a las teselas, y un stacking context con algo que se mezcla ahora es un grupo
+    aislado (Compositing and Blending 1 §3.2). Antes la tesela se sumaba al fondo y salía
+    blanca.
 
 Resueltos el 2026-11-17 en la ronda 6 de E3 (en `master` desde `3a7c372`):
 - **Un `<iframe>` lento congelaba su página.** El hilo de la pestaña pedía, parseaba y ejecutaba
@@ -164,8 +166,8 @@ protegida por ellas en Freedom:
 
 | Sitio | Lo que se ve | Pista |
 |---|---|---|
-| excalidraw.com y gov.co | En blanco, o sin terminar de montarse. | `FontFace.load()` y `document.fonts` descargan en síncrono en el hilo de la pestaña (CSS Font Loading §2.2 pide asíncrono), y `document.fonts` recorre todas las reglas en cada operación (E1 lo diagnosticó; lo arregla E2, ronda 7). |
-| www.openstreetmap.org | El mapa no se ve aunque las teselas ya llegan bien (rama `army/e3`, ronda 7). | Las `<img class="leaflet-tile leaflet-tile-loaded">` están cargadas y colocadas con `translate3d` dentro de capas de 0×0; una tesela suelta con el mismo `transform` sí se pinta. Falta ver qué tapa o recorta las capas de Leaflet (E2). |
+| excalidraw.com y gov.co | Desde la ronda 7, las fuentes ya no congelan la pestaña (E2). excalidraw llega a "Loading scene…" y ahí se queda. gov.co monta su estructura, pero el contenido principal queda vacío. | **gov.co no es de red** (E3, ronda 8): 88 respuestas, todas 200 o 204, con CORS correcto, preflights que pasan y JSON válido. "Error al cargar banner informativo" es un `console.log` del sitio. El único error es `TypeError: Cannot read properties of null (reading 'datoconsultadousuario')`, de JavaScript (E1). excalidraw: sin diagnosticar tras el arreglo de las fuentes. |
+| www.openstreetmap.org | El mapa se ve desde `eb9776d` (arriba). Los iconos de los controles del mapa salen como "?". | Sin diagnosticar: probablemente las imágenes o el SVG de los iconos de Leaflet (E2). |
 | www.nytimes.com | Desde el segundo barrido responde 403 con la verificación de DataDome (`captcha-delivery.com`), también a `curl`, con cualquier `User-Agent`. | Es la reputación de la IP tras muchas cargas automáticas, no el motor. El marco de verificación carga y manda su `POST` (200), pero la portada no se libera en ~7 s y se ve en blanco. Lo que muestra ese marco después del `POST` no está visto. |
 | Google (búsquedas) | Responde `429 Too Many Requests` y redirige a `/sorry` con reCAPTCHA; el reCAPTCHA falla con `TypeError: Type error.` dentro de `recaptcha__es_419.js`. Buscar desde la barra queda inutilizable. | Google es el buscador por defecto: es lo más visible para quien usa Freedom. Ver si el 429 depende del `User-Agent` nuevo, de las cabeceras (`Sec-CH-UA`, `Accept`) o del ritmo de peticiones, y qué operación falla en el reCAPTCHA. |
 | Aplicación de `app.asimetrix.co` (`/ASIMETRIX`, build `ce1e596`, con sesión iniciada) | La pestaña se cae: "Esta página falló", con el detalle `el realm no tiene WebContext`. En la consola, `ChunkLoadError: Loading CSS chunk 9298 failed`, `TypeError: Illegal invocation` y dos promesas rechazadas sin manejar. | Sin sesión no se reproduce la caída ni el `ChunkLoadError`. Arreglados desde entonces: el `Illegal invocation`, un `ShadowRealm` que tumbaba la pestaña con ese mismo mensaje y las hojas enlazadas que disparaban `error` (ver arriba). Falta que el usuario lo pruebe con su sesión (`RETOMAR-EN-MAC.md`, sección 9b). |

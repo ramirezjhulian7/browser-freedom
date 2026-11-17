@@ -361,6 +361,79 @@ seguir).
   manda reportar en ese caso (Resize Observer, *deliver resize loop error notification*); que el bucle se dé aquí es cosa de E1
   mirarlo.
 
+## Cuarto barrido (ronda 8, 2026-11-17)
+
+- **Método:** los mismos 27 sitios, con 25 esperas antes del `dump`, como el tercero.
+  - Binario: release de `master` `cb41001`, con la ronda 7 integrada: el compilador de E1
+    (YouTube), las fuentes web asíncronas de E2 y el `Accept` por *destination* de E3.
+  - Después del barrido, `master` pasó a `eb9776d` con la ronda 8 de E2. Esa ronda arregla el
+    mapa de OpenStreetMap (`mix-blend-mode` en un grupo aislado), así que ese sitio se volvió a
+    pasar con `eb9776d` (última fila de la tabla).
+- **Carga:** de 15,8 a 76,5, así que los tiempos no son comparables.
+- **Comparación:** un subagente comparó las capturas del paso 26 con las del tercer barrido y
+  clasificó cada sitio. Para nytimes, openstreetmap, gov.co y apple-es miró también el DOM, la
+  maqueta y la consola.
+- **Ningún sitio tumbó la pestaña.**
+
+| Sitio | Errores de consola, 3.º → 4.º | Captura, 4.º frente a 3.º | Estado |
+|---|---|---|---|
+| es.wikipedia.org | 0 → 0 | igual | menores: los radios de "Apariencia" salen sin marcar |
+| en.wikipedia.org | 0 → 0 | igual | menores: los mismos radios sin marcar |
+| bbc.com | 0 → 0 | igual | menores: "NEWS" tapado por la foto, titular en una serif genérica, hueco de anuncio |
+| elpais.com | 1 → 1 (`gsi/client`, 403) | igual | menores: ~280 px en blanco arriba; el selector de edición tapa la "E" del logo |
+| eltiempo.com | 3 → 3 | igual | menores: ~310 px en blanco arriba y desborde horizontal |
+| nytimes.com | 0 → 0 | igual | **graves**: la verificación de DataDome en blanco (la IP; "Ronda 7") |
+| google.com | 0 → 0 | igual | bien (la página básica que Google entrega a Freedom) |
+| duckduckgo.com | 1 → 1 (`ResizeObserver loop`) | igual | bien |
+| bing.com | 1 → 1 (`reading 'submit'`) | igual | menores: desborde horizontal; el pie, montado bajo las noticias |
+| developer.mozilla.org | 0 → 0 | igual | menores: el botón de búsqueda sin icono; una franja gris vacía |
+| doc.rust-lang.org | 0 → 0 | igual | bien |
+| docs.python.org | 0 → 0 | igual | bien |
+| github.com | 0 → 0 | igual | menores: las columnas del último commit siguen en esqueleto |
+| gitlab.com | 0 → 0 | igual | menores: avatar del proyecto en blanco, logo como "I.", último commit en esqueleto |
+| news.ycombinator.com | 0 → 0 | igual | bien |
+| reddit.com | 0 → 0 | igual | **graves** (en el límite): el feed carga, pero las tarjetas destacadas y la barra lateral son esqueletos y hay números pegados ("161 k2.5 k") |
+| stackoverflow.com | 0 → 0 | igual | bien (pasa el reto de Cloudflare) |
+| amazon.com | 2 → 2 (`crypto.subtle` con AES-CBC) | igual | menores: la barra del carrusel sobre las tarjetas; "Imprescindibl/es" cortado |
+| mercadolibre.com.co | 0 → 0 | igual | menores: asoman las diapositivas vecinas del banner |
+| openstreetmap.org | 0 → 0 | igual | **graves** con `cb41001`: las teselas llegan (`leaflet-tile-loaded`), pero el mapa sale en blanco |
+| youtube.com | 1 → 2 (`reading 'hostElement'`; `Cannot delete property 'renderGuide'`) | **mejor**: aparece la caja de búsqueda; el reloj de la barra baja de 24,8 s a 7,4 s y ya no hay "tiempo agotado" | **graves**: sin logo ni vídeos, solo esqueletos |
+| vimeo.com | 1 → 1 (React #418) | igual | **graves**: el bloque principal y el buscador en esqueleto; desborde horizontal |
+| excalidraw.com | 1 → 0 | igual | **graves**: "Loading scene…"; el lienzo no aparece |
+| react.dev | 0 → 0 | igual | bien |
+| rae.es | 0 → 0 | **mejor**: la primera diapositiva del carrusel (foto, titular y flechas), antes un hueco blanco | menores: la segunda diapositiva asoma cortada a la derecha |
+| gov.co | 1 → 1 (`reading 'datoconsultadousuario'`) | igual | **graves**: cabecera, logo, buscador y "Trámites más consultados" miden 0 de alto; un indicador de carga girando |
+| apple.com/es | 3 → 7 (`ResizeObserver loop`) | igual | **graves**: el menú global es una franja negra vacía y la imagen de la portada mide 0 de ancho |
+| openstreetmap.org con `eb9776d` | 0 | **mejor**: el mapa entero, con sus teselas y rótulos | menores: los iconos de los controles salen como "?" |
+
+**Resumen del cuarto barrido:**
+- **Cambio frente al tercero:** 2 mejoran (YouTube y RAE), 25 siguen igual y ninguno empeora.
+  Con `eb9776d`, OpenStreetMap también mejora.
+- **Recuento con `cb41001`:**
+  - **bien, 7:** google, duckduckgo, rust-book, python-docs, hackernews, stackoverflow y
+    react;
+  - **defectos menores, 12:** las dos Wikipedia, bbc, elpais, eltiempo, bing, mdn, github,
+    gitlab, amazon, mercadolibre y rae;
+  - **defectos graves, 8:** nytimes, reddit, openstreetmap, youtube, vimeo, excalidraw, gov.co
+    y apple-es.
+- **Recuento con `master` `eb9776d`:** 7 bien, 13 con defectos menores y 7 con defectos
+  graves (OpenStreetMap pasa a menores).
+- **Clasificaciones dudosas:**
+  - Reddit podría contar como menores, porque el feed principal carga.
+  - Google está bien respecto a la página básica que decide entregar, no a la de Chrome.
+  - En rust-book no se ve la barra lateral de capítulos; puede que el sitio la oculte a
+    1180 px.
+- **Lo que sigue en más sitios:**
+  - las aplicaciones de JavaScript pesado que se quedan en esqueletos (YouTube, Vimeo, Reddit,
+    GitHub, GitLab y excalidraw; E1);
+  - gov.co, que falla por un `TypeError` en JavaScript y no por la red (`e3.md`, ronda 8: 88
+    respuestas 200/204 y CORS correcto);
+  - imágenes e iconos que no salen (Apple, GitLab y los controles de OpenStreetMap; E2);
+  - desbordes horizontales (El Tiempo, Bing y Vimeo);
+  - `ResizeObserver loop` en Apple, que sube de 3 a 7 avisos.
+- **No llegó a los 27 sitios:** la ronda 8. De E2 solo se vio OpenStreetMap con `eb9776d`; lo
+  que E1 y E3 tengan sin integrar no está en ningún binario del barrido.
+
 ## Lo que no encontré
 
 - **"El sitio tardó demasiado"** (un tiempo de lectura agotado en `bf-net`, que vio E4): no

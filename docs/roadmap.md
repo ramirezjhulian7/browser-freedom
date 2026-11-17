@@ -72,28 +72,24 @@ El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimie
 
 ## Decisiones pendientes del usuario
 
-Cuatro puntos no avanzan sin una decisión que no le toca a ningún ejecutor (al 2026-11-17, sin
-respuesta; el planificador no excluye tests ni añade crates mientras tanto):
-- **Excluir los 12 tests que ningún navegador cumple.** Con eso, 2.3 y 3.6 quedarían cumplidos
-  y el avance subiría a 93.3 % con la fase 1. Son:
+Lo que decidió el usuario y lo que sigue abierto (2026-11-17):
+- **Excluir los 12 tests que ningún navegador cumple: decidido el 2026-11-17, no.** 2.3 y 3.6
+  siguen sin cumplirse con ellos dentro. Son:
   - **2.3, 2 subtests de `html/syntax/parsing`.** `DOMContentLoaded-defer.html` pide lo
     contrario que `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
     `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
     no dispara.
-  - **3.6, 10 reftests de css-flexbox.**
-    - 8 son de CSS Flexbox 2 (`flex-wrap: balance`, `flex-line-count`), un borrador sin texto
-      estable.
-    - `flex-container-max-content-001` y `-min-content-001` contradicen §4.5 en su referencia,
-      y en wpt.fyi fallan en Chrome, Firefox y Safari (E2, "Sesión nueva, ronda 4").
-- **Lector de pantalla (fase 5).** El motor ya calcula rol y nombre accesibles, pero un lector
-  de pantalla de macOS solo lee lo que se expone por `NSAccessibility`. Eso pide FFI con
-  Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo
-  (`accesskit`, la recomendación del planificador).
-- **Fuzzer de IPC (fase 5).** Hace falta separar el motor en procesos (navegador y contenido)
-  con IPC propio. Hoy cada pestaña es un hilo del mismo proceso.
-- **El `User-Agent` de Freedom y Google.** `accounts.google.com/gsi/client`, el script de
-  inicio de sesión de Google que usan El País y El Tiempo, responde 403 al `User-Agent` de
-  Freedom y 200 a uno de Chrome (barrido de E3).
+  - **3.6, 10 reftests de css-flexbox:** 8 de CSS Flexbox 2 (`flex-wrap: balance`,
+    `flex-line-count`) y `flex-container-max-content-001`/`-min-content-001`, cuya referencia
+    contradice §4.5 y que fallan en Chrome, Firefox y Safari.
+- **Lector de pantalla con `accesskit`: decidido el 2026-11-17, no.** Sin un crate externo ni
+  FFI con `unsafe`, el árbol de accesibilidad que ya calcula el motor no llega a
+  `NSAccessibility`, y el criterio sigue sin cumplirse.
+- **Abierta: el fuzzer de IPC (fase 5).** Hace falta separar el motor en procesos (navegador y
+  contenido) con IPC propio. Hoy cada pestaña es un hilo del mismo proceso.
+- **Abierta: el `User-Agent` de Freedom y Google.** `accounts.google.com/gsi/client`, el
+  script de inicio de sesión de Google que usan El País y El Tiempo, responde 403 al
+  `User-Agent` de Freedom y 200 a uno de Chrome.
   - La regla del proyecto es no imitar a Chrome, y `bf-infra/src/identity.rs` no se toca.
   - El planificador lo deja así salvo que el usuario diga otra cosa.
 
@@ -232,6 +228,19 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   - E3: un `<iframe>` lento ya no congela su página. La red del marco va en otro hilo y su
     documento se parsea por trozos (HTML §7.4.2.2), y la pestaña pinta entre tareas (HTML
     §8.1.7.3).
+- **Ronda 7 del barrido** (en `master` desde `cb41001`; notas de la ronda 7):
+  - **E1, velocidad de JavaScript:** el compilador resolvía los nombres de variables de forma
+    cuadrática. YouTube pasa de 24,3 s a 5,5 s de scripts en la carga (medianas).
+  - **E1:** `Path2D` (HTML §4.12.5.1.7) y las longitudes animadas de SVG; `workers`
+    **1175 / 1441**.
+  - **E2, fuentes web asíncronas:** las fuentes `http(s)` y `FontFace.load()` se descargan en
+    otro hilo (CSS Font Loading 3 §2.2). El texto sale con la fuente de respaldo y cambia al
+    llegar.
+  - **E2, consultas de estilo desde scripts:** `getComputedStyle` no fuerza maqueta cuando no
+    hace falta (CSSOM §9), y la cascada que piden los scripts usa varios hilos.
+  - **E3, el `Accept` por destino** (Fetch §4): las imágenes piden
+    `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`, las hojas `text/css,*/*;q=0.1`. Con
+    `*/*`, el servidor de teselas de OpenStreetMap daba la imagen de bloqueo 418.
 - **Hojas enlazadas en la ventana** (E2, en `master` desde `489e6f8`; `pendiente/mac/e2.md`,
   "Sesión nueva, ronda 1"): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
   `document.styleSheets` tiene sus reglas. La hoja sale de `bf_style::sheet_cache`, ya
