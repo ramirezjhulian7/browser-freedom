@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<!-- SVG 2 §8.2 y §6.6: width/height del <svg> son atributos de presentación de las propiedades
+     (`1em` = 16 px, `24` = 24 px); con porcentajes o sin atributos absolutos no hay tamaño
+     natural y la proporción es la del viewBox (`height: 100%` sin alto definido es `auto`,
+     CSS 2 §10.5); sin nada, 300×150 (CSS 2 §10.3.2, §10.6.2). Casos de react.dev (la lupa de
+     ~140 px y el logo). -->
+<style>body{margin:0;font-size:16px} svg{display:block}</style><svg width="1em" height="1em" viewBox="0 0 20 20"></svg><svg width="100%" height="100%" viewBox="-10.5 -9.45 21 18.9" style="width:112px"></svg><svg width="24" height="24px"></svg><svg></svg><div style="display:flex;width:200px"><svg viewBox="0 0 2 1" style="width:50px"></svg><svg width="1em" height="1em" viewBox="0 0 20 20"></svg></div>
+<!-- expect
+Block <html> 0,0 800×315.8
+  Block <body> 0,0 800×315.8
+    Replaced <svg> 0,0 16×16
+    Replaced <svg> 0,16 112×100.8
+    Replaced <svg> 0,116.8 24×24
+    Replaced <svg> 0,140.8 300×150
+    Block <div> 0,290.8 200×25
+      Replaced <svg> 0,290.8 50×25
+      Replaced <svg> 50,290.8 16×16
+-->
