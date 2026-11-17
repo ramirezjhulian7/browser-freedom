@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bom;
+pub mod crypto; // E1: `crypto.subtle` (Web Cryptography API)
 pub mod cssom;
 pub mod dom;
 pub mod html;
@@ -384,5 +385,6 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         net::register(agent, realm, ctx); // E2
         storage::register(agent, realm, ctx); // E2
         workers::register(agent, realm, ctx); // E3
+        crypto::register(agent, realm, ctx); // E1
     });
 }
