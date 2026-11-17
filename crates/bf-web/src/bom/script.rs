@@ -166,6 +166,15 @@ impl ModuleLoader for WebModuleLoader {
     }
 }
 
+/// E1: el motivo de una terminación (tiempo agotado) con la URL del script que la causó: la
+/// consola decía solo "Script terminado: tiempo agotado" y no se sabía cuál (YouTube).
+fn with_script_url(t: Throw, url: &str) -> Throw {
+    match t {
+        Throw::Terminate(reason) => Throw::Terminate(format!("{reason} ({url})")),
+        t => t,
+    }
+}
+
 /// Un script externo ya buscado.
 struct Fetched {
     source: String,
@@ -504,7 +513,7 @@ impl WebScripts<'_> {
             env.run_time += start.elapsed();
         }
         if let Err(t) = r {
-            self.report(t);
+            self.report(with_script_url(t, url));
         }
         self.clean_up();
     }
@@ -537,7 +546,7 @@ impl WebScripts<'_> {
             env.run_time += start.elapsed();
         }
         if let Err(t) = r {
-            self.report(t);
+            self.report(with_script_url(t, url));
         }
         self.clean_up();
     }

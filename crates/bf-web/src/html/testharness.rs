@@ -262,13 +262,14 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
     if rel.ends_with(".worker.js") && !is_any {
         let base = rel.trim_end_matches(".js");
         let name = rel.rsplit('/').next().unwrap_or(rel);
+        let long = meta_lines(&src)
+            .iter()
+            .any(|(k, v)| k == "timeout" && v == "long");
         return vec![TestDoc {
             path: format!("{base}.html"),
             url: format!("{}/{base}.html", origin_for(rel)),
-            html: worker_page(&format!("new Worker({:?})", name)),
-            long: meta_lines(&src)
-                .iter()
-                .any(|(k, v)| k == "timeout" && v == "long"),
+            html: worker_page(&format!("new Worker({:?})", name), long),
+            long,
             encoding: Encoding::Utf8,
         }];
     }
@@ -317,7 +318,10 @@ pub fn test_docs(root: &Path, rel: &str) -> Vec<TestDoc> {
                 docs.push(TestDoc {
                     path: format!("{base}.{page}.html{v}"),
                     url: format!("{}/{base}.{page}.html{v}", origin_for(rel)),
-                    html: worker_page(&format!("new {ctor}({:?})", format!("{worker_js}{v}"))),
+                    html: worker_page(
+                        &format!("new {ctor}({:?})", format!("{worker_js}{v}")),
+                        long,
+                    ),
                     long,
                     encoding: Encoding::Utf8,
                 });
@@ -395,10 +399,18 @@ fn includes_global(metas: &[(String, String)], global: &str) -> bool {
     globals.iter().any(|g| *g == global || *g == "worker")
 }
 
-/// E3: la página de un test que corre en un worker (como la genera wptserve).
-fn worker_page(worker: &str) -> String {
+/// E3: la página de un test que corre en un worker (como la genera wptserve). E1: con
+/// `META: timeout=long`, wptserve pone `<meta name="timeout" content="long">` en la página, y
+/// así el `testharness.js` de la ventana espera 60 s y no 10 a los resultados del worker (que
+/// corre en tiempo real: el reloj virtual de la ventana avanza lo que tarda).
+fn worker_page(worker: &str, long: bool) -> String {
+    let meta = if long {
+        "<meta name=\"timeout\" content=\"long\">\n"
+    } else {
+        ""
+    };
     format!(
-        "<!doctype html>\n<meta charset=utf-8>\n\
+        "<!doctype html>\n<meta charset=utf-8>\n{meta}\
          <script src=\"/resources/testharness.js\"></script>\n\
          <script src=\"/resources/testharnessreport.js\"></script>\n\
          <div id=log></div>\n<script>\nfetch_tests_from_worker({worker});\n</script>\n"

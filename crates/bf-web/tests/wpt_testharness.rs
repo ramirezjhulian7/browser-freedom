@@ -316,15 +316,21 @@ fn any_js_wrapper_and_meta() {
     .unwrap();
     std::fs::write(
         root.join("t/w.any.js"),
-        "// META: global=dedicatedworker\ntest(function () {}, 'x');\n",
+        "// META: global=dedicatedworker\n// META: timeout=long\ntest(function () {}, 'x');\n",
     )
     .unwrap();
     // E3: solo la variante en worker dedicado (`.any.worker.html`), sin la de ventana.
-    let w: Vec<String> = test_docs(&root, "t/w.any.js")
-        .into_iter()
-        .map(|d| d.path)
-        .collect();
+    let wd = test_docs(&root, "t/w.any.js");
+    let w: Vec<&str> = wd.iter().map(|d| d.path.as_str()).collect();
     assert_eq!(w, ["t/w.any.worker.html"], "solo worker");
+    // E1: la página del worker lleva el `timeout=long` (como la de wptserve), para el
+    // `testharness.js` de la ventana.
+    assert!(wd[0].long);
+    assert!(
+        wd[0]
+            .html
+            .contains("<meta name=\"timeout\" content=\"long\">")
+    );
     // Sin `META: global`: ventana y worker dedicado; aquí se mira la de ventana.
     let docs: Vec<TestDoc> = test_docs(&root, "t/b.any.js");
     let paths: Vec<&str> = docs.iter().map(|d| d.path.as_str()).collect();
