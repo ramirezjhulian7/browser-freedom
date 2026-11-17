@@ -5164,6 +5164,9 @@ mod tests {
         for needle in [
             "Esta página falló",
             "pánico de prueba en el hilo de la pestaña",
+            // E1: dónde cayó (`crate::crash`); esta pestaña aún no tenía motor.
+            "src/window/worker.rs:",
+            "Sin motor de JavaScript en la pestaña.",
             "Recargar",
             "about:blank#panico-de-prueba",
         ] {
@@ -5178,6 +5181,44 @@ mod tests {
         assert!(text(&app).contains("de nuevo"));
         app.activate_tab(0);
         assert!(text(&app).contains("sigo viva"));
+    }
+
+    /// E1: un pánico dentro de una función nativa que llama el script de la página (como el de
+    /// "el realm no tiene WebContext"): la página de error dice el archivo y la línea de Rust,
+    /// el realm y la pila de JavaScript, sin la consulta de la URL del script.
+    #[test]
+    fn tab_panic_in_javascript_shows_where() {
+        crate::profile::set_ephemeral();
+        let fonts = FontDb::system();
+        let worker = Documents::new(fonts.clone(), || {});
+        let net = Arc::new(NetLoader::new());
+        let mut app = App::new(worker, fonts, None, Theme::for_system(None), net);
+        app.headless = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let url = Url::parse(crate::crash::test_panic::URL, None).unwrap();
+        app.start_load(url, Navigation::Push);
+        app.settle();
+        let current = app.current.as_ref().unwrap();
+        assert_eq!(
+            current.meta.error.as_ref().map(|e| e.kind),
+            Some(crate::load::ErrorKind::Engine)
+        );
+        let shown = current
+            .doc
+            .descendant_text_content(current.doc.root())
+            .to_string();
+        for needle in [
+            "pánico de prueba en una función nativa",
+            "src/crash.rs:",
+            // Antes de `load_with` el realm aún no es una ventana: el informe lo dice.
+            "Realm 0: sin WebContext",
+            "at pagina_de_prueba (https://example.test/prueba.js:2:",
+        ] {
+            assert!(shown.contains(needle), "falta {needle:?} en {shown:?}");
+        }
+        assert!(!shown.contains("token"), "{shown}");
     }
 
     fn page(html: &str) -> Arc<Loaded> {

@@ -762,6 +762,10 @@ fn remove_frame(agent: &mut Agent, realm: RealmId) {
         remove_frame(agent, k);
     }
     super::script::unload_document(agent, realm);
+    // E1: su `Window` ya no tiene contexto de navegación: `closed` es `true` (HTML §7.2.2).
+    if let Some(s) = agent.realm_data_mut::<super::BomState>(realm) {
+        s.closed = true;
+    }
     frames_mut(agent).list.retain(|f| f.realm != realm);
 }
 
@@ -1075,24 +1079,14 @@ fn cross_origin_object(agent: &mut Agent, viewer: RealmId, target: RealmId) -> J
     super::accessor(agent, inner, "parent", xo_parent, None);
     super::accessor(agent, inner, "top", xo_top, None);
     super::accessor(agent, inner, "length", xo_length, None);
-    super::accessor(agent, inner, "closed", xo_false, None);
+    super::accessor(agent, inner, "closed", xo_closed, None);
     super::accessor(agent, inner, "opener", xo_null, None);
     super::accessor(agent, inner, "location", xo_location, Some(xo_set_location));
     super::method(agent, inner, "postMessage", 1, xo_post_message);
     for name in ["close", "focus", "blur"] {
         super::method(agent, inner, name, 0, xo_noop);
     }
-    let handler = agent.new_plain_object();
-    super::method(agent, handler, "get", 3, xo_trap_get);
-    super::method(agent, handler, "set", 4, xo_trap_set);
-    super::method(agent, handler, "getPrototypeOf", 1, xo_trap_proto);
-    super::method(agent, handler, "defineProperty", 3, xo_trap_deny);
-    super::method(agent, handler, "deleteProperty", 2, xo_trap_deny);
-    let g = agent.realms[viewer].global_object;
-    let Value::Object(ctor) = agent.get(g, &PropertyKey::from("Proxy"), Value::Object(g))? else {
-        return Ok(Value::Null);
-    };
-    let proxy = agent.construct(ctor, &[Value::Object(inner), Value::Object(handler)], None)?;
+    let proxy = cross_origin_proxy(agent, inner)?;
     let view = CrossOriginView {
         viewer,
         target,
@@ -1101,6 +1095,34 @@ fn cross_origin_object(agent: &mut Agent, viewer: RealmId, target: RealmId) -> J
     };
     views(agent).0.push(view);
     Ok(proxy)
+}
+
+/// E1: el `Proxy` de un objeto entre orígenes (`WindowProxy` o `Location`, HTML §7.2.3 y
+/// §7.10.6): `inner` tiene sus "CrossOriginProperties" y el handler hace de los métodos
+/// internos de §7.2.3.x. Con el `Proxy` intrínseco: la página puede haber cambiado `Proxy`.
+fn cross_origin_proxy(
+    agent: &mut Agent,
+    inner: bf_js::heap::Gc<bf_js::object::Object>,
+) -> JsResult<Value> {
+    let handler = agent.new_object(None);
+    super::method(agent, handler, "get", 3, xo_trap_get);
+    super::method(agent, handler, "set", 4, xo_trap_set);
+    super::method(
+        agent,
+        handler,
+        "getOwnPropertyDescriptor",
+        2,
+        xo_trap_descriptor,
+    );
+    super::method(agent, handler, "has", 2, xo_trap_has);
+    super::method(agent, handler, "ownKeys", 1, xo_trap_keys);
+    super::method(agent, handler, "getPrototypeOf", 1, xo_trap_proto);
+    super::method(agent, handler, "setPrototypeOf", 2, xo_trap_set_proto);
+    super::method(agent, handler, "preventExtensions", 1, xo_trap_false);
+    super::method(agent, handler, "defineProperty", 3, xo_trap_deny);
+    super::method(agent, handler, "deleteProperty", 2, xo_trap_deny);
+    let p = agent.proxy_create(&Value::Object(inner), &Value::Object(handler))?;
+    Ok(Value::Object(p))
 }
 
 /// `SecurityError` (HTML §7.2.3.1: acceso a una propiedad que no es entre orígenes).
@@ -1112,54 +1134,202 @@ fn security_error<T>(agent: &mut Agent, what: &str) -> JsResult<T> {
     )
 }
 
-/// `[[Get]]` (HTML §7.2.3.7 "CrossOriginGet"): solo las propiedades entre orígenes y los
-/// índices de los marcos; los símbolos y `then` dan `undefined` (§7.2.3.7 paso 2,
-/// "CrossOriginPropertyFallback").
-fn xo_trap_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let target = a.arg(0);
-    let key = agent.to_property_key(&a.arg(1))?;
-    let Some(view) = view_of(agent, &target) else {
-        return Ok(Value::Undefined);
+/// Qué objeto entre orígenes recibe una trampa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XoKind {
+    Window,
+    Location,
+}
+
+/// "CrossOriginProperties" de `Location` (HTML §7.2.1.3.1): `href` (solo escritura) y
+/// `replace`.
+const CROSS_ORIGIN_LOCATION: [&str; 2] = ["href", "replace"];
+
+/// El tipo y la vista del objeto entre orígenes `v` (su `Proxy` o su objeto interior).
+fn xo_of(agent: &Agent, v: &Value) -> Option<(XoKind, CrossOriginView)> {
+    if let Some(w) = view_of(agent, v) {
+        return Some((XoKind::Window, w));
+    }
+    location_view(agent, v).map(|w| (XoKind::Location, w))
+}
+
+/// ¿Es `key` una de las "CrossOriginProperties" de `kind`?
+fn is_cross_origin_name(kind: XoKind, key: &PropertyKey) -> bool {
+    let PropertyKey::String(s) = key else {
+        return false;
     };
-    match &key {
-        PropertyKey::Index(i) => {
-            let kids = children_of(agent, view.target);
-            match kids.get(*i as usize) {
-                Some(&k) => Ok(window_proxy(agent, view.viewer, k)),
-                None => security_error(agent, &i.to_string()),
-            }
-        }
-        PropertyKey::Symbol(_) => Ok(Value::Undefined),
-        PropertyKey::String(s) => {
-            let name = s.to_string();
-            if CROSS_ORIGIN.contains(&name.as_str()) {
-                let Value::Object(o) = target else {
-                    return Ok(Value::Undefined);
-                };
-                agent.get(o, &key, a.arg(2))
-            } else if name == "then" {
-                Ok(Value::Undefined)
-            } else {
-                security_error(agent, &name)
-            }
-        }
+    let name = s.to_string();
+    match kind {
+        XoKind::Window => CROSS_ORIGIN.contains(&name.as_str()),
+        XoKind::Location => CROSS_ORIGIN_LOCATION.contains(&name.as_str()),
     }
 }
 
-/// `[[Set]]` (HTML §7.2.3.8 "CrossOriginSet"): solo `location`.
-fn xo_trap_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+/// "CrossOriginPropertyFallback" (HTML §7.2.3.4): `then`, `@@toStringTag`, `@@hasInstance` e
+/// `@@isConcatSpreadable` existen como `undefined`; lo demás es `SecurityError`.
+fn fallback_keys(agent: &Agent) -> [PropertyKey; 4] {
+    let w = &agent.well_known;
+    [
+        PropertyKey::from("then"),
+        PropertyKey::Symbol(w.to_string_tag),
+        PropertyKey::Symbol(w.has_instance),
+        PropertyKey::Symbol(w.is_concat_spreadable),
+    ]
+}
+
+fn is_fallback_key(agent: &Agent, key: &PropertyKey) -> bool {
+    fallback_keys(agent).iter().any(|k| k == key)
+}
+
+/// El marco hijo `i` de la ventana de `view`, visto desde su ventana (los índices del
+/// `WindowProxy`, HTML §7.2.3.3).
+fn xo_child(agent: &mut Agent, view: CrossOriginView, i: u32) -> Option<Value> {
+    let kids = children_of(agent, view.target);
+    let k = *kids.get(i as usize)?;
+    Some(window_proxy(agent, view.viewer, k))
+}
+
+/// La propiedad entre orígenes `key` del objeto interior `inner`.
+fn inner_property(
+    agent: &mut Agent,
+    inner: &Value,
+    key: &PropertyKey,
+) -> JsResult<Option<bf_js::object::PropertyDescriptor>> {
+    match inner {
+        Value::Object(o) => agent.get_own_property(*o, key),
+        _ => Ok(None),
+    }
+}
+
+/// `[[Get]]` (HTML §7.2.3.7 "CrossOriginGet"): los índices de los marcos (en una ventana),
+/// las propiedades entre orígenes (un accesor sin getter, como `Location.href`, es
+/// `SecurityError`) y "CrossOriginPropertyFallback".
+fn xo_trap_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let target = a.arg(0);
     let key = agent.to_property_key(&a.arg(1))?;
-    if key.to_string() == "location" {
-        return match location_target(agent, &a.arg(0)) {
-            Some(v) => {
-                xo_navigate(agent, v, &a.arg(2), false)?;
-                Ok(Value::from_bool(true))
-            }
-            None => Ok(Value::from_bool(false)),
+    let Some((kind, view)) = xo_of(agent, &target) else {
+        return Ok(Value::Undefined);
+    };
+    if kind == XoKind::Window
+        && let PropertyKey::Index(i) = key
+    {
+        return match xo_child(agent, view, i) {
+            Some(w) => Ok(w),
+            None => security_error(agent, &i.to_string()),
         };
     }
-    let what = key.to_string();
-    security_error(agent, &what)
+    if is_cross_origin_name(kind, &key) {
+        match inner_property(agent, &target, &key)? {
+            Some(d) if d.value.is_some() => return Ok(d.value.unwrap_or_default()),
+            Some(bf_js::object::PropertyDescriptor {
+                get: Some(Some(g)), ..
+            }) => return agent.call(&Value::Object(g), a.arg(2), &[]),
+            _ => {}
+        }
+    } else if is_fallback_key(agent, &key) {
+        return Ok(Value::Undefined);
+    }
+    security_error(agent, &key.to_string())
+}
+
+/// `[[Set]]` (HTML §7.2.3.8 "CrossOriginSet"): solo los accesores con setter (`location` de la
+/// ventana, `href` de `Location`).
+fn xo_trap_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let target = a.arg(0);
+    let key = agent.to_property_key(&a.arg(1))?;
+    if let Some((kind, _)) = xo_of(agent, &target)
+        && is_cross_origin_name(kind, &key)
+        && let Some(bf_js::object::PropertyDescriptor {
+            set: Some(Some(s)), ..
+        }) = inner_property(agent, &target, &key)?
+    {
+        agent.call(&Value::Object(s), a.arg(3), &[a.arg(2)])?;
+        return Ok(Value::from_bool(true));
+    }
+    security_error(agent, &key.to_string())
+}
+
+/// `[[GetOwnProperty]]` (HTML §7.2.3.5, "CrossOriginGetOwnPropertyHelper"): las propiedades
+/// entre orígenes como configurables y no enumerables; los métodos, de solo lectura; los
+/// accesores, con el getter y el setter que se pueden usar entre orígenes.
+fn xo_trap_descriptor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    use bf_js::object::PropertyDescriptor;
+    let target = a.arg(0);
+    let key = agent.to_property_key(&a.arg(1))?;
+    let Some((kind, view)) = xo_of(agent, &target) else {
+        return Ok(Value::Undefined);
+    };
+    let data = |v: Value| PropertyDescriptor {
+        value: Some(v),
+        writable: Some(false),
+        get: None,
+        set: None,
+        enumerable: Some(false),
+        configurable: Some(true),
+    };
+    let desc = if kind == XoKind::Window
+        && let PropertyKey::Index(i) = key
+    {
+        xo_child(agent, view, i).map(data)
+    } else if is_cross_origin_name(kind, &key) {
+        inner_property(agent, &target, &key)?.map(|d| match d.value {
+            Some(v) => data(v),
+            None => PropertyDescriptor {
+                value: None,
+                writable: None,
+                get: Some(d.get.flatten()),
+                set: Some(d.set.flatten()),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        })
+    } else if is_fallback_key(agent, &key) {
+        Some(data(Value::Undefined))
+    } else {
+        None
+    };
+    match desc {
+        Some(d) => agent.from_property_descriptor(Some(&d)),
+        None => security_error(agent, &key.to_string()),
+    }
+}
+
+/// `[[HasProperty]]`: con `[[GetOwnProperty]]` de arriba y el prototipo `null`.
+fn xo_trap_has(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let target = a.arg(0);
+    let key = agent.to_property_key(&a.arg(1))?;
+    let Some((kind, view)) = xo_of(agent, &target) else {
+        return Ok(Value::from_bool(false));
+    };
+    let has = match key {
+        PropertyKey::Index(i) if kind == XoKind::Window => xo_child(agent, view, i).is_some(),
+        _ => is_cross_origin_name(kind, &key) || is_fallback_key(agent, &key),
+    };
+    if has {
+        Ok(Value::from_bool(true))
+    } else {
+        security_error(agent, &key.to_string())
+    }
+}
+
+/// `[[OwnPropertyKeys]]` (HTML §7.2.3.10, "CrossOriginOwnPropertyKeys"): los índices de los
+/// marcos, las propiedades entre orígenes y las de "CrossOriginPropertyFallback".
+fn xo_trap_keys(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some((kind, view)) = xo_of(agent, &a.arg(0)) else {
+        return Ok(Value::Object(agent.create_array_from_list(&[])?));
+    };
+    let mut keys: Vec<Value> = Vec::new();
+    let names: &[&str] = match kind {
+        XoKind::Window => {
+            let n = children_of(agent, view.target).len();
+            keys.extend((0..n).map(|i| Value::str(&i.to_string())));
+            &CROSS_ORIGIN
+        }
+        XoKind::Location => &CROSS_ORIGIN_LOCATION,
+    };
+    keys.extend(names.iter().map(|n| Value::str(n)));
+    keys.extend(fallback_keys(agent).iter().map(PropertyKey::to_value));
+    Ok(Value::Object(agent.create_array_from_list(&keys)?))
 }
 
 /// `[[GetPrototypeOf]]` de un objeto entre orígenes: `null` (HTML §7.2.3.2).
@@ -1167,15 +1337,21 @@ fn xo_trap_proto(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Null)
 }
 
-/// `[[DefineOwnProperty]]` y `[[Delete]]`: `SecurityError` (HTML §7.2.3.5, §7.2.3.9).
+/// `[[SetPrototypeOf]]`: "SetImmutablePrototype" (solo vale volver a poner `null`).
+fn xo_trap_set_proto(_: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::from_bool(matches!(a.arg(1), Value::Null)))
+}
+
+/// `[[PreventExtensions]]`: `false` (HTML §7.2.3.4; `Object.preventExtensions` lanza).
+fn xo_trap_false(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    Ok(Value::from_bool(false))
+}
+
+/// `[[DefineOwnProperty]]` y `[[Delete]]`: `SecurityError` (HTML §7.2.3.6, §7.2.3.9).
 fn xo_trap_deny(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let key = agent.to_property_key(&a.arg(1))?;
     let what = key.to_string();
     security_error(agent, &what)
-}
-
-fn location_target(agent: &Agent, v: &Value) -> Option<CrossOriginView> {
-    view_of(agent, v)
 }
 
 fn xo_self(_: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
@@ -1203,8 +1379,13 @@ fn xo_length(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Number(n as f64))
 }
 
-fn xo_false(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::from_bool(false))
+/// `closed` entre orígenes (HTML §7.2.2): la de la otra ventana (`true` si se quitó su marco).
+fn xo_closed(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let closed = match view_of(agent, &a.this) {
+        Some(v) => super::window_closed(agent, v.target),
+        None => false,
+    };
+    Ok(Value::from_bool(closed))
 }
 
 fn xo_null(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
@@ -1215,52 +1396,65 @@ fn xo_noop(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-/// Las `Location` entre orígenes ya creadas: el objeto y la vista de su ventana.
+/// Las `Location` entre orígenes ya creadas: su `Proxy`, su objeto interior y la vista de su
+/// ventana.
 #[derive(Debug, Default)]
-struct CrossOriginLocations(Vec<(HostHandle, CrossOriginView)>);
+struct CrossOriginLocations(Vec<(HostHandle, HostHandle, CrossOriginView)>);
 
 /// `location` entre orígenes (HTML §7.10.6): solo `href` (de escritura) y `replace()`, que
-/// navegan la otra ventana.
+/// navegan la otra ventana; lo demás lanza `SecurityError` (los métodos internos de
+/// [`cross_origin_proxy`]). El mismo objeto cada vez para el mismo par de ventanas.
 fn xo_location(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(view) = view_of(agent, &a.this) else {
         return Ok(Value::Null);
     };
     let existing = agent.embedder_data::<CrossOriginLocations>().and_then(|l| {
         l.0.iter()
-            .find(|(_, v)| v.viewer == view.viewer && v.target == view.target)
-            .map(|(h, _)| *h)
+            .find(|(_, _, v)| v.viewer == view.viewer && v.target == view.target)
+            .map(|(h, _, _)| *h)
     });
     if let Some(v) = existing.and_then(|h| agent.host_pinned(h)) {
         return Ok(v);
     }
     let loc = agent.new_object(None);
-    super::accessor(agent, loc, "href", xo_href_denied, Some(xo_set_href));
+    // `href`: `{needsGet: false, needsSet: true}`, un accesor sin getter.
+    let set = agent.create_builtin_function(xo_set_href, 1, "set href", false);
+    agent.heap[loc].props.insert(
+        PropertyKey::from("href"),
+        bf_js::object::Prop {
+            value: bf_js::object::PropValue::Accessor {
+                get: None,
+                set: Some(set),
+            },
+            enumerable: false,
+            configurable: true,
+        },
+    );
     super::method(agent, loc, "replace", 1, xo_replace);
-    let h = agent.host_pin(Value::Object(loc));
+    let proxy = cross_origin_proxy(agent, loc)?;
+    let p = agent.host_pin(proxy.clone());
+    let i = agent.host_pin(Value::Object(loc));
     if agent.embedder_data::<CrossOriginLocations>().is_none() {
         agent.set_embedder_data(CrossOriginLocations::default());
     }
     if let Some(l) = agent.embedder_data_mut::<CrossOriginLocations>() {
-        l.0.push((h, view));
+        l.0.push((p, i, view));
     }
-    Ok(Value::Object(loc))
+    Ok(proxy)
 }
 
-/// La ventana de una `Location` entre orígenes.
+/// La ventana de una `Location` entre orígenes (su `Proxy` o su objeto interior).
 fn location_view(agent: &Agent, this: &Value) -> Option<CrossOriginView> {
     let Value::Object(o) = this else {
         return None;
     };
+    let is = |h: HostHandle| matches!(agent.host_pinned(h), Some(Value::Object(x)) if x == *o);
     agent
         .embedder_data::<CrossOriginLocations>()?
         .0
         .iter()
-        .find(|(h, _)| matches!(agent.host_pinned(*h), Some(Value::Object(x)) if x == *o))
-        .map(|(_, v)| *v)
-}
-
-fn xo_href_denied(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    security_error(agent, "href")
+        .find(|(p, i, _)| is(*p) || is(*i))
+        .map(|(_, _, v)| *v)
 }
 
 /// Navega la ventana de la vista `view` a `href` (relativa a la URL base de quien llama).
