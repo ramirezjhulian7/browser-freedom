@@ -202,22 +202,25 @@ nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y q
 
 ## 9. Lo primero al retomar
 
-Estado del 2026-11-17, tanda nueva por mensaje directo (el mod ya no reparte bloques).
-`master` está en `fcdb9c7`, con las rondas 8 de E1, E2 y E3 integradas. **Avance: 88.9 %**
-(91.1 % con la fase 1): 47 de 51 criterios.
+Estado del 2026-11-17 a las 19:00, cuando el usuario paró la tanda nueva (por mensaje
+directo; el mod ya no reparte bloques). `master` está en `1a4c877`:
+- las rondas 8 de E1, E2 y E3;
+- WOFF y WOFF2 y el primer paso del estilo incremental (E2);
+- AES, PBKDF2 y HKDF en `crypto.subtle` (E1).
+
+**Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios.
 
 Lo primero, en este orden:
-1. **Integrar lo que quedó en las ramas** (9b): `army/e3` trae la maqueta de los scripts con
-   las fuentes web, las sugerencias de recursos y las conexiones de la primera visita. E2
-   tiene en curso WOFF y WOFF2 y el estilo incremental, y toca `bf-shell/src/load.rs` y
-   `bf-net/src/http.rs`; revisar la fusión con `army/e3`.
+1. **Integrar `army/e3`** (9b): la maqueta de los scripts con las fuentes web, las
+   sugerencias de recursos y las conexiones de la primera visita. Ya tiene `master`
+   `1a4c877` fusionado, con su conflicto resuelto en `bf-web/src/cssom/mod.rs`, y verificado.
 2. **Las aplicaciones de JavaScript pesado** (E1). Son la mayor parte de los defectos graves
    de los barridos: YouTube, Vimeo, Reddit y los esqueletos de GitHub y GitLab. Antes, el
    pánico "Gc liberado" de GitHub en `run_animation_frames` (quinto barrido).
 3. **Imágenes que no salen** (E2, sin diagnosticar): Apple (la portada mide 0 de ancho),
    GitLab y los iconos de los controles de OpenStreetMap.
-4. **Estilo incremental** (E2, en curso): las maquetas forzadas de El Tiempo, RAE y GitHub
-   recalculan todo el estilo.
+4. **Estilo incremental** (E2): el primer paso, solo para cambios de atributo, está en
+   `master`. Falta medir cuánto baja el tiempo de scripts y extenderlo a cambios del árbol.
 
 ### 9a. Las decisiones del usuario
 
@@ -239,12 +242,13 @@ Siguen abiertas:
   - `crypto.subtle` con AES-CBC, AES-CTR y AES-GCM, PBKDF2 y HKDF (Amazon);
   - la consola dice qué script se cortó por tiempo agotado.
 
-  Tiene en curso, sin commit, cambios en `custom_elements`.
-- **`army/e2`:** su ronda 8 está en `master` (`element.style`, el mapa de OpenStreetMap y una
-  sola descarga por imagen). Tiene en curso, sin commit:
-  - WOFF y WOFF2, con los descompresores registrados desde el shell;
-  - el primer paso del estilo incremental.
-- **`army/e3`** (sin integrar; `pendiente/mac/e3.md`, "Tanda nueva"):
+  Tenía en curso, sin commit, cambios en `custom_elements`; ver su nota.
+- **`army/e2`:** en `master` están su ronda 8 (`element.style`, el mapa de OpenStreetMap y
+  una sola descarga por imagen) y la tanda nueva (`1a4c877`): WOFF y WOFF2, con los
+  descompresores de `bf-net` registrados desde el shell, y la cascada incremental del CSSOM
+  tras cambios de atributo.
+- **`army/e3`** (sin integrar, con `master` `1a4c877` fusionado; `pendiente/mac/e3.md`,
+  "Tanda nueva"):
   - **hecho:**
     - `ShellLayout` mide con las `@font-face` del documento: sin el `ResizeObserver loop`
       de más;
