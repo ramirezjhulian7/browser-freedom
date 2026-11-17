@@ -24,6 +24,9 @@ use bf_js::vm::{Agent, JsResult, RealmId, Throw};
 
 use crate::WebContextHandle;
 
+pub mod aes; // E1: AES (FIPS 197) y los modos CBC, CTR y GCM
+pub mod sha; // E1: SHA con estado incremental, para HMAC y PBKDF2
+
 // --- Primitivas ---
 
 /// Una función hash de §30.
@@ -83,19 +86,7 @@ pub fn digest(h: Hash, data: &[u8]) -> Vec<u8> {
 
 /// HMAC (RFC 2104; FIPS 198-1): `H((K' ^ opad) || H((K' ^ ipad) || m))`.
 pub fn hmac(h: Hash, key: &[u8], data: &[u8]) -> Vec<u8> {
-    let block = h.block_len();
-    let mut k = if key.len() > block {
-        digest(h, key)
-    } else {
-        key.to_vec()
-    };
-    k.resize(block, 0);
-    let mut inner: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
-    inner.extend_from_slice(data);
-    let inner = digest(h, &inner);
-    let mut outer: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
-    outer.extend_from_slice(&inner);
-    digest(h, &outer)
+    sha::Hmac::new(h, key).mac(data)
 }
 
 /// Comparación en tiempo constante (para `verify`).
@@ -164,9 +155,67 @@ const USAGES: [&str; 8] = [
     "unwrapKey",
 ];
 
-/// Lo que guarda un `CryptoKey` (§13): por ahora solo claves HMAC (`[[type]]` "secret").
+/// El algoritmo de una clave (todas son secretas, `[[type]]` "secret").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    Hmac,
+    AesCbc,
+    AesCtr,
+    AesGcm,
+    Pbkdf2,
+    Hkdf,
+}
+
+impl KeyKind {
+    const ALL: [KeyKind; 6] = [
+        KeyKind::Hmac,
+        KeyKind::AesCbc,
+        KeyKind::AesCtr,
+        KeyKind::AesGcm,
+        KeyKind::Pbkdf2,
+        KeyKind::Hkdf,
+    ];
+
+    /// El nombre registrado (§18.4.4: se compara sin distinguir mayúsculas).
+    fn name(self) -> &'static str {
+        match self {
+            KeyKind::Hmac => "HMAC",
+            KeyKind::AesCbc => "AES-CBC",
+            KeyKind::AesCtr => "AES-CTR",
+            KeyKind::AesGcm => "AES-GCM",
+            KeyKind::Pbkdf2 => "PBKDF2",
+            KeyKind::Hkdf => "HKDF",
+        }
+    }
+
+    /// El `alg` de la JWK de una clave AES de `bits` bits (RFC 7518 §4.4, §5.2; Web Crypto
+    /// §28.x.4: `A128CBC`, `A256GCM`…).
+    fn aes_jwk_alg(self, bits: u32) -> String {
+        let mode = match self {
+            KeyKind::AesCbc => "CBC",
+            KeyKind::AesCtr => "CTR",
+            _ => "GCM",
+        };
+        format!("A{bits}{mode}")
+    }
+}
+
+/// Las operaciones de §18.4 ("registered algorithms" por operación).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    ImportKey,
+    GenerateKey,
+    Encrypt,
+    Decrypt,
+    Derive,
+    GetKeyLength,
+}
+
+/// Lo que guarda un `CryptoKey` (§13). `hash` solo cuenta en HMAC; `length` es la longitud de
+/// la clave en bits (HMAC y AES).
 #[derive(Debug, Clone)]
 struct KeyData {
+    kind: KeyKind,
     hash: Hash,
     /// La longitud en bits (`HmacKeyAlgorithm.length`).
     length: u32,
@@ -188,10 +237,10 @@ pub fn register(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
                     .method("generateKey", 3, subtle_generate_key)
                     .method("sign", 3, subtle_sign)
                     .method("verify", 4, subtle_verify)
-                    .method("encrypt", 3, subtle_unsupported)
-                    .method("decrypt", 3, subtle_unsupported)
-                    .method("deriveBits", 3, subtle_unsupported)
-                    .method("deriveKey", 5, subtle_unsupported)
+                    .method("encrypt", 3, subtle_encrypt)
+                    .method("decrypt", 3, subtle_decrypt)
+                    .method("deriveBits", 3, subtle_derive_bits)
+                    .method("deriveKey", 5, subtle_derive_key)
                     .method("wrapKey", 4, subtle_unsupported)
                     .method("unwrapKey", 7, subtle_unsupported),
             );
@@ -348,6 +397,27 @@ fn normalize_hmac(agent: &mut Agent, alg: &Value) -> JsResult<()> {
     }
 }
 
+/// E1: "normalize an algorithm" (§18.4.4) para `op`: el algoritmo registrado con ese nombre
+/// para esa operación, o `NotSupportedError`.
+fn normalize_kind(agent: &mut Agent, alg: &Value, op: Op) -> JsResult<KeyKind> {
+    let name = algorithm_name(agent, alg)?;
+    let kind = KeyKind::ALL
+        .into_iter()
+        .find(|k| k.name().eq_ignore_ascii_case(&name));
+    let supported = kind.is_some_and(|k| match op {
+        Op::ImportKey => true,
+        Op::GenerateKey | Op::GetKeyLength => !matches!(k, KeyKind::Pbkdf2 | KeyKind::Hkdf),
+        Op::Encrypt | Op::Decrypt => {
+            matches!(k, KeyKind::AesCbc | KeyKind::AesCtr | KeyKind::AesGcm)
+        }
+        Op::Derive => matches!(k, KeyKind::Pbkdf2 | KeyKind::Hkdf),
+    });
+    match kind {
+        Some(k) if supported => Ok(k),
+        _ => not_supported(agent, &name),
+    }
+}
+
 /// El miembro `hash` (obligatorio) de `HmacImportParams`/`HmacKeyGenParams` (§29.2, §29.4).
 fn hmac_hash(agent: &mut Agent, alg: &Value) -> JsResult<Hash> {
     let h = member(agent, alg, "hash")?;
@@ -432,7 +502,14 @@ fn subtle_digest(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     })
 }
 
-/// `importKey(format, keyData, algorithm, extractable, keyUsages)` (§14.3.9; HMAC, §29.6).
+/// El material de una clave a importar: bytes (`raw`, o lo que sale de `deriveKey`) o una JWK.
+enum Material {
+    Raw(Vec<u8>),
+    Jwk(Value),
+}
+
+/// `importKey(format, keyData, algorithm, extractable, keyUsages)` (§14.3.9; HMAC §29.6, AES
+/// §28.2.4/§28.3.4/§28.4.4, PBKDF2 §31.4, HKDF §32.4).
 fn subtle_import_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (format, data, alg, extractable, uses) = (a.arg(0), a.arg(1), a.arg(2), a.arg(3), a.arg(4));
     promise(agent, |agent| {
@@ -444,69 +521,143 @@ fn subtle_import_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         }
         let extractable = bf_js::abstract_ops::conversion::to_boolean(agent, &extractable);
         let usages = usages(agent, &uses)?;
-        normalize_hmac(agent, &alg)?;
-        let hash = hmac_hash(agent, &alg)?;
-        let length = hmac_length(agent, &alg)?;
-        if usages.iter().any(|u| !matches!(*u, "sign" | "verify")) {
-            return dom_error(
-                agent,
-                "SyntaxError",
-                "Cannot create a key using the specified key usages.",
-            );
-        }
-        let key = match format.as_str() {
-            "raw" => bytes(agent, &data, "keyData")?,
-            "jwk" => jwk_key(agent, &data, hash, extractable, &usages)?,
-            _ => return not_supported(agent, &format!("HMAC {format}")),
-        };
-        let bits = key.len() as u32 * 8;
-        if bits == 0 {
-            return dom_error(agent, "DataError", "HMAC key data must not be empty.");
-        }
-        let length = match length {
-            Some(l) if l > bits || l <= bits - 8 => {
-                return dom_error(
-                    agent,
-                    "DataError",
-                    "The key length does not match the key data.",
-                );
+        let kind = normalize_kind(agent, &alg, Op::ImportKey)?;
+        let material = match format.as_str() {
+            "raw" => Material::Raw(bytes(agent, &data, "keyData")?),
+            "jwk" => {
+                if !matches!(data, Value::Object(_)) {
+                    return agent.type_error(
+                        "Failed to execute 'importKey' on 'SubtleCrypto': keyData is not a JsonWebKey.",
+                    );
+                }
+                Material::Jwk(data.clone())
             }
-            Some(l) => l,
-            None => bits,
+            _ => return not_supported(agent, &format!("{} {format}", kind.name())),
         };
-        if usages.is_empty() {
-            return dom_error(
-                agent,
-                "SyntaxError",
-                "Usages cannot be empty when creating a key.",
-            );
-        }
-        Ok(new_key(
-            agent,
-            KeyData {
-                hash,
-                length,
-                bytes: key,
-                extractable,
-                usages,
-            },
-        ))
+        let k = import_key(agent, kind, &alg, material, extractable, usages)?;
+        Ok(new_key(agent, k))
     })
 }
 
-/// La clave de una JWK HMAC (§29.6, "If format is "jwk"").
-fn jwk_key(
+/// Los pasos de "import key" de cada algoritmo, y el último de §14.3.9: una clave secreta sin
+/// usos es `SyntaxError`.
+fn import_key(
     agent: &mut Agent,
-    jwk: &Value,
-    hash: Hash,
+    kind: KeyKind,
+    alg: &Value,
+    material: Material,
     extractable: bool,
-    usages: &[&str],
-) -> JsResult<Vec<u8>> {
-    if !matches!(jwk, Value::Object(_)) {
-        return agent.type_error(
-            "Failed to execute 'importKey' on 'SubtleCrypto': keyData is not a JsonWebKey.",
+    usages: Vec<&'static str>,
+) -> JsResult<KeyData> {
+    let allowed: &[&str] = match kind {
+        KeyKind::Hmac => &["sign", "verify"],
+        KeyKind::AesCbc | KeyKind::AesCtr | KeyKind::AesGcm => {
+            &["encrypt", "decrypt", "wrapKey", "unwrapKey"]
+        }
+        KeyKind::Pbkdf2 | KeyKind::Hkdf => &["deriveKey", "deriveBits"],
+    };
+    if usages.iter().any(|u| !allowed.contains(u)) {
+        return dom_error(
+            agent,
+            "SyntaxError",
+            "Cannot create a key using the specified key usages.",
         );
     }
+    let (hash, length, key) = match kind {
+        KeyKind::Hmac => {
+            let hash = hmac_hash(agent, alg)?;
+            let length = hmac_length(agent, alg)?;
+            let key = match material {
+                Material::Raw(b) => b,
+                Material::Jwk(j) => {
+                    let (key, jalg) = jwk_secret(agent, &j, extractable, &usages, "sig")?;
+                    if jalg.is_some_and(|a| a != hash.jwk_alg()) {
+                        return dom_error(
+                            agent,
+                            "DataError",
+                            "The JWK \"alg\" member does not match the hash.",
+                        );
+                    }
+                    key
+                }
+            };
+            let bits = key.len() as u32 * 8;
+            if bits == 0 {
+                return dom_error(agent, "DataError", "HMAC key data must not be empty.");
+            }
+            let length = match length {
+                Some(l) if l > bits || l <= bits - 8 => {
+                    return dom_error(
+                        agent,
+                        "DataError",
+                        "The key length does not match the key data.",
+                    );
+                }
+                Some(l) => l,
+                None => bits,
+            };
+            (hash, length, key)
+        }
+        KeyKind::AesCbc | KeyKind::AesCtr | KeyKind::AesGcm => {
+            let (key, jalg) = match material {
+                Material::Raw(b) => (b, None),
+                Material::Jwk(j) => jwk_secret(agent, &j, extractable, &usages, "enc")?,
+            };
+            if !matches!(key.len(), 16 | 24 | 32) {
+                return dom_error(
+                    agent,
+                    "DataError",
+                    "AES key data must be 128, 192 or 256 bits.",
+                );
+            }
+            if jalg.is_some_and(|a| a != kind.aes_jwk_alg(key.len() as u32 * 8)) {
+                return dom_error(
+                    agent,
+                    "DataError",
+                    "The JWK \"alg\" member does not match the key.",
+                );
+            }
+            (Hash::Sha256, key.len() as u32 * 8, key)
+        }
+        KeyKind::Pbkdf2 | KeyKind::Hkdf => {
+            let Material::Raw(key) = material else {
+                return not_supported(agent, &format!("{} jwk", kind.name()));
+            };
+            if extractable {
+                return dom_error(
+                    agent,
+                    "SyntaxError",
+                    "Keys for key derivation cannot be extractable.",
+                );
+            }
+            (Hash::Sha256, 0, key)
+        }
+    };
+    if usages.is_empty() {
+        return dom_error(
+            agent,
+            "SyntaxError",
+            "Usages cannot be empty when creating a key.",
+        );
+    }
+    Ok(KeyData {
+        kind,
+        hash,
+        length,
+        bytes: key,
+        extractable,
+        usages,
+    })
+}
+
+/// La clave de una JWK secreta (`kty` "oct"; §29.6, §28.x.4) y su `alg`, si tiene.
+fn jwk_secret(
+    agent: &mut Agent,
+    jwk: &Value,
+    extractable: bool,
+    usages: &[&str],
+    use_value: &str,
+) -> JsResult<(Vec<u8>, Option<String>)> {
     let field = |agent: &mut Agent, name: &str| -> JsResult<Option<String>> {
         let v = member(agent, jwk, name)?;
         if matches!(v, Value::Undefined) {
@@ -531,23 +682,15 @@ fn jwk_key(
             "The JWK \"k\" member is not valid base64url.",
         );
     };
-    if let Some(alg) = field(agent, "alg")?
-        && alg != hash.jwk_alg()
-    {
-        return dom_error(
-            agent,
-            "DataError",
-            "The JWK \"alg\" member does not match the hash.",
-        );
-    }
+    let alg = field(agent, "alg")?;
     if !usages.is_empty()
         && let Some(u) = field(agent, "use")?
-        && u != "sig"
+        && u != use_value
     {
         return dom_error(
             agent,
             "DataError",
-            "The JWK \"use\" member was not \"sig\".",
+            &format!("The JWK \"use\" member was not \"{use_value}\"."),
         );
     }
     let ops = member(agent, jwk, "key_ops")?;
@@ -573,10 +716,10 @@ fn jwk_key(
             "The JWK \"ext\" member was false but extractable was requested.",
         );
     }
-    Ok(key)
+    Ok((key, alg))
 }
 
-/// `exportKey(format, key)` (§14.3.10; HMAC, §29.7).
+/// `exportKey(format, key)` (§14.3.10; HMAC §29.7, AES §28.x.5).
 fn subtle_export_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (format, key) = (a.arg(0), a.arg(1));
     promise(agent, |agent| {
@@ -587,6 +730,9 @@ fn subtle_export_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             ));
         }
         let k = arg_key(agent, &key)?;
+        if matches!(k.kind, KeyKind::Pbkdf2 | KeyKind::Hkdf) {
+            return not_supported(agent, &format!("{} export", k.kind.name()));
+        }
         if !k.extractable {
             return dom_error(agent, "InvalidAccessError", "The key is not extractable.");
         }
@@ -596,10 +742,14 @@ fn subtle_export_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 let o = agent.new_plain_object();
                 let ops: Vec<Value> = k.usages.iter().map(|u| Value::str(u)).collect();
                 let ops = Value::Object(agent.create_array_from_list(&ops)?);
+                let alg = match k.kind {
+                    KeyKind::Hmac => k.hash.jwk_alg().to_owned(),
+                    kind => kind.aes_jwk_alg(k.length),
+                };
                 let entries = [
                     ("kty", Value::str("oct")),
                     ("k", Value::str(&base64url_encode(&k.bytes))),
-                    ("alg", Value::str(k.hash.jwk_alg())),
+                    ("alg", Value::str(&alg)),
                     ("key_ops", ops),
                     ("ext", Value::Boolean(k.extractable)),
                 ];
@@ -608,34 +758,48 @@ fn subtle_export_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 }
                 Ok(Value::Object(o))
             }
-            _ => not_supported(agent, &format!("HMAC {format}")),
+            _ => not_supported(agent, &format!("{} {format}", k.kind.name())),
         }
     })
 }
 
-/// `generateKey(algorithm, extractable, keyUsages)` (§14.3.6; HMAC, §29.5).
+/// `generateKey(algorithm, extractable, keyUsages)` (§14.3.6; HMAC §29.5, AES §28.x.3).
 fn subtle_generate_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (alg, extractable, uses) = (a.arg(0), a.arg(1), a.arg(2));
     promise(agent, |agent| {
         let extractable = bf_js::abstract_ops::conversion::to_boolean(agent, &extractable);
         let usages = usages(agent, &uses)?;
-        normalize_hmac(agent, &alg)?;
-        let hash = hmac_hash(agent, &alg)?;
-        let length = hmac_length(agent, &alg)?;
-        if usages.iter().any(|u| !matches!(*u, "sign" | "verify")) {
+        let kind = normalize_kind(agent, &alg, Op::GenerateKey)?;
+        let (hash, length) = match kind {
+            KeyKind::Hmac => {
+                let hash = hmac_hash(agent, &alg)?;
+                let length = match hmac_length(agent, &alg)? {
+                    Some(0) => {
+                        return dom_error(
+                            agent,
+                            "OperationError",
+                            "HMAC key length must not be zero.",
+                        );
+                    }
+                    Some(l) => l,
+                    None => hash.block_len() as u32 * 8,
+                };
+                (hash, length)
+            }
+            _ => (Hash::Sha256, aes_length(agent, &alg)?),
+        };
+        let allowed: &[&str] = if kind == KeyKind::Hmac {
+            &["sign", "verify"]
+        } else {
+            &["encrypt", "decrypt", "wrapKey", "unwrapKey"]
+        };
+        if usages.iter().any(|u| !allowed.contains(u)) {
             return dom_error(
                 agent,
                 "SyntaxError",
                 "Cannot create a key using the specified key usages.",
             );
         }
-        let length = match length {
-            Some(0) => {
-                return dom_error(agent, "OperationError", "HMAC key length must not be zero.");
-            }
-            Some(l) => l,
-            None => hash.block_len() as u32 * 8,
-        };
         if usages.is_empty() {
             return dom_error(
                 agent,
@@ -648,6 +812,7 @@ fn subtle_generate_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         Ok(new_key(
             agent,
             KeyData {
+                kind,
                 hash,
                 length,
                 bytes: key,
@@ -658,11 +823,36 @@ fn subtle_generate_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     })
 }
 
-/// Los pasos comunes de `sign` y `verify` (§14.3.3, §14.3.4): el algoritmo tiene que ser el de
-/// la clave y la clave tiene que admitir el uso.
-fn key_for(agent: &mut Agent, alg: &Value, key: &Value, usage: &str) -> JsResult<KeyData> {
-    normalize_hmac(agent, alg)?;
+/// El miembro `length` de `AesKeyGenParams`/`AesDerivedKeyParams` (§28.x.3, "get key length"):
+/// obligatorio (`TypeError`) y de 128, 192 o 256 (`OperationError`).
+fn aes_length(agent: &mut Agent, alg: &Value) -> JsResult<u32> {
+    let Some(l) = hmac_length(agent, alg)? else {
+        return agent.type_error(
+            "Failed to execute on 'SubtleCrypto': required member length is undefined.",
+        );
+    };
+    if !matches!(l, 128 | 192 | 256) {
+        return dom_error(
+            agent,
+            "OperationError",
+            "AES key length must be 128, 192 or 256 bits.",
+        );
+    }
+    Ok(l)
+}
+
+/// Los pasos comunes de las operaciones con una clave (§14.3.1 a §14.3.8), después de
+/// normalizar el algoritmo y copiar los datos: el algoritmo tiene que ser el de la clave y la
+/// clave tiene que admitir el uso (`InvalidAccessError`).
+fn key_for(agent: &mut Agent, key: &Value, kind: KeyKind, usage: &str) -> JsResult<KeyData> {
     let k = arg_key(agent, key)?;
+    if k.kind != kind {
+        return dom_error(
+            agent,
+            "InvalidAccessError",
+            &format!("The key is not a {} key.", kind.name()),
+        );
+    }
     if !k.usages.contains(&usage) {
         return dom_error(
             agent,
@@ -677,8 +867,11 @@ fn key_for(agent: &mut Agent, alg: &Value, key: &Value, usage: &str) -> JsResult
 fn subtle_sign(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (alg, key, data) = (a.arg(0), a.arg(1), a.arg(2));
     promise(agent, |agent| {
+        // §14.3.3: primero se normaliza el algoritmo (puede correr código de la página, p. ej.
+        // un getter de `name`) y después se copian los bytes de `data`.
+        normalize_hmac(agent, &alg)?;
         let data = bytes(agent, &data, "data")?;
-        let k = key_for(agent, &alg, &key, "sign")?;
+        let k = key_for(agent, &key, KeyKind::Hmac, "sign")?;
         let mac = hmac(k.hash, &k.bytes, &data);
         Ok(array_buffer(agent, mac))
     })
@@ -688,16 +881,320 @@ fn subtle_sign(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 fn subtle_verify(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (alg, key, sig, data) = (a.arg(0), a.arg(1), a.arg(2), a.arg(3));
     promise(agent, |agent| {
+        // §14.3.4: normalizar, y después copiar la firma y los datos.
+        normalize_hmac(agent, &alg)?;
         let sig = bytes(agent, &sig, "signature")?;
         let data = bytes(agent, &data, "data")?;
-        let k = key_for(agent, &alg, &key, "verify")?;
+        let k = key_for(agent, &key, KeyKind::Hmac, "verify")?;
         let mac = hmac(k.hash, &k.bytes, &data);
         Ok(Value::Boolean(equal(&mac, &sig)))
     })
 }
 
-/// `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey` y `unwrapKey`: ningún algoritmo
-/// registrado para ellas, así que "normalize an algorithm" (§18.4.4) da `NotSupportedError`.
+/// Un miembro obligatorio de un diccionario de parámetros (`TypeError` si falta).
+fn required(agent: &mut Agent, alg: &Value, name: &str) -> JsResult<Value> {
+    let v = member(agent, alg, name)?;
+    if matches!(v, Value::Undefined) {
+        return agent.type_error(&format!(
+            "Failed to execute on 'SubtleCrypto': required member {name} is undefined."
+        ));
+    }
+    Ok(v)
+}
+
+/// Un número de un diccionario como entero sin signo de hasta `max` (`[EnforceRange]`).
+fn enforce_range(agent: &mut Agent, v: &Value, max: f64) -> JsResult<u32> {
+    let n = agent.to_number(v)?;
+    if !n.is_finite() || n.trunc() < 0.0 || n.trunc() > max {
+        return agent.type_error("Failed to execute on 'SubtleCrypto': value is out of range.");
+    }
+    Ok(n.trunc() as u32)
+}
+
+/// Los parámetros de un cifrado AES ya normalizados (§28.2.1 `AesCtrParams`, §28.3.1
+/// `AesCbcParams`, §28.4.1 `AesGcmParams`).
+enum AesParams {
+    Cbc {
+        iv: Vec<u8>,
+    },
+    Ctr {
+        counter: Vec<u8>,
+        length: u32,
+    },
+    Gcm {
+        iv: Vec<u8>,
+        aad: Vec<u8>,
+        tag_len: u32,
+    },
+}
+
+fn aes_params(agent: &mut Agent, kind: KeyKind, alg: &Value) -> JsResult<AesParams> {
+    Ok(match kind {
+        KeyKind::AesCbc => {
+            let iv = required(agent, alg, "iv")?;
+            AesParams::Cbc {
+                iv: bytes(agent, &iv, "iv")?,
+            }
+        }
+        KeyKind::AesCtr => {
+            let counter = required(agent, alg, "counter")?;
+            let counter = bytes(agent, &counter, "counter")?;
+            let length = required(agent, alg, "length")?;
+            AesParams::Ctr {
+                counter,
+                length: enforce_range(agent, &length, 255.0)?,
+            }
+        }
+        _ => {
+            let iv = required(agent, alg, "iv")?;
+            let iv = bytes(agent, &iv, "iv")?;
+            let aad = match member(agent, alg, "additionalData")? {
+                Value::Undefined => Vec::new(),
+                v => bytes(agent, &v, "additionalData")?,
+            };
+            let tag_len = match member(agent, alg, "tagLength")? {
+                Value::Undefined => 128,
+                v => enforce_range(agent, &v, 255.0)?,
+            };
+            AesParams::Gcm { iv, aad, tag_len }
+        }
+    })
+}
+
+fn operation_error<T>(agent: &mut Agent, what: &str) -> JsResult<T> {
+    dom_error(agent, "OperationError", what)
+}
+
+/// `encrypt(algorithm, key, data)` (§14.3.1) y `decrypt` (§14.3.2), con AES-CBC, AES-CTR y
+/// AES-GCM (§28).
+fn subtle_crypt(agent: &mut Agent, a: &CallArgs<'_>, encrypt: bool) -> JsResult<Value> {
+    let (alg, key, data) = (a.arg(0), a.arg(1), a.arg(2));
+    promise(agent, |agent| {
+        let op = if encrypt { Op::Encrypt } else { Op::Decrypt };
+        let kind = normalize_kind(agent, &alg, op)?;
+        let params = aes_params(agent, kind, &alg)?;
+        // Los datos se copian después de normalizar (§14.3.1, pasos 2 a 4).
+        let data = bytes(agent, &data, "data")?;
+        let usage = if encrypt { "encrypt" } else { "decrypt" };
+        let k = key_for(agent, &key, kind, usage)?;
+        let Some(aes) = aes::Aes::new(&k.bytes) else {
+            return operation_error(agent, "Invalid AES key.");
+        };
+        let out = match params {
+            AesParams::Cbc { iv } => {
+                if iv.len() != 16 {
+                    return operation_error(agent, "The iv must be 16 bytes.");
+                }
+                if encrypt {
+                    aes::cbc_encrypt(&aes, &iv, &data)
+                } else {
+                    aes::cbc_decrypt(&aes, &iv, &data)
+                }
+            }
+            AesParams::Ctr { counter, length } => {
+                if counter.len() != 16 || length == 0 || length > 128 {
+                    return operation_error(agent, "Invalid AES-CTR counter or length.");
+                }
+                aes::ctr(&aes, &counter, length, &data)
+            }
+            AesParams::Gcm { iv, aad, tag_len } => {
+                if !matches!(tag_len, 32 | 64 | 96 | 104 | 112 | 120 | 128) {
+                    return operation_error(agent, "Invalid AES-GCM tag length.");
+                }
+                if iv.is_empty() {
+                    return operation_error(agent, "The iv must not be empty.");
+                }
+                let t = (tag_len / 8) as usize;
+                if encrypt {
+                    Some(aes::gcm_encrypt(&aes, &iv, &aad, &data, t))
+                } else {
+                    aes::gcm_decrypt(&aes, &iv, &aad, &data, t)
+                }
+            }
+        };
+        match out {
+            Some(o) => Ok(array_buffer(agent, o)),
+            None => operation_error(
+                agent,
+                "The operation failed for an operation-specific reason.",
+            ),
+        }
+    })
+}
+
+fn subtle_encrypt(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    subtle_crypt(agent, a, true)
+}
+
+fn subtle_decrypt(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    subtle_crypt(agent, a, false)
+}
+
+/// PBKDF2 (RFC 8018 §5.2) con HMAC.
+pub fn pbkdf2(h: Hash, password: &[u8], salt: &[u8], iterations: u32, len: usize) -> Vec<u8> {
+    let hlen = digest(h, &[]).len();
+    let prf = sha::Hmac::new(h, password);
+    let mut out = Vec::with_capacity(len.div_ceil(hlen) * hlen);
+    for i in 1..=len.div_ceil(hlen) as u32 {
+        let mut s = salt.to_vec();
+        s.extend_from_slice(&i.to_be_bytes());
+        let mut u = prf.mac(&s);
+        let mut t = u.clone();
+        for _ in 1..iterations {
+            u = prf.mac(&u);
+            for (x, y) in t.iter_mut().zip(&u) {
+                *x ^= y;
+            }
+        }
+        out.extend_from_slice(&t);
+    }
+    out.truncate(len);
+    out
+}
+
+/// HKDF (RFC 5869 §2.2 y §2.3) con HMAC: `None` si `len` pasa de 255 bloques.
+pub fn hkdf(h: Hash, ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Option<Vec<u8>> {
+    let hlen = digest(h, &[]).len();
+    if len > 255 * hlen {
+        return None;
+    }
+    let salt = if salt.is_empty() {
+        vec![0u8; hlen]
+    } else {
+        salt.to_vec()
+    };
+    let prk = hmac(h, &salt, ikm);
+    let mut out = Vec::with_capacity(len + hlen);
+    let mut t: Vec<u8> = Vec::new();
+    let mut i = 1u8;
+    while out.len() < len {
+        let mut m = t.clone();
+        m.extend_from_slice(info);
+        m.push(i);
+        t = hmac(h, &prk, &m);
+        out.extend_from_slice(&t);
+        i = i.wrapping_add(1);
+    }
+    out.truncate(len);
+    Some(out)
+}
+
+/// Los parámetros normalizados de PBKDF2 (§31.1 `Pbkdf2Params`) o HKDF (§32.1 `HkdfParams`).
+struct DeriveParams {
+    hash: Hash,
+    salt: Vec<u8>,
+    /// Las iteraciones de PBKDF2 o el `info` de HKDF.
+    iterations: u32,
+    info: Vec<u8>,
+}
+
+fn derive_params(agent: &mut Agent, kind: KeyKind, alg: &Value) -> JsResult<DeriveParams> {
+    let h = required(agent, alg, "hash")?;
+    let hash = normalize_hash(agent, &h)?;
+    let salt = required(agent, alg, "salt")?;
+    let salt = bytes(agent, &salt, "salt")?;
+    let (iterations, info) = if kind == KeyKind::Pbkdf2 {
+        let it = required(agent, alg, "iterations")?;
+        (enforce_range(agent, &it, f64::from(u32::MAX))?, Vec::new())
+    } else {
+        let info = required(agent, alg, "info")?;
+        (0, bytes(agent, &info, "info")?)
+    };
+    Ok(DeriveParams {
+        hash,
+        salt,
+        iterations,
+        info,
+    })
+}
+
+/// Los bits de `deriveBits`/`deriveKey` con PBKDF2 (§31.3) o HKDF (§32.3): `length` en bits,
+/// múltiplo de 8 (0 da un buffer vacío).
+fn derive(
+    agent: &mut Agent,
+    kind: KeyKind,
+    p: &DeriveParams,
+    key: &KeyData,
+    length: Option<u32>,
+) -> JsResult<Vec<u8>> {
+    let Some(length) = length.filter(|l| l % 8 == 0) else {
+        return operation_error(agent, "The length must be a multiple of 8.");
+    };
+    let len = (length / 8) as usize;
+    if kind == KeyKind::Pbkdf2 {
+        if p.iterations == 0 {
+            return operation_error(agent, "PBKDF2 iterations must not be zero.");
+        }
+        return Ok(pbkdf2(p.hash, &key.bytes, &p.salt, p.iterations, len));
+    }
+    match hkdf(p.hash, &key.bytes, &p.salt, &p.info, len) {
+        Some(b) => Ok(b),
+        None => operation_error(agent, "HKDF length is too large."),
+    }
+}
+
+/// La longitud de `deriveBits` (`optional [EnforceRange] unsigned long? length = null`, §14.2):
+/// `null` o sin dar es `None`; NaN, infinitos o fuera de rango son `TypeError`.
+fn derive_length(agent: &mut Agent, v: &Value) -> JsResult<Option<u32>> {
+    if v.is_nullish() {
+        return Ok(None);
+    }
+    enforce_range(agent, v, f64::from(u32::MAX)).map(Some)
+}
+
+/// `deriveBits(algorithm, baseKey, length)` (§14.3.8).
+fn subtle_derive_bits(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (alg, key, length) = (a.arg(0), a.arg(1), a.arg(2));
+    promise(agent, |agent| {
+        let kind = normalize_kind(agent, &alg, Op::Derive)?;
+        let params = derive_params(agent, kind, &alg)?;
+        let length = derive_length(agent, &length)?;
+        let k = key_for(agent, &key, kind, "deriveBits")?;
+        let out = derive(agent, kind, &params, &k, length)?;
+        Ok(array_buffer(agent, out))
+    })
+}
+
+/// `deriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages)` (§14.3.7): los bits
+/// de la longitud de la clave destino ("get key length": AES §28.x.6, HMAC §29.8), importados
+/// como `raw`.
+fn subtle_derive_key(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let (alg, key, target, extractable, uses) = (a.arg(0), a.arg(1), a.arg(2), a.arg(3), a.arg(4));
+    promise(agent, |agent| {
+        let extractable = bf_js::abstract_ops::conversion::to_boolean(agent, &extractable);
+        let usages = usages(agent, &uses)?;
+        let kind = normalize_kind(agent, &alg, Op::Derive)?;
+        let params = derive_params(agent, kind, &alg)?;
+        let target_kind = normalize_kind(agent, &target, Op::GetKeyLength)?;
+        let length = match target_kind {
+            KeyKind::Hmac => {
+                let hash = hmac_hash(agent, &target)?;
+                match hmac_length(agent, &target)? {
+                    Some(0) => {
+                        return dom_error(agent, "TypeError", "HMAC key length must not be zero.");
+                    }
+                    Some(l) => l,
+                    None => hash.block_len() as u32 * 8,
+                }
+            }
+            _ => aes_length(agent, &target)?,
+        };
+        let k = key_for(agent, &key, kind, "deriveKey")?;
+        let bits = derive(agent, kind, &params, &k, Some(length))?;
+        let derived = import_key(
+            agent,
+            target_kind,
+            &target,
+            Material::Raw(bits),
+            extractable,
+            usages,
+        )?;
+        Ok(new_key(agent, derived))
+    })
+}
+
+/// `wrapKey` y `unwrapKey`: ningún algoritmo registrado para ellas, así que "normalize an
+/// algorithm" (§18.4.4) da `NotSupportedError`.
 fn subtle_unsupported(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let alg = a.arg(0);
     promise(agent, |agent| {
@@ -717,24 +1214,44 @@ fn key_extractable(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Boolean(this_key(agent, a)?.extractable))
 }
 
-/// `algorithm` (§13.5): un `HmacKeyAlgorithm`, el mismo objeto cada vez (slot 0).
+/// `algorithm` (§13.5): un `HmacKeyAlgorithm`, `AesKeyAlgorithm` o `KeyAlgorithm`, el mismo
+/// objeto cada vez (slot 0).
 fn key_algorithm(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let k = this_key(agent, a)?;
     cached(agent, a, 0, |agent| {
-        let hash = agent.new_plain_object();
-        agent.create_data_property_or_throw(
-            hash,
-            PropertyKey::from("name"),
-            Value::str(k.hash.name()),
-        )?;
         let o = agent.new_plain_object();
-        let entries = [
-            ("name", Value::str("HMAC")),
-            ("hash", Value::Object(hash)),
-            ("length", Value::Number(f64::from(k.length))),
-        ];
-        for (name, v) in entries {
-            agent.create_data_property_or_throw(o, PropertyKey::from(name), v)?;
+        agent.create_data_property_or_throw(
+            o,
+            PropertyKey::from("name"),
+            Value::str(k.kind.name()),
+        )?;
+        match k.kind {
+            KeyKind::Hmac => {
+                let hash = agent.new_plain_object();
+                agent.create_data_property_or_throw(
+                    hash,
+                    PropertyKey::from("name"),
+                    Value::str(k.hash.name()),
+                )?;
+                agent.create_data_property_or_throw(
+                    o,
+                    PropertyKey::from("hash"),
+                    Value::Object(hash),
+                )?;
+                agent.create_data_property_or_throw(
+                    o,
+                    PropertyKey::from("length"),
+                    Value::Number(f64::from(k.length)),
+                )?;
+            }
+            KeyKind::AesCbc | KeyKind::AesCtr | KeyKind::AesGcm => {
+                agent.create_data_property_or_throw(
+                    o,
+                    PropertyKey::from("length"),
+                    Value::Number(f64::from(k.length)),
+                )?;
+            }
+            KeyKind::Pbkdf2 | KeyKind::Hkdf => {}
         }
         Ok(Value::Object(o))
     })
@@ -913,6 +1430,46 @@ mod tests {
             hex(&hmac(Hash::Sha1, b"Jefe", b"what do ya want for nothing?")),
             "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
         );
+    }
+
+    /// RFC 6070 §2 (PBKDF2-HMAC-SHA1) y RFC 5869 apéndice A, casos 1 y 3 (HKDF-SHA256).
+    #[test]
+    fn pbkdf2_rfc_6070_and_hkdf_rfc_5869_vectors() {
+        assert_eq!(
+            hex(&pbkdf2(Hash::Sha1, b"password", b"salt", 1, 20)),
+            "0c60c80f961f0e71f3a9b524af6012062fe037a6"
+        );
+        assert_eq!(
+            hex(&pbkdf2(Hash::Sha1, b"password", b"salt", 4096, 20)),
+            "4b007901b765489abead49d926f721d065a429c1"
+        );
+        assert_eq!(
+            hex(&pbkdf2(
+                Hash::Sha1,
+                b"passwordPASSWORDpassword",
+                b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+                4096,
+                25
+            )),
+            "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038"
+        );
+        let ikm = [0x0bu8; 22];
+        assert_eq!(
+            hex(&hkdf(
+                Hash::Sha256,
+                &ikm,
+                &unhex("000102030405060708090a0b0c"),
+                &unhex("f0f1f2f3f4f5f6f7f8f9"),
+                42
+            )
+            .unwrap()),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+        );
+        assert_eq!(
+            hex(&hkdf(Hash::Sha256, &ikm, &[], &[], 42).unwrap()),
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
+        );
+        assert!(hkdf(Hash::Sha256, &ikm, &[], &[], 255 * 32 + 1).is_none());
     }
 
     #[test]
