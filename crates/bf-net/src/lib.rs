@@ -1454,7 +1454,10 @@ impl Fetcher {
             })();
             let (head, raw, keep) = match result {
                 Ok(r) => r,
-                Err(_) if reused => {
+                // RFC 9110 §9.2.2: una conexión reutilizada que el servidor ya había cerrado se
+                // repite con una nueva, pero solo con un método idempotente. Con `POST` no se
+                // sabe si el servidor llegó a aplicarla: el error llega a quien pidió (E3).
+                Err(_) if reused && idempotent => {
                     fresh = true;
                     continue;
                 }
