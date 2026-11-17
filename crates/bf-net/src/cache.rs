@@ -403,9 +403,22 @@ struct Inner {
     /// RFC 5861 §3: revalidaciones por hacer en segundo plano, y las claves en curso.
     revalidations: Mutex<Vec<Revalidation>>,
     in_flight: Mutex<HashSet<String>>,
-    /// E6: el hilo que guarda en disco, en orden, las actualizaciones por 304 (§4.3.4) fuera
-    /// del camino de la respuesta.
+    /// E6: el hilo que guarda en disco, en orden, fuera del camino de la respuesta. Desde E3,
+    /// todo lo que se guarda: las respuestas nuevas, las actualizaciones por 304 (§4.3.4) y lo
+    /// que se quita (§4.4).
     writer: Mutex<Option<(Sender<Job>, JoinHandle<()>)>>,
+}
+
+/// E3: cada cuántos bytes escritos se mira si la carpeta pasa del límite ([`disk::trim`]
+/// recorre la carpeta entera: hacerlo en cada escritura costaba decenas de ms por respuesta
+/// con unos miles de archivos). La carpeta puede pasar del límite como mucho en esto.
+const TRIM_EVERY: u64 = DISK_LIMIT / 32;
+
+/// E3: las cachés con hilo de escritura del proceso, para [`HttpCache::flush_all`].
+fn writers() -> &'static Mutex<Vec<std::sync::Weak<Inner>>> {
+    static WRITERS: std::sync::OnceLock<Mutex<Vec<std::sync::Weak<Inner>>>> =
+        std::sync::OnceLock::new();
+    WRITERS.get_or_init(Mutex::default)
 }
 
 /// Un trabajo del hilo de escritura.
@@ -611,22 +624,8 @@ impl HttpCache {
     /// escritura (las actualizaciones por 304: la memoria ya tiene lo nuevo y lo guardado en
     /// disco sigue siendo válido mientras tanto).
     fn remember_later(&self, key: &str, entries: Vec<Entry>) {
-        // `BF_NO_PRECARGA=1`: como antes, en el momento (para comparar en el mismo binario).
-        if std::env::var_os("BF_NO_PRECARGA").is_some() {
-            self.remember(key, entries, true);
-            return;
-        }
-        if let Some(dir) = &self.inner.dir
-            && !entries.is_empty()
-        {
-            let job = Job::Write {
-                dir: dir.clone(),
-                key: key.to_owned(),
-                entries: entries.clone(),
-            };
-            self.write_job(job);
-        }
-        self.remember(key, entries, false);
+        // E3: ahora todo lo que se guarda va al hilo de escritura ([`HttpCache::remember`]).
+        self.remember(key, entries, true);
     }
 
     /// Manda `job` al hilo de escritura (lo crea la primera vez).
@@ -637,13 +636,25 @@ impl HttpCache {
             let handle = std::thread::Builder::new()
                 .name("bf-net-cache-disco".into())
                 .spawn(move || {
+                    // E3: la carpeta se recorre la primera vez y luego cada `TRIM_EVERY`
+                    // bytes escritos.
+                    let mut written = TRIM_EVERY;
                     for job in rx {
                         match job {
                             Job::Write { dir, key, entries } => {
                                 let started = std::time::Instant::now();
                                 let path = disk::path(&dir, &key);
-                                if disk::write(&dir, &path, &key, &entries).is_ok() {
-                                    disk::trim(&dir, DISK_LIMIT);
+                                if entries.is_empty() {
+                                    let _ = std::fs::remove_file(&path);
+                                } else if disk::write(&dir, &path, &key, &entries).is_ok() {
+                                    written += entries
+                                        .iter()
+                                        .map(|e| e.response.body.len() as u64)
+                                        .sum::<u64>();
+                                    if written >= TRIM_EVERY {
+                                        disk::trim(&dir, DISK_LIMIT);
+                                        written = 0;
+                                    }
                                 }
                                 use crate::timing::{Disk, disk_op};
                                 disk_op(Disk::BgWrites, Disk::BgWriteNanos, started.elapsed());
@@ -655,12 +666,21 @@ impl HttpCache {
                     }
                 });
             match handle {
-                Ok(h) => *writer = Some((tx, h)),
+                Ok(h) => {
+                    *writer = Some((tx, h));
+                    let mut all = writers().lock().unwrap_or_else(|e| e.into_inner());
+                    all.retain(|w| w.strong_count() > 0);
+                    all.push(Arc::downgrade(&self.inner));
+                }
                 // Sin hilo: se escribe aquí.
                 Err(_) => {
                     if let Job::Write { dir, key, entries } = job {
                         let path = disk::path(&dir, &key);
-                        let _ = disk::write(&dir, &path, &key, &entries);
+                        if entries.is_empty() {
+                            let _ = std::fs::remove_file(&path);
+                        } else {
+                            let _ = disk::write(&dir, &path, &key, &entries);
+                        }
                     }
                     return;
                 }
@@ -668,6 +688,21 @@ impl HttpCache {
         }
         if let Some((tx, _)) = writer.as_ref() {
             let _ = tx.send(job);
+        }
+    }
+
+    /// E3: [`HttpCache::flush`] de todas las cachés del proceso con hilo de escritura: para
+    /// antes de salir (las escrituras están fuera del camino de la respuesta, y un hilo de
+    /// escritura no termina lo pendiente si el proceso sale).
+    pub fn flush_all() {
+        let all: Vec<Arc<Inner>> = writers()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        for inner in all {
+            HttpCache { inner }.flush();
         }
     }
 
@@ -766,17 +801,29 @@ impl HttpCache {
     }
 
     /// Guarda las entradas de `key` (en memoria y, con `persist`, en disco).
+    ///
+    /// E3: el disco se escribe en el hilo de escritura, en orden, fuera del camino de la
+    /// respuesta: la memoria ya tiene lo nuevo. `BF_NO_PRECARGA=1` escribe aquí, como antes
+    /// (para comparar en el mismo binario).
     fn remember(&self, key: &str, entries: Vec<Entry>, persist: bool) {
         if persist && let Some(dir) = &self.inner.dir {
-            let started = std::time::Instant::now();
-            let path = disk::path(dir, key);
-            if entries.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else if disk::write(dir, &path, key, &entries).is_ok() {
-                disk::trim(dir, DISK_LIMIT);
+            if std::env::var_os("BF_NO_PRECARGA").is_some() {
+                let started = std::time::Instant::now();
+                let path = disk::path(dir, key);
+                if entries.is_empty() {
+                    let _ = std::fs::remove_file(&path);
+                } else if disk::write(dir, &path, key, &entries).is_ok() {
+                    disk::trim(dir, DISK_LIMIT);
+                }
+                use crate::timing::{Disk, disk_op};
+                disk_op(Disk::Writes, Disk::WriteNanos, started.elapsed());
+            } else {
+                self.write_job(Job::Write {
+                    dir: dir.clone(),
+                    key: key.to_owned(),
+                    entries: entries.clone(),
+                });
             }
-            use crate::timing::{Disk, disk_op};
-            disk_op(Disk::Writes, Disk::WriteNanos, started.elapsed());
         }
         let mut mem = self.inner.memory.lock().unwrap_or_else(|e| e.into_inner());
         let size = |v: &Vec<Entry>| v.iter().map(|e| e.response.body.len()).sum::<usize>();
@@ -2408,6 +2455,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// E3: una respuesta nueva se guarda en disco en el hilo de escritura, no en el camino de
+    /// la respuesta (antes cada una costaba una escritura y un recorrido de la carpeta: 58 ms
+    /// de media en la primera visita a react.dev, con unos 2300 archivos en la carpeta). Tras
+    /// `flush`, otra caché
+    /// sobre la misma carpeta la sirve del disco. Con `BF_NO_PRECARGA` se escribiría en el
+    /// camino; ningún test lo pone.
+    #[test]
+    fn new_responses_are_written_off_the_path() {
+        let dir = std::env::temp_dir().join(format!("freedom-cache-fondo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = rig(Some(&dir));
+        crate::timing::take_disk();
+        r.get(
+            &[],
+            Default::default(),
+            &[("Cache-Control", "max-age=60")],
+            200,
+        );
+        assert_eq!(crate::timing::take_disk().writes, 0, "nada en el camino");
+        r.cache.flush();
+        let r2 = rig(Some(&dir));
+        let (res, used, _) = r2.get(&[], Default::default(), &[], 500);
+        assert_eq!((used, &res.body[..]), (CacheUse::Hit, &b"cuerpo"[..]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn disk_round_trip() {
         let dir = std::env::temp_dir().join(format!("freedom-cache-test-{}", std::process::id()));
@@ -2426,6 +2499,8 @@ mod tests {
         let (res, u, _) = r.get(&[("Accept", "x")], Default::default(), &[], 500);
         assert_eq!((u, &res.body[..]), (CacheUse::Hit, &b"cuerpo"[..]));
         r.cache.invalidate(&r.url);
+        // E3: el disco se escribe en el hilo de escritura; otro proceso lo ve después.
+        r.cache.flush();
         let r = rig(Some(&dir));
         assert_eq!(
             r.get(&[("Accept", "x")], Default::default(), &[], 200).1,

@@ -757,6 +757,24 @@ impl Fetcher {
 
     /// Fetch de `url`: `http(s)`, `data:` y `file:`.
     pub fn fetch(&self, url: &Url, opts: &FetchOptions) -> Result<Response, FetchError> {
+        let start = std::time::Instant::now();
+        let r = self.fetch_inner(url, opts);
+        // E3: con `FREEDOM_NET_LOG`, también las que fallan, con el error y lo que tardaron (un
+        // tiempo de espera agotado no dejaba rastro).
+        if let Err(e) = &r
+            && net_log_enabled()
+        {
+            eprintln!(
+                "red: {} {} falló tras {} ms: {e}",
+                opts.method.as_str().to_ascii_uppercase(),
+                url.href(),
+                start.elapsed().as_millis()
+            );
+        }
+        r
+    }
+
+    fn fetch_inner(&self, url: &Url, opts: &FetchOptions) -> Result<Response, FetchError> {
         let mut url = url.clone();
         let mut method = opts.method;
         let mut body = opts.body.clone();

@@ -1645,10 +1645,11 @@ mod shared_requests {
 /// Loading 3 §2.2) descarga con el loader de la ventana, también desde un marco. Antes buscaba
 /// solo `PageResources`, que existe en el runner de testharness pero no en el navegador: la
 /// fuente fallaba con `NetworkError` (el embed de YouTube de asimetrix.co dejaba dos promesas
-/// rechazadas). Las hojas de `<link>` del CSSOM tienen el mismo problema (`error` en vez de
-/// `load`, `cssRules` vacío) y siguen así: arreglarlo igual sube la primera pintura de
-/// Wikipedia unos 70 ms, porque el CSSOM parsea otra vez todas las hojas (ver
-/// `docs/pendiente/mac/e6.md`). El test lo deja anotado.
+/// rechazadas). Las hojas de `<link>` del CSSOM tenían el mismo problema (`error` en vez de
+/// `load`, `cssRules` vacío). E2 lo arregló con el mismo loader (`bf-web/src/cssom/sheets.rs`,
+/// `load_linked_sheet`): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y la hoja sale
+/// de `bf_style::sheet_cache`, ya parseada por el pintado, sin el coste en la primera pintura
+/// que había medido E6 (`docs/pendiente/mac/e2.md`, "Sesión nueva, ronda 1").
 #[cfg(test)]
 mod page_loader_pages {
     use super::*;

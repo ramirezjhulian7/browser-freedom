@@ -1804,6 +1804,23 @@ impl App {
 
     // --- Navegación ---
 
+    /// E3: una navegación a un esquema que el navegador no carga (`mailto:`, `tel:` o el de
+    /// otra aplicación, como `meli://`). HTML §7.4.2.2 (*navigate*): si el esquema no es un
+    /// *fetch scheme* (Fetch §2.2: `about`, `blob`, `data`, `file`, `http(s)`) ni `javascript:`,
+    /// la URL se entrega a otra aplicación (*hand-off to external software*) y el documento no
+    /// cambia. Freedom no abre otras aplicaciones: la página se queda y la barra de estado lo
+    /// dice. `true` si era una de esas.
+    fn hand_off(&mut self, url: &Url) -> bool {
+        if !external_scheme(url) {
+            return false;
+        }
+        self.set_notice(format!(
+            "Freedom no abre enlaces {}: (son de otra aplicación)",
+            url.scheme
+        ));
+        true
+    }
+
     fn start_load(&mut self, url: Url, nav: Navigation) {
         self.start_load_with(url, nav, None);
     }
@@ -1892,6 +1909,9 @@ impl App {
 
     /// Navega a `url` (un enlace o lo escrito en la barra).
     fn navigate(&mut self, url: Url) {
+        if self.hand_off(&url) {
+            return;
+        }
         if url.scheme == "bf" {
             // Las acciones del perfil (borrar historial, marcadores…) solo desde una página
             // interna: una página de la web no puede dispararlas con un enlace.
@@ -2407,6 +2427,9 @@ impl App {
         match request {
             PageRequest::Navigate { url, replace, post } => {
                 self.with_tab(i, |app| {
+                    if app.hand_off(&url) {
+                        return;
+                    }
                     if post.is_some() {
                         app.start_load_with(url, Navigation::Push, post);
                     } else if replace {
@@ -4468,9 +4491,12 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
         .build()
         .map_err(|e| format!("no se pudo iniciar la ventana: {e}"))?;
     let mut browser = Browser::new(event_loop.create_proxy(), url);
-    event_loop
+    let r = event_loop
         .run_app(&mut browser)
-        .map_err(|e| format!("error en el bucle de eventos: {e}"))
+        .map_err(|e| format!("error en el bucle de eventos: {e}"));
+    // E3: la caché HTTP escribe el disco en su hilo; lo pendiente, antes de salir.
+    bf_net::cache::HttpCache::flush_all();
+    r
 }
 
 impl App {
@@ -5002,6 +5028,16 @@ impl App {
     }
 }
 
+/// E3: ¿El esquema de `url` es uno que el navegador no carga? Los que sí: los *fetch schemes*
+/// (Fetch §2.2), `javascript:` (lo ejecuta el documento) y los del propio navegador
+/// (`freedom:` y `bf:`).
+fn external_scheme(url: &Url) -> bool {
+    !matches!(
+        url.scheme.as_str(),
+        "about" | "blob" | "data" | "file" | "http" | "https" | "javascript" | "freedom" | "bf"
+    )
+}
+
 /// `freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
@@ -5051,6 +5087,9 @@ pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
         println!("{:02} {step}: {}", i + 1, app.state_line());
         save(&app, i + 1)?;
     }
+    // E3: la caché HTTP escribe el disco en su hilo; lo pendiente, antes de salir (la sesión
+    // siguiente lo lee del disco).
+    bf_net::cache::HttpCache::flush_all();
     Ok(())
 }
 
