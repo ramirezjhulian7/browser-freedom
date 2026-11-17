@@ -110,10 +110,40 @@ fn fetch_streaming_inner(
             target.push('?');
             target.push_str(q);
         }
+        if crate::net_log_headers() {
+            crate::log_request_headers(&method, &url, &headers);
+        }
         http::write_request(conn.get_mut(), &method, &target, &headers, body.as_deref())?;
         let mut head = http::read_head(&mut conn)?;
         while (100..200).contains(&head.status) && head.status != 101 {
             head = http::read_head(&mut conn)?;
+        }
+        // E3: con `FREEDOM_NET_LOG=cabeceras`, las de la respuesta que deciden si el script la
+        // puede leer (CORS, tipo, codificación).
+        if crate::net_log_headers() {
+            let mut out = format!(
+                "respuesta: {} {} {}",
+                method.to_ascii_uppercase(),
+                url.href(),
+                head.status
+            );
+            for (n, v) in &head.headers.0 {
+                let n2 = n.to_ascii_lowercase();
+                if n2.starts_with("access-control-")
+                    || matches!(
+                        n2.as_str(),
+                        "content-type"
+                            | "content-encoding"
+                            | "content-length"
+                            | "transfer-encoding"
+                            | "location"
+                            | "vary"
+                    )
+                {
+                    out.push_str(&format!("\n    {n}: {v}"));
+                }
+            }
+            eprintln!("{out}");
         }
         // E3: con `FREEDOM_NET_LOG`, cada salto, como las de `Fetcher::fetch` (estas no pasan
         // por la caché: XHR, `fetch()` y `EventSource` desde los scripts).
