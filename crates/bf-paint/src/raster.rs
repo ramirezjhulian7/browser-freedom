@@ -421,6 +421,26 @@ impl Canvas {
         c: Rgba,
         dotted: bool,
     ) {
+        // E2: CSS Backgrounds 3 §4.2 deja al UA el espaciado de `dotted` y `dashed`. Como los
+        // navegadores, el patrón se calcula sobre la caja con los bordes ajustados al píxel de
+        // dispositivo (si la transformación no gira ni sesga): una caja de 50,1 px se pinta
+        // igual que una de 50 (WPT `flexbox-min-width-auto-001` y `-min-height-auto-001`). Sin
+        // esto, el patrón de los lados que empiezan en el borde derecho o en el de abajo se
+        // corría la fracción entera y cambiaba el antialias de todos sus puntos.
+        let ts = self.ts();
+        let snapped;
+        let rect = if ts.kx == 0.0 && ts.ky == 0.0 && ts.sx != 0.0 && ts.sy != 0.0 {
+            let snap = |v: f32, s: f32, t: f32| ((v * s + t).round() - t) / s;
+            let (x0, x1) = (snap(rect.x, ts.sx, ts.tx), snap(rect.right(), ts.sx, ts.tx));
+            let (y0, y1) = (
+                snap(rect.y, ts.sy, ts.ty),
+                snap(rect.bottom(), ts.sy, ts.ty),
+            );
+            snapped = Rect::new(x0, y0, x1 - x0, y1 - y0);
+            &snapped
+        } else {
+            rect
+        };
         let w = [widths.top, widths.right, widths.bottom, widths.left][side];
         let inner = shrink(rect, widths);
         let Some(wedge) = Self::wedge(rect, &inner, side) else {
