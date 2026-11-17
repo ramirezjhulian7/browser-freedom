@@ -1872,6 +1872,192 @@ pub fn style_document_parallel(
     map
 }
 
+/// E2: hasta dónde llega el efecto de cambiar los atributos de un elemento, según los
+/// selectores de las hojas (Selectors 4 §16, "Combinators", y §15, `:has()`; §14.4,
+/// `:nth-child(An+B of S)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AttributeReach {
+    /// Al elemento y a sus descendientes: los combinadores de descendiente e hijo solo miran
+    /// antepasados, y las pseudo-clases estructurales (`:nth-child(An+B)`, `:first-child`…)
+    /// dependen del árbol, no de los atributos.
+    Subtree,
+    /// También a los hermanos siguientes y sus descendientes (`+`, `~`).
+    FollowingSiblings,
+    /// A cualquier elemento (`:has()` mira hacia abajo y a los lados; `:nth-child(… of S)`
+    /// cuenta hermanos según `S`): hay que rehacer la cascada entera.
+    Anywhere,
+}
+
+fn list_reach(list: &bf_css::selectors::SelectorList) -> AttributeReach {
+    use bf_css::selectors::{Combinator, PseudoClass, Simple};
+    let mut reach = AttributeReach::Subtree;
+    for complex in &list.0 {
+        let sibling =
+            |c: &Combinator| matches!(c, Combinator::NextSibling | Combinator::SubsequentSibling);
+        if complex.leading.as_ref().is_some_and(sibling) || complex.combinators.iter().any(sibling)
+        {
+            reach = reach.max(AttributeReach::FollowingSiblings);
+        }
+        if let Some(slotted) = &complex.slotted {
+            reach = reach.max(list_reach(slotted));
+        }
+        for simple in complex.compounds.iter().flatten() {
+            let Simple::PseudoClass(pc) = simple else {
+                continue;
+            };
+            match pc {
+                PseudoClass::Has(_)
+                | PseudoClass::NthChild { of: Some(_), .. }
+                | PseudoClass::NthLastChild { of: Some(_), .. } => return AttributeReach::Anywhere,
+                PseudoClass::Not(l)
+                | PseudoClass::Is(l)
+                | PseudoClass::Where(l)
+                | PseudoClass::HostContext(l)
+                | PseudoClass::Host(Some(l)) => reach = reach.max(list_reach(l)),
+                _ => {}
+            }
+            if reach == AttributeReach::Anywhere {
+                return reach;
+            }
+        }
+    }
+    reach
+}
+
+fn rules_reach(rules: &[bf_css::stylesheet::Rule]) -> AttributeReach {
+    use bf_css::stylesheet::{LayerRule, Rule};
+    let mut reach = AttributeReach::Subtree;
+    for rule in rules {
+        let r = match rule {
+            Rule::Style(s) => list_reach(&s.selectors).max(rules_reach(&s.nested)),
+            Rule::Media(m) => rules_reach(&m.rules),
+            Rule::Supports(s) => rules_reach(&s.rules),
+            Rule::Layer(LayerRule::Block { rules, .. }) => rules_reach(rules),
+            _ => AttributeReach::Subtree,
+        };
+        reach = reach.max(r);
+        if reach == AttributeReach::Anywhere {
+            break;
+        }
+    }
+    reach
+}
+
+/// E2: la cascada incremental del CSSOM. `previous` es lo que dio [`style_document_parallel`]
+/// (o [`style_document_with_sheets`]) con estas mismas hojas, medios y métricas, y desde
+/// entonces solo cambiaron atributos de los elementos `changed` (sin cambios del árbol, de
+/// texto ni de estados). Devuelve el mapa que daría la cascada completa del documento actual
+/// recalculando solo los subárboles afectados, cada uno a partir del estilo ya calculado de su
+/// padre (el estilo de un elemento depende solo de lo que le aplica y del de su padre: CSS
+/// Cascade 5 §7, herencia). `None` si no se puede asegurar el mismo resultado y hay que hacer
+/// la cascada completa: hojas con `:has()` o `:nth-child(… of S)`, shadow roots, cambios en
+/// la raíz o en elementos que deciden qué hojas aplican (`style`, `link`, `meta`, `base`) o
+/// cuyo estado depende de otros elementos (controles de formulario: `:default`, grupos de
+/// radio), o un padre sin estilo en `previous`.
+#[allow(clippy::too_many_arguments)]
+pub fn restyle_after_attribute_changes(
+    doc: &Document,
+    document_sheets: &[Stylesheet],
+    sheets: &[&Stylesheet],
+    media: &MediaContext,
+    ctx: &MatchContext,
+    fonts: Option<&dyn FontMetricsSource>,
+    previous: &StyleMap,
+    changed: &[NodeId],
+) -> Option<StyleMap> {
+    if doc.has_shadow_roots() {
+        return None;
+    }
+    let root = doc.document_element()?;
+    let mut targets: Vec<NodeId> = Vec::with_capacity(changed.len());
+    for &el in changed {
+        // Un elemento fuera del documento no tiene estilo (ni lo tienen sus descendientes).
+        if !doc.is_connected(el) {
+            continue;
+        }
+        let element = doc.element(el)?;
+        let global = matches!(
+            &*element.name.to_string(),
+            "style" | "link" | "meta" | "base" | "slot" | "template"
+        );
+        let form = matches!(
+            &*element.name.to_string(),
+            "input"
+                | "button"
+                | "select"
+                | "option"
+                | "optgroup"
+                | "form"
+                | "fieldset"
+                | "textarea"
+                | "label"
+                | "output"
+        );
+        if el == root || global || form {
+            return None;
+        }
+        targets.push(el);
+    }
+    let no_shadow: Vec<(NodeId, Vec<Stylesheet>)> = Vec::new();
+    let mut styler = new_styler(doc, document_sheets, &no_shadow, sheets, media, ctx, fonts);
+    let reach = [&styler.ua, &styler.author, &styler.user]
+        .into_iter()
+        .flatten()
+        .map(|s| rules_reach(&s.rules))
+        .max()
+        .unwrap_or(AttributeReach::Subtree);
+    if reach == AttributeReach::Anywhere {
+        return None;
+    }
+    if reach == AttributeReach::FollowingSiblings {
+        let mut with_siblings = Vec::with_capacity(targets.len());
+        for &t in &targets {
+            let mut next = Some(t);
+            while let Some(n) = next {
+                if doc.element(n).is_some() {
+                    with_siblings.push(n);
+                }
+                next = doc.next_sibling(n);
+            }
+        }
+        targets = with_siblings;
+    }
+    // Sin repetir y sin los que ya quedan dentro del subárbol de otro.
+    let set: HashSet<NodeId> = targets.iter().copied().collect();
+    let mut seen = HashSet::new();
+    targets.retain(|&t| {
+        let mut up = doc.parent(t);
+        while let Some(p) = up {
+            if set.contains(&p) {
+                return false;
+            }
+            up = doc.parent(p);
+        }
+        seen.insert(t)
+    });
+    // `rem` y `rlh` salen de la raíz, que no cambió.
+    let root_style = previous.get(&(root, None))?;
+    styler.root_font_size = root_style.font_size_px();
+    styler.root_line_height = root_style
+        .line_height
+        .resolve(root_style.font_size_px(), NORMAL_LINE_HEIGHT);
+    let mut roots = Vec::with_capacity(targets.len());
+    let mut stale: HashSet<NodeId> = HashSet::new();
+    for &t in &targets {
+        let parent = doc.parent(t)?;
+        roots.push((t, Some(previous.get(&(parent, None))?.clone())));
+        let mut stack = vec![t];
+        while let Some(n) = stack.pop() {
+            stale.insert(n);
+            stack.extend(styler.element_children(n));
+        }
+    }
+    let mut map = previous.clone();
+    map.retain(|(n, _), _| !stale.contains(n));
+    styler.style_subtrees(roots, &mut map);
+    Some(map)
+}
+
 /// E4: cuántos elementos tiene el subárbol (en el flat tree) de cada elemento.
 fn subtree_sizes(doc: &Document, styler: &Styler<'_>) -> HashMap<NodeId, usize> {
     let mut order: Vec<(NodeId, Option<NodeId>)> = Vec::new();

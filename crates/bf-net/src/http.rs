@@ -232,6 +232,26 @@ pub fn decode_content(body: Vec<u8>, encodings: &[String]) -> io::Result<Vec<u8>
     Ok(data)
 }
 
+/// E2: descomprime `data` (`"deflate"`: zlib; `"br"`: Brotli) sin pasar de `limit` bytes:
+/// `None` si el flujo está dañado o da más de `limit` (así una fuente WOFF dañada no pide
+/// memoria sin fin). Lo usa `bf-web` para las fuentes WOFF y WOFF2.
+pub fn decompress_limited(data: &[u8], encoding: &str, limit: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let cap = limit as u64 + 1;
+    match encoding {
+        "deflate" => flate2::read::ZlibDecoder::new(data)
+            .take(cap)
+            .read_to_end(&mut out)
+            .ok()?,
+        "br" => brotli::Decompressor::new(data, 4096)
+            .take(cap)
+            .read_to_end(&mut out)
+            .ok()?,
+        _ => return None,
+    };
+    (out.len() <= limit).then_some(out)
+}
+
 /// Escribe un request HTTP/1.1.
 pub fn write_request(
     w: &mut impl Write,
