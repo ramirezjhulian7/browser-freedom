@@ -22,6 +22,7 @@
 //! navegador los documentos de los marcos para pintarlos dentro de su `<iframe>`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use bf_dom::events::{Event, EventInit, EventTarget};
 use bf_dom::{Document, NodeId};
@@ -55,6 +56,8 @@ pub struct Frame {
     /// E2: el `load` del `<iframe>` espera al `load` del documento del marco (HTML §7.4.6.3,
     /// "iframe load event steps"); mientras, demora el `load` del documento del padre.
     load_pending: bool,
+    /// E3: el número de su última navegación asíncrona (ver `navigate_async`).
+    navigation: u64,
 }
 
 /// Los marcos del agente (dato del embebedor).
@@ -315,6 +318,7 @@ fn create_frame(agent: &mut Agent, parent: RealmId, element: NodeId) -> RealmId 
         opaque: false,
         pending: None,
         load_pending: false,
+        navigation: 0,
     });
     realm
 }
@@ -366,11 +370,19 @@ fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
         let res = window_loader(agent, realm)?.load(url)?;
         (res.bytes, res.content_type, res.url)
     };
-    let res = BlobOrResource {
-        bytes,
-        content_type,
-        url: res_url,
-    };
+    Some(decode(
+        agent,
+        realm,
+        BlobOrResource {
+            bytes,
+            content_type,
+            url: res_url,
+        },
+    ))
+}
+
+/// Decodifica el documento `res` para un marco de la ventana `realm`.
+fn decode(agent: &Agent, realm: RealmId, res: BlobOrResource) -> Fetched {
     let xml = xml_type(res.content_type.as_deref(), &res.url);
     // HTML: "determine the character encoding" (HTML §13.2.3.2): BOM, `charset` del
     // `Content-Type`, prescan de `<meta>`; si no, el del documento que contiene al marco
@@ -390,12 +402,12 @@ fn fetch(agent: &Agent, realm: RealmId, url: &Url) -> Option<Fetched> {
         }
     };
     let (text, enc) = encoding::decode(&res.bytes, enc);
-    Some(Fetched {
+    Fetched {
         text,
         url: res.url,
         xml,
         encoding: enc,
-    })
+    }
 }
 
 /// El encoding del documento de la ventana `realm` si es del mismo origen que `url` (para un
@@ -454,9 +466,9 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     let opaque = parent_doc_sandbox
         .as_ref()
         .is_some_and(|t| !t.iter().any(|t| t == "allow-same-origin"));
-    let all = frames_mut(agent);
-    all.navigations += 1;
-    if let Some(f) = all.list.iter_mut().find(|f| f.realm == realm) {
+    // E3: también deja sin efecto una navegación asíncrona que no terminó.
+    let nav = next_navigation(agent, realm);
+    if let Some(f) = frames_mut(agent).list.iter_mut().find(|f| f.realm == realm) {
         f.opaque = opaque;
     }
     let deep = depth_of(agent, realm) > MAX_DEPTH;
@@ -480,6 +492,12 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
         }
         Target::Url(url) if deep => {
             let _ = url;
+        }
+        // E3: con la red en hilos (el shell), el documento del marco se pide en segundo plano y
+        // se parsea en varias tareas: el padre sigue pintando y atendiendo eventos mientras.
+        Target::Url(url) if url.scheme != "blob" && crate::net::is_threaded(agent, parent) => {
+            navigate_async(agent, realm, parent, url, scripts, nav);
+            return;
         }
         Target::Url(url) => match fetch(agent, parent, &url) {
             Some(Fetched {
@@ -506,9 +524,13 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
         },
     }
     let _ = element;
-    // El `load` del `<iframe>` (HTML §7.4.6.3 "iframe load event steps"): si el documento del
-    // marco ya terminó (o no hay documento que esperar: `about:blank`, XML, un error), ahora;
-    // si no, cuando termine ([`frame_document_loaded`]).
+    navigated(agent, realm);
+}
+
+/// El `load` del `<iframe>` (HTML §7.4.6.3 "iframe load event steps") al terminar la
+/// navegación del marco `realm`: si su documento ya terminó (o no hay documento que esperar:
+/// `about:blank`, XML, un error), ahora; si no, cuando termine ([`frame_document_loaded`]).
+fn navigated(agent: &mut Agent, realm: RealmId) {
     let html = matches!(
         WebContextHandle { realm }.get(agent).documents[0],
         DocumentOwner::Parser(_)
@@ -518,6 +540,200 @@ fn navigate(agent: &mut Agent, realm: RealmId, target: Target) {
     } else {
         frame_document_loaded(agent, realm);
     }
+}
+
+/// E3: lo más que se le da al parser del documento de un marco en una tarea.
+const FRAME_CHUNK: usize = 64 << 10;
+
+/// E3: la navegación de un marco con la red en hilos. La carga de un navegable hijo no
+/// detiene al documento que lo contiene (HTML §7.4.2.2, *navigate*: el fetch corre "in
+/// parallel"; §4.8.5): el padre sigue pintando y atendiendo eventos mientras tanto.
+/// - Mixed Content y CSP (`frame-src`) se comprueban aquí, en el hilo de la pestaña.
+/// - El documento se pide con el loader de la ventana en otro hilo (`net::spawn_job`).
+/// - Al llegar, se le da al parser en trozos ([`chunks`]), uno por tarea *networking*, como
+///   llegarían por la red (HTML §13.2.2: el parser recibe la entrada por partes). Entre tarea
+///   y tarea el bucle de eventos de la pestaña elige otra y puede pintar (HTML §8.1.7.3).
+/// - El `load` del `<iframe>` sigue demorando el del padre hasta que el marco termina.
+///
+/// Si el marco navega otra vez o se quita mientras tanto, lo que llega de esta navegación se
+/// descarta (`Frame::navigation`).
+fn navigate_async(
+    agent: &mut Agent,
+    realm: RealmId,
+    parent: RealmId,
+    url: Url,
+    scripts: bool,
+    nav: u64,
+) {
+    let start = Instant::now();
+    let failed = move |agent: &mut Agent, url: &Url| {
+        agent.host.hooks.console(
+            bf_js::host::ConsoleLevel::Error,
+            &format!("No se pudo cargar el marco {}", url.href()),
+        );
+        navigated(agent, realm);
+    };
+    // E6: Mixed Content y CSP (`frame-src`) con la política de la ventana que contiene el marco.
+    let url = match crate::security::policy(agent, parent) {
+        Some(p) => match p.check_request(&url, bf_infra::Destination::Frame, None) {
+            Some(u) => u,
+            None => return failed(agent, &url),
+        },
+        None => url,
+    };
+    let Some(loader) = window_loader(agent, parent) else {
+        return failed(agent, &url);
+    };
+    let target = url.clone();
+    let job = Box::new(move || {
+        loader
+            .load(&target)
+            .map(|res| crate::net::NetResponse {
+                url_list: vec![res.url],
+                status: 200,
+                status_text: "OK".into(),
+                headers: crate::net::headers::HeaderList(
+                    res.content_type
+                        .map(|c| vec![("content-type".to_owned(), c)])
+                        .unwrap_or_default(),
+                ),
+                body: res.bytes,
+            })
+            .ok_or_else(|| target.href())
+    });
+    let done = Box::new(move |agent: &mut Agent, r: crate::net::NetResult| {
+        if !is_current(agent, realm, nav) {
+            return;
+        }
+        let network = start.elapsed();
+        let Ok(res) = r else {
+            return failed(agent, &url);
+        };
+        let final_url = res.url_list.last().cloned().unwrap_or_else(|| url.clone());
+        let content_type = res
+            .headers
+            .0
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone());
+        let fetched = decode(
+            agent,
+            parent,
+            BlobOrResource {
+                bytes: res.body,
+                content_type,
+                url: final_url,
+            },
+        );
+        match fetched.xml {
+            Some(mime) => {
+                load_xml_document(agent, realm, &fetched.url, &fetched.text, mime);
+                navigated(agent, realm);
+            }
+            None => {
+                super::script::begin_parse_with(agent, realm, &fetched.url, scripts);
+                let pieces = chunks(&fetched.text);
+                let trace = FrameTrace {
+                    url: fetched.url.href(),
+                    network,
+                    start,
+                    tasks: pieces.len(),
+                };
+                feed_frame(agent, realm, nav, pieces, fetched.encoding, trace);
+            }
+        }
+    });
+    crate::net::spawn_job(agent, parent, job, done);
+}
+
+/// E3: para la traza `perf marco` de [`navigate_async`].
+struct FrameTrace {
+    url: String,
+    network: std::time::Duration,
+    start: Instant,
+    tasks: usize,
+}
+
+/// E3: el siguiente trozo del documento del marco `realm` (de la navegación `nav`) y, en otra
+/// tarea, el resto; con el último, el final del parseo y el `load` del `<iframe>`.
+fn feed_frame(
+    agent: &mut Agent,
+    realm: RealmId,
+    nav: u64,
+    mut pieces: std::collections::VecDeque<String>,
+    encoding: Encoding,
+    trace: FrameTrace,
+) {
+    if !is_current(agent, realm, nav) {
+        return;
+    }
+    if let Some(piece) = pieces.pop_front() {
+        super::script::feed(agent, realm, &piece);
+        agent.queue_task(
+            bf_js::host::TaskSource::Networking,
+            Box::new(move |agent: &mut Agent| {
+                feed_frame(agent, realm, nav, pieces, encoding, trace);
+            }),
+        );
+        return;
+    }
+    super::script::finish(agent, realm);
+    // E2: sus propios marcos, antes de soltar su `load` (que así los espera).
+    sync_level(agent, realm, depth_of(agent, realm));
+    super::script::resources_loaded(agent, realm);
+    set_character_set(agent, realm, encoding);
+    if std::env::var_os("BF_TRACE").is_some() {
+        eprintln!(
+            "perf marco {}: red {:.1} ms · documento en {} tareas, terminado a los {:.1} ms",
+            trace.url,
+            trace.network.as_secs_f64() * 1000.0,
+            trace.tasks,
+            trace.start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    navigated(agent, realm);
+}
+
+/// E3: `text` en trozos para el parser: cada uno termina justo después de un `</script` (para
+/// que cada tarea ejecute como mucho un script del parser) o a [`FRAME_CHUNK`] bytes. Cualquier
+/// corte es válido para el parser, que recibe la entrada por partes; los cortes caen en límites
+/// de carácter.
+fn chunks(text: &str) -> std::collections::VecDeque<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = std::collections::VecDeque::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = match lower[start..].find("</script") {
+            Some(i) => start + i + "</script".len(),
+            None => text.len(),
+        };
+        if end - start > FRAME_CHUNK {
+            end = start + FRAME_CHUNK;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+        }
+        out.push_back(text[start..end].to_owned());
+        start = end;
+    }
+    out
+}
+
+/// Empieza una navegación del marco `realm` (cuenta para [`sync_frames`]); devuelve su número
+/// (E3: deja sin efecto lo que llegue de una navegación asíncrona anterior).
+fn next_navigation(agent: &mut Agent, realm: RealmId) -> u64 {
+    let all = frames_mut(agent);
+    all.navigations += 1;
+    let n = all.navigations;
+    if let Some(f) = all.list.iter_mut().find(|f| f.realm == realm) {
+        f.navigation = n;
+    }
+    n
+}
+
+/// E3: ¿sigue el marco `realm` en la navegación `nav` (no navegó otra vez ni se quitó)?
+fn is_current(agent: &Agent, realm: RealmId, nav: u64) -> bool {
+    frame_of(agent, realm).is_some_and(|f| f.navigation == nav)
 }
 
 /// Marca (o desmarca) el `load` pendiente del marco `realm` y, con él, la demora del `load`

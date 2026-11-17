@@ -1181,6 +1181,17 @@ impl Engine {
 
     /// Corre las tareas que vencieron (temporizadores, async, …). Devuelve cuántas corrió.
     pub fn run_due_tasks(&mut self) -> usize {
+        self.run_due_tasks_for(None)
+    }
+
+    /// E3: como [`Engine::run_due_tasks`], pero con `budget` deja de elegir tareas cuando lo
+    /// pasa (después de correr al menos una): el bucle de eventos elige una tarea en cada
+    /// vuelta y entre ellas tiene la oportunidad de "update the rendering" (HTML §8.1.7.3), así
+    /// que una ráfaga de tareas (los trozos del documento de un marco, una cadena de
+    /// `setTimeout(…, 0)`) no deja a la página sin pintar. Las que quedan siguen vencidas: el
+    /// hilo vuelve enseguida.
+    pub fn run_due_tasks_for(&mut self, budget: Option<Duration>) -> usize {
+        let started = Instant::now();
         // E6: lo que bloquearon las políticas desde la última vez (los subrecursos se piden
         // desde el layout).
         if self.has_window() {
@@ -1205,7 +1216,7 @@ impl Engine {
                     self.report_error(&e);
                 }
             }
-            if n > 10_000 {
+            if n > 10_000 || budget.is_some_and(|b| started.elapsed() >= b) {
                 break;
             }
         }

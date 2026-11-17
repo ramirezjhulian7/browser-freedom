@@ -26,6 +26,10 @@ use crate::theme::Theme;
 
 /// Intervalo mínimo entre dos cuadros producidos por scripts.
 const FRAME: Duration = Duration::from_millis(16);
+/// E3: cuánto corre seguido el hilo de la pestaña tareas del documento antes de dar paso a un
+/// cuadro (el umbral de una tarea larga, *Long Tasks API* §2: 50 ms). Una tarea sola puede
+/// durar más; entre tareas, el documento se vuelve a pintar.
+const TASK_BUDGET: Duration = Duration::from_millis(50);
 
 /// Cargar `url` y maquetarla. `recent` y `theme` son para las páginas internas.
 pub struct LoadJob {
@@ -1005,7 +1009,8 @@ impl State {
         let Some(engine) = &mut current.engine else {
             return;
         };
-        let mut ran = engine.run_due_tasks();
+        // E3: como mucho `TASK_BUDGET` seguidos de tareas antes de pintar (HTML §8.1.7.3).
+        let mut ran = engine.run_due_tasks_for(Some(TASK_BUDGET));
         // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
         if engine.wants_frame() && self.last_raf.elapsed() >= FRAME && !behind {
             self.last_raf = Instant::now();
