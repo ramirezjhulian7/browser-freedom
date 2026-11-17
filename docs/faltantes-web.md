@@ -62,7 +62,31 @@ Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
   - una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
     una sola vez aunque la respuesta no sea cacheable (E6, en `master` desde `84e2dd0`).
 
-Resueltos el 2026-11-17 en la rama `army/e3` (sin integrar todavía):
+Resueltos en la ronda 6 del 2026-11-17 (en `master` desde `3a7c372`):
+- **E1:**
+  - `SVGElement` y su jerarquía (GitLab, YouTube);
+  - `DOMMatrix`, `DOMPoint` y `DOMQuad` (Apple);
+  - `select.add` (documentación de Python);
+  - un módulo con y sin `crossorigin` ya no se evalúa dos veces (NYT, "Custom element … is
+    already defined");
+  - `sessionStorage` sobrevive a `location.reload()`.
+- **E2:**
+  - `insertRule` y `adoptedStyleSheets` entran en la cascada que se pinta (la BBC sin estilos);
+  - los `<svg>` sin tamaño ya no salen gigantes (la lupa de react.dev);
+  - varios desbordes horizontales;
+  - GitHub, de unos 4 s a menos de 1 en la maqueta.
+- **E3:** el marco lento y el reto de Cloudflare (abajo).
+
+En la rama `army/e3` (ronda 7, sin integrar todavía):
+- **Las teselas de OpenStreetMap salían con la imagen "418 Access blocked".**
+  - Las imágenes iban con `Accept: */*`. Fetch §4 recomienda, para el destino `image`,
+    `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`.
+  - El servidor de teselas solo da la tesela a las peticiones con `Referer` de
+    `openstreetmap.org` si piden una imagen así. Con ese `Accept`, las 30 teselas llegan.
+  - El mapa sigue sin verse: las teselas cargadas (`leaflet-tile-loaded`, `opacity: 1`) no se
+    pintan dentro de las capas de Leaflet (E2).
+
+Resueltos el 2026-11-17 en la ronda 6 de E3 (en `master` desde `3a7c372`):
 - **Un `<iframe>` lento congelaba su página.** El hilo de la pestaña pedía, parseaba y ejecutaba
   el documento del marco de una vez: el de YouTube en `asimetrix.co` lo retenía 2,7 s, y el
   titular de la portada no se veía hasta ~3,3 s después de la primera pintura.
@@ -140,6 +164,9 @@ protegida por ellas en Freedom:
 
 | Sitio | Lo que se ve | Pista |
 |---|---|---|
+| excalidraw.com y gov.co | En blanco, o sin terminar de montarse. | `FontFace.load()` y `document.fonts` descargan en síncrono en el hilo de la pestaña (CSS Font Loading §2.2 pide asíncrono), y `document.fonts` recorre todas las reglas en cada operación (E1 lo diagnosticó; lo arregla E2, ronda 7). |
+| www.openstreetmap.org | El mapa no se ve aunque las teselas ya llegan bien (rama `army/e3`, ronda 7). | Las `<img class="leaflet-tile leaflet-tile-loaded">` están cargadas y colocadas con `translate3d` dentro de capas de 0×0; una tesela suelta con el mismo `transform` sí se pinta. Falta ver qué tapa o recorta las capas de Leaflet (E2). |
+| www.nytimes.com | Desde el segundo barrido responde 403 con la verificación de DataDome (`captcha-delivery.com`), también a `curl`, con cualquier `User-Agent`. | Es la reputación de la IP tras muchas cargas automáticas, no el motor. El marco de verificación carga y manda su `POST` (200), pero la portada no se libera en ~7 s y se ve en blanco. Lo que muestra ese marco después del `POST` no está visto. |
 | Google (búsquedas) | Responde `429 Too Many Requests` y redirige a `/sorry` con reCAPTCHA; el reCAPTCHA falla con `TypeError: Type error.` dentro de `recaptcha__es_419.js`. Buscar desde la barra queda inutilizable. | Google es el buscador por defecto: es lo más visible para quien usa Freedom. Ver si el 429 depende del `User-Agent` nuevo, de las cabeceras (`Sec-CH-UA`, `Accept`) o del ritmo de peticiones, y qué operación falla en el reCAPTCHA. |
 | Aplicación de `app.asimetrix.co` (`/ASIMETRIX`, build `ce1e596`, con sesión iniciada) | La pestaña se cae: "Esta página falló", con el detalle `el realm no tiene WebContext`. En la consola, `ChunkLoadError: Loading CSS chunk 9298 failed`, `TypeError: Illegal invocation` y dos promesas rechazadas sin manejar. | Sin sesión no se reproduce la caída ni el `ChunkLoadError`. Arreglados desde entonces: el `Illegal invocation`, un `ShadowRealm` que tumbaba la pestaña con ese mismo mensaje y las hojas enlazadas que disparaban `error` (ver arriba). Falta que el usuario lo pruebe con su sesión (`RETOMAR-EN-MAC.md`, sección 9b). |
 | Aplicación Next.js (asimetrix.co) | `TypeError: Cannot read properties of undefined (reading 'dplId')` al registrar los chunks de Turbopack. | Algún global o propiedad que el runtime de Next.js espera y no existe. |

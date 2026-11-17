@@ -219,6 +219,19 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
     contextos seguros. Hace `digest` con SHA-1, SHA-256, SHA-384 y SHA-512, y HMAC con
     `importKey`, `exportKey`, `generateKey`, `sign` y `verify`. Lo demás rechaza con el error
     estándar (`NotSupportedError`).
+- **Lo que pidió el barrido de sitios** (en `master` desde `3a7c372`; `pendiente/mac/e1.md` y
+  `e2.md`, "Sesión nueva, ronda 6"; `pendiente/mac/barrido-sitios.md`):
+  - E1:
+    - `SVGElement` y su jerarquía, `DOMPoint`, `DOMQuad`, `DOMMatrix` y `select.add`;
+    - un módulo con y sin `crossorigin` ya no se evalúa dos veces;
+    - `sessionStorage` sobrevive a `location.reload()`;
+    - WPT: `webmessaging` **233 / 261** y `WebCryptoAPI/digest` **232 / 232**.
+  - E2: las reglas que los scripts meten por `insertRule` y `adoptedStyleSheets` entran en la
+    cascada que se pinta (CSSOM §6.6), lo que arregla la BBC sin estilos. `css/CSS2` sube a
+    **3565** (+9, el tamaño de los reemplazados).
+  - E3: un `<iframe>` lento ya no congela su página. La red del marco va en otro hilo y su
+    documento se parsea por trozos (HTML §7.4.2.2), y la pestaña pinta entre tareas (HTML
+    §8.1.7.3).
 - **Hojas enlazadas en la ventana** (E2, en `master` desde `489e6f8`; `pendiente/mac/e2.md`,
   "Sesión nueva, ronda 1"): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
   `document.styleSheets` tiene sus reglas. La hoja sale de `bf_style::sheet_cache`, ya
@@ -689,6 +702,11 @@ y los list box se desplazan con la rueda.
       imagen simultáneas compartidas (E6, merge `84e2dd0`).
     - desde el 2026-11-17: la precarga parsea hojas, compila scripts y la ventana mientras se
       valida el documento (E3, `ce900ef`).
+    - desde `2238e5c`: las hojas y los scripts del documento se piden en paralelo (descarga
+      especulativa, HTML §13.2.8) y la caché escribe el disco fuera del camino (E3).
+    - desde `3a7c372`:
+      - GitHub, cascada de 2,1 a 1,25 s y maqueta de 4,1 a menos de 1 s (E2, medianas);
+      - un `<iframe>` lento no congela su página (E3).
   - **Desplazamiento: 60 fps, criterio cumplido.** Medida del planificador sobre `276fa07`
     (release, Wikipedia `Navegador_web`, caché caliente, ejecutores casi parados;
     `scrollbench:120:40`, meta 16.7 ms por cuadro):

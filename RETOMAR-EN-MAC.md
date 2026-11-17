@@ -202,23 +202,38 @@ nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y q
 
 ## 9. Lo primero al retomar
 
-Estado del 2026-11-17, `master` `f9dddce`: entraron la precarga durante la validación (E3),
-el CSS de `asimetrix.co` y las hojas enlazadas en la ventana (E2), el parser que cede al host
-en mitad de un token y el diagnóstico de caídas de pestaña (E1). **Avance: 88.9 %** (91.1 %
-con la fase 1): 47 de 51 criterios. Lo que E1 y E2 tengan en curso en sus ramas no está en
-`master` (`git log --oneline master..army/e<n>`).
+Estado del 2026-11-17, `master` `3a7c372`, con las rondas 1 a 6 de la sesión del día
+integradas. **Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios. Lo que los
+ejecutores tengan en curso en sus ramas no está en `master` (`git log --oneline
+master..army/e<n>`).
 
-### 9a. Las cuatro decisiones del usuario
+Lo primero, en este orden:
+1. **Las decisiones del usuario** (9a). Los cuatro criterios que faltan dependen de ellas, y
+   hay una más sobre el `User-Agent`.
+2. **Fuentes web asíncronas** (E2, en curso en la ronda 7). `FontFace.load()` y
+   `document.fonts` descargan en síncrono en el hilo de la pestaña (CSS Font Loading §2.2 pide
+   que sea asíncrono), y `document.fonts` recorre todas las reglas en cada operación. Por eso
+   excalidraw queda en blanco y gov.co no termina de montarse (`pendiente/mac/e1.md`, "Sesión
+   nueva, ronda 6", "Páginas en blanco o a medias").
+3. **Velocidad de JavaScript** (E1, en curso en la ronda 7). Es lo que más deja a medias las
+   aplicaciones grandes del barrido: YouTube (25 s de scripts), DuckDuckGo (los resultados
+   llegan a los 3-7 s) y El Tiempo.
+
+### 9a. Las decisiones del usuario
 
 Los cuatro criterios que faltan dependen de ellas (roadmap, "Decisiones pendientes del
-usuario"):
-- **2.3, `html/syntax/parsing` (8164 / 8166):** los 2 que quedan no se pueden cumplir. La
-  propuesta del planificador es excluirlos.
-- **3.6, flexbox por palabras clave de tamaño (95 / 107):** 8 son de CSS Flexbox 2, un
-  borrador sin texto estable. La propuesta es excluirlos; los otros 4 los sigue E2.
+usuario"). El planificador se las preguntó por teléfono el 2026-11-17, sin respuesta todavía:
+- **Excluir los 12 tests que ningún navegador cumple:**
+  - 2 de `html/syntax/parsing` (8164 / 8166);
+  - 10 de los reftests de flexbox de 3.6 (97 / 107): 8 de CSS Flexbox 2 y 2 cuya referencia
+    contradice §4.5.
+
+  Con eso, el avance subiría a 93.3 % con la fase 1.
 - **Lector de pantalla:** hace falta un crate externo (`accesskit`, la recomendación del
   planificador) o FFI con `unsafe`.
 - **Fuzzer de IPC:** pide separar el motor en procesos.
+- **El `User-Agent` de Freedom y Google:** `accounts.google.com/gsi/client` responde 403 al
+  de Freedom. La regla es no imitar a Chrome, y `identity.rs` no se toca.
 
 ### 9b. `app.asimetrix.co` con sesión iniciada
 
@@ -232,13 +247,15 @@ realm no tiene WebContext`) ni el `ChunkLoadError`. Lo que cambió desde la capt
 En `https://asimetrix.co/` a 1180 px ya no salen el texto del `<noscript>`, las franjas
 laterales ni el desborde horizontal; el logo de "Ecosistema" mide 446×208 y el hueco del vídeo
 1068×600 (negro: el motor no reproduce vídeo). El titular grande de la portada ya no aparece en
-la captura del planificador; E2 lo revisa (puede ser una animación de entrada).
+la captura del planificador: era una animación de entrada que terminaba entre dos pintados
+(E2), y un `<iframe>` de YouTube que retenía la pestaña 2,7 s (E3). Las dos cosas están
+arregladas desde `3a7c372`.
 
 ### 9c. Uso diario
 
 El barrido de sitios de E3 (`docs/pendiente/mac/barrido-sitios.md`) dice qué le falta al
-navegador en sitios públicos conocidos, con las carencias ordenadas por número de sitios y un
-dueño propuesto. `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de
+navegador en 27 sitios públicos conocidos, con las carencias ordenadas por número de sitios y
+un dueño propuesto. Hay tres barridos, con una columna de cambio entre uno y otro. `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de
 maqueta y la consola de cada sitio para depurarlo (`docs/rendimiento.md`, "Volcado de una
 sesión").
 

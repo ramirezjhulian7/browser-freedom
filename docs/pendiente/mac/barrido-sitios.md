@@ -243,6 +243,66 @@ seguir).
 - NYT sale peor porque el sitio sirvió su verificación antibots.
 - Apple queda dudoso.
 
+## Ronda 7 (2026-11-17)
+
+### OpenStreetMap: el 418 de las teselas
+
+**Causa demostrada: el `Accept` de las imágenes (motor, E3, arreglado en `army/e3`).**
+
+- **Lo que manda Freedom de verdad** (`FREEDOM_NET_LOG=cabeceras`, nuevo: las cabeceras de cada
+  salto): las teselas llevaban `Referer: https://www.openstreetmap.org/`, la cookie
+  `_osm_totp_token`, las Client Hints y **`Accept: */*`**.
+- **Lo que hace el servidor** (`curl`, siempre con el `User-Agent` de Freedom):
+
+  | Petición de `tile.openstreetmap.org/5/9/15.png` | Respuesta |
+  |---|---|
+  | `Referer` de openstreetmap.org, `Accept: */*`, con o sin token y `Sec-Fetch-*` | **418 "Access blocked"**: 6672 bytes, `X-Blocked: Access denied`, `Cache-Control: no-cache`; la misma imagen para todas las teselas |
+  | `Referer` de openstreetmap.org, `Accept: image/…`, con o sin token y `Sec-Fetch-*` | la tesela (30 922 bytes, `max-age=89430`) |
+  | Sin `Referer` | la tesela |
+
+  La cookie no cambia nada: un token inventado da lo mismo. La nota de E1 de la ronda 6 tenía
+  los dos tamaños al revés: los 6672 bytes eran el bloqueo, no la tesela.
+- **La regla:** Fetch §4 (el algoritmo *fetch*, el paso de `Accept`) pide, para una petición
+  sin `Accept` y destino `image`, `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`; para
+  `style`, `text/css,*/*;q=0.1`; para los marcos, el de documento. Freedom mandaba `*/*` en
+  los dos caminos: el pintado (`Fetcher::fetch`) y las `<img>` del motor
+  (`Fetcher::fetch_request`).
+- **Arreglo:** `bf_net::accept_for`. Test: `bf-net/tests/accept.rs`.
+- **Después:** las 30 teselas llegan bien (tamaños distintos) y Leaflet las marca
+  `leaflet-tile-loaded`.
+- **Queda (E2):** el mapa sigue sin verse. Las teselas están cargadas, con `opacity: 1` y
+  colocadas con `translate3d` dentro de capas de 0×0. Una tesela suelta con el mismo
+  `transform` sí se pinta, y el decodificador PNG con paleta funciona.
+- **De paso:** cada tesela se pide dos veces, una el motor y otra el pintado; el `<img>` y el
+  pintado no comparten la descarga. Pendiente.
+
+### NYT: la verificación antibots
+
+**No es el motor: la reputación de la IP.**
+- Desde el segundo barrido, `www.nytimes.com` responde **403** con la página de DataDome:
+  `captcha-delivery.com`, un `<iframe>` de verificación.
+- `curl` recibe el mismo 403 con el `User-Agent` de Freedom y con el de `curl`. En el primer
+  barrido había respondido 200.
+- **En Freedom:**
+  - el marco de verificación carga (`perf marco`: red 265 ms, documento en 3 tareas);
+  - con más espera, su script manda el `POST` de verificación (200);
+  - la portada no se libera en ~7 s y se ve en blanco.
+- **Sin ver:** lo que muestra el marco después del `POST` (un captcha u otra cosa).
+- **Para medir NYT otra vez** hace falta otra red, o esperar a que DataDome olvide esta IP.
+
+### Apple: "dudoso"
+
+**Es el sitio, no el motor.**
+- El color de la franja de financiación cambió en cada barrido (azul, azul marino y ahora gris
+  oscuro).
+- No depende del tema: con `BF_THEME=light` y `BF_THEME=dark` sale idéntica, gris oscura.
+- La página está en una campaña de fondo oscuro (`globalheader-dark` en el `<body>`, "Regalos
+  que ilusionan").
+- La consola baja de 5 errores a 2 con lo de E1 (`DOMMatrix`). Quedan 2 "Uncaught
+  ResizeObserver loop completed with undelivered notifications". Es el error que el estándar
+  manda reportar en ese caso (Resize Observer, *deliver resize loop error notification*); que el bucle se dé aquí es cosa de E1
+  mirarlo.
+
 ## Lo que no encontré
 
 - **"El sitio tardó demasiado"** (un tiempo de lectura agotado en `bf-net`, que vio E4): no
