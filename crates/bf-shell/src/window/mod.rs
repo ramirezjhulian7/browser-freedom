@@ -4752,6 +4752,47 @@ impl App {
             + &self.downloads_line()
     }
 
+    /// E3: el paso `dump` de una sesión: escribe, de la pestaña activa,
+    /// - `<prefijo>.dom.html`: el DOM serializado (HTML §13.3, *serializing HTML fragments*,
+    ///   con los hijos del documento y el scripting activado, como `innerHTML`);
+    /// - `<prefijo>.layout.txt`: el árbol de fragmentos de la última maqueta
+    ///   ([`bf_layout::dump`]);
+    /// - `<prefijo>.console.txt`: la consola, un mensaje por entrada con su nivel.
+    ///
+    /// Los tres empiezan con la URL de la pestaña; si la pestaña no tiene documento o
+    /// maqueta, el archivo lo dice.
+    fn session_dump(&self, prefix: &str) -> Result<(), String> {
+        let write = |ext: &str, text: &str| {
+            let path = format!("{prefix}.{ext}");
+            std::fs::write(&path, text).map_err(|e| format!("no se pudo escribir {path}: {e}"))
+        };
+        let url = self
+            .history
+            .get(self.index)
+            .map_or_else(String::new, |e| e.url.href());
+        let dom = match &self.current {
+            Some(c) => {
+                bf_html::dom::serialize_children(&c.doc, c.doc.root(), true)
+                    .to_string_lossy()
+                    .into_owned()
+                    + "\n"
+            }
+            None => "(sin documento)\n".into(),
+        };
+        write("dom.html", &format!("<!-- {url} -->\n{dom}"))?;
+        let layout = match (&self.current, &self.page) {
+            (Some(c), Some(p)) => bf_layout::dump(&c.doc, &p.tree),
+            _ => "(sin maqueta)\n".to_owned(),
+        };
+        write("layout.txt", &format!("# {url}\n{layout}"))?;
+        let mut console = format!("# {url}\n");
+        for e in self.console() {
+            let level = format!("{:?}", e.level).to_lowercase();
+            console.push_str(&format!("[{level}] {}\n", e.text));
+        }
+        write("console.txt", &console)
+    }
+
     /// Un paso de una sesión sin ventana.
     fn step(&mut self, step: &str) -> Result<(), String> {
         let bad = || format!("paso inválido: {step}");
@@ -4965,7 +5006,9 @@ impl App {
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
 /// `link:texto` (clic en el enlace con ese texto), `wheel:X,Y,DY` (la rueda), `type:texto`,
-/// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto), `resize:W,H` y `wait`.
+/// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto),
+/// `resize:W,H`, `wait` y `dump` (E3: además de la captura, `<prefijo>-NN.dom.html`,
+/// `<prefijo>-NN.layout.txt` y `<prefijo>-NN.console.txt`; ver `App::session_dump`).
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     // Sin `FREEDOM_PROFILE`, una sesión de prueba no toca el historial ni los marcadores.
@@ -4998,7 +5041,13 @@ pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     println!("00 abrir {arg}: {}", app.state_line());
     save(&app, 0)?;
     for (i, step) in steps.iter().enumerate() {
-        app.step(step)?;
+        if step == "dump" {
+            app.receive();
+            app.settle();
+            app.session_dump(&format!("{out}-{:02}", i + 1))?;
+        } else {
+            app.step(step)?;
+        }
         println!("{:02} {step}: {}", i + 1, app.state_line());
         save(&app, i + 1)?;
     }
