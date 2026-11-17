@@ -270,6 +270,14 @@ impl Atom {
     }
 }
 
+/// E1: para buscar un `Atom` por `&str` en un mapa (los scopes del compilador): el hash de
+/// `Atom` es el de su texto (`Rc<str>`), así que coincide con el de `str`.
+impl std::borrow::Borrow<str> for Atom {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl std::ops::Deref for Atom {
     type Target = str;
     fn deref(&self) -> &str {

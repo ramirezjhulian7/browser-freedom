@@ -11,6 +11,8 @@
 //! [`Env`]: crate::vm::env::Env
 
 use std::collections::{HashMap, HashSet};
+
+use crate::object::FastHashMap;
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -150,11 +152,16 @@ pub struct Scope {
     pub contains_eval: bool,
     pub materialized: bool,
     pub layout: Rc<ScopeLayout>,
+    /// E1: nombre → índice en `bindings` (cada nombre se declara una vez por scope, ver
+    /// `Analyzer::declare`). Antes `find` recorría `bindings` comparando cadenas: con los scopes
+    /// de miles de variables de los bundles grandes (YouTube) resolver cada referencia costaba
+    /// O(variables) y compilar se volvía cuadrático (25 s de scripts en YouTube).
+    pub(crate) index: FastHashMap<Atom, usize>,
 }
 
 impl Scope {
     pub fn find(&self, name: &str) -> Option<usize> {
-        self.bindings.iter().rposition(|b| b.name.as_str() == name)
+        self.index.get(name).copied()
     }
 }
 
@@ -676,6 +683,7 @@ impl Analyzer {
             contains_eval: false,
             materialized: false,
             layout: Rc::new(ScopeLayout::default()),
+            index: FastHashMap::default(),
         });
         self.tree.scopes.len() - 1
     }
@@ -690,6 +698,7 @@ impl Analyzer {
             }
             return i;
         }
+        s.index.insert(name.clone(), s.bindings.len());
         s.bindings.push(Binding {
             name,
             kind,
