@@ -616,6 +616,13 @@ pub fn fetch_document_with(
         let (text, enc) = encoding::decode(&response.body, enc);
         let doc = match engine {
             Some((engine, env)) => {
+                // E3: las hojas y los scripts del documento se piden en paralelo mientras el
+                // parser avanza (HTML §13.2.8, `preload::speculative_fetch`).
+                crate::preload::speculative_fetch(
+                    loader.clone(),
+                    text.clone(),
+                    response.url.clone(),
+                );
                 engine.set_navigation_policies(
                     response.headers.get("cross-origin-opener-policy"),
                     response.headers.get("cross-origin-embedder-policy"),
