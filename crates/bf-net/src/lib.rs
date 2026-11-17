@@ -468,7 +468,7 @@ impl LogEntry {
 }
 
 /// `FREEDOM_NET_LOG=1`: cada petición se escribe en stderr.
-fn net_log_enabled() -> bool {
+pub(crate) fn net_log_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("FREEDOM_NET_LOG").is_some_and(|v| v != "0"))
 }
