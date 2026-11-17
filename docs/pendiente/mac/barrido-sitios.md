@@ -243,6 +243,64 @@ seguir).
 - NYT sale peor porque el sitio sirvió su verificación antibots.
 - Apple queda dudoso.
 
+## Tercer barrido (ronda 7, 2026-11-17)
+
+- **Método:** los mismos 27 sitios con el release de `master` `3a7c372`, ronda 6 integrada.
+  Esta vez con 25 esperas (~8 s) antes del `dump`, porque DuckDuckGo y Stack Overflow necesitan
+  unos 7 s. No incluye lo de la ronda 7 en `army/e3`, como el `Accept` de las imágenes.
+- **Carga:** 42-68, así que la primera pintura no es comparable.
+- **Comparación:** un subagente comparó las capturas del último paso con las del segundo
+  barrido. Parte de lo que mejora puede deberse solo a la espera más larga; la columna lo dice.
+- **Ningún sitio tumbó la pestaña.**
+
+| Sitio | Errores de consola, 2.º → 3.º | Captura, 3.º frente a 2.º |
+|---|---|---|
+| es.wikipedia.org | 0 → 0 | **mejor**: el logotipo SVG y el panel "Apariencia" ya salen; la barrita suelta desapareció |
+| en.wikipedia.org | 0 → 0 | **mejor**: el logo ya no sale como texto cortado; el panel "Appearance" tiene contenido |
+| bbc.com | 0 → 0 | **mejor (grande)**: con estilos (cabecera, menú, titular con foto, columnas). Quedan "NEWS" tapado por la foto y titulares en Times |
+| elpais.com | 1 → 1 (`gsi/client`, 403) | **mejor** (poco): sin desborde horizontal; la foto lateral (quizá por la espera) |
+| eltiempo.com | 1 → 3 (`gsi/client`; "tiempo agotado"; `reading 'id'`) | **mejor**: imágenes (quizá por la espera), sin barra suelta, flechas del carrusel en su sitio; sigue el desborde |
+| nytimes.com | 0 → 0 | igual: la verificación de DataDome en blanco (la IP, ver "Ronda 7") |
+| google.com | 0 → 0 | igual (bien) |
+| duckduckgo.com | 0 → 1 (`ResizeObserver loop`) | **mejor (grande)**: caja de búsqueda y resultados (por la espera de 8 s; E1 lo había visto) |
+| bing.com | 0 → 1 (`reading 'submit'`) | **mejor**: la cabecera completa y el carrusel; sigue el desborde |
+| developer.mozilla.org | 0 → 0 | igual (bien) |
+| doc.rust-lang.org | 0 → 0 | igual (bien) |
+| docs.python.org | 1 → 0 (`select.add`, arreglado) | **mejor**: los selectores de idioma y versión (el de idioma, muy ancho) |
+| github.com | 0 → 0 | igual: las columnas del último commit en esqueleto |
+| gitlab.com | 5 → 0 (`SVGElement`, arreglado) | **mejor**: la barra superior, la ruta, la estrella y el selector de rama; pero el avatar del proyecto ahora en blanco y el logo como "I." |
+| news.ycombinator.com | 0 → 0 | igual (bien) |
+| reddit.com | 0 → 0 | igual: esqueletos y números pegados |
+| stackoverflow.com | 0 → 0 | **mejor (grande)**: pasó la verificación de Cloudflare (por la espera) y muestra "Newest Questions" |
+| amazon.com | 0 → 2 (`crypto.subtle` con AES-CBC: `NotSupportedError`) | **mejor** (poco): la tarjeta 2×2 cabe y sin desborde horizontal |
+| mercadolibre.com.co | 4 → 0 | **mejor** (poco): el banner respeta márgenes y esquinas |
+| openstreetmap.org | 0 → 0 | **mejor**: la bienvenida, los controles y la escala; el mapa sigue sin teselas (con `master`, el 418; ver "Ronda 7") y los iconos de los controles salen como "?" |
+| youtube.com | 2 → 1 (`Script terminado: tiempo agotado`) | igual: esqueletos |
+| vimeo.com | 0 → 1 (React #418, hidratación) | **mejor**: la cabecera y el banner; el centro sigue en esqueleto |
+| excalidraw.com | 0 → 1 (una promesa rechazada) | igual: "Loading scene…" (las fuentes síncronas, E2 en curso) |
+| react.dev | 0 → 0 | **mejor**: la lupa ya no es gigante, sin desborde horizontal |
+| rae.es | 8 → 0 | **mejor**: "Dudas rápidas" y logos de tamaño razonable; la noticia destacada sigue cortada a la derecha |
+| gov.co | 0 → 1 (`reading 'datoconsultadousuario'`) | **mejor (grande)**: aparece buena parte de la portada; la parte de arriba sigue en blanco |
+| apple.com/es | 5 → 3 (`ResizeObserver loop`) | **mejor** (poco): la barra de país; siguen sin el menú global ni la imagen de la portada |
+
+**Resumen del tercer barrido:**
+- **18 mejoran y 9 siguen igual; ninguno empeora.**
+- **Cambios grandes:**
+  - por el motor: la BBC con estilos, la lupa de react.dev, los logos de Wikipedia, los
+    desbordes que desaparecieron (El País, Amazon, react.dev, RAE) y gov.co;
+  - por la espera más larga: Stack Overflow pasa Cloudflare y salen los resultados de
+    DuckDuckGo.
+- **Lo que sigue en más sitios:**
+  - aplicaciones de JavaScript pesado que se quedan en esqueletos: YouTube, excalidraw, Reddit,
+    GitHub, GitLab, Vimeo, Amazon y gov.co (E1, y las fuentes de E2);
+  - imágenes o iconos que no salen: OpenStreetMap, GitLab, Apple y Reddit (E2);
+  - desbordes: El Tiempo, Bing y Vimeo.
+- **Errores nuevos de consola** (de E1; salen porque los scripts corren más tiempo):
+  - "tiempo agotado" en El Tiempo y YouTube;
+  - `ResizeObserver loop` en DuckDuckGo y Apple;
+  - `crypto.subtle` con AES-CBC en Amazon (sin implementar; antes `crypto.subtle` no existía y
+    el sitio seguía otro camino).
+
 ## Ronda 7 (2026-11-17)
 
 ### OpenStreetMap: el 418 de las teselas
