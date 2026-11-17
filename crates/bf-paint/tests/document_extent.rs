@@ -57,15 +57,44 @@ fn absolute_escaping_a_static_clip_still_counts() {
         <div style='overflow: hidden; width: 300px; height: 100px'>\
         <div style='position: absolute; left: 900px; width: 100px; height: 10px'></div></div>";
     assert_eq!(extent(html), (1000.0, 600.0));
-    // Un `fixed` solo lo recorta un antepasado transformado.
+    // Un `fixed` con el viewport como bloque contenedor no se mueve al desplazar: no agranda
+    // el documento (CSS Position 3 §2.1, CSS Overflow 3 §2.2), ni siquiera escondido a la
+    // derecha con `transform` (el menú lateral de DuckDuckGo).
     let html = "<!doctype html><style>body { margin: 0 }</style>\
         <div style='overflow: hidden; width: 300px; height: 100px; position: relative'>\
         <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
-    assert_eq!(extent(html), (800.0, 910.0));
+    assert_eq!(extent(html), (800.0, 600.0));
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='position: fixed; right: 0; top: 0; width: 260px; height: 100%; \
+        transform: translateX(100%)'></div>";
+    assert_eq!(extent(html), (800.0, 600.0));
+    // Con un antepasado transformado, ese es su bloque contenedor: cuenta, recortado por él.
     let html = "<!doctype html><style>body { margin: 0 }</style>\
         <div style='overflow: hidden; width: 300px; height: 100px; transform: scale(1)'>\
         <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
     assert_eq!(extent(html), (800.0, 600.0));
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='width: 300px; height: 100px; transform: scale(1)'>\
+        <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
+    assert_eq!(extent(html), (800.0, 910.0));
+}
+
+/// CSS Overflow 3 §2.2: cuentan los border boxes, y el margin box solo de los ítems de flex y
+/// grid. El caso de El País: una caja de 334 px cuyo margen derecho llegaba a 1298.
+#[test]
+fn margins_count_only_for_flex_and_grid_items() {
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='width: 334px; height: 10px; margin-right: 964px'></div>";
+    assert_eq!(extent(html), (800.0, 600.0));
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='display: flex'><div style='width: 334px; height: 10px; \
+        margin-right: 964px; flex: none'></div></div>";
+    assert_eq!(extent(html), (1298.0, 600.0));
+    // La raíz sigue contando su margin box: el margen inferior que colapsa a través de ella.
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='height: 600px'></div><p style='margin: 0 0 50px'>x</p>";
+    let (_, h) = extent(html);
+    assert!(h > 650.0, "{h}");
 }
 
 /// CSS Overflow 3 §2.2: el desbordamiento desplazable cuenta las cajas transformadas, donde

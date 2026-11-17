@@ -1789,6 +1789,31 @@ impl<'a> Layout<'a> {
         // E5: keywords en `min-width`/`max-width`: bajo una restricción min-content (max-content)
         // `fit-content` es el min-content (max-content).
         let (min_kw, max_kw) = (s.min_width.clone(), s.max_width.as_size());
+        // E2: CSS Sizing 3 §5.2.1 y §5.2.2: en un reemplazado o un control "comprimible"
+        // (`input` que no es botón, `select`, `textarea`, `progress`, `meter`), un porcentaje en
+        // `width` o `max-width` se resuelve contra 0 para la contribución min-content. El campo de
+        // búsqueda de la RAE (`width: 100%`) hacía que su formulario no encogiera dentro de una
+        // fila flex y empujaba la columna de al lado fuera de la página.
+        let compressible = matches!(b.kind, BoxKind::Replaced { .. })
+            || matches!(
+                b.control,
+                Some(
+                    Control::TextField { .. }
+                        | Control::TextArea { .. }
+                        | Control::Checkbox { .. }
+                        | Control::Radio { .. }
+                        | Control::Select { .. }
+                        | Control::ListBox { .. }
+                        | Control::Progress(_)
+                        | Control::Meter { .. }
+                )
+            );
+        let pct_width = matches!(&s.width, Size::LengthPercentage(lp) if lp.has_percentage());
+        let inner = if compressible && (pct_width || pct_max) {
+            (0.0, inner.1)
+        } else {
+            inner
+        };
         let mut out = [0.0f32; 2];
         for (i, v) in [inner.0, inner.1].into_iter().enumerate() {
             let lo = self.limit_keyword(b, &min_kw, i == 1).unwrap_or(lo);
