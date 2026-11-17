@@ -228,6 +228,12 @@ impl BomHooks for FrameHooks {
     fn save_storage(&mut self, origin: &str, items: &[(String, String)]) {
         self.inner.save_storage(origin, items);
     }
+    fn load_session_storage(&mut self, origin: &str) -> Option<Vec<(String, String)>> {
+        self.inner.load_session_storage(origin)
+    }
+    fn save_session_storage(&mut self, origin: &str, items: &[(String, String)]) {
+        self.inner.save_session_storage(origin, items);
+    }
     fn storage_changed(
         &mut self,
         origin: &str,

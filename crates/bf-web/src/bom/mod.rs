@@ -71,6 +71,15 @@ pub trait BomHooks {
     }
     /// Guarda el `localStorage` de `origin`.
     fn save_storage(&mut self, _origin: &str, _items: &[(String, String)]) {}
+    /// E1: el `sessionStorage` de `origin` en el contexto de navegación de nivel superior de esta
+    /// ventana (HTML §12.2.2: "session storage holder" del *top-level traversable*): sobrevive a
+    /// las navegaciones y a `location.reload()` en la misma pestaña. `None`: el navegador no
+    /// lo guarda (cada documento empieza vacío).
+    fn load_session_storage(&mut self, _origin: &str) -> Option<Vec<(String, String)>> {
+        None
+    }
+    /// E1: guarda el `sessionStorage` de `origin` en la pestaña.
+    fn save_session_storage(&mut self, _origin: &str, _items: &[(String, String)]) {}
     /// Cambió el `localStorage` de `origin` (`key` `None`: `clear()`): el navegador avisa a
     /// las otras ventanas de ese origen ([`script::storage_event`]).
     fn storage_changed(
@@ -186,6 +195,8 @@ pub struct BomState {
     pub objects: BomObjects,
     pub history: history::SessionHistory,
     pub session_storage: storage::StorageArea,
+    /// E1: ¿ya se cargó `session_storage` de los hooks ([`BomHooks::load_session_storage`])?
+    pub session_loaded: bool,
     /// Se carga (de los hooks) la primera vez que se usa.
     pub local_storage: Option<storage::StorageArea>,
     /// `performance.timeOrigin` (ms desde la época Unix).
@@ -210,6 +221,7 @@ impl BomState {
             objects: BomObjects::default(),
             history: history::SessionHistory::new(url),
             session_storage: storage::StorageArea::default(),
+            session_loaded: false,
             local_storage: None,
             time_origin,
             now_origin: 0.0,
