@@ -118,16 +118,17 @@ cualquier programa del Mac.
     (contenido mixto), y se respetan las reglas de Content Security Policy que manda el sitio
     sobre qué scripts, imágenes, conexiones y marcos puede usar.
   - **En macOS:** se instala como `Freedom.app`.
-- **En sitios conocidos** (un barrido de 27 sitios públicos el 17 de noviembre de 2026, sin
+- **En sitios conocidos** (barridos de 27 sitios públicos el 17 de noviembre de 2026, sin
   iniciar sesión):
   - ninguno hizo caer la pestaña;
-  - se ven bien Google, Hacker News, el libro de Rust y la documentación de Python;
-  - con detalles menores, las dos Wikipedias, El País, El Tiempo, Bing, MDN, GitHub,
-    Reddit y react.dev;
+  - se ven bien Google, Hacker News, el libro de Rust, la documentación de Python, MDN y las
+    Wikipedias;
+  - la BBC ya sale con sus estilos, y Mercado Libre, GitLab, Amazon y la RAE muestran más
+    contenido que en el primer barrido;
   - Stack Overflow pasa la verificación de Cloudflare a los ~6 segundos y luego se ve bien;
-  - en YouTube, Vimeo, excalidraw, gov.co, DuckDuckGo, Amazon, Apple, GitLab, el NYT, la
-    RAE, OpenStreetMap y BBC falta parte del contenido o del estilo, sobre todo porque sus
-    scripts no terminan de montar la página.
+  - en YouTube, Vimeo, excalidraw, gov.co, DuckDuckGo, Apple, el NYT y OpenStreetMap falta
+    parte del contenido, sobre todo porque sus scripts no terminan de montar la página a
+    tiempo o porque las fuentes web todavía se descargan de forma síncrona.
 
   El detalle por sitio está en
   [`docs/pendiente/mac/barrido-sitios.md`](docs/pendiente/mac/barrido-sitios.md).

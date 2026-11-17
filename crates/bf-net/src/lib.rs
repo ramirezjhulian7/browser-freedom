@@ -107,13 +107,34 @@ impl Default for FetchOptions {
     }
 }
 
+/// El `Accept` de los documentos (Fetch §2.2.5, *document `Accept` header value*).
+pub const DOCUMENT_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
 impl FetchOptions {
     /// Para documentos (navegación).
     pub fn document() -> Self {
         FetchOptions {
-            accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into(),
+            accept: DOCUMENT_ACCEPT.into(),
             ..FetchOptions::default()
         }
+    }
+}
+
+/// E3: el `Accept` de una petición sin uno propio (`accept` es el de por omisión, `*/*`) según
+/// su *destination*, como recomienda Fetch §4 (el algoritmo *fetch*, el paso de `Accept`): imágenes
+/// `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`, hojas `text/css,*/*;q=0.1` y marcos el
+/// de los documentos. Con `*/*`, el servidor de teselas de OpenStreetMap da la imagen de
+/// bloqueo 418 a las teselas que pide su propia web (`Referer: https://www.openstreetmap.org/`).
+pub fn accept_for(accept: &str, destination: Option<bf_infra::Destination>) -> &str {
+    use bf_infra::Destination;
+    if accept != "*/*" {
+        return accept;
+    }
+    match destination {
+        Some(Destination::Image) => "image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
+        Some(Destination::Style) => "text/css,*/*;q=0.1",
+        Some(Destination::Frame) => DOCUMENT_ACCEPT,
+        _ => accept,
     }
 }
 
@@ -465,6 +486,30 @@ impl LogEntry {
     pub fn network(&self) -> bool {
         !matches!(self.cache, CacheUse::Hit | CacheUse::Unavailable)
     }
+}
+
+/// E3: `FREEDOM_NET_LOG=cabeceras`: además, las cabeceras que se mandan en cada salto (las de
+/// verdad, después de las de por defecto, las del autor, `Referer` y cookies).
+fn net_log_headers() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FREEDOM_NET_LOG").is_some_and(|v| v == "cabeceras"))
+}
+
+/// E3: escribe la petición y sus cabeceras en stderr; las de credenciales (`Cookie`,
+/// `Authorization`), solo con su largo.
+fn log_request_headers(method: &str, url: &Url, headers: &Headers) {
+    let mut out = format!("cabeceras: {} {}", method.to_ascii_uppercase(), url.href());
+    for (n, v) in &headers.0 {
+        let secret = n.eq_ignore_ascii_case("cookie")
+            || n.eq_ignore_ascii_case("authorization")
+            || n.eq_ignore_ascii_case("proxy-authorization");
+        if secret {
+            out.push_str(&format!("\n    {n}: ({} bytes)", v.len()));
+        } else {
+            out.push_str(&format!("\n    {n}: {v}"));
+        }
+    }
+    eprintln!("{out}");
 }
 
 /// `FREEDOM_NET_LOG=1`: cada petición se escribe en stderr.
@@ -825,7 +870,8 @@ impl Fetcher {
                 referrer_policy: policy,
                 share: image_share(opts.destination, opts.client),
             };
-            let mut response = self.http(&url, &extra, referrer, &opts.accept)?;
+            let accept = accept_for(&opts.accept, opts.destination);
+            let mut response = self.http(&url, &extra, referrer, accept)?;
             response.redirects = redirects;
             if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(response);
@@ -956,7 +1002,20 @@ impl Fetcher {
             if let Some((name, value)) = &sent {
                 h.push(name, value);
             }
+            if net_log_headers() {
+                log_request_headers(extra.method, url, &h);
+            }
             let response = self.hop(url, extra, &h, target)?;
+            if net_log_headers() {
+                eprintln!(
+                    "respuesta: {} {} {} ({} bytes, {})",
+                    extra.method.to_ascii_uppercase(),
+                    url.href(),
+                    response.status,
+                    response.body.len(),
+                    response.protocol.name()
+                );
+            }
             let proxy = response.status == 407;
             if !allowed || !(response.status == 401 || proxy) {
                 if !matches!(response.status, 401 | 407)
@@ -1705,7 +1764,10 @@ impl Fetcher {
                 referrer_policy: policy,
                 share: image_share(req.destination, req.client),
             };
-            let mut response = self.http(&url, &extra, referrer, "*/*")?;
+            // E3: el `Accept` por *destination* (las `<img>` del motor); uno del autor en
+            // `headers` manda.
+            let accept = accept_for("*/*", req.destination);
+            let mut response = self.http(&url, &extra, referrer, accept)?;
             response.redirects = redirects;
             if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok((response, list));
