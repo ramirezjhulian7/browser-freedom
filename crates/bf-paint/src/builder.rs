@@ -122,6 +122,14 @@ fn real_sc(f: &Fragment) -> bool {
             || crate::filters::creates_stacking_context(&f.style)) // E7
 }
 
+/// E2: ¿hay en el stacking context de `f` (sin entrar en los que crean sus descendientes) una caja
+/// con `mix-blend-mode`?
+fn contains_blend(f: &Fragment) -> bool {
+    f.children.iter().any(|c| {
+        is_box(c) && (crate::filters::blends(&c.style) || (!real_sc(c) && contains_blend(c)))
+    })
+}
+
 /// ¿Tiene `mask-image` (CSS Masking 1 §7.1)? Crea un stacking context (E7).
 fn masked(style: &ComputedStyle) -> bool {
     style.mask_image.0.iter().any(|i| !matches!(i, Image::None))
@@ -415,7 +423,17 @@ impl<'a> Builder<'a> {
     }
 
     fn stacking_context(&mut self, f: &'a Fragment, clip: &ClipChain) {
-        let effect = crate::filters::effect(f); // E7: filter, clip-path y mix-blend-mode
+        // E7: filter, clip-path y mix-blend-mode. E2: Compositing and Blending 1 §3.2,
+        // "everything in CSS that creates a stacking context must be considered an 'isolated'
+        // group": un `mix-blend-mode` de dentro se mezcla con lo pintado en este stacking
+        // context, no con lo que hay debajo de él. Basta aislar los que tienen algo que se
+        // mezcla (para los demás no cambia nada): las teselas de Leaflet (`plus-lighter`, para
+        // tapar las juntas) se mezclaban con el fondo de la página y salían blancas en
+        // openstreetmap.org.
+        // La raíz no: su grupo es el del canvas, con su fondo (§3.1).
+        let is_root = self.root.is_some_and(|r| std::ptr::eq(r, f));
+        let effect = crate::filters::effect(f)
+            .or_else(|| (!is_root && contains_blend(f)).then(crate::filters::isolation));
         if effect.is_some() {
             self.emit(clip, DisplayItem::PushEffect);
         }

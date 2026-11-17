@@ -72,6 +72,21 @@ pub fn effect(f: &Fragment) -> Option<Effect> {
     })
 }
 
+/// E2: una capa de aislamiento (sin filtro, recorte ni mezcla propios): lo que se pinta dentro
+/// se compone sobre un fondo transparente y después, con `source-over`, sobre lo de debajo.
+pub fn isolation() -> Effect {
+    Effect {
+        filter: None,
+        clip: None,
+        blend: BlendMode::SourceOver,
+    }
+}
+
+/// E2: ¿tiene `style` un `mix-blend-mode` distinto de `normal`?
+pub fn blends(style: &ComputedStyle) -> bool {
+    style.mix_blend_mode != MixBlendMode::Normal
+}
+
 fn blend_mode(m: MixBlendMode) -> BlendMode {
     match m {
         MixBlendMode::Normal => BlendMode::SourceOver,

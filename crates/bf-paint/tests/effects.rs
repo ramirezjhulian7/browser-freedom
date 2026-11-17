@@ -181,3 +181,26 @@ fn grupo_de_sombra_desenfoca_y_desplaza() {
     assert!(edge > 90 && edge < 165, "{edge}");
     assert_eq!(px(&p, 40, 70), [255, 255, 255, 255]);
 }
+
+/// E2: Compositing and Blending 1 §3.2: un stacking context (aquí, por `transform` y por
+/// `z-index`) es un grupo aislado; un `mix-blend-mode` de dentro se mezcla con lo pintado en él,
+/// no con el fondo de la página. Las teselas de Leaflet (`plus-lighter` dentro de capas con
+/// `translate3d`) salían blancas sobre el fondo claro del mapa.
+#[test]
+fn blend_mode_is_isolated_by_its_stacking_context() {
+    let tile = |container: &str| {
+        format!(
+            "<!doctype html><style>body {{ margin: 0; background: rgb(242, 239, 233) }}</style>\
+             <div style='{container}'><div style='width: 50px; height: 50px; \
+             background: rgb(40, 160, 60); mix-blend-mode: plus-lighter'></div></div>"
+        )
+    };
+    let green = [40, 160, 60, 255];
+    let p = paint(&tile("transform: translate3d(0px, 0px, 0)"));
+    assert!(near(px(&p, 25, 25), green, 2), "{:?}", px(&p, 25, 25));
+    let p = paint(&tile("position: relative; z-index: 1"));
+    assert!(near(px(&p, 25, 25), green, 2), "{:?}", px(&p, 25, 25));
+    // Sin stacking context en medio, se mezcla con la página (suma, casi blanco).
+    let p = paint(&tile(""));
+    assert!(px(&p, 25, 25)[0] > 250, "{:?}", px(&p, 25, 25));
+}

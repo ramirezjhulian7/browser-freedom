@@ -25,10 +25,9 @@ pub struct Decl {
     pub important: bool,
 }
 
-/// Un bloque de declaraciones CSS (CSSOM §6.7, "CSS declaration block").
-/// E2: cuántas veces se parseó un bloque de declaraciones (para los tests que comprueban que
-/// `element.style` no vuelve a parsear el atributo en cada acceso).
-/// Por hilo: los tests corren en paralelo.
+// E2: cuántas veces se parseó un bloque de declaraciones, por hilo (para los tests que
+// comprueban que `element.style` no vuelve a parsear el atributo en cada acceso; los tests
+// corren en paralelo).
 thread_local! {
     static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -39,6 +38,7 @@ pub fn parse_count() -> usize {
     PARSES.with(std::cell::Cell::get)
 }
 
+/// Un bloque de declaraciones CSS (CSSOM §6.7, "CSS declaration block").
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeclBlock {
     pub decls: Vec<Decl>,
