@@ -79,8 +79,10 @@ fn orientation(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     {
         return Ok(v);
     }
+    // `ScreenOrientation` hereda de `EventTarget` (Screen Orientation §3): un target real, para
+    // que `addEventListener("change", …)` no lance "Illegal invocation".
     let class = bom_classes(agent).screen_orientation;
-    let o = Value::Object(agent.host_create(class, Box::new(())));
+    let o = Value::Object(super::new_target_object(agent, super::bom_target(8), class));
     if let Some(slots) = agent.host_slots_mut(screen) {
         slots.push(o.clone());
     }

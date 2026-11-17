@@ -130,9 +130,18 @@ pub fn register(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
     window::install(agent, realm, ctx);
 }
 
+/// ¿Tiene `realm` un [`crate::WebContext`]? (La guarda de los realms del host.)
+fn has_web_context(agent: &Agent, realm: RealmId) -> bool {
+    agent.realm_data::<crate::WebContext>(realm).is_some()
+}
+
 /// Las clases del DOM en `realm`, sin convertir el global en el `Window` (el global de un
 /// worker es otro; ver `crate::workers::scope`).
 pub fn register_classes(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHandle) {
+    // E1: las funciones del host solo corren en realms con `WebContext` (ventanas, marcos y
+    // workers). En otro (un `ShadowRealm`) lanzan un `TypeError` en vez de tumbar la pestaña
+    // con "el realm no tiene WebContext", y el `ShadowRealm` no expone las interfaces.
+    agent.host.realm_guard = Some(has_web_context);
     if agent.embedder_data::<DomClasses>().is_none() {
         let event_target = agent.register_host_class(events::event_target_class());
         let dom_exception = agent.register_host_class(exception::dom_exception_class());

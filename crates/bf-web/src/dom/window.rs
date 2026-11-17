@@ -197,7 +197,10 @@ fn notify_rejected_promises(agent: &mut Agent, promises: Vec<Gc<Object>>) {
                 agent.host_unpin(pin);
                 if not_canceled {
                     let err = bf_js::host::JsError::from_value(agent, reason);
-                    let msg = format!("Uncaught (in promise) {}", err.message);
+                    // Los hooks anteponen "Uncaught " a lo que reciben (`report_exception`):
+                    // aquí va solo "(in promise) …" para que la consola diga "Uncaught (in
+                    // promise) TypeError: …", como los navegadores, y no "Uncaught Uncaught".
+                    let msg = format!("(in promise) {}", err.message);
                     agent.host.hooks.report_exception(&msg, &err.stack);
                 }
             }

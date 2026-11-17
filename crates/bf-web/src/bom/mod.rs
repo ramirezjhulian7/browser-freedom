@@ -29,6 +29,7 @@ use bf_js::vm::function::{CallArgs, NativeFn};
 use bf_js::vm::{Agent, JsResult, RealmId};
 
 use crate::WebContextHandle;
+use crate::dom::events::TargetRef;
 use crate::dom::to_dom_string;
 
 /// Lo que el navegador implementa para el BOM. Todo tiene un valor por defecto para un
@@ -293,6 +294,44 @@ fn pinned(agent: &mut Agent, realm: RealmId, n: u64, class: HostClassId) -> Host
     agent.host_pin(Value::Object(o))
 }
 
+/// Los ids de los `EventTarget` del BOM (`screen`, `performance`, `screen.orientation`): fijos y
+/// muy por encima de los que reparte el documento (`Document::create_event_target` cuenta desde
+/// 1). Un contador no sirve: un marco cambia su documento (`about:blank` → `srcdoc`) y el nuevo
+/// vuelve a contar desde 1, y el `AbortSignal` del marco recibía el id (y la identidad) de
+/// `screen`.
+const BOM_TARGET_BASE: u64 = 0xFFFF_0000;
+
+/// El `EventTarget` del BOM número `n` (ver [`BOM_TARGET_BASE`]).
+pub(crate) fn bom_target(n: u64) -> bf_dom::events::EventTarget {
+    bf_dom::events::EventTarget::Object(BOM_TARGET_BASE + n)
+}
+
+/// Crea un objeto de la ventana que es un `EventTarget` (`Screen`, `Performance`) y lo fija.
+///
+/// `addEventListener` y los demás métodos de `EventTarget` (DOM §2.7) buscan el target del
+/// wrapper en su carga ([`crate::dom::events::event_target_of`]): sin un [`TargetRef`]
+/// lanzaban "Illegal invocation" aunque la clase herede de `EventTarget` (p. ej.
+/// `performance.addEventListener("resourcetimingbufferfull", …)`, Resource Timing §4.2).
+fn pinned_target(agent: &mut Agent, n: u64, class: HostClassId) -> HostHandle {
+    let o = new_target_object(agent, bom_target(n), class);
+    agent.host_pin(Value::Object(o))
+}
+
+/// El wrapper del `EventTarget` no-nodo `t` del documento 0, en el realm en curso.
+pub(crate) fn new_target_object(
+    agent: &mut Agent,
+    t: bf_dom::events::EventTarget,
+    class: HostClassId,
+) -> bf_js::heap::Gc<bf_js::object::Object> {
+    crate::dom::events::wrap_object_target(
+        agent,
+        0,
+        t,
+        class,
+        Box::new(TargetRef { doc: 0, target: t }),
+    )
+}
+
 /// Los objetos y las propiedades propias del `Window` que pone el BOM.
 fn install_window(agent: &mut Agent, realm: RealmId) {
     let c = bom_classes(agent).clone();
@@ -300,10 +339,10 @@ fn install_window(agent: &mut Agent, realm: RealmId) {
         navigator: Some(pinned(agent, realm, 1, c.navigator)),
         location: Some(pinned(agent, realm, 2, c.location)),
         history: Some(pinned(agent, realm, 3, c.history)),
-        screen: Some(pinned(agent, realm, 4, c.screen)),
+        screen: Some(pinned_target(agent, 4, c.screen)),
         session_storage: Some(storage::create(agent, realm, 5, false)),
         local_storage: Some(storage::create(agent, realm, 6, true)),
-        performance: Some(pinned(agent, realm, 7, c.performance)),
+        performance: Some(pinned_target(agent, 7, c.performance)),
     };
     if let Some(s) = agent.realm_data_mut::<BomState>(realm) {
         s.objects = objects;
