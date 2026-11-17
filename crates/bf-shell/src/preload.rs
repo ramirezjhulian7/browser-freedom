@@ -159,7 +159,11 @@ pub fn scan_document(html: &str, document: &Url) -> Scan {
                     None
                 };
                 if let (Some(kind), Some(href)) = (kind, attr("href")) {
-                    push(&mut out, &base, href, kind, None, None);
+                    // E3: el `nonce` de un `<link rel=preload as=script nonce>` (Mercado
+                    // Libre): sin él la CSP con `'strict-dynamic'` bloqueaba la petición
+                    // especulativa.
+                    let nonce = attr("nonce").map(str::to_owned);
+                    push(&mut out, &base, href, kind, None, nonce);
                 }
             }
             "script" => {
@@ -818,12 +822,13 @@ mod tests {
         let doc = url("https://sitio.test/");
         let s = scan_document(
             "<meta http-equiv=Content-Security-Policy content=\"script-src 'nonce-a'\">\
-             <script nonce=a src=a.js></script><script src=b.js></script>",
+             <script nonce=a src=a.js></script><script src=b.js></script>\
+             <link rel=preload as=script nonce=a href=c.js>",
             &doc,
         );
         assert!(s.meta_csp);
         let nonces: Vec<Option<&str>> = s.found.iter().map(|f| f.nonce.as_deref()).collect();
-        assert_eq!(nonces, [Some("a"), None]);
+        assert_eq!(nonces, [Some("a"), None, Some("a")]);
         assert!(!scan_document("<meta http-equiv=refresh content=5>", &doc).meta_csp);
     }
 

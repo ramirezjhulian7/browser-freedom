@@ -204,6 +204,10 @@ impl DocumentPolicy {
         nonce: Option<&str>,
         parser_inserted: bool,
     ) -> Option<Url> {
+        // E3: un `nonce` vacío es no tener nonce (CSP 3 §6.7.2.5 no lo encuentra en ninguna
+        // lista): así la misma petición pedida con `Some("")` (el atributo del elemento) y con
+        // `None` (la descarga especulativa) se decide, y se anota en la consola, una sola vez.
+        let nonce = nonce.filter(|n| !n.is_empty());
         let count = self
             .policies
             .lock()
@@ -371,6 +375,23 @@ mod tests {
         assert!(p.allow_inline(Inline::Script, Some("k"), "x()"));
         assert!(p.check_eval().is_err());
         assert!(p.has_csp());
+    }
+
+    /// E3: la misma petición sin nonce, con `None` o con `Some("")`, se anota una vez.
+    #[test]
+    fn empty_nonce_is_no_nonce() {
+        let p = DocumentPolicy::new(url("https://sitio.test/"));
+        p.add_headers([(
+            "content-security-policy-report-only",
+            "script-src 'unsafe-inline'",
+        )]);
+        let js = url("https://sitio.test/a.js");
+        assert!(p.check_request(&js, Destination::Script, None).is_some());
+        assert!(
+            p.check_request(&js, Destination::Script, Some(""))
+                .is_some()
+        );
+        assert_eq!(p.take_messages().len(), 1);
     }
 
     /// Los datos de `securitypolicyviolation` (CSP 3 §5.3): `blockedURI` sin fragmento,
