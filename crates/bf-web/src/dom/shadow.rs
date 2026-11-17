@@ -569,8 +569,21 @@ fn adopted_set(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+/// E1: lo que [`sync_adopted`] ya copió: el texto de cada hoja construida en la generación
+/// del CSSOM en que se serializó, y por shadow root las hojas que tenía y esa generación. Sin
+/// esto, cada mutación del DOM volvía a serializar todas las hojas adoptadas de todos los
+/// shadow roots (en Reddit, cientos de componentes de Lit comparten hojas grandes, y la pestaña
+/// pasaba minutos en `attachShadow` sin llegar a ejecutar sus temporizadores).
+#[derive(Default)]
+struct AdoptedCache {
+    generation: u64,
+    texts: std::collections::HashMap<crate::cssom::sheets::SheetId, Option<String>>,
+    roots: std::collections::HashMap<NodeRef, (Vec<crate::cssom::sheets::SheetId>, u64)>,
+}
+
 /// Copia a cada shadow root el texto de sus `adoptedStyleSheets` (lo lee la cascada por
-/// `loader::shadow_tree_stylesheets`).
+/// `loader::shadow_tree_stylesheets`). Solo los roots cuyas hojas o cuya generación del CSSOM
+/// cambiaron desde la última vez.
 pub fn sync_adopted(agent: &mut Agent) {
     let realm = crate::WebContextHandle::current(agent).realm;
     let Some(entries) = agent
@@ -579,6 +592,19 @@ pub fn sync_adopted(agent: &mut Agent) {
     else {
         return;
     };
+    let generation = crate::cssom::sheets_generation(agent, realm);
+    if agent.realm_data::<AdoptedCache>(realm).is_none() {
+        agent.set_realm_data(realm, AdoptedCache::default());
+    }
+    {
+        let cache = agent.realm_data_mut::<AdoptedCache>(realm).expect("caché");
+        if cache.generation != generation {
+            cache.generation = generation;
+            cache.texts.clear();
+        }
+        let live: std::collections::HashSet<NodeRef> = entries.iter().map(|(k, _)| *k).collect();
+        cache.roots.retain(|r, _| live.contains(r));
+    }
     for (root, h) in entries {
         let arr = agent.host_pinned(h).unwrap_or_default();
         let Value::Object(o) = arr else { continue };
@@ -587,15 +613,43 @@ pub fn sync_adopted(agent: &mut Agent) {
             .ok()
             .and_then(|v| v.as_number())
             .unwrap_or(0.0) as usize;
-        let mut texts = Vec::new();
+        let mut ids = Vec::with_capacity(len);
         for i in 0..len {
             let Ok(v) = agent.get_str(o, &i.to_string()) else {
                 continue;
             };
-            if let Some(id) = crate::cssom::sheets::sheet_of(agent, &v)
-                && let Some((true, text)) = crate::cssom::sheets::constructed_sheet(agent, id)
-            {
-                texts.push(text);
+            if let Some(id) = crate::cssom::sheets::sheet_of(agent, &v) {
+                ids.push(id);
+            }
+        }
+        let cache = agent.realm_data::<AdoptedCache>(realm).expect("caché");
+        if cache
+            .roots
+            .get(&root)
+            .is_some_and(|(prev, g)| *g == generation && *prev == ids)
+        {
+            continue;
+        }
+        let mut texts = Vec::new();
+        for &id in &ids {
+            let cached = agent
+                .realm_data::<AdoptedCache>(realm)
+                .and_then(|c| c.texts.get(&id).cloned());
+            let text = match cached {
+                Some(t) => t,
+                None => {
+                    let t = crate::cssom::sheets::constructed_sheet(agent, id)
+                        .and_then(|(constructed, text)| constructed.then_some(text));
+                    agent
+                        .realm_data_mut::<AdoptedCache>(realm)
+                        .expect("caché")
+                        .texts
+                        .insert(id, t.clone());
+                    t
+                }
+            };
+            if let Some(t) = text {
+                texts.push(t);
             }
         }
         let same = with_doc(agent, root.doc, |d| {
@@ -606,6 +660,11 @@ pub fn sync_adopted(agent: &mut Agent) {
                 d.set_adopted_style_texts(root.node, texts)
             });
         }
+        agent
+            .realm_data_mut::<AdoptedCache>(realm)
+            .expect("caché")
+            .roots
+            .insert(root, (ids, generation));
     }
 }
 
