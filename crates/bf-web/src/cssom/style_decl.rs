@@ -1,7 +1,8 @@
 //! `CSSStyleDeclaration` (CSSOM §6.7.3) y `ElementCSSInlineStyle.style` (CSSOM §6.7.5).
 //!
-//! Una declaración tiene un dueño: el atributo `style` de un elemento (se re-parsea en cada
-//! acceso y se reescribe en cada cambio, así queda viva), una regla de una hoja, o un
+//! Una declaración tiene un dueño: el atributo `style` de un elemento (se reescribe en cada
+//! cambio, así queda viva; E2: el bloque parseado se guarda con el texto del que salió y solo se
+//! vuelve a parsear si el atributo cambió por otro camino), una regla de una hoja, o un
 //! elemento cuyo estilo computado expone (solo lectura).
 
 use bf_css::selectors::PseudoElement;
@@ -97,7 +98,23 @@ pub fn read_block(agent: &mut Agent, owner: DeclOwner) -> DeclBlock {
                 d.element(n.node)
                     .and_then(|e| e.attr("style").map(str::to_owned))
             });
-            text.map_or_else(DeclBlock::default, |t| DeclBlock::parse(&t))
+            let Some(text) = text else {
+                return DeclBlock::default();
+            };
+            // E2: CSSOM §6.7.5 mantiene el bloque y el atributo sincronizados, pero no pide
+            // reconstruir el bloque en cada lectura: mientras el atributo tenga el texto del
+            // que salió (o el que escribió el propio CSSOM), vale el bloque guardado. React
+            // escribe `element.style` sin parar (DuckDuckGo): cada acceso re-parseaba el
+            // atributo con el tokenizador de CSS y cada `setProperty` lo hacía dos veces.
+            let cache = &mut super::state(agent).inline_blocks;
+            if let Some((t, b)) = cache.get(&n)
+                && *t == text
+            {
+                return b.clone();
+            }
+            let block = DeclBlock::parse(&text);
+            cache.insert(n, (text, block.clone()));
+            block
         }
         DeclOwner::Rule(r) => sheets::rule_block(agent, r).unwrap_or_default(),
         DeclOwner::Computed { .. } => DeclBlock::default(),
@@ -110,6 +127,9 @@ fn write_block(agent: &mut Agent, owner: DeclOwner, block: DeclBlock) {
     match owner {
         DeclOwner::Inline(n) => {
             let text = block.css_text();
+            super::state(agent)
+                .inline_blocks
+                .insert(n, (text.clone(), block));
             let _ = with_doc_mut(agent, n.doc, |d| {
                 d.set_attribute(n.node, &"style".into(), text.as_str().into())
             });

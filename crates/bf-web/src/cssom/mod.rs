@@ -125,6 +125,9 @@ pub struct CssomState {
     pub(crate) layout_epoch: u64,
     /// E2: hay un trabajo esperando a que llegue una fuente web ([`watch_web_fonts`]).
     fonts_watched: bool,
+    /// E2: el bloque parseado del atributo `style` de cada elemento con el texto del que salió
+    /// (ver `style_decl::read_block`).
+    pub(crate) inline_blocks: HashMap<NodeRef, (String, declaration::DeclBlock)>,
 }
 
 impl Default for CssomState {
@@ -146,6 +149,7 @@ impl Default for CssomState {
             provider: None,
             layout_epoch: 0,
             fonts_watched: false,
+            inline_blocks: HashMap::new(),
         }
     }
 }

@@ -26,6 +26,19 @@ pub struct Decl {
 }
 
 /// Un bloque de declaraciones CSS (CSSOM §6.7, "CSS declaration block").
+/// E2: cuántas veces se parseó un bloque de declaraciones (para los tests que comprueban que
+/// `element.style` no vuelve a parsear el atributo en cada acceso).
+/// Por hilo: los tests corren en paralelo.
+thread_local! {
+    static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// E2: el contador de [`DeclBlock::parse`] del hilo en curso (solo para tests).
+#[doc(hidden)]
+pub fn parse_count() -> usize {
+    PARSES.with(std::cell::Cell::get)
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeclBlock {
     pub decls: Vec<Decl>,
@@ -138,6 +151,7 @@ fn expand_shorthand(sh: &ShorthandDef, values: &[ComponentValue]) -> Vec<(String
 impl DeclBlock {
     /// "Parse a CSS declaration block" (CSSOM §6.7.2) de un atributo `style` o `cssText`.
     pub fn parse(text: &str) -> DeclBlock {
+        PARSES.with(|c| c.set(c.get() + 1));
         let contents = parse_block_contents(text);
         let mut block = DeclBlock::default();
         let mut all: Vec<&Declaration> = contents.declarations.iter().collect();
