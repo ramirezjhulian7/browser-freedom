@@ -146,18 +146,106 @@ impl PageEnv {
 
 /// El [`bf_web::cssom::LayoutProvider`] del navegador: maqueta con las fuentes reales y los
 /// tamaños de las imágenes del último layout.
+///
+/// E3: con las `@font-face` del documento, como el pintado (`bf_paint::prepare_page_animated`).
+/// Antes medía solo con las fuentes del sistema: un texto con fuente web medía distinto en la
+/// maqueta del CSSOM y en la del pintado, `getBoundingClientRect` oscilaba entre las dos y
+/// `ResizeObserver` (Resize Observer §3.4.5) veía un cambio a una profundidad ya entregada y
+/// avisaba de un bucle. Las fuentes salen de la caché del proceso (`bf_font`, por URL), así que
+/// registrarlas no descarga nada que el pintado no haya pedido.
 struct ShellLayout {
+    db: Arc<bf_font::FontDb>,
     fonts: bf_font::Fonts,
+    /// El cargador de fuentes del documento (*destination* `font`, Fetch §2.2.5).
+    font_loader: Arc<dyn bf_infra::ResourceLoader>,
+    /// Las hojas de las que salieron las reglas `@font-face` de `faces`.
+    sheets: Option<Arc<Vec<bf_css::stylesheet::Stylesheet>>>,
+    /// Las reglas `@font-face` de las hojas, tal como están en ellas, y si `fonts` ya las tiene.
+    faces: Vec<Vec<bf_css::syntax::Declaration>>,
+    registered: bool,
     images: Rc<RefCell<bf_layout::ImageSizes>>,
 }
 
+impl ShellLayout {
+    fn new(
+        db: Arc<bf_font::FontDb>,
+        loader: Arc<dyn bf_infra::ResourceLoader>,
+        images: Rc<RefCell<bf_layout::ImageSizes>>,
+    ) -> ShellLayout {
+        ShellLayout {
+            fonts: bf_font::Fonts::new(db.clone()),
+            db,
+            font_loader: bf_infra::ForDestination::wrap(loader, bf_infra::Destination::Font),
+            sheets: None,
+            faces: Vec::new(),
+            registered: true,
+            images,
+        }
+    }
+
+    /// Registra las `@font-face` pendientes. Las `url()` de las hojas enlazadas ya vienen
+    /// resueltas contra la URL de la hoja (`bf_style::sheet_cache`); las de un `<style>` se
+    /// resuelven contra la base del documento (CSS Values 4 §4.5.1), como en el pintado.
+    fn register_faces(&mut self, doc: &Document) {
+        if self.registered {
+            return;
+        }
+        self.registered = true;
+        let mut sheet = bf_css::stylesheet::Stylesheet {
+            rules: self
+                .faces
+                .iter()
+                .cloned()
+                .map(bf_css::stylesheet::Rule::FontFace)
+                .collect(),
+            origin: bf_css::stylesheet::Origin::Author,
+            layer_order: Vec::new(),
+        };
+        let base = doc.base_url();
+        sheet.rewrite_urls(&mut |u| Url::parse(u, Some(&base)).ok().map(|u| u.href()));
+        let rules: Vec<&[bf_css::syntax::Declaration]> = sheet
+            .rules
+            .iter()
+            .filter_map(|r| match r {
+                bf_css::stylesheet::Rule::FontFace(d) => Some(&d[..]),
+                _ => None,
+            })
+            .collect();
+        let mut fonts = bf_font::Fonts::new(self.db.clone());
+        fonts.add_font_faces(&rules, self.font_loader.clone());
+        self.fonts = fonts;
+    }
+}
+
 impl bf_web::cssom::LayoutProvider for ShellLayout {
+    fn style_sheets(
+        &mut self,
+        sheets: &Arc<Vec<bf_css::stylesheet::Stylesheet>>,
+        media: &bf_css::media::MediaContext,
+    ) {
+        if self.sheets.as_ref().is_some_and(|s| Arc::ptr_eq(s, sheets)) {
+            return;
+        }
+        self.sheets = Some(sheets.clone());
+        let all: Vec<&bf_css::stylesheet::Stylesheet> = sheets.iter().collect();
+        let rules = bf_style::loader::font_face_rules(&all, media);
+        // Las mismas reglas: se conservan las caras ya cargadas y las cachés de shaping.
+        if rules.len() == self.faces.len()
+            && rules.iter().zip(&self.faces).all(|(a, b)| *a == &b[..])
+        {
+            return;
+        }
+        self.faces = rules.iter().map(|r| r.to_vec()).collect();
+        self.registered = false;
+    }
+
     fn layout(
         &mut self,
         doc: &Document,
         styles: &bf_style::StyleMap,
         viewport: bf_layout::Size,
     ) -> bf_layout::FragmentTree {
+        self.register_faces(doc);
         bf_layout::layout_document_with_images(
             doc,
             styles,
@@ -671,10 +759,7 @@ impl Engine {
             },
         );
         if let Some(db) = &env.fonts {
-            let provider = ShellLayout {
-                fonts: bf_font::Fonts::new(db.clone()),
-                images: self.images.clone(),
-            };
+            let provider = ShellLayout::new(db.clone(), loader.clone(), self.images.clone());
             bf_web::cssom::set_layout_provider(&mut self.rt.agent, realm, Box::new(provider));
         }
     }

@@ -99,6 +99,15 @@ impl LayoutSnapshot {
 /// uno con sus fuentes reales).
 pub trait LayoutProvider {
     fn layout(&mut self, doc: &Document, styles: &StyleMap, viewport: Size) -> FragmentTree;
+
+    /// E3: las hojas con que la cascada del CSSOM acaba de calcular los estilos, para que el
+    /// proveedor registre sus `@font-face` (CSS Fonts 4 §4) y mida como el pintado.
+    fn style_sheets(
+        &mut self,
+        _sheets: &Arc<Vec<bf_css::stylesheet::Stylesheet>>,
+        _media: &MediaContext,
+    ) {
+    }
 }
 
 /// El estado del CSSOM de una ventana (dato del realm).
@@ -575,6 +584,9 @@ fn cascade_styles(agent: &mut Agent) -> Arc<StyleMap> {
     }
     let media = media_context(agent);
     let doc_sheets = sheets::document_sheets(agent, &media);
+    if let Some(p) = state(agent).provider.as_mut() {
+        p.style_sheets(&doc_sheets, &media);
+    }
     let doc = h.get(agent).document();
     // E2: en varios hilos, como la cascada del pintado (`bf_style::style_document_parallel`,
     // mismo resultado). En el barrido, cada consulta de geometría de un script que llegaba

@@ -16,6 +16,8 @@ mod font_tests; // E2
 mod history;
 mod internal;
 #[cfg(test)]
+mod layout_fonts_tests; // E3
+#[cfg(test)]
 mod lazy_paint_tests; // E2
 mod load;
 #[cfg(test)]
