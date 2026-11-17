@@ -78,6 +78,8 @@ pub(crate) struct PendingAbs<'a> {
 /// E5: caja, `pct_height_basis`, `cb_max_height` (en bits) y marco de un cálculo de anchos
 /// intrínsecos ([`Layout::intrinsic_widths`]).
 pub(crate) type IntrinsicKey = (usize, Option<u32>, Option<u32>, u8);
+/// E2: (caja, ancho y alto del `cb`, ancho de contenido) de una medida de alto de un ítem flex.
+pub(crate) type ContentHeightKey = (usize, u32, Option<u32>, u32);
 
 pub(crate) struct Layout<'a> {
     pub fonts: &'a dyn FontProvider,
@@ -137,6 +139,9 @@ pub(crate) struct Layout<'a> {
     >,
     /// E5: anchos intrínsecos ya calculados ([`Self::intrinsic_widths`]).
     pub intrinsic_cache: std::collections::HashMap<IntrinsicKey, (f32, f32)>,
+    /// E2: los altos de contenido de los ítems medidos en cada [`Self::flex_layout`] en curso
+    /// (ver `item_content_height`).
+    pub content_height_memo: Vec<std::collections::HashMap<ContentHeightKey, f32>>,
     /// E5: cajas cuyo subárbol puede leer el alto del containing block (ver
     /// `Layout::reads_cb_height`, `inline.rs`).
     pub cb_height_readers: std::collections::HashMap<usize, bool>,
@@ -384,6 +389,7 @@ impl<'a> Layout<'a> {
             perf: crate::perf::Perf::new(),
             inline_cache: std::collections::HashMap::new(),
             intrinsic_cache: std::collections::HashMap::new(),
+            content_height_memo: Vec::new(),
             cb_height_readers: std::collections::HashMap::new(),
             caches: std::env::var_os("BF_NO_LAYOUT_CACHE").is_none(),
         }
