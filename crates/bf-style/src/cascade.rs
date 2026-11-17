@@ -650,6 +650,12 @@ fn compute_custom_properties(
     for e in entries.iter() {
         by_name.entry(&e.name).or_default().push(e);
     }
+    // Las que hay que volver a sustituir (ver más abajo).
+    let changed: HashSet<String> = by_name
+        .keys()
+        .map(|n| (*n).to_owned())
+        .chain(registry.iter().map(|r| r.name.clone()))
+        .collect();
     let mut raw: HashMap<String, Arc<Vec<ComponentValue>>> = (*inherited).clone();
     for r in registry.iter() {
         match unset_registered(r) {
@@ -733,11 +739,19 @@ fn compute_custom_properties(
     }
     let mut state = HashMap::new();
     let mut cyclic = HashSet::new();
-    let names: Vec<String> = raw.keys().cloned().collect();
-    let mut out = CustomProperties::new();
-    for name in names {
-        if let Some(v) = resolve(&name, &raw, &mut state, &mut Vec::new(), &mut cyclic) {
-            out.insert(name, v);
+    // E4/E2: solo hay que sustituir las que cambian en este elemento (las declaradas aquí y
+    // las registradas); las heredadas ya son valores computados, con sus `var()` sustituidos
+    // (CSS Variables 1 §3), y sustituirlas otra vez da lo mismo. Antes se recorrían todas en
+    // cada elemento que declaraba alguna: miles en GitHub (Primer), 1,8 s de la cascada.
+    let mut out: CustomProperties = (*inherited).clone();
+    for name in changed {
+        match resolve(&name, &raw, &mut state, &mut Vec::new(), &mut cyclic) {
+            Some(v) => {
+                out.insert(name, v);
+            }
+            None => {
+                out.remove(&name);
+            }
         }
     }
     // Las registradas: inválidas en computed-value time si no cumplen la sintaxis.
