@@ -490,14 +490,14 @@ impl LogEntry {
 
 /// E3: `FREEDOM_NET_LOG=cabeceras`: además, las cabeceras que se mandan en cada salto (las de
 /// verdad, después de las de por defecto, las del autor, `Referer` y cookies).
-fn net_log_headers() -> bool {
+pub(crate) fn net_log_headers() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("FREEDOM_NET_LOG").is_some_and(|v| v == "cabeceras"))
 }
 
 /// E3: escribe la petición y sus cabeceras en stderr; las de credenciales (`Cookie`,
 /// `Authorization`), solo con su largo.
-fn log_request_headers(method: &str, url: &Url, headers: &Headers) {
+pub(crate) fn log_request_headers(method: &str, url: &Url, headers: &Headers) {
     let mut out = format!("cabeceras: {} {}", method.to_ascii_uppercase(), url.href());
     for (n, v) in &headers.0 {
         let secret = n.eq_ignore_ascii_case("cookie")
@@ -1454,7 +1454,10 @@ impl Fetcher {
             })();
             let (head, raw, keep) = match result {
                 Ok(r) => r,
-                Err(_) if reused => {
+                // RFC 9110 §9.2.2: una conexión reutilizada que el servidor ya había cerrado se
+                // repite con una nueva, pero solo con un método idempotente. Con `POST` no se
+                // sabe si el servidor llegó a aplicarla: el error llega a quien pidió (E3).
+                Err(_) if reused && idempotent => {
                     fresh = true;
                     continue;
                 }

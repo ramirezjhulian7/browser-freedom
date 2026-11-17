@@ -121,14 +121,14 @@ cualquier programa del Mac.
 - **En sitios conocidos** (barridos de 27 sitios públicos el 17 de noviembre de 2026, sin
   iniciar sesión):
   - ninguno hizo caer la pestaña;
-  - se ven bien Google, Hacker News, el libro de Rust, la documentación de Python, MDN y las
-    Wikipedias;
-  - la BBC ya sale con sus estilos, y Mercado Libre, GitLab, Amazon y la RAE muestran más
-    contenido que en el primer barrido;
+  - en el cuarto barrido, 7 se ven bien (Google, DuckDuckGo, Hacker News, Stack Overflow, el
+    libro de Rust, la documentación de Python y react.dev), 13 tienen defectos menores (entre
+    ellos las Wikipedias, la BBC, MDN, GitHub, Amazon y OpenStreetMap, que ya muestra el mapa)
+    y 7 defectos graves;
   - Stack Overflow pasa la verificación de Cloudflare a los ~6 segundos y luego se ve bien;
-  - en YouTube, Vimeo, excalidraw, gov.co, DuckDuckGo, Apple, el NYT y OpenStreetMap falta
-    parte del contenido, sobre todo porque sus scripts no terminan de montar la página a
-    tiempo o porque las fuentes web todavía se descargan de forma síncrona.
+  - en YouTube, Vimeo, Reddit, excalidraw, gov.co y Apple falta buena parte del contenido,
+    sobre todo porque sus scripts no terminan de montar la página; el NYT pide una
+    verificación contra robots que no se libera.
 
   El detalle por sitio está en
   [`docs/pendiente/mac/barrido-sitios.md`](docs/pendiente/mac/barrido-sitios.md).
@@ -170,10 +170,11 @@ historial, scroll y zoom.
 Las **fases 2 a 4** cumplen 43 de sus 45 criterios. Faltan dos:
 - `html/syntax/parsing` sin ningún fallo; está en 8164 / 8166, y los 2 que faltan no se pueden
   cumplir.
-- Los reftests de css-flexbox con palabras clave de tamaño; pasan 95 de 107, y 8 de los que
-  faltan son de CSS Flexbox 2, un borrador.
+- Los reftests de css-flexbox con palabras clave de tamaño; pasan 97 de 107. De los 10 que
+  faltan, 8 son de CSS Flexbox 2 (un borrador) y 2 no los pasa ningún navegador.
 
-Las dos esperan una decisión del usuario (sacar del criterio lo que no se puede cumplir).
+El usuario decidió el 2026-11-17 no sacar del criterio lo que no se puede cumplir, así que
+los dos siguen como no cumplidos.
 
 Lo que ya está:
 - El motor de JavaScript (`bf-js`) pasa el 98.8 % de test262 y ejecuta los scripts de las
@@ -184,8 +185,9 @@ Lo que ya está:
   animaciones de CSS.
 - HTTP/2 con caché HTTP en disco, SVG y WebP, y scroll containers con `sticky`.
 
-La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) cumple 4 de sus 6 criterios;
-faltan el lector de pantalla y el fuzzer de IPC, que esperan una decisión del usuario:
+La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) cumple 4 de sus 6 criterios.
+Faltan el lector de pantalla (el usuario decidió el 2026-11-17 no añadir `accesskit`) y el
+fuzzer de IPC (decisión abierta):
 - el rol, el nombre y los estados de cada elemento y el árbol de accesibilidad ya se
   calculan, pero no se exponen al sistema;
 - CSP (también `img-src` y el evento `securitypolicyviolation`) y contenido mixto ya se
@@ -194,6 +196,8 @@ faltan el lector de pantalla y el fuzzer de IPC, que esperan una decisión del u
   densidad 2 (meta: 16.7 ms; criterio cumplido);
 - la primera pintura de Wikipedia tarda 328-363 ms (meta: menos de 500 ms; criterio
   cumplido); la red se lleva 250-277 y el resto unos 80-90;
+- el JavaScript de los sitios grandes va mucho más rápido: YouTube pasó de 24 a 5,5 s de
+  scripts al cargar;
 - faltan los procesos separados con sandbox.
 
 Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
