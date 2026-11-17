@@ -279,7 +279,7 @@ const SPECULATIVE_THREADS: usize = 6;
 /// documento ya en la mano: otro hilo recorre `html` con el escáner y pide en paralelo, con
 /// `loader` (el del documento, que junta las peticiones iguales y guarda lo que llega), las
 /// hojas y los scripts que nombra. El parser se detiene en cada `<script src>` hasta tenerlo;
-/// sin esto, los pedía de uno en uno (más de 1 s en 9 de 27 sitios del barrido de E3).
+/// sin esto, los pedía de uno en uno (más de 1 s en 10 de 27 sitios del barrido de E3).
 ///
 /// - Los scripts se piden con su `nonce` e insertados por el parser, como los pedirá el
 ///   parser (CSP 3 §6.7.1.1), y las hojas como las pide el pintado.
