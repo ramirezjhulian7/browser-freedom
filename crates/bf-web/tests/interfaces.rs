@@ -121,3 +121,38 @@ fn select_add_and_remove() {
         "0axbc,0xbc,TypeError,NotFoundError,"
     );
 }
+
+/// SVG 2 §4.6.2 y §4.6.3: `SVGAnimatedLength` y `SVGLength` reflejan los atributos de longitud.
+#[test]
+fn svg_animated_lengths() {
+    let mut p = Page::new(
+        "<svg id=s viewBox='0 0 200 100' width=400><rect id=r x=10 y=2cm width=50% height=1in \
+         rx=bad /><circle id=c cx=5 cy=6 r=7 /><line id=l x1=1 y1=2 x2=3 y2=4 /></svg>",
+    );
+    assert_eq!(
+        p.show(
+            "const r = document.getElementById('r'); \
+             [r.x instanceof SVGAnimatedLength, r.x === r.x, r.x.baseVal === r.x.baseVal, \
+              r.x.baseVal instanceof SVGLength, r.x.baseVal.value, r.x.baseVal.unitType, \
+              Math.round(r.y.baseVal.value * 1000) / 1000, r.y.baseVal.valueInSpecifiedUnits, \
+              r.y.baseVal.unitType === SVGLength.SVG_LENGTHTYPE_CM, r.width.baseVal.value, \
+              r.height.baseVal.value, r.rx.baseVal.value, r.width.baseVal.valueAsString, \
+              document.getElementById('c').r.baseVal.value, document.getElementById('l').x2.baseVal.value, \
+              document.getElementById('s').width.baseVal.value, typeof r.cx].join()"
+        ),
+        "true,true,true,true,10,1,75.591,2,true,100,96,0,50%,7,3,400,undefined"
+    );
+    assert_eq!(
+        p.show(
+            "const q = document.getElementById('r'); \
+             q.x.baseVal.value = 25; const a = q.getAttribute('x'); \
+             q.y.baseVal.convertToSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_MM); const b = q.getAttribute('y'); \
+             q.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, 30); \
+             function err(f) { try { f(); return 'ok'; } catch (e) { return e.name; } } \
+             [a, b, q.getAttribute('width'), q.x.animVal.value, \
+              err(() => { q.x.animVal.value = 1; }), err(() => { q.x.baseVal.valueAsString = 'nada'; }), \
+              err(() => q.x.baseVal.newValueSpecifiedUnits(99, 1))].join()"
+        ),
+        "25,20mm,30px,25,NoModificationAllowedError,SyntaxError,NotSupportedError"
+    );
+}

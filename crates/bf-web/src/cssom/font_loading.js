@@ -221,10 +221,11 @@
     if (f.status !== "unloaded") return;
     f.status = "loading";
     for (const set of f.sets) setFaceLoading(set, o);
-    queueTask(() => {
-      const ok = f.sources !== null && native.fetchFont(f.sources);
-      settle(o, f, ok, ok ? null : err("NetworkError", "The font could not be loaded."));
-    });
+    // E2: la descarga va fuera del hilo de la pestaña y el resultado llega en una tarea
+    // (`fetchFontAsync`); varias caras se descargan a la vez.
+    const done = (ok) => settle(o, f, ok, ok ? null : err("NetworkError", "The font could not be loaded."));
+    if (f.sources === null) queueTask(() => done(false));
+    else native.fetchFontAsync(f.sources, done);
   }
   class FontFace {
     constructor(family, source, descriptors = {}) {
@@ -540,7 +541,9 @@
   function rulesOf(list, out, base) {
     for (const r of Array.from(list || [])) {
       if (r.type === 5) out.push([r, base]);
-      else if (r.cssRules) rulesOf(r.cssRules, out, base);
+      // E2: `@font-face` no puede ir dentro de una regla de estilo (CSS Nesting §3.2: solo
+      // reglas condicionales y de estilo): no se baja a ellas.
+      else if (r.type !== 1 && r.cssRules) rulesOf(r.cssRules, out, base);
     }
   }
   function cssFaces(s) {

@@ -484,3 +484,72 @@ fn macos_cjk_single_family() {
         .collect();
     assert_eq!(families.len(), 1, "{families:?}");
 }
+
+/// E2: un servidor lento: sirve `data` al cabo de `delay`.
+struct SlowLoader {
+    data: Vec<u8>,
+    delay: std::time::Duration,
+}
+
+impl bf_infra::ResourceLoader for SlowLoader {
+    fn load(&self, url: &Url) -> Option<bf_infra::resource::Resource> {
+        std::thread::sleep(self.delay);
+        Some(bf_infra::resource::Resource {
+            url: url.clone(),
+            bytes: self.data.clone(),
+            content_type: Some("font/ttf".into()),
+        })
+    }
+}
+
+/// E2: CSS Fonts 4 §4.9 y CSS Font Loading 3 §2.2: con la carga asíncrona (la ventana del
+/// navegador), una fuente web `http(s)` que tarda no bloquea: el texto se da forma enseguida con
+/// la de respaldo y, cuando llega (sube `web_fonts_generation`), la maqueta siguiente la usa.
+#[test]
+fn web_fonts_load_in_the_background() {
+    let Some((dir, _)) = ahem_fixture("background") else {
+        return;
+    };
+    let data = std::fs::read(dir.join("font.ttf")).unwrap();
+    bf_font::set_async_web_fonts(true);
+    let url = format!("http://fuentes.prueba/{}/lenta.ttf", std::process::id());
+    let css = format!("@font-face {{ font-family: Lenta; src: url(\"{url}\") }}");
+    let sheet = Stylesheet::parse(&css, Origin::Author);
+    let rules: Vec<_> = sheet
+        .rules
+        .iter()
+        .filter_map(|r| match r {
+            Rule::FontFace(d) => Some(d.as_slice()),
+            _ => None,
+        })
+        .collect();
+    let loader: Arc<dyn bf_infra::ResourceLoader> = Arc::new(SlowLoader {
+        data,
+        delay: std::time::Duration::from_secs(2),
+    });
+    let family = named("Lenta");
+    let req = request(&family, 400.0, false);
+    // Una cara `@font-face` (bit 31), no la de respaldo ni `NO_FONT` (`u32::MAX`).
+    let web = |fonts: &Fonts| {
+        let k = fonts.shape("X", &req)[0].font.0;
+        k != u32::MAX && k & (1 << 31) != 0
+    };
+    let since = bf_font::web_fonts_generation();
+    let start = std::time::Instant::now();
+    let mut fonts = Fonts::new(Arc::new(FontDb::default()));
+    fonts.add_font_faces(&rules, loader.clone());
+    // Sin esperar a la red: la de respaldo.
+    assert!(!web(&fonts));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    // Cuando llega, la generación sube y una maqueta nueva usa la fuente web.
+    let now = bf_font::wait_web_fonts_change(since, std::time::Duration::from_secs(20));
+    assert!(now > since);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(1900));
+    let mut fonts = Fonts::new(Arc::new(FontDb::default()));
+    fonts.add_font_faces(&rules, loader);
+    assert!(web(&fonts));
+}

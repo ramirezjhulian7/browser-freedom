@@ -163,6 +163,17 @@ fn resolved(
     if !layout_dependent || pseudo.is_some() || style.display == Display::None {
         return computed;
     }
+    // E2: CSSOM §9, "resolved value": `top`/`right`/`bottom`/`left` solo dan el valor usado
+    // en un elemento posicionado ("if the property applies to a positioned element"); y un
+    // `padding-*` sin porcentaje tiene como valor usado su valor computado. En los dos casos
+    // la respuesta no necesita maquetar (cada maqueta forzada rehace la cascada y la maqueta).
+    let inset = matches!(name, "top" | "right" | "bottom" | "left");
+    if inset && style.position == bf_style::properties::types::Position::Static {
+        return computed;
+    }
+    if name.starts_with("padding-") && !computed.contains('%') {
+        return computed;
+    }
     let tree = current_layout(agent);
     let frags = view::element_fragments(&tree, node.node);
     let Some(f) = frags.first().copied() else {

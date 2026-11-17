@@ -524,3 +524,41 @@ fn draw_image_from_img() {
     assert_eq!(p.px(5, 5), "0,0,255,255");
     assert_eq!(p.px(11, 11), CLEAR);
 }
+
+/// E1: `Path2D` (HTML §4.12.5.1.7): los métodos de trazado en coordenadas de usuario, la
+/// transformación vigente al usarlo en `fill`, los datos de trazado de SVG, `addPath`, `clip`,
+/// `isPointInPath` e `isPointInStroke`.
+#[test]
+fn path2d() {
+    let mut p = Page::new();
+    p.show(
+        "ctx.fillStyle = 'red'; var a = new Path2D(); a.rect(0, 0, 4, 4); \
+         ctx.translate(10, 10); ctx.fill(a); ctx.setTransform(1, 0, 0, 1, 0, 0);",
+    );
+    // El rectángulo se pintó desplazado por la transformación vigente al usarlo.
+    assert_eq!(p.px(11, 11), RED);
+    assert_eq!(p.px(1, 1), CLEAR);
+    // Datos de trazado de SVG (con comandos relativos, H/V, C y Z).
+    p.show("ctx.fill(new Path2D('M0 15 h3 v3 H0 Z'));");
+    assert_eq!(p.px(1, 16), RED);
+    assert_eq!(p.px(5, 16), CLEAR);
+    assert_eq!(
+        p.show(
+            "var b = new Path2D('M2,2 L6,2 L6,6 L2,6 z'); var c2 = new Path2D(b); \
+             var d = new Path2D(); d.addPath(c2, {e: 10}); \
+             var arc = new Path2D('M0 0 A5 5 0 0 1 10 0'); arc.arc(5, 5, 2, 0, Math.PI * 2); \
+             [typeof Path2D, b instanceof Path2D, ctx.isPointInPath(b, 3, 3), \
+              ctx.isPointInPath(b, 9, 9), ctx.isPointInPath(d, 13, 3), ctx.isPointInPath(d, 3, 3), \
+              ctx.isPointInPath(b, 3, 3, 'evenodd'), ctx.isPointInStroke(b, 2, 4), \
+              typeof Path2D.prototype.roundRect, Path2D.length].join()"
+        ),
+        "function,true,true,false,true,false,true,true,function,0"
+    );
+    // `clip(path)`: lo que se pinta después queda dentro.
+    p.show(
+        "var k = new Path2D(); k.rect(0, 0, 2, 20); ctx.save(); ctx.clip(k); \
+         ctx.fillStyle = 'red'; ctx.fillRect(0, 5, 20, 2); ctx.restore();",
+    );
+    assert_eq!(p.px(1, 6), RED);
+    assert_eq!(p.px(5, 6), CLEAR);
+}

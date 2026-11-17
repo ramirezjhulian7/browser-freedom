@@ -9,8 +9,8 @@
 //!   si no es válido, si es una palabra clave global o si usa `var()` (§3.5.1).
 //! - `parseSrc(texto, base)`: el valor de `src` como lista `url:<absoluta>` / `local:<nombre>`
 //!   (con el parser de `@font-face` de `bf-font`).
-//! - `fetchFont(lista)`: descarga (con el cargador de la página, de forma síncrona en la tarea
-//!   del script) la primera fuente de la lista que sea un formato de fuente.
+//! - `fetchFontAsync(lista, callback)`: E2: descarga en un hilo la primera fuente de la lista
+//!   que sea un formato de fuente y llama a `callback(ok)` en una tarea.
 //! - `setFaces(css)`: deja en el documento las caras añadidas al conjunto desde scripts como
 //!   un bloque `@font-face`, marcado con [`bf_style::loader::SCRIPT_FONT_FACES`], entre los
 //!   textos adoptados de la raíz del documento. `document_stylesheets` lo lee, así que la
@@ -19,11 +19,12 @@
 //!
 //! # Cuándo se resuelve `ready`
 //!
-//! Las fuentes de `@font-face` se cargan de forma síncrona en la maqueta que las usa (`Fonts::
-//! load_web`), así que no hay cargas de fondo que esperar: `ready` se resuelve en una tarea
-//! cuando no queda ninguna cara del conjunto cargando y el documento ya disparó `load` (CSS
-//! Font Loading 3 §4.2, "pending on the environment"). La maqueta siguiente, la que se pinta,
-//! ya usa las caras.
+//! `ready` se resuelve en una tarea cuando no queda ninguna cara del conjunto cargando y el
+//! documento ya disparó `load` (CSS Font Loading 3 §4.2, "pending on the environment"). E2: las
+//! caras que carga `FontFace.load()` llegan en segundo plano (`fetchFontAsync`), así que `ready`
+//! espera a que terminen. Las de `@font-face` que pide la maqueta (`Fonts::load_web`) también
+//! van en segundo plano en la ventana del navegador; mientras llegan, el texto usa la fuente de
+//! respaldo y la página se vuelve a pintar al llegar (`cssom::watch_web_fonts`).
 
 use bf_css::syntax::{parse_component_value_list, parse_declaration_list};
 use bf_infra::{ResourceLoader, Url};
@@ -48,7 +49,7 @@ pub fn install(agent: &mut Agent, realm: RealmId) {
         ("parseLonghand", 2, parse_longhand),
         ("parseFont", 1, parse_font),
         ("parseSrc", 2, parse_src),
-        ("fetchFont", 1, fetch_font),
+        ("fetchFontAsync", 2, fetch_font_async),
         ("setFaces", 1, set_faces),
     ];
     for (name, len, f) in fns {
@@ -177,40 +178,69 @@ fn is_font_data(data: &[u8]) -> bool {
     )
 }
 
-/// `fetchFont(lista)`: ¿se puede cargar alguna de las fuentes (`url:`/`local:`)?
-fn fetch_font(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+/// E2: `fetchFontAsync(lista, callback)`: como `fetchFont`, pero la descarga va en un hilo
+/// (`net::spawn_job`; sin red en hilos, aquí mismo) y `callback(ok)` se llama en una tarea de
+/// red. CSS Font Loading 3 §2.2 ("load a font face"): la carga es asíncrona y, al terminar, el
+/// resultado se pone "in a task"; varias caras se descargan a la vez. Antes `FontFace.load()`
+/// descargaba en síncrono en el hilo de la pestaña, una cara tras otra (excalidraw.com quedaba
+/// en blanco). Los bytes quedan en la caché de fuentes del proceso (`bf_font::store_web_font`),
+/// así la maqueta no vuelve a pedir la fuente.
+fn fetch_font_async(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Value::Object(list) = a.arg(0) else {
-        return Ok(Value::Boolean(false));
+        return Ok(Value::Undefined);
     };
     let len = agent.get_str(list, "length")?.as_number().unwrap_or(0.0) as usize;
-    let realm = WebContextHandle::current(agent).realm;
-    // E6: el loader de la ventana (en el navegador no hay `PageResources`).
-    let loader = crate::bom::script::page_loader(agent, realm);
+    let mut items = Vec::with_capacity(len);
     for i in 0..len {
         let item = agent.get_str(list, &i.to_string())?;
-        let item = agent.to_string(&item)?.to_string();
-        if let Some(url) = item.strip_prefix("url:") {
-            let Ok(url) = Url::parse(url, None) else {
-                continue;
-            };
-            // Las URL `data:` no necesitan cargador.
-            // E6: con *destination* `font` (Fetch §2.2.5): contenido mixto y CSP `font-src`.
-            let data = match &loader {
-                Some(l) => l
-                    .load_for(&url, bf_infra::Destination::Font)
-                    .map(|r| r.bytes),
-                None => bf_infra::FileLoader::default().load(&url).map(|r| r.bytes),
-            };
-            if data.is_some_and(|d| is_font_data(&d)) {
-                return Ok(Value::Boolean(true));
-            }
-        } else if let Some(name) = item.strip_prefix("local:")
-            && bf_font::FontDb::system().by_name(name).is_some()
-        {
-            return Ok(Value::Boolean(true));
-        }
+        items.push(agent.to_string(&item)?.to_string());
     }
-    Ok(Value::Boolean(false))
+    let callback = agent.host_pin(a.arg(1));
+    let realm = WebContextHandle::current(agent).realm;
+    let loader = crate::bom::script::page_loader(agent, realm);
+    let job = Box::new(move || {
+        for item in &items {
+            if let Some(url) = item.strip_prefix("url:") {
+                let Ok(url) = Url::parse(url, None) else {
+                    continue;
+                };
+                let data = match &loader {
+                    Some(l) => l
+                        .load_for(&url, bf_infra::Destination::Font)
+                        .map(|r| r.bytes),
+                    None => bf_infra::FileLoader::default().load(&url).map(|r| r.bytes),
+                };
+                if let Some(data) = data.filter(|d| is_font_data(d)) {
+                    bf_font::store_web_font(&url, data);
+                    return Ok(crate::net::NetResponse {
+                        url_list: vec![url],
+                        status: 200,
+                        status_text: String::new(),
+                        headers: crate::net::headers::HeaderList(Vec::new()),
+                        body: Vec::new(),
+                    });
+                }
+            } else if let Some(name) = item.strip_prefix("local:")
+                && bf_font::FontDb::system().by_name(name).is_some()
+            {
+                return Ok(crate::net::NetResponse {
+                    url_list: Vec::new(),
+                    status: 200,
+                    status_text: String::new(),
+                    headers: crate::net::headers::HeaderList(Vec::new()),
+                    body: Vec::new(),
+                });
+            }
+        }
+        Err("The font could not be loaded.".to_owned())
+    });
+    let done = Box::new(move |agent: &mut Agent, r: crate::net::NetResult| {
+        let cb = agent.host_pinned(callback).unwrap_or(Value::Undefined);
+        agent.host_unpin(callback);
+        let _ = agent.call(&cb, Value::Undefined, &[Value::Boolean(r.is_ok())]);
+    });
+    crate::net::spawn_job(agent, realm, job, done);
+    Ok(Value::Undefined)
 }
 
 /// `setFaces(css)`: el bloque `@font-face` de las caras añadidas desde scripts (vacío: ninguna).
