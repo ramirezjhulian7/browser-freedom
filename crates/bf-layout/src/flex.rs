@@ -349,7 +349,8 @@ impl<'a> Layout<'a> {
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
-        self.content_height_memo.push(std::collections::HashMap::new());
+        self.content_height_memo
+            .push(std::collections::HashMap::new());
         let r = self.flex_layout_inner(container, cb);
         self.content_height_memo.pop();
         r
