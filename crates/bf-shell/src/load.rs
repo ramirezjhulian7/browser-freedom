@@ -215,6 +215,22 @@ impl ResourceLoader for CachedLoader {
         self.load_as(&url, Some(destination))
     }
 
+    /// E3: un script con el `nonce` y los metadatos de parser de sus opciones de fetch (los
+    /// módulos que importa otro script los heredan, HTML §8.1.5.5): CSP 3 §6.7.1.1.
+    fn load_script(
+        &self,
+        url: &Url,
+        nonce: Option<&str>,
+        parser_inserted: bool,
+    ) -> Option<Resource> {
+        let destination = bf_infra::Destination::Script;
+        let url = match self.security() {
+            Some(p) => p.check_request_by(url, destination, nonce, parser_inserted)?,
+            None => url.clone(),
+        };
+        self.load_as(&url, Some(destination))
+    }
+
     /// E2: la imagen que ya descargó el motor web (un `<img>`, HTML §4.8.4.3.5): el pintado
     /// la toma de aquí en lugar de pedirla otra vez (las `loading=lazy`, §4.8.4.3.9, las pinta
     /// solo cuando el motor ya las tiene).
@@ -600,6 +616,13 @@ pub fn fetch_document_with(
         let (text, enc) = encoding::decode(&response.body, enc);
         let doc = match engine {
             Some((engine, env)) => {
+                // E3: las hojas y los scripts del documento se piden en paralelo mientras el
+                // parser avanza (HTML §13.2.8, `preload::speculative_fetch`).
+                crate::preload::speculative_fetch(
+                    loader.clone(),
+                    text.clone(),
+                    response.url.clone(),
+                );
                 engine.set_navigation_policies(
                     response.headers.get("cross-origin-opener-policy"),
                     response.headers.get("cross-origin-embedder-policy"),
@@ -1645,10 +1668,11 @@ mod shared_requests {
 /// Loading 3 §2.2) descarga con el loader de la ventana, también desde un marco. Antes buscaba
 /// solo `PageResources`, que existe en el runner de testharness pero no en el navegador: la
 /// fuente fallaba con `NetworkError` (el embed de YouTube de asimetrix.co dejaba dos promesas
-/// rechazadas). Las hojas de `<link>` del CSSOM tienen el mismo problema (`error` en vez de
-/// `load`, `cssRules` vacío) y siguen así: arreglarlo igual sube la primera pintura de
-/// Wikipedia unos 70 ms, porque el CSSOM parsea otra vez todas las hojas (ver
-/// `docs/pendiente/mac/e6.md`). El test lo deja anotado.
+/// rechazadas). Las hojas de `<link>` del CSSOM tenían el mismo problema (`error` en vez de
+/// `load`, `cssRules` vacío). E2 lo arregló con el mismo loader (`bf-web/src/cssom/sheets.rs`,
+/// `load_linked_sheet`): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y la hoja sale
+/// de `bf_style::sheet_cache`, ya parseada por el pintado, sin el coste en la primera pintura
+/// que había medido E6 (`docs/pendiente/mac/e2.md`, "Sesión nueva, ronda 1").
 #[cfg(test)]
 mod page_loader_pages {
     use super::*;

@@ -182,6 +182,9 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
                 agent.current_realm = realm;
                 match crate::bom::script::fetch_script(agent, realm, &url, charset) {
                     Some((source, final_url)) => {
+                        // E3: las opciones de fetch del script (no lo insertó el parser), para
+                        // lo que importe (HTML §8.1.5.5).
+                        crate::bom::script::note_script_options(&final_url, &nonce, false);
                         execute(agent, doc, el, &source, &final_url, module, true);
                         fire_simple(agent, doc, el, "load");
                     }
@@ -199,15 +202,18 @@ fn prepare_script(agent: &mut Agent, doc: DocIndex, el: NodeId) {
     let source = info.source_text.to_string();
     // E6: CSP para los scripts en línea (`'unsafe-inline'`, `nonce` o hash; `'strict-dynamic'`
     // permite los que inserta un script).
+    let nonce = info.nonce.to_string();
     if !crate::security::allow_inserted_inline_script(
         agent,
         realm,
-        Some(&info.nonce.to_string()),
+        Some(&nonce),
         &source,
         Some(crate::NodeRef::new(doc, el)),
     ) {
         return;
     }
+    // E3: las opciones de fetch del script (no lo insertó el parser), para lo que importe.
+    crate::bom::script::note_script_options(&name, &nonce, false);
     if module {
         if has_env {
             // Un módulo inline está listo cuando carga su grafo: se ejecuta en una tarea.

@@ -153,8 +153,12 @@ Wikipedia, Hacker News, example.com) en una ventana navegable con barra de URL, 
 historial, scroll y zoom.
 
 Las **fases 2 a 4** cumplen 43 de sus 45 criterios. Faltan dos:
-- `html/syntax/parsing` sin ningún fallo; está en 99.9 %.
-- Los reftests de css-flexbox con palabras clave de tamaño; pasan 86 de 108.
+- `html/syntax/parsing` sin ningún fallo; está en 8164 / 8166, y los 2 que faltan no se pueden
+  cumplir.
+- Los reftests de css-flexbox con palabras clave de tamaño; pasan 95 de 107, y 8 de los que
+  faltan son de CSS Flexbox 2, un borrador.
+
+Las dos esperan una decisión del usuario (sacar del criterio lo que no se puede cumplir).
 
 Lo que ya está:
 - El motor de JavaScript (`bf-js`) pasa el 98.8 % de test262 y ejecuta los scripts de las
@@ -165,15 +169,16 @@ Lo que ya está:
   animaciones de CSS.
 - HTTP/2 con caché HTTP en disco, SVG y WebP, y scroll containers con `sticky`.
 
-La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está a medias:
+La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) cumple 4 de sus 6 criterios;
+faltan el lector de pantalla y el fuzzer de IPC, que esperan una decisión del usuario:
 - el rol, el nombre y los estados de cada elemento y el árbol de accesibilidad ya se
   calculan, pero no se exponen al sistema;
 - CSP (también `img-src` y el evento `securitypolicyviolation`) y contenido mixto ya se
   aplican;
 - Wikipedia se desplaza a 60 fps: 3.7-4.0 ms por cuadro a densidad 1 y 5.2-6.1 ms a
   densidad 2 (meta: 16.7 ms; criterio cumplido);
-- la primera pintura de Wikipedia tarda 542-665 ms (meta: menos de 500 ms); la red sola se
-  lleva unos 250-315;
+- la primera pintura de Wikipedia tarda 328-363 ms (meta: menos de 500 ms; criterio
+  cumplido); la red se lleva 250-277 y el resto unos 80-90;
 - faltan los procesos separados con sandbox.
 
 Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en
@@ -191,7 +196,7 @@ Sus recuentos son los de la última corrida con resumen y no se han vuelto a ano
 |---|---|---|---|---|
 | Tokenizador HTML | HTML §13.2.5 | html5lib-tests (tokenizer) | **7045** pasan, 0 fallan (3 *stale*) | `cargo test -p bf-html --test html5lib_tokenizer` |
 | Tree construction | HTML §13.2.6, §13.4 | árboles de WPT `html/syntax/parsing`, sin JavaScript | **3900** pasan, 0 fallan (4 omitidos) | [`docs/wpt-status.md`](docs/wpt-status.md), "E3, ronda 6" |
-| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8155 / 8166** subtests (99.9 %) | [`docs/roadmap.md`](docs/roadmap.md), 2.3 |
+| Parser con scripts | HTML §13.2, `document.write` | WPT `html/syntax/parsing` (testharness.js) | **8164 / 8166** subtests | [`docs/roadmap.md`](docs/roadmap.md), 2.3 |
 | CSS Syntax | CSS Syntax 3 | css-parsing-tests | **253** pasan, 0 fallan (24 *stale*) | `cargo test -p bf-css --test css_parsing_tests` |
 | URL e IDNA | URL Standard, UTS #46 | WPT `url/resources` | **1444** pasan, 0 fallan; los 7 casos de `percent-encoding.json` también pasan (Mac) | `cargo test -p bf-url --test wpt_url`; [`docs/roadmap.md`](docs/roadmap.md), 3.5 |
 | Layout y pintura | CSS 2.2, Backgrounds 3, Flexbox 1, Grid 2, Tables 3, Transforms, Writing Modes, SVG 2… | WPT reftests (30 grupos) | **9935 / 12 548 ejecutables (79.2 %)** | [`docs/wpt-status.md`](docs/wpt-status.md), "Reftests en macOS" |
@@ -464,6 +469,8 @@ freedom dump-layout pagina.html --width 800 --system-fonts
 
 # La lógica de la ventana sin abrir una: un PNG por paso (con el cromo) y el estado en stdout
 freedom session about:home "type:google.com" "key:enter" "key:mod+i" "key:f12"     "move:600,300" -o sesion
+# `dump` deja además sesion-NN.dom.html, sesion-NN.layout.txt y sesion-NN.console.txt
+freedom session https://es.wikipedia.org/wiki/Navegador_web wait dump -o /tmp/w
 ```
 
 ### La interfaz

@@ -3,8 +3,9 @@
 Lo que falla al navegar con Freedom por sitios reales, para priorizar el trabajo. Cada fila
 dice qué se vio, dónde, y si quedó verificado con una página de prueba aislada
 (`freedom session` sobre `master` en `08ff44e`, 2026-10-21) o si la causa todavía hay que
-investigarla. Al día con `master` el 2026-11-13: lo que sigue en "Funciones que faltan" se
-comprobó en el código de `bf-web`, sin volver a abrir los sitios.
+investigarla. Al día con `master` el 2026-11-17. El barrido de 27 sitios públicos del
+2026-11-17, con lo que le falta a cada uno y las carencias ordenadas por número de sitios, está
+en [`pendiente/mac/barrido-sitios.md`](pendiente/mac/barrido-sitios.md).
 
 ## Funciones que faltan (verificado)
 
@@ -60,6 +61,17 @@ Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
     después de la primera pintura, como pide HTML §8.1.7.3.
   - una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
     una sola vez aunque la respuesta no sea cacheable (E6, en `master` desde `84e2dd0`).
+
+Resueltos el 2026-11-17 (en `master`):
+- **Hojas enlazadas en la ventana.** `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
+  `document.styleSheets` tiene sus reglas; antes disparaba `error` (E2, `489e6f8`).
+- **Pistas de presentación contra `@layer`.** Una regla de autor en una capa les gana (CSS
+  Cascade 5 §6.5): el logo gigante de `asimetrix.co`. Las imágenes con `width` y `height`
+  reservan su hueco con esa proporción antes de llegar (HTML §15.4.3) (E2, `489e6f8`).
+- **`TypeError: Illegal invocation`** al quitar oyentes de `performance` y
+  `screen.orientation` (E1, `1ee12fa`).
+- **Un `ShadowRealm` tumbaba la pestaña** (`el realm no tiene WebContext`): ahora no tiene
+  las interfaces del host. Una pestaña que falla dice por qué (E1, `1ee12fa` y `f9dddce`).
   - Falta: las perezosas dentro de un `<iframe>` y dentro de contenedores con `overflow`.
 - **CSS Font Loading** (`document.fonts`, `FontFace`, `FontFaceSet`): antes `document.fonts`
   no existía y `document.fonts.ready` lanzaba `TypeError` (E5, `pendiente/mac/e5.md`, ronda 7;
@@ -116,7 +128,7 @@ protegida por ellas en Freedom:
 | Sitio | Lo que se ve | Pista |
 |---|---|---|
 | Google (búsquedas) | Responde `429 Too Many Requests` y redirige a `/sorry` con reCAPTCHA; el reCAPTCHA falla con `TypeError: Type error.` dentro de `recaptcha__es_419.js`. Buscar desde la barra queda inutilizable. | Google es el buscador por defecto: es lo más visible para quien usa Freedom. Ver si el 429 depende del `User-Agent` nuevo, de las cabeceras (`Sec-CH-UA`, `Accept`) o del ritmo de peticiones, y qué operación falla en el reCAPTCHA. |
-| Aplicación de `app.asimetrix.co` (`/ASIMETRIX`, build `ce1e596`) | La pestaña se cae: "Esta página falló", con el detalle `el realm no tiene WebContext`. En la consola, `ChunkLoadError: Loading CSS chunk 9298 failed`, `TypeError: Illegal invocation` y dos promesas rechazadas sin manejar. | Tres fallos, detallados en `RETOMAR-EN-MAC.md`, sección 9c. El del chunk CSS coincide con el tropiezo 3b de `pendiente/mac/e6.md` (los `<link rel=stylesheet>` disparan `error` en la ventana). |
+| Aplicación de `app.asimetrix.co` (`/ASIMETRIX`, build `ce1e596`, con sesión iniciada) | La pestaña se cae: "Esta página falló", con el detalle `el realm no tiene WebContext`. En la consola, `ChunkLoadError: Loading CSS chunk 9298 failed`, `TypeError: Illegal invocation` y dos promesas rechazadas sin manejar. | Sin sesión no se reproduce la caída ni el `ChunkLoadError`. Arreglados desde entonces: el `Illegal invocation`, un `ShadowRealm` que tumbaba la pestaña con ese mismo mensaje y las hojas enlazadas que disparaban `error` (ver arriba). Falta que el usuario lo pruebe con su sesión (`RETOMAR-EN-MAC.md`, sección 9b). |
 | Aplicación Next.js (asimetrix.co) | `TypeError: Cannot read properties of undefined (reading 'dplId')` al registrar los chunks de Turbopack. | Algún global o propiedad que el runtime de Next.js espera y no existe. |
 | Aplicación Vite (emmavet.com.co) | `TypeError: Type error.` en la línea 1 del módulo principal: la aplicación no arranca. | Falla al evaluar un módulo ES; el mensaje no dice qué operación. |
 | Sitio de videos | `TypeError: Cannot read properties of undefined (reading 'protocol')` en su script de cabecera. | Algo devuelve `undefined` donde el sitio espera un objeto con `protocol` (¿`<a>.protocol`, `URL` de un recurso, `location` de un iframe?). |
@@ -131,6 +143,5 @@ a probar esos sitios para ver el mensaje real.
 
 ## Pruebas que fallan en `master`
 
-- Ninguna: `master` (`21ea345`) pasa la verificación completa en el Mac: formato, clippy y
-  126 grupos de tests (informe del planificador del 2026-11-13, ronda 3 del ciclo de cierre). La que estaba anotada aquí,
-  `bf-web/tests/cssom.rs::snapshot_from_the_shell_is_used` (`devicePixelRatio`), ya pasa.
+- Ninguna: `master` (`489e6f8`) pasa la verificación completa en el Mac: formato, clippy y
+  141 grupos de tests (informe del planificador del 2026-11-17, ronda 4).

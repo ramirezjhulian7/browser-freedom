@@ -25,18 +25,23 @@ mediciones anteriores, con su fecha).
 
 Un criterio sin medir cuenta como no cumplido. Cada fase pesa igual en el total. La fase 1
 está cerrada y no entra en la cuenta. Con ella al 100 %, el total sería (100 + 94.7 + 94.1 +
-100 + 50) / 5 = **87.8 %**.
+100 + 66.7) / 5 = **91.1 %**.
 
 | Fase | Criterios | Cumplidos | Sin medir | Avance |
 |---|---:|---:|---:|---:|
 | 2: JavaScript y la plataforma web dinámica | 19 | 18 | 0 | 94.7 % |
 | 3: completar CSS y el texto | 17 | 16 | 0 | 94.1 % |
 | 4: red, medios y documentos | 9 | 9 | 0 | 100.0 % |
-| 5: navegador de uso diario | 6 | 3 | 0 | 50.0 % |
-| **Total** (media de las fases) | 51 | 46 | 0 | **84.7 %** |
+| 5: navegador de uso diario | 6 | 4 | 0 | 66.7 % |
+| **Total** (media de las fases) | 51 | 47 | 0 | **88.9 %** |
 
-Cuenta: (94.7 + 94.1 + 100 + 50) / 4 = 84.7 %; cumplidos 18 + 16 + 9 + 3 = 46 de
+Cuenta: (94.7 + 94.1 + 100 + 66.7) / 4 = 88.9 %; cumplidos 18 + 16 + 9 + 4 = 47 de
 19 + 17 + 9 + 6 = 51.
+
+Cambios respecto de la tabla del cierre del 2026-11-13 (84.7 %):
+- **Fase 5, primera pintura de Wikipedia < 500 ms**: cumplido en la medida del planificador
+  sobre `master` `489e6f8` (release, caché caliente, siete corridas seguidas): 328-363 ms. Ver
+  el bloque **Estado** de la fase 5.
 
 Cambios respecto de la tabla del cierre del ciclo anterior (80.5 %):
 - **Fase 5, 60 fps al desplazar Wikipedia**: cumplido en la medida del planificador sobre
@@ -58,17 +63,16 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 
 | Apartado | Criterio | Cifra actual | Meta | Fuente |
 |---|---|---|---|---|
-| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8159 / 8166 subtests (99.9 %), 236 documentos; de los 7 que quedan, 5 piden que el parser ceda el control en mitad de un paso y 2 no se pueden cumplir | 0 fallos | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 5" |
+| 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8164 / 8166 subtests en `master`; los 2 que quedan no se pueden cumplir (ver "Decisiones pendientes del usuario") | 0 fallos | `pendiente/mac/e1.md`, "Sesión nueva, ronda 1" (rama del parser, integrada en `1ee12fa`) |
 | 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 95 / 107 en `master` (8 de los 12 que faltan son de CSS Flexbox 2) | pasan | `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3" |
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
-| 5 | Primera pintura de Wikipedia en release | `master` `7be3431`: 526-604 ms, mediana 577 (carga 11). Con la precarga de hojas, scripts y ventana (rama `army/e3`, sin integrar): 446-554 ms, mediana 491, 3 de 5 corridas por debajo de la meta; con carga 25, mediana 747. La red sola, 260-265 ms | < 500 ms | `rendimiento.md`, "Adelantar trabajo a la espera de la red"; desglose en el bloque **Estado** de la fase 5 |
 
 El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md).
 
 ## Decisiones pendientes del usuario
 
-Cinco puntos no avanzan sin una decisión que no le toca a ningún ejecutor:
+Cuatro puntos no avanzan sin una decisión que no le toca a ningún ejecutor:
 - **Lector de pantalla (fase 5).** El motor ya calcula rol y nombre accesibles, pero un lector
   de pantalla de macOS solo lee lo que se expone por `NSAccessibility`. Eso pide FFI con
   Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo.
@@ -82,13 +86,9 @@ Cinco puntos no avanzan sin una decisión que no le toca a ningún ejecutor:
   `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
   `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
   no dispara. O se sacan del criterio o 2.3 no puede llegar a 0 fallos.
-- **Primera pintura, el suelo de la red.** El documento de Wikipedia trae `max-age=0,
-  must-revalidate` y hay que validarlo en cada visita. En un proceso nuevo eso son tres viajes
-  de ida y vuelta (TCP, TLS 1.3 y el 304), unos 115 ms cada uno en esta red: un suelo de unos
-  345 ms antes de parsear nada (`pendiente/mac/e6.md`, "Ciclo de cierre, ronda 5"). Bajarlo
-  pide reanudar TLS con 0-RTT (RFC 8446 §2.3), guardando los *session tickets* entre procesos.
-  O se acepta, o se mide la primera pintura sin la red (con el documento ya validado), o se
-  cambia la meta.
+
+La del suelo de red de la primera pintura ya no hace falta: el criterio se cumple con la red
+incluida (fase 5, **Estado**).
 
 Los criterios cumplidos están en el bloque **Estado** de cada apartado. Tres de ellos se apoyan
 en capturas y no en una suite: Hacker News con columnas (3.1), los iconos y la torta de
@@ -198,8 +198,12 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   cumplida), `dom/events` **80.2 %** (734 / 915; meta ≥ 80 % cumplida), `idlharness` de DOM
   **86.9 %** (2058 / 2369) y de HTML **80.0 %** (5920 / 7398) (meta ≥ 80 % cumplida). Más
   allá del apartado (Mac, 2026-11-12): Shadow DOM (`shadow-dom/` 97.3 %), custom elements
-  (`custom-elements/` 83.5 %), `XMLSerializer` (E1, `bf-dom/src/{shadow,custom}.rs`,
-  `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
+  (`custom-elements/` 3556 / 4172, 85.2 %, E1, `0363c59`), `XMLSerializer` (E1,
+  `bf-dom/src/{shadow,custom}.rs`, `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
+- **Hojas enlazadas en la ventana** (E2, en `master` desde `489e6f8`; `pendiente/mac/e2.md`,
+  "Sesión nueva, ronda 1"): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
+  `document.styleSheets` tiene sus reglas. La hoja sale de `bf_style::sheet_cache`, ya
+  parseada por el pintado, y las `cssRules` se crean al pedirlas.
 - **Parcial**: `domparsing/` 23.9 % (Mac; sin `tentative/` 42.6 %): faltan los métodos
   posicionales y la API Sanitizer.
 - **Sin medir**: re-estilo y re-layout incrementales (no hay cifra). Los bindings se escriben
@@ -264,20 +268,19 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   - En la ronda 6 de E6, sobre `master`, los reftests con JavaScript ejecutados subieron a
     387 / 402 (96.3 %) (`pendiente/mac/e6.md`, ronda 6). La cifra combinada no se volvió a
     medir.
-- **Parcial**: `html/syntax/parsing` **8159 / 8166 subtests (99.9 %)** en 236 documentos (Mac,
-  2026-11-13, E1, `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 5"; 8155 en la ronda 2 de
-  E3). Las variantes `?file=…` de `html5lib_url`, `html5lib_write` y `html5lib_write_single`
-  pasan todas (5423 / 5423), y el árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan.
-  Meta: 0 fallos. Quedan 7:
-  - Construcción síncrona de custom elements y los *children changed steps* de un `script` en
-    mitad de un token, como `foster-parenting-moved-table` (5). Necesitan que el tree builder
-    pueda llamar al host en mitad de un paso; hoy solo lo hace entre tokens.
-  - `DOMContentLoaded-defer.html` (1): pide lo contrario que
-    `DOMContentLoaded-defer-task-order.tentative.html`, que pasa.
-  - `adoption-agency-reparenting-pagehide.tentative.html` (1): espera un `pagehide` que el
-    estándar no dispara.
-  - Estos dos últimos no se pueden cumplir; sacarlos del criterio es una decisión pendiente
-    (ver "Decisiones pendientes del usuario").
+- **Parcial**: `html/syntax/parsing` **8164 / 8166 subtests** (Mac, E1, release de
+  `0363c59`; `pendiente/mac/e1.md`, "Sesión nueva, ronda 1"; en `master` desde `1ee12fa`).
+  Las variantes `?file=…` de `html5lib_url`, `html5lib_write` y `html5lib_write_single` pasan
+  todas, y el árbol de html5lib sin JS sigue en 3900 pasan, 0 fallan. Meta: 0 fallos.
+  - Pasan los 5 que pedían que el tree builder llamara al host en mitad de un paso
+    (construcción síncrona de custom elements y los *children changed steps* de un `script`
+    en mitad de un token, como `foster-parenting-moved-table`): el parser cede al host en
+    mitad de un token (E1).
+  - Quedan 2, que no se pueden cumplir: `DOMContentLoaded-defer.html` pide lo contrario que
+    `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
+    `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
+    no dispara. Sacarlos del criterio es una decisión pendiente (ver "Decisiones pendientes
+    del usuario").
   - Los 4 de nodos que un script lleva a otro documento ya pasan: el parser sigue a los nodos
     adoptados (E1, `bf-web/src/dom/adopt.rs`).
 - **Falta**: `TODO(event-loop)` sigue en `bf-dom/src/forms.rs`. En el runner de reftests con
@@ -435,6 +438,10 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   (E5, `bf-layout/src/{block,flex,grid}.rs`). `css/css-sizing` **67.6 %** (355 / 525, Mac,
   2026-11-12, `REFTEST_GROUPS=css/css-sizing`: no está en `GROUPS`; meta cumplida).
   `css/selectors/of-type-selectors.xhtml` **pasa** (Mac, 2026-11-12; criterio cumplido).
+- **Imágenes con `width` y `height`** (E2, en `master` desde `489e6f8`): dan `aspect-ratio:
+  auto w / h` (HTML §15.4.3) y reservan su hueco antes de llegar. Las pistas de presentación
+  quedan por debajo de todas las capas de autor (CSS Cascade 5 §6.5): una regla en `@layer`
+  les gana, como en `asimetrix.co` (`pendiente/mac/e2.md`, "Sesión nueva, ronda 1").
 - **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **95 / 107** en
   `master` (Mac, 2026-11-13, E5, `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3"; meta: que
   pasen todos; 86 / 108 en la ronda 6 de E5, 74 / 108 antes; el 108 contaba un test que hoy no
@@ -587,7 +594,7 @@ y los list box se desplazan con la rueda.
   - Aceptación: 60 fps al desplazar Wikipedia; primera pintura de Wikipedia < 500 ms en
     release.
 
-**Estado** (3 de 6 criterios cumplidos):
+**Estado** (4 de 6 criterios cumplidos):
 - **Accesibilidad** (E1, en `master`; `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" y
   "Ciclo de cierre, ronda 3"):
   - El motor calcula el rol y el nombre accesible de cada elemento (HTML-AAM, ARIA 1.2,
@@ -655,45 +662,42 @@ y los list box se desplazan con la rueda.
       (E5, merge `f7fd9e2`: la maqueta de Wikipedia, de 192 a 65 ms); precarga durante la
       validación del documento, escrituras de la caché fuera del camino y peticiones de
       imagen simultáneas compartidas (E6, merge `84e2dd0`).
+    - desde el 2026-11-17: la precarga parsea hojas, compila scripts y la ventana mientras se
+      valida el documento (E3, `ce900ef`).
   - **Desplazamiento: 60 fps, criterio cumplido.** Medida del planificador sobre `276fa07`
     (release, Wikipedia `Navegador_web`, caché caliente, ejecutores casi parados;
     `scrollbench:120:40`, meta 16.7 ms por cuadro):
     - densidad 1: mediana 3.7-4.0 ms;
     - densidad 2: mediana 5.2-6.1 ms, p95 9.4-11.2 ms; 2-3 cuadros de 120 pasan de 16.7 ms.
     - Antes: 8.0 y 17.7 ms (E4, `pendiente/mac/e4.md`, "Cierre, ronda 3", carga 15-36).
-  - **Primera pintura de Wikipedia, 2026-11-17** (meta < 500 ms; A/B de 5 corridas alternadas
-    con traza, caché caliente, carga 11; `rendimiento.md`, "Adelantar trabajo a la espera de la
-    red"):
-    - `master` `7be3431`: mediana 577 ms (mínimo 526);
-    - con la precarga que parsea las hojas, compila los scripts y la ventana mientras se valida
-      el documento (rama `army/e3`, sin integrar): mediana 491 ms (mínimo 446), 3 de 5
-      corridas por debajo de 500. Con carga 25 la mediana sube a 747: el margen es pequeño.
-    - Medianas de después: red 265, parser 38, scripts 21, cascada 37, maqueta 61, lista 13,
-      raster 19, ventana 17, hojas 8. Fuera de la red quedan unos 225 ms de los 235 que deja
-      la meta.
-  - Medida anterior, **542-665 ms** en cinco corridas (`276fa07`, medida del planificador).
-    Desglose de dos corridas con traza:
+  - **Primera pintura de Wikipedia: 328-363 ms, criterio cumplido.** Medida del planificador
+    sobre `master` `489e6f8` (release, caché caliente, siete corridas seguidas de `freedom
+    session https://es.wikipedia.org/wiki/Navegador_web` con `BF_TRACE=1`; meta < 500 ms):
 
-    | Parte | Corrida 1 (ms) | Corrida 2 (ms) |
-    |---|---:|---:|
-    | Red y caché | 247 | 315 |
-    | Parseo | 54 | 62 |
-    | Scripts | 22 | 27 |
-    | Hojas | 23 | 27 |
-    | Cascada | 90 | 126 |
-    | Maqueta | 85 | 55 |
-    | Lista de pintado | 15 | 10 |
-    | Raster | 27 | 21 |
+    | Parte | ms |
+    |---|---:|
+    | Red y caché | 250-277 |
+    | Parseo | 14-32 |
+    | Scripts | 7-12 |
+    | Hojas | 3-5 |
+    | Cascada | 13-15 |
+    | Maqueta | 16-19 |
+    | Lista de pintado | 3 |
 
-    Dentro del parseo, instalar la ventana cuesta 39-42 ms y el parser 36-45 ms. La red no
-    baja de unos 250 ms, así que el resto tiene que caber en unos 200. Las dos vías del ciclo
-    nuevo: abaratar cascada y maqueta, y adelantar a la espera de la red lo que no depende de
-    la respuesta (instalar la ventana, parsear las hojas en caché, compilar los scripts en
-    caché). La segunda está hecha en la rama `army/e3` (2026-11-17, arriba).
+    - La red es tres cuartas partes; parseo, estilos, maqueta y pintado suman unos 80-90 ms.
+    - Lo que lo hizo posible, además de lo de arriba: la precarga (E3, integrada en
+      `ce900ef`). Mientras se valida el documento, parsea las hojas guardadas en
+      `bf_style::sheet_cache`, compila los scripts clásicos en `bf_js::code_cache` y compila el
+      JavaScript propio de la ventana (`rendimiento.md`, "Adelantar trabajo a la espera de la
+      red").
+    - Con la máquina cargada sube: E3 midió 446-554 ms (mediana 491) con carga 11 y una
+      mediana de 747 ms con carga 25, mientras otros ejecutores compilaban.
+  - Medida anterior, 542-665 ms en cinco corridas (`276fa07`, medida del planificador), con la
+    cascada en 90-126 ms y la maqueta en 55-85 ms.
   - **Suelo de red**: el documento se valida en cada visita (`max-age=0, must-revalidate`) y
     un proceso nuevo no tiene conexión abierta. TCP, TLS 1.3 y el 304 cuestan un viaje de ida
-    y vuelta cada uno, unos 115 ms en esta red: unos 345 ms antes de parsear (E6). Qué hacer
-    con eso es una decisión pendiente.
+    y vuelta cada uno (E6). Bajarlo pediría reanudar TLS con 0-RTT (RFC 8446 §2.3); ya no hace
+    falta para el criterio.
   - Falta la GPU.
 
 ---

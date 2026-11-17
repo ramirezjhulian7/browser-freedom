@@ -48,6 +48,20 @@ pub trait ResourceLoader: Send + Sync {
         self.load(url)
     }
 
+    /// E3: un script, con el `nonce` y los metadatos de parser de sus opciones de fetch
+    /// (HTML §8.1.4.1, *script fetch options*): CSP 3 §6.7.1.1 lo permite por el nonce, y con
+    /// `'strict-dynamic'` si no lo insertó el parser. Por defecto, `load_for` con
+    /// [`Destination::Script`].
+    fn load_script(
+        &self,
+        url: &Url,
+        nonce: Option<&str>,
+        parser_inserted: bool,
+    ) -> Option<Resource> {
+        let _ = (nonce, parser_inserted);
+        self.load_for(url, Destination::Script)
+    }
+
     /// E2: `resource` es el contenido de `url`, obtenido por otro camino (el motor web, que
     /// pidió la imagen de un `<img>` con su propia red). Un loader con caché lo guarda para
     /// que quien lo pida después (el pintado) no lo descargue otra vez; por defecto, nada.
@@ -81,6 +95,15 @@ impl ResourceLoader for ForDestination {
 
     fn load_for(&self, url: &Url, destination: Destination) -> Option<Resource> {
         self.inner.load_for(url, destination)
+    }
+
+    fn load_script(
+        &self,
+        url: &Url,
+        nonce: Option<&str>,
+        parser_inserted: bool,
+    ) -> Option<Resource> {
+        self.inner.load_script(url, nonce, parser_inserted)
     }
 
     fn remember(&self, url: &Url, resource: &Resource) {

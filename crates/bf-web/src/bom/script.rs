@@ -66,6 +66,46 @@ impl ImportMap {
     }
 }
 
+/// E3: las opciones de fetch de un script que corrió (HTML §8.1.4.1, *script fetch options*)
+/// que usa la CSP: el nonce criptográfico y si lo insertó el parser.
+#[derive(Debug, Clone)]
+struct FetchOptions {
+    nonce: String,
+    parser_inserted: bool,
+}
+
+/// E3: más que esto y se olvidan (cada pestaña es un hilo y su agente vive entre navegaciones).
+const MAX_SCRIPT_OPTIONS: usize = 4096;
+
+thread_local! {
+    /// E3: las opciones de fetch de los scripts y módulos de este hilo, por la URL con que se
+    /// evalúan (la que el motor da como *referrer* al importar). Los marcos comparten el
+    /// cargador de módulos de la pestaña, así que van todos juntos.
+    static SCRIPT_OPTIONS: RefCell<HashMap<String, FetchOptions>> = RefCell::new(HashMap::new());
+}
+
+/// E3: anota las opciones de fetch del script que se evalúa con el nombre `url`, para los
+/// módulos que importe (ver [`WebModuleLoader::load_from`]).
+pub(crate) fn note_script_options(url: &str, nonce: &str, parser_inserted: bool) {
+    SCRIPT_OPTIONS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_SCRIPT_OPTIONS && !m.contains_key(url) {
+            m.clear();
+        }
+        m.insert(
+            url.to_owned(),
+            FetchOptions {
+                nonce: nonce.to_owned(),
+                parser_inserted,
+            },
+        );
+    });
+}
+
+fn script_options(url: &str) -> Option<FetchOptions> {
+    SCRIPT_OPTIONS.with(|m| m.borrow().get(url).cloned())
+}
+
 /// El cargador de módulos del documento: resuelve con el import map y la URL del que importa
 /// (HTML §8.1.5.5 "resolve a module specifier") y lee con el `ResourceLoader`.
 pub struct WebModuleLoader {
@@ -103,6 +143,24 @@ impl ModuleLoader for WebModuleLoader {
         let res = self
             .loader
             .load_for(&parsed, bf_infra::Destination::Script)
+            .ok_or_else(|| format!("no se pudo cargar {url}"))?;
+        Ok(encoding::decode(&res.bytes, Encoding::Utf8).0)
+    }
+
+    /// E3: un módulo que importa el script o módulo `referrer` se pide con las opciones de
+    /// este (HTML §8.1.5.5, *descendant script fetch options*: el mismo nonce y los mismos
+    /// metadatos de parser), que la CSP usa (CSP 3 §6.7.1.1); el módulo las hereda para sus
+    /// propios imports. Sin opciones conocidas de `referrer`, como [`ModuleLoader::load`].
+    fn load_from(&self, url: &str, referrer: Option<&str>) -> Result<String, String> {
+        let Some(options) = referrer.and_then(script_options) else {
+            return self.load(url);
+        };
+        note_script_options(url, &options.nonce, options.parser_inserted);
+        let parsed = Url::parse(url, None).map_err(|_| format!("URL inválida: {url}"))?;
+        let nonce = (!options.nonce.is_empty()).then_some(options.nonce.as_str());
+        let res = self
+            .loader
+            .load_script(&parsed, nonce, options.parser_inserted)
             .ok_or_else(|| format!("no se pudo cargar {url}"))?;
         Ok(encoding::decode(&res.bytes, Encoding::Utf8).0)
     }
@@ -819,19 +877,31 @@ impl bf_html::ScriptHost for WebScripts<'_> {
         put_parser(self.agent, self.realm, parser);
         // E1: los custom elements que el parser insertó se actualizan antes del script.
         crate::html::custom_elements::process_reactions(self.agent);
+        // E3: las opciones de fetch del script (insertado por el parser), para lo que importe.
+        let nonce = info.nonce.to_string();
         match info.type_ {
             ScriptType::Classic => match fetched {
-                Some(f) => self.run_classic(&f.source, &f.url),
-                None => self.run_classic(info.source_text.as_lossy_str(), &page),
+                Some(f) => {
+                    note_script_options(&f.url, &nonce, true);
+                    self.run_classic(&f.source, &f.url);
+                }
+                None => {
+                    note_script_options(&page, &nonce, true);
+                    self.run_classic(info.source_text.as_lossy_str(), &page);
+                }
             },
             ScriptType::Module => match fetched {
-                Some(f) => self.run_module(&f.source, &f.url),
+                Some(f) => {
+                    note_script_options(&f.url, &nonce, true);
+                    self.run_module(&f.source, &f.url);
+                }
                 None => {
                     let n = env_mut(self.agent, self.realm).map_or(0, |e| {
                         e.inline_modules += 1;
                         e.inline_modules
                     });
                     let url = format!("{page}#module-{n}");
+                    note_script_options(&url, &nonce, true);
                     self.run_module(info.source_text.as_lossy_str(), &url);
                 }
             },
