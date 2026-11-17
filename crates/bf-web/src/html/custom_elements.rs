@@ -78,8 +78,20 @@ struct Registry {
     when_defined: HashMap<String, HostHandle>,
     /// La *custom element definition* de cada elemento.
     element_defs: HashMap<NodeRef, usize>,
-    /// La cola de elementos con reacciones y las reacciones de cada uno.
-    queue: VecDeque<NodeRef>,
+    /// La cola de elementos con reacciones (con su número de orden) y las reacciones de cada
+    /// uno.
+    queue: VecDeque<(u64, NodeRef)>,
+    next_seq: u64,
+    /// E1: la pila de *element queues* (§4.13.6), aproximada sobre la cola única: mientras se
+    /// invocan las reacciones de un elemento, lo que se encola a partir de ahí (número de
+    /// orden ≥ el de la cima) es de una cola interior, y una invocación anidada (la de un
+    /// `[CEReactions]` dentro de un constructor o callback) solo procesa eso, no los elementos
+    /// pendientes de las colas de fuera.
+    floors: Vec<u64>,
+    /// E1: los elementos cuyas reacciones se están invocando: una reacción nueva para uno de
+    /// ellos (el `connectedCallback` que encola su propio upgrade, paso 5) se queda en su
+    /// lista y la corre el mismo bucle, después de lo que esté corriendo (el constructor).
+    processing: Vec<NodeRef>,
     reactions: HashMap<NodeRef, VecDeque<Reaction>>,
     /// El objeto `customElements`.
     object: Option<HostHandle>,
@@ -617,8 +629,10 @@ fn enqueue(agent: &mut Agent, el: NodeRef, reaction: Reaction) {
     let reg = registry(agent);
     let list = reg.reactions.entry(el).or_default();
     list.push_back(reaction);
-    if !reg.queue.contains(&el) {
-        reg.queue.push_back(el);
+    if !reg.processing.contains(&el) && !reg.queue.iter().any(|(_, x)| *x == el) {
+        let seq = reg.next_seq;
+        reg.next_seq += 1;
+        reg.queue.push_back((seq, el));
     }
 }
 
@@ -728,11 +742,21 @@ pub fn process_reactions(agent: &mut Agent) {
     invoke_reactions(agent);
 }
 
-/// "Invoke custom element reactions" de la cola.
+/// "Invoke custom element reactions" de la cola (§4.13.6): de la *element queue* actual, es
+/// decir, de lo encolado desde que empezó a correr la reacción que nos llamó (`floors`).
 fn invoke_reactions(agent: &mut Agent) {
     loop {
-        let Some(el) = registry(agent).queue.pop_front() else {
-            return;
+        let el = {
+            let reg = registry(agent);
+            let floor = reg.floors.last().copied().unwrap_or(0);
+            let Some(i) = reg.queue.iter().position(|(seq, _)| *seq >= floor) else {
+                return;
+            };
+            let (_, el) = reg.queue.remove(i).expect("índice");
+            let next = reg.next_seq;
+            reg.floors.push(next);
+            reg.processing.push(el);
+            el
         };
         while let Some(reaction) = registry(agent)
             .reactions
@@ -747,7 +771,12 @@ fn invoke_reactions(agent: &mut Agent) {
                 crate::dom::events::report_exception(agent, &e);
             }
         }
-        registry(agent).reactions.remove(&el);
+        {
+            let reg = registry(agent);
+            reg.floors.pop();
+            reg.processing.pop();
+            reg.reactions.remove(&el);
+        }
         // Las reacciones encoladas por los callbacks (eventos nuevos del DOM).
         let pending = (0..WebContextHandle::current(agent).get(agent).documents.len()).any(|d| {
             with_doc(agent, d as crate::DocIndex, |x| {
@@ -966,7 +995,7 @@ fn upgrade(agent: &mut Agent, el: NodeRef, def: usize) -> JsResult<()> {
         reg.element_defs.remove(&el);
         reg.face.remove(&el);
         reg.reactions.remove(&el);
-        reg.queue.retain(|x| *x != el);
+        reg.queue.retain(|(_, x)| *x != el);
         return Err(e);
     }
     // 13.
@@ -1330,7 +1359,7 @@ pub fn forget(agent: &mut Agent, old: NodeRef) {
     reg.internals.remove(&old);
     reg.face.remove(&old);
     reg.reactions.remove(&old);
-    reg.queue.retain(|n| *n != old);
+    reg.queue.retain(|(_, n)| *n != old);
 }
 
 /// Al adoptar `old` (que pasó a ser `new` en otro documento): la definición sigue al nodo y,

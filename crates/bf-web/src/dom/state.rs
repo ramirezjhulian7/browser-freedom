@@ -68,6 +68,9 @@ pub struct DomState {
     pub child_cache: HashMap<(DocIndex, bf_dom::NodeId), ChildList>,
     /// Los documentos de `new Document()` (su interfaz es `Document`, no `XMLDocument`).
     pub plain_documents: HashSet<DocIndex>,
+    /// E1: los documentos sin navegador abiertos con `document.open()` (HTML §8.4.1): lo
+    /// escrito desde entonces (el *script-created parser* y su flujo de entrada).
+    pub script_created: HashMap<DocIndex, DomString>,
     /// Los wrappers de los eventos nativos en dispatch, por (dirección, `timeStamp`).
     pub native_events: Vec<((usize, u64), HostHandle)>,
 }

@@ -286,3 +286,26 @@ fn window_named_properties() {
     // Las variables propias del global ganan.
     assert_eq!(p.show("var solo = 5; solo"), "5");
 }
+
+/// E1: cientos de shadow roots que adoptan la misma hoja grande (los componentes de Lit de
+/// Reddit) se crean en tiempo lineal: `sync_adopted` solo vuelve a copiar el texto de los
+/// roots cuyas hojas o cuya generación del CSSOM cambiaron. Antes, cada mutación serializaba
+/// todas las hojas de todos los roots y la pestaña de Reddit no salía de `attachShadow`. Al
+/// cambiar la hoja, los estilos siguen llegando a todos.
+#[test]
+fn many_shadow_roots_adopting_a_big_sheet() {
+    let mut p = Page::new("<div id=box></div>");
+    let start = std::time::Instant::now();
+    let r = p.show(
+        "var rules = []; for (var i = 0; i < 400; i++) rules.push('.c' + i + ' { color: rgb(1, 2, ' + (i % 250) + ') }'); \
+         var s = new CSSStyleSheet(); s.replaceSync(rules.join('\\n') + '\\np { color: rgb(0, 128, 0) }'); \
+         var last; for (var j = 0; j < 150; j++) { var d = document.createElement('div'); box.append(d); \
+           var sr = d.attachShadow({mode: 'open'}); sr.adoptedStyleSheets = [s]; sr.innerHTML = '<p>x</p>'; last = sr; } \
+         var before = getComputedStyle(last.firstChild).color; \
+         s.insertRule('p { color: rgb(0, 0, 255) }', s.cssRules.length); \
+         [before, getComputedStyle(last.firstChild).color].join()",
+    );
+    assert_eq!(r, "rgb(0, 128, 0),rgb(0, 0, 255)");
+    let secs = start.elapsed().as_secs_f64();
+    assert!(secs < 60.0, "{secs} s");
+}
