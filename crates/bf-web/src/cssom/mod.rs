@@ -575,22 +575,64 @@ fn cascade_styles(agent: &mut Agent) -> Arc<StyleMap> {
     }
     let media = media_context(agent);
     let doc_sheets = sheets::document_sheets(agent, &media);
+    let previous = state(agent).styles.take();
     let doc = h.get(agent).document();
+    let ctx = MatchContext::for_document(doc);
+    // E2: si desde la cascada anterior (con las mismas hojas) solo cambiaron atributos, se
+    // recalculan esos elementos y sus descendientes a partir del estilo guardado de su padre
+    // (`bf_style::restyle_after_attribute_changes`, mismo resultado que la completa). En
+    // www.rae.es, 50 de las 64 cascadas de una carga eran de ese caso.
+    let incremental = previous
+        .filter(|(_, g, _)| *g == generation && incremental_style())
+        .and_then(|(v, _, old)| {
+            let changed = doc.attribute_changes_since(v)?;
+            bf_style::restyle_after_attribute_changes(
+                doc,
+                &doc_sheets,
+                &[],
+                &media,
+                &ctx,
+                Some(&TestMetrics),
+                &old,
+                &changed,
+            )
+        });
     // E2: en varios hilos, como la cascada del pintado (`bf_style::style_document_parallel`,
     // mismo resultado). En el barrido, cada consulta de geometría de un script que llegaba
     // tras un cambio del DOM rehacía la cascada en un hilo: en www.rae.es, 60 veces de
     // 250–300 ms de emparejar selectores.
-    let styles = Arc::new(bf_style::style_document_parallel(
-        doc,
-        &doc_sheets,
-        &[],
-        &media,
-        &MatchContext::for_document(doc),
-        Some(&TestMetrics),
-        cascade_threads(),
-    ));
+    if incremental.is_some() {
+        INCREMENTAL_CASCADES.with(|c| c.set(c.get() + 1));
+    }
+    let styles = Arc::new(incremental.unwrap_or_else(|| {
+        bf_style::style_document_parallel(
+            doc,
+            &doc_sheets,
+            &[],
+            &media,
+            &ctx,
+            Some(&TestMetrics),
+            cascade_threads(),
+        )
+    }));
     state(agent).styles = Some((version, generation, styles.clone()));
     styles
+}
+
+thread_local! {
+    static INCREMENTAL_CASCADES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// E2: cuántas cascadas del CSSOM de este hilo fueron incrementales (para los tests).
+pub fn incremental_cascades() -> u64 {
+    INCREMENTAL_CASCADES.with(std::cell::Cell::get)
+}
+
+/// E2: ¿cascada incremental tras cambios de atributo? Sí, salvo con `BF_NO_INCREMENTAL_STYLE`
+/// (para comparar).
+fn incremental_style() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BF_NO_INCREMENTAL_STYLE").is_none())
 }
 
 /// E2: las métricas de `TestFont` para `ex`/`ch` (las de la cascada del CSSOM), compartibles

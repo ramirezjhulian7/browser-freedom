@@ -721,3 +721,40 @@ fn inline_style_is_not_reparsed_on_every_access() {
         "3px||1"
     );
 }
+
+/// E2: tras cambios de atributo (sin tocar el árbol), la cascada del CSSOM recalcula solo los
+/// elementos cambiados, sus descendientes y, con `+`/`~` en las hojas, sus hermanos siguientes;
+/// `getComputedStyle` ve lo mismo que con la cascada completa.
+#[test]
+fn attribute_changes_restyle_incrementally() {
+    let mut p = Page::new(
+        "<!DOCTYPE html><style>.on + li { color: rgb(1, 1, 1) } .on ~ li b { color: rgb(2, 2, 2) }\
+         .big { font-size: 20px } .big i { margin-left: 1em } li { color: rgb(9, 9, 9) }</style>\
+         <ul><li id=a>a</li><li id=b>b</li><li id=c><b id=cb>c</b></li></ul><div id=d><i id=di>x</i></div>",
+    );
+    p.run(
+        "var g = (id, prop) => getComputedStyle(document.getElementById(id))[prop]; \
+         var out = () => [g('b', 'color'), g('cb', 'color'), g('di', 'marginLeft')].join('|');",
+    );
+    assert_eq!(p.s("out()"), "rgb(9, 9, 9)|rgb(9, 9, 9)|0px");
+    let before = bf_web::cssom::incremental_cascades();
+    assert_eq!(
+        p.s("document.getElementById('a').className = 'on', out()"),
+        "rgb(1, 1, 1)|rgb(2, 2, 2)|0px"
+    );
+    assert_eq!(
+        p.s("document.getElementById('d').classList.add('big'), out()"),
+        "rgb(1, 1, 1)|rgb(2, 2, 2)|20px"
+    );
+    assert_eq!(
+        p.s("document.getElementById('a').className = '', out()"),
+        "rgb(9, 9, 9)|rgb(9, 9, 9)|20px"
+    );
+    assert_eq!(bf_web::cssom::incremental_cascades() - before, 3);
+    // Un cambio del árbol: cascada completa.
+    assert_eq!(
+        p.s("document.getElementById('a').remove(), document.getElementById('b').className = 'on', out()"),
+        "rgb(9, 9, 9)|rgb(2, 2, 2)|20px"
+    );
+    assert_eq!(bf_web::cssom::incremental_cascades() - before, 3);
+}

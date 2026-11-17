@@ -10,6 +10,7 @@ pub mod db;
 pub mod face;
 pub mod fontface;
 pub mod matching;
+pub mod woff;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,6 +24,7 @@ pub use db::FontDb;
 pub use face::{FaceStyle, LoadedFace};
 pub use fontface::{FontFaceRule, Source, parse_font_face};
 use matching::{Descriptors, best_match, generic_candidates};
+pub use woff::set_decompressors;
 
 /// Las claves con este bit son caras `@font-face` del documento; el resto, del sistema.
 const WEB_BIT: u32 = 1 << 31;
@@ -143,9 +145,7 @@ fn bump_web_fonts() {
 /// E2: guarda en la caché del proceso los bytes de la fuente de `url` que otro camino ya
 /// descargó (`FontFace.load()`), para que la maqueta no la vuelva a pedir.
 pub fn store_web_font(url: &bf_infra::Url, data: Vec<u8>) {
-    let face = is_sfnt(&data)
-        .then(|| LoadedFace::new(Arc::new(data), 0).map(Arc::new))
-        .flatten();
+    let face = face_from_bytes(data);
     if face.is_none() {
         return;
     }
@@ -160,10 +160,18 @@ pub fn store_web_font(url: &bf_infra::Url, data: Vec<u8>) {
 }
 
 fn load_face(url: &bf_infra::Url, loader: &dyn ResourceLoader) -> Option<Arc<LoadedFace>> {
-    let data = loader.load(url)?.bytes;
-    if !is_sfnt(&data) {
-        return None;
-    }
+    face_from_bytes(loader.load(url)?.bytes)
+}
+
+/// La cara de los bytes de una fuente descargada. El formato lo dicen los primeros bytes, no la
+/// extensión ni `format()`: un sfnt tal cual; un WOFF (`wOFF`) o WOFF2 (`wOF2`), descomprimido
+/// con [`woff::decode`] (si hay descompresores registrados); cualquier otra cosa, `None`.
+fn face_from_bytes(data: Vec<u8>) -> Option<Arc<LoadedFace>> {
+    let data = if is_sfnt(&data) {
+        data
+    } else {
+        woff::decode(&data).filter(|d| is_sfnt(d))?
+    };
     LoadedFace::new(Arc::new(data), 0).map(Arc::new)
 }
 
@@ -317,6 +325,9 @@ impl Fonts {
         let mut pending = false;
         let found = web.rule.sources.iter().find_map(|src| match src {
             Source::Url { url, format } => {
+                // CSS Fonts 4 §4.3.1: una fuente con `format()` que no se soporta ni se pide.
+                // WOFF y WOFF2 solo si hay descompresores registrados (el navegador los pone).
+                let woff = woff::supported();
                 let supported = format.as_deref().is_none_or(|f| {
                     matches!(
                         f,
@@ -325,12 +336,13 @@ impl Fonts {
                             | "collection"
                             | "truetype-variations"
                             | "opentype-variations"
-                    )
+                    ) || (woff
+                        && matches!(f, "woff" | "woff2" | "woff-variations" | "woff2-variations"))
                 });
                 let url = bf_infra::Url::parse(url, None).ok()?;
-                // WOFF/WOFF2 necesitan descompresión (pendiente): ni se piden.
+                // Sin descompresores, tampoco se pide una `.woff`/`.woff2` sin `format()`.
                 let path = url.path_string().to_ascii_lowercase();
-                if !supported || path.ends_with(".woff") || path.ends_with(".woff2") {
+                if !supported || (!woff && (path.ends_with(".woff") || path.ends_with(".woff2"))) {
                     return None;
                 }
                 let loader = self.loader.clone()?;

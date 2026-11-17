@@ -39,8 +39,20 @@ use crate::WebContextHandle;
 
 pub(crate) const FONT_LOADING_JS: &str = include_str!("font_loading.js");
 
+/// E2: registra en `bf-font` los descompresores de WOFF 1.0 (zlib) y WOFF 2.0 (Brotli), los
+/// de `bf-net`. `bf-font` no depende de esas bibliotecas; sin esto, las fuentes WOFF y WOFF2 se
+/// descartan. Llamarla más de una vez no cambia nada.
+pub fn register_font_decompressors() {
+    // Un flujo que da más de lo que anuncia el archivo es un archivo dañado: no se sigue.
+    bf_font::set_decompressors(
+        |d, n| bf_net::http::decompress_limited(d, "deflate", n),
+        |d, n| bf_net::http::decompress_limited(d, "br", n),
+    );
+}
+
 /// Evalúa `font_loading.js` en `realm` (la ventana) con sus funciones nativas.
 pub fn install(agent: &mut Agent, realm: RealmId) {
+    register_font_decompressors();
     let saved = agent.current_realm;
     agent.current_realm = realm;
     let native = agent.new_plain_object();
