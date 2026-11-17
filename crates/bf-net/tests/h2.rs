@@ -368,6 +368,121 @@ fn concurrent_streams_share_one_connection() {
     assert_eq!(*f.connections_opened.lock().unwrap(), 1);
 }
 
+/// E3: `<link rel=preconnect>` (HTML §4.6.7.10): la preconexión abre la conexión h2 sin
+/// pedir nada, y las peticiones que llegan después (también a la vez) van todas por ella
+/// (RFC 9113 §9.1).
+#[test]
+fn preconnect_opens_the_shared_h2_connection() {
+    const N: usize = 4;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut s = Server::handshake(stream, &[]);
+        opened_tx.send(()).unwrap();
+        for _ in 0..N {
+            let r = s.request(false);
+            let path = r.get(":path").unwrap().to_owned();
+            s.respond(r.id, "200", &[], path.as_bytes());
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "una sola conexión");
+    });
+    let f = Arc::new(h2c_fetcher());
+    assert!(f.preconnect(&url(port, "/")));
+    // El servidor ya hizo el handshake sin recibir ninguna petición.
+    opened_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // Una segunda preconexión no abre otra.
+    assert!(!f.preconnect(&url(port, "/otra")));
+    let threads: Vec<_> = (0..N)
+        .map(|i| {
+            let f = f.clone();
+            thread::spawn(move || {
+                let path = format!("/r{i}");
+                let res = f
+                    .fetch(&url(port, &path), &FetchOptions::default())
+                    .unwrap();
+                assert_eq!(res.protocol, Protocol::H2);
+                assert_eq!(res.body, path.into_bytes());
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    server.join().unwrap();
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
+}
+
+/// E3: las peticiones por partes de los scripts (`fetch()`, XHR) van por la conexión h2 del
+/// origen (RFC 9113 §9.1), con la cabecera y cada DATA entregados en cuanto llegan, en vez de
+/// abrir una conexión HTTP/1.1 cada una.
+#[test]
+fn streaming_requests_share_the_h2_connection() {
+    use bf_net::streaming::{StreamHead, StreamSink};
+    struct Parts(Vec<String>);
+    impl StreamSink for Parts {
+        fn head(&mut self, h: &StreamHead) -> bool {
+            self.0.push(format!("head {}", h.status));
+            true
+        }
+        fn chunk(&mut self, b: &[u8]) -> bool {
+            self.0.push(String::from_utf8_lossy(b).into_owned());
+            true
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut s = Server::handshake(stream, &[]);
+        for _ in 0..3 {
+            let r = s.request(true);
+            let path = r.get(":path").unwrap().to_owned();
+            let method = r.get(":method").unwrap().to_owned();
+            s.headers(r.id, 0, &[(":status", "200")]);
+            s.send(ft::DATA, 0, r.id, format!("{method} ").as_bytes());
+            s.send(ft::DATA, 0, r.id, path.as_bytes());
+            s.send(ft::DATA, flags::END_STREAM, r.id, &[]);
+            assert_eq!(
+                r.body,
+                if method == "POST" {
+                    b"x=1".to_vec()
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "una sola conexión");
+    });
+    let f = h2c_fetcher();
+    let mut sink = Parts(Vec::new());
+    f.fetch_streaming(
+        &url(port, "/a"),
+        &bf_net::RequestOptions::default(),
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(sink.0, ["head 200", "GET ", "/a"]);
+    let post = bf_net::RequestOptions {
+        method: "POST".into(),
+        body: Some(b"x=1".to_vec()),
+        ..bf_net::RequestOptions::default()
+    };
+    let mut sink = Parts(Vec::new());
+    f.fetch_streaming(&url(port, "/p"), &post, &mut sink)
+        .unwrap();
+    assert_eq!(sink.0, ["head 200", "POST ", "/p"]);
+    let res = f.fetch(&url(port, "/b"), &FetchOptions::default()).unwrap();
+    assert_eq!(res.body, b"GET /b");
+    server.join().unwrap();
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
+}
+
 #[test]
 fn flow_control_in_both_directions() {
     let upload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
@@ -656,6 +771,53 @@ fn tls_without_h2_uses_http_1_1() {
     assert_eq!(res.protocol, Protocol::Http11);
     assert_eq!(res.body, b"ok");
     server.join().unwrap();
+}
+
+/// E3: una conexión nueva con un servidor ya visitado reanuda la sesión TLS 1.3 con el ticket
+/// que mandó (RFC 8446 §2.2; la caché de sesiones de la configuración de rustls), sin 0-RTT.
+#[test]
+fn tls_sessions_are_resumed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tls_server_config(&[b"http/1.1"]);
+    let server = thread::spawn(move || {
+        let mut kinds = Vec::new();
+        for _ in 0..2 {
+            let mut stream = tls_accept(&listener, config.clone());
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut tmp).unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            kinds.push(stream.conn.handshake_kind());
+            assert!(stream.conn.early_data().is_none(), "sin 0-RTT");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+            stream.conn.send_close_notify();
+            let _ = stream.flush();
+        }
+        kinds
+    });
+    let f = test_fetcher();
+    let u = Url::parse(&format!("https://127.0.0.1:{port}/"), None).unwrap();
+    let _ = bf_net::timing::take();
+    assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().body, b"ok");
+    let first = bf_net::timing::take();
+    assert_eq!((first.connections, first.resumed), (1, 0));
+    assert_eq!(f.fetch(&u, &FetchOptions::default()).unwrap().body, b"ok");
+    let second = bf_net::timing::take();
+    assert_eq!((second.connections, second.resumed), (1, 1));
+    let kinds = server.join().unwrap();
+    assert_eq!(
+        kinds,
+        [
+            Some(rustls::HandshakeKind::Full),
+            Some(rustls::HandshakeKind::Resumed)
+        ]
+    );
 }
 
 #[test]

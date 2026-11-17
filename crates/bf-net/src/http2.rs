@@ -178,8 +178,33 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Por donde vuelve la respuesta de una petición.
-type Reply = Sender<Result<Response, Error>>;
+/// Por donde vuelve la respuesta de una petición: entera o, E3, por partes.
+enum Reply {
+    Whole(Sender<Result<Response, Error>>),
+    Parts(Sender<Part>),
+}
+
+impl Reply {
+    fn fail(&self, e: Error) {
+        match self {
+            Reply::Whole(tx) => {
+                let _ = tx.send(Err(e));
+            }
+            Reply::Parts(tx) => {
+                let _ = tx.send(Part::End(Err(e)));
+            }
+        }
+    }
+}
+
+/// E3: una respuesta entregada por partes ([`Connection::request_parts`]): la cabecera en
+/// cuanto llega, cada DATA y el final (o el error).
+#[derive(Debug)]
+pub enum Part {
+    Head(u16, Headers),
+    Data(Vec<u8>),
+    End(Result<(), Error>),
+}
 
 /// Lo que despierta al conductor.
 enum Event {
@@ -261,10 +286,33 @@ impl Connection {
             return Err(Error::Refused);
         }
         let (tx, rx) = mpsc::channel();
-        if self.tx.send(Event::Request(Box::new(req), tx)).is_err() {
+        if self
+            .tx
+            .send(Event::Request(Box::new(req), Reply::Whole(tx)))
+            .is_err()
+        {
             return Err(Error::Refused);
         }
         rx.recv().unwrap_or(Err(Error::Lost))
+    }
+
+    /// E3: hace una petición y entrega la respuesta por partes ([`Part`]): para los cuerpos
+    /// que los scripts leen a medida que llegan (`fetch()`, `EventSource`), por la conexión
+    /// que el origen ya tiene (RFC 9113 §9.1). Si quien recibe suelta el canal, el flujo se
+    /// cancela (`RST_STREAM` con `CANCEL`, §5.4.2 y §7).
+    pub fn request_parts(&self, req: Request) -> Result<Receiver<Part>, Error> {
+        if !self.is_alive() {
+            return Err(Error::Refused);
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Event::Request(Box::new(req), Reply::Parts(tx)))
+            .is_err()
+        {
+            return Err(Error::Refused);
+        }
+        Ok(rx)
     }
 }
 
@@ -566,15 +614,15 @@ impl Driver {
                     "la conexión HTTP/2 se cerró",
                 )),
             };
-            let _ = s.reply.send(Err(err));
+            s.reply.fail(err);
         }
         for (_, reply) in self.queue.drain(..) {
-            let _ = reply.send(Err(Error::Refused));
+            reply.fail(Error::Refused);
         }
         // Lo que quede en el canal (peticiones que llegaron tarde) se rechaza.
         while let Ok(ev) = self.rx.try_recv() {
             if let Event::Request(_, reply) = ev {
-                let _ = reply.send(Err(Error::Refused));
+                reply.fail(Error::Refused);
             }
         }
     }
@@ -598,7 +646,7 @@ impl Driver {
         // §5.1.1: los ids no se reutilizan; agotados, hace falta otra conexión.
         if self.goaway.is_some() || self.next_id > MAX_WINDOW as u32 {
             self.alive.store(false, Ordering::Release);
-            let _ = reply.send(Err(Error::Refused));
+            reply.fail(Error::Refused);
             return;
         }
         if self.streams.len() >= self.peer.max_concurrent {
@@ -807,7 +855,7 @@ impl Driver {
                         // cuerpo; si la respuesta no llegó, es un reinicio más.
                         c => Error::Reset(c),
                     };
-                    let _ = s.reply.send(Err(err));
+                    s.reply.fail(err);
                     self.dequeue();
                 }
                 Ok(())
@@ -850,11 +898,11 @@ impl Driver {
                     .collect();
                 for id in refused {
                     if let Some(s) = self.streams.remove(&id) {
-                        let _ = s.reply.send(Err(Error::Refused));
+                        s.reply.fail(Error::Refused);
                     }
                 }
                 for (_, reply) in self.queue.drain(..) {
-                    let _ = reply.send(Err(Error::Refused));
+                    reply.fail(Error::Refused);
                 }
                 Ok(())
             }
@@ -906,7 +954,18 @@ impl Driver {
             return Ok(());
         }
         s.received = true;
-        s.data.extend_from_slice(data);
+        // E3: por partes, cada DATA sale en cuanto llega; si nadie lo recibe, se cancela.
+        let gone = match &s.reply {
+            Reply::Parts(tx) => !data.is_empty() && tx.send(Part::Data(data.to_vec())).is_err(),
+            Reply::Whole(_) => {
+                s.data.extend_from_slice(data);
+                false
+            }
+        };
+        if gone {
+            self.reset(f.stream, ec::CANCEL);
+            return Ok(());
+        }
         if end {
             self.complete(f.stream);
             return Ok(());
@@ -986,8 +1045,15 @@ impl Driver {
                     return Ok(());
                 }
                 s.status = Some(status);
+                // E3: por partes, la cabecera sale ya; si nadie la recibe, se cancela.
+                let gone = match &s.reply {
+                    Reply::Parts(tx) => tx.send(Part::Head(status, headers.clone())).is_err(),
+                    Reply::Whole(_) => false,
+                };
                 s.headers = headers;
-                if end_stream {
+                if gone {
+                    self.reset(stream, ec::CANCEL);
+                } else if end_stream {
                     self.complete(stream);
                 }
             }
@@ -1098,7 +1164,7 @@ impl Driver {
         payload.extend_from_slice(&code.to_be_bytes());
         write_frame(&mut self.outbuf, ft::RST_STREAM, 0, id, &payload);
         if let Some(s) = self.streams.remove(&id) {
-            let _ = s.reply.send(Err(Error::Reset(code)));
+            s.reply.fail(Error::Reset(code));
         }
         self.dequeue();
     }
@@ -1117,11 +1183,18 @@ impl Driver {
                 &ec::NO_ERROR.to_be_bytes(),
             );
         }
-        let _ = s.reply.send(Ok(Response {
-            status: s.status.unwrap_or(0),
-            headers: s.headers,
-            body: s.data,
-        }));
+        match s.reply {
+            Reply::Whole(tx) => {
+                let _ = tx.send(Ok(Response {
+                    status: s.status.unwrap_or(0),
+                    headers: s.headers,
+                    body: s.data,
+                }));
+            }
+            Reply::Parts(tx) => {
+                let _ = tx.send(Part::End(Ok(())));
+            }
+        }
         self.dequeue();
     }
 

@@ -272,6 +272,12 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
+/// E3: una conexión libre de las peticiones por partes y desde cuándo.
+type IdleStream = (Instant, BufReader<Stream>);
+
+/// E3: cuánto se guarda libre una conexión de las peticiones por partes.
+const STREAM_IDLE: Duration = Duration::from_secs(4);
+
 /// Una configuración de cliente TLS con `roots` y la lista ALPN `alpn`.
 fn make_tls_config(roots: rustls::RootCertStore, alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -441,6 +447,9 @@ pub struct Fetcher {
     pub cookies: CookieJar,
     /// Conexiones abiertas (para los tests de keep-alive).
     pub connections_opened: Mutex<usize>,
+    /// E3: las conexiones HTTP/1.1 libres de las peticiones por partes
+    /// ([`Fetcher::fetch_streaming`]), por origen.
+    stream_idle: Mutex<HashMap<PoolKey, Vec<IdleStream>>>,
     /// E6: las peticiones de imagen en vuelo que otras idénticas esperan
     /// ([`Fetcher::send_shared`]), y cuántas se juntaron con otra (para los tests).
     in_flight: Mutex<HashMap<FlightKey, Arc<Flight>>>,
@@ -549,20 +558,48 @@ impl Fetcher {
             .unwrap_or_else(|e| e.into_inner())
             .contains(key);
         timing::count(true);
+        let started = Instant::now();
         let mut tcp = connect_tcp_with(
             &self.dns,
             host,
             port,
             self.read_timeout.unwrap_or(READ_TIMEOUT),
         )?;
+        let connected = started.elapsed();
+        // E3: `FREEDOM_NET_LOG`: cada conexión nueva, con lo que tardó y si TLS se reanudó.
+        let log = |protocol: &str, tls: Option<(Duration, Option<rustls::HandshakeKind>)>| {
+            if !net_log_enabled() {
+                return;
+            }
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            let tls = match tls {
+                Some((d, kind)) => {
+                    let kind = match kind {
+                        Some(rustls::HandshakeKind::Resumed) => "reanudado",
+                        Some(rustls::HandshakeKind::FullWithHelloRetryRequest) => {
+                            "completo con HRR"
+                        }
+                        _ => "completo",
+                    };
+                    format!(", TLS {:.0} ms ({kind})", ms(d))
+                }
+                None => String::new(),
+            };
+            eprintln!(
+                "red: conexión nueva {host}:{port} {protocol}: DNS y TCP {:.0} ms{tls}",
+                ms(connected)
+            );
+        };
         if !tls {
             if allow_h2 && self.h2_prior_knowledge {
                 let c = timing::time(
                     |t| &mut t.h2_setup,
                     || http2::start(http2::Transport::Plain(tcp)),
                 )?;
+                log("h2", None);
                 return Ok(Opened::H2(c));
             }
+            log("http/1.1", None);
             return Ok(Opened::H1(Stream::Plain(tcp)));
         }
         let config = match (&self.tls, allow_h2) {
@@ -577,8 +614,14 @@ impl Fetcher {
         while conn.is_handshaking() {
             conn.complete_io(&mut tcp).map_err(error::tls_io_error)?;
         }
-        timing::add(|t| &mut t.tls, handshake.elapsed());
+        let handshake = handshake.elapsed();
+        timing::add(|t| &mut t.tls, handshake);
+        if conn.handshake_kind() == Some(rustls::HandshakeKind::Resumed) {
+            timing::add_resumed();
+        }
+        let tls_log = Some((handshake, conn.handshake_kind()));
         if conn.alpn_protocol() == Some(b"h2") {
+            log("h2", tls_log);
             let certs = conn
                 .peer_certificates()
                 .map(|c| c.iter().map(|c| c.clone().into_owned()).collect())
@@ -593,6 +636,7 @@ impl Fetcher {
             let c = timing::time(|t| &mut t.h2_setup, || http2::start(transport))?;
             return Ok(Opened::H2(c));
         }
+        log("http/1.1", tls_log);
         let stream = rustls::StreamOwned::new(conn, tcp);
         Ok(Opened::H1(Stream::Tls(Box::new(stream))))
     }
@@ -623,7 +667,19 @@ impl Fetcher {
             if !reuse && pool.idle.get_mut(key).and_then(Vec::pop).is_some() {
                 return (Slot::New, guard);
             }
+            // E3: `FREEDOM_NET_LOG`: cuánto espera una petición a que quede libre una de las
+            // conexiones del origen (RFC 9112 §9.4).
+            let waited = Instant::now();
             pool = self.pool_free.wait(pool).unwrap_or_else(|e| e.into_inner());
+            timing::add(|t| &mut t.slot_wait, waited.elapsed());
+            if net_log_enabled() {
+                eprintln!(
+                    "red: espera de conexión {}:{} {:.0} ms",
+                    key.0,
+                    key.1,
+                    waited.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
     }
 
@@ -635,6 +691,256 @@ impl Fetcher {
         };
         let key: PoolKey = (host, url.port.unwrap_or(if tls { 443 } else { 80 }), tls);
         self.lock_pool().open.get(&key).copied().unwrap_or(0)
+    }
+
+    /// E3: `<link rel=dns-prefetch>` y la cabecera `Link` con ese `rel` (HTML §4.6.7.4,
+    /// "resolve the origin"): resuelve el nombre del origen de `url` y lo deja en la caché de
+    /// DNS ([`Dns`]), sin abrir ninguna conexión. `false` si no hay nada que resolver.
+    pub fn prefetch_dns(&self, url: &Url) -> bool {
+        let Some(host) = Self::http_host(url) else {
+            return false;
+        };
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let ok = self.dns.lookup_all(bare).is_ok();
+        if net_log_enabled() {
+            eprintln!(
+                "red: dns-prefetch {bare} {}",
+                if ok { "resuelto" } else { "falló" }
+            );
+        }
+        ok
+    }
+
+    /// E3: `<link rel=preconnect>` y la cabecera `Link` con ese `rel` (HTML §4.6.7.10;
+    /// Fetch §2.6, *obtain a connection*): abre la conexión con el origen de `url` (DNS, TCP,
+    /// TLS y, si se negocia, HTTP/2) sin pedir nada, y la deja en el pool para la primera
+    /// petición. Una conexión h2 queda compartida (RFC 9113 §9.1); una HTTP/1.1, libre.
+    ///
+    /// No hace nada si el origen ya tiene una conexión (abierta o abriéndose) o si otra h2
+    /// sirve para él (§9.1.1): el tope de conexiones ociosas que deja una preconexión es una
+    /// por origen. Un origen de la lista HSTS se abre por `https` (RFC 6797 §8.3), que es como
+    /// irán sus peticiones. Devuelve si abrió una.
+    pub fn preconnect(&self, url: &Url) -> bool {
+        let started = Instant::now();
+        let opened = self.connect_ahead(url);
+        if opened && net_log_enabled() {
+            eprintln!(
+                "red: preconexión {} en {:.0} ms",
+                url.origin(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        opened
+    }
+
+    /// E3: lo de [`Fetcher::preconnect`], sin el registro.
+    fn connect_ahead(&self, url: &Url) -> bool {
+        let url = self.hsts.upgrade(url).unwrap_or_else(|| url.clone());
+        let Some(host) = Self::http_host(&url) else {
+            return false;
+        };
+        let tls = url.scheme == "https";
+        let port = url.port.unwrap_or(if tls { 443 } else { 80 });
+        let key: PoolKey = (host.clone(), port, tls);
+        let may_h2 = (tls || self.h2_prior_knowledge)
+            && !self
+                .h1_known
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key);
+        // El mismo turno que la primera petición a un origen que puede hablar h2: la que
+        // llegue mientras se abre espera a esta conexión en vez de abrir otra.
+        let gate = may_h2.then(|| {
+            self.connecting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(key.clone())
+                .or_default()
+                .clone()
+        });
+        let _turn = gate
+            .as_ref()
+            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()));
+        if self.h2_connection(&key).is_some() {
+            return false;
+        }
+        let guard = {
+            let mut pool = self.lock_pool();
+            let open = pool.open.entry(key.clone()).or_default();
+            if *open > 0 {
+                return false;
+            }
+            *open += 1;
+            SlotGuard {
+                fetcher: self,
+                key: &key,
+                held: true,
+            }
+        };
+        if tls
+            && !self
+                .h1_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key)
+            && self.coalesce(&host, &key).is_some()
+        {
+            return false;
+        }
+        *self
+            .connections_opened
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
+        match self.open(&host, port, tls, &key) {
+            Ok(Opened::H1(s)) => {
+                self.h1_known
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key.clone());
+                guard.keep(BufReader::new(s));
+            }
+            Ok(Opened::H2(c)) => {
+                drop(guard);
+                let mut map = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+                if !map.get(&key).is_some_and(|c| c.is_alive()) {
+                    map.insert(key.clone(), Arc::new(c));
+                }
+            }
+            Err(e) => {
+                if net_log_enabled() {
+                    eprintln!("red: conexión con {} falló: {e}", url.origin());
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    /// E3: una petición con el cuerpo entregado por partes ([`streaming::fetch_streaming`]) con
+    /// las cookies de este `Fetcher`, su caché de DNS y conexiones HTTP/1.1 que quedan abiertas
+    /// para la siguiente (RFC 9112 §9.3).
+    pub fn fetch_streaming(
+        &self,
+        url: &Url,
+        req: &RequestOptions,
+        sink: &mut dyn streaming::StreamSink,
+    ) -> Result<(), FetchError> {
+        streaming::fetch_streaming_with(Some(self), url, req, Some(&self.cookies), sink)
+    }
+
+    /// E3: la conexión HTTP/2 por la que puede ir una petición por partes a `url` (con
+    /// `key`): la del origen, otra que sirva para él (RFC 9113 §9.1.1) o, en el primer contacto
+    /// con un origen que puede hablar h2, la que se abre ahora (como la primera petición de
+    /// [`Fetcher::fetch`]). `None` si el origen habla HTTP/1.1.
+    pub(crate) fn h2_for_streaming(
+        &self,
+        url: &Url,
+        key: &PoolKey,
+    ) -> Option<Arc<http2::Connection>> {
+        if let Some(c) = self.h2_connection(key) {
+            return Some(c);
+        }
+        let h1 = |set: &Mutex<HashSet<PoolKey>>| {
+            set.lock().unwrap_or_else(|e| e.into_inner()).contains(key)
+        };
+        if !(key.2 || self.h2_prior_knowledge) || h1(&self.h1_only) || h1(&self.h1_known) {
+            return None;
+        }
+        if key.2
+            && let Some(c) = self.coalesce(&key.0, key)
+        {
+            return Some(c);
+        }
+        self.connect_ahead(url);
+        self.h2_connection(key)
+    }
+
+    /// E3: una conexión HTTP/1.1 para una petición por partes con `key`: una libre (si `reuse`)
+    /// o una nueva. Devuelve si es reutilizada.
+    pub(crate) fn stream_connection(
+        &self,
+        key: &PoolKey,
+        reuse: bool,
+    ) -> Result<(BufReader<Stream>, bool), FetchError> {
+        if reuse {
+            let mut idle = self.stream_idle.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(list) = idle.get_mut(key) {
+                // Las que llevan libres más de `STREAM_IDLE` se cierran: el servidor puede
+                // haberlas cerrado ya (Apache, a los 5 s).
+                list.retain(|(at, _)| at.elapsed() < STREAM_IDLE);
+                if let Some((_, c)) = list.pop() {
+                    return Ok((c, true));
+                }
+            }
+        }
+        let (host, port, tls) = (key.0.as_str(), key.1, key.2);
+        let started = Instant::now();
+        let mut tcp = connect_tcp_with(
+            &self.dns,
+            host,
+            port,
+            self.read_timeout.unwrap_or(READ_TIMEOUT),
+        )?;
+        *self
+            .connections_opened
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
+        let connected = started.elapsed();
+        let stream = if tls {
+            let config = match &self.tls {
+                Some((_, h1)) => h1.clone(),
+                None => tls_config(),
+            };
+            let mut conn = rustls::ClientConnection::new(config, server_name(host)?)
+                .map_err(|e| FetchError::Tls(TlsError::from_rustls(&e)))?;
+            while conn.is_handshaking() {
+                conn.complete_io(&mut tcp).map_err(error::tls_io_error)?;
+            }
+            if net_log_enabled() {
+                let kind = if conn.handshake_kind() == Some(rustls::HandshakeKind::Resumed) {
+                    "reanudado"
+                } else {
+                    "completo"
+                };
+                eprintln!(
+                    "red: conexión nueva {host}:{port} http/1.1 (por partes): DNS y TCP {:.0} ms, \
+                     TLS {:.0} ms ({kind})",
+                    connected.as_secs_f64() * 1000.0,
+                    (started.elapsed() - connected).as_secs_f64() * 1000.0
+                );
+            }
+            Stream::Tls(Box::new(rustls::StreamOwned::new(conn, tcp)))
+        } else {
+            if net_log_enabled() {
+                eprintln!(
+                    "red: conexión nueva {host}:{port} http/1.1 (por partes): DNS y TCP {:.0} ms",
+                    connected.as_secs_f64() * 1000.0
+                );
+            }
+            Stream::Plain(tcp)
+        };
+        Ok((BufReader::new(stream), false))
+    }
+
+    /// E3: la conexión de una petición por partes terminada vuelve libre al pool (como mucho
+    /// [`MAX_CONNECTIONS_PER_HOST`] libres por origen).
+    pub(crate) fn stream_keep(&self, key: PoolKey, conn: BufReader<Stream>) {
+        let mut idle = self.stream_idle.lock().unwrap_or_else(|e| e.into_inner());
+        let list = idle.entry(key).or_default();
+        if list.len() < MAX_CONNECTIONS_PER_HOST {
+            list.push((Instant::now(), conn));
+        }
+    }
+
+    /// El nombre del origen `http(s)` de `url`.
+    fn http_host(url: &Url) -> Option<String> {
+        if !matches!(url.scheme.as_str(), "http" | "https") {
+            return None;
+        }
+        match &url.host {
+            Some(Host::Empty) | None => None,
+            Some(h) => Some(h.to_string()),
+        }
     }
 
     /// RFC 9113 §9.1.1 (*connection reuse*): una conexión h2 por TLS abierta con otro origen

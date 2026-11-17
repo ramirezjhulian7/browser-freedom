@@ -81,6 +81,32 @@ impl CachedLoader {
             .map_or((None, ReferrerPolicy::Default), |(u, p)| (Some(u), p))
     }
 
+    /// E3: un recurso que el documento ya obtuvo (o está obteniendo) por este cargador: un
+    /// `<link rel=preload>`, la descarga especulativa o el pintado. Si está en camino, espera
+    /// a que llegue. `None` si nunca se pidió (no sale ninguna petición) o si falló.
+    pub fn available(&self, url: &Url) -> Option<Resource> {
+        let key = url.href();
+        if let Some(hit) = self
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return hit.clone();
+        }
+        let flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()?;
+        let mut r = flight.result.lock().unwrap_or_else(|e| e.into_inner());
+        while r.is_none() {
+            r = flight.ready.wait(r).unwrap_or_else(|e| e.into_inner());
+        }
+        r.clone().flatten()
+    }
+
     /// El documento que pide los subrecursos: su URL (el referente) y su política.
     pub fn set_client(&self, url: Url, policy: ReferrerPolicy) {
         *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some((url, policy));
@@ -469,7 +495,7 @@ fn trace_fetch(response: &bf_net::Response, total: Duration) {
     eprintln!(
         "perf red {}: {} ms ({:?}, {} {}, {} peticiones, {} conexiones nuevas): dns {} · tcp {} \
          · tls {} · h2 inicio {} · espera {} · cuerpo {} · h2 {} · descompresión {} · caché {} \
-         · resto {} ({} bytes)",
+         · resto {} ({} bytes) · TLS reanudado en {} de {} · espera de conexión {}",
         response.url,
         ms(total),
         response.cache,
@@ -488,6 +514,9 @@ fn trace_fetch(response: &bf_net::Response, total: Duration) {
         ms(t.cache),
         ms(total.saturating_sub(t.total())),
         response.body.len(),
+        t.resumed,
+        t.connections,
+        ms(t.slot_wait),
     );
 }
 
@@ -620,10 +649,17 @@ pub fn fetch_document_with(
             Some((engine, env)) => {
                 // E3: las hojas y los scripts del documento se piden en paralelo mientras el
                 // parser avanza (HTML §13.2.8, `preload::speculative_fetch`).
+                // Y lo que adelanta la cabecera `Link` (RFC 8288; todas sus líneas).
+                let link = response
+                    .headers
+                    .get_all("link")
+                    .collect::<Vec<_>>()
+                    .join(",");
                 crate::preload::speculative_fetch(
                     loader.clone(),
                     text.clone(),
                     response.url.clone(),
+                    (!link.is_empty()).then_some(link),
                 );
                 engine.set_navigation_policies(
                     response.headers.get("cross-origin-opener-policy"),
@@ -1599,16 +1635,29 @@ mod shared_requests {
         assert_eq!(paint.map(|r| r.bytes), Some(b"img".to_vec()));
         assert_eq!(count.load(Ordering::SeqCst), 1, "una sola petición");
         assert_eq!(*backend.net.fetcher.shared_requests.lock().unwrap(), 1);
-        // Ya terminada, otra petición del motor web sale de nuevo (`no-store`): solo se
-        // juntan las que se cruzan.
+        // E3: ya terminada, otra petición del motor web la toma de lo que tiene el documento
+        // aunque sea `no-store` (HTML §4.8.4.3, *list of available images*): no sale a la red.
         let again = NetRequest {
             url: img.clone(),
             options: bf_net::RequestOptions {
                 destination: Some(bf_infra::Destination::Image),
+                credentials: true,
                 ..Default::default()
             },
         };
-        assert!(backend.fetch(&again).is_ok());
+        assert_eq!(backend.fetch(&again).map(|r| r.body), Ok(b"img".to_vec()));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        // Sin credenciales no es la misma petición que hizo el cargador: va a la red, y como
+        // ya no se cruza con otra, sale de nuevo.
+        let anonymous = NetRequest {
+            url: img.clone(),
+            options: bf_net::RequestOptions {
+                destination: Some(bf_infra::Destination::Image),
+                credentials: false,
+                ..Default::default()
+            },
+        };
+        assert!(backend.fetch(&anonymous).is_ok());
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 

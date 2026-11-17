@@ -202,23 +202,25 @@ nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y q
 
 ## 9. Lo primero al retomar
 
-Estado del 2026-11-17, al cerrar la tanda (ronda 8). `master` está en `eb9776d`, con la ronda 8
-de E2 integrada. **Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios.
+Estado del 2026-11-17 a las 19:00, cuando el usuario paró la tanda nueva (por mensaje
+directo; el mod ya no reparte bloques). `master` está en `1a4c877`:
+- las rondas 8 de E1, E2 y E3;
+- WOFF y WOFF2 y el primer paso del estilo incremental (E2);
+- AES, PBKDF2 y HKDF en `crypto.subtle` (E1).
+
+**Avance: 88.9 %** (91.1 % con la fase 1): 47 de 51 criterios.
 
 Lo primero, en este orden:
-1. **Integrar lo que quedó en las ramas** (9b): `army/e1` y `army/e3` traen la ronda 8 sin
-   integrar.
+1. **Integrar `army/e3`** (9b): la maqueta de los scripts con las fuentes web, las
+   sugerencias de recursos y las conexiones de la primera visita. Ya tiene `master`
+   `1a4c877` fusionado, con su conflicto resuelto en `bf-web/src/cssom/mod.rs`, y verificado.
 2. **Las aplicaciones de JavaScript pesado** (E1). Son la mayor parte de los defectos graves
-   del cuarto barrido: YouTube (ya con caja de búsqueda y 7,4 s de scripts en vez de 24,8),
-   Vimeo, Reddit y los esqueletos de GitHub y GitLab.
-3. **`ShellLayout` con las `@font-face` del documento** (E3, `bf-shell/src/script.rs`; propuesta
-   de E2 en su nota de la ronda 8). La maqueta que usan los scripts mide con las fuentes del
-   sistema y la del pintado con las del documento. Por eso `ResizeObserver` avisa de un bucle
-   de más (Apple, DuckDuckGo) y `getBoundingClientRect` oscila.
-4. **Imágenes que no salen** (E2, sin diagnosticar): Apple (la portada mide 0 de ancho),
-   GitLab y los iconos de los controles de OpenStreetMap; El País y Amazon según E2.
-5. **Estilo incremental** (E2, diseño en su nota de la ronda 8): las maquetas forzadas de
-   El Tiempo, RAE y GitHub recalculan todo el estilo.
+   de los barridos: YouTube, Vimeo, Reddit y los esqueletos de GitHub y GitLab. Antes, el
+   pánico "Gc liberado" de GitHub en `run_animation_frames` (quinto barrido).
+3. **Imágenes que no salen** (E2, sin diagnosticar): Apple (la portada mide 0 de ancho),
+   GitLab y los iconos de los controles de OpenStreetMap.
+4. **Estilo incremental** (E2): el primer paso, solo para cambios de atributo, está en
+   `master`. Falta medir cuánto baja el tiempo de scripts y extenderlo a cambios del árbol.
 
 ### 9a. Las decisiones del usuario
 
@@ -236,29 +238,29 @@ Siguen abiertas:
 
 ### 9b. Las ramas y lo que deja cada ejecutor
 
-Según la nota de cada uno en la ronda 8:
-- **`army/e1`** (sin integrar; la nota de la ronda 8 estaba a medio escribir al cerrar):
-  - commits `9b1ae22` (la consola dice qué script se cortó por tiempo agotado), `dd023c1` (la
-    página de los tests en worker lleva `timeout=long`) y `8e88842` (`crypto.subtle` con
-    AES-CBC, AES-CTR y AES-GCM, PBKDF2 y HKDF, que pide Amazon);
-  - **en curso:** cambios en `bf-web/src/crypto.rs` y `tests/subtle.rs` sin commit;
-  - **diagnósticos:** excalidraw espera ~111 `FontFace.load()` de fuentes CJK y monta tras 8-10 s
-    (con 25 esperas en su máquina; en el cuarto barrido, con más carga, seguía en "Loading
-    scene…"); el `TypeError` de gov.co es el código del sitio sin sesión iniciada.
-- **`army/e2`** (integrada en `eb9776d`):
-  - **hecho:** `element.style` sin re-parsear, los stacking contexts con `mix-blend-mode` como
-    grupo aislado (el mapa de OpenStreetMap ya se ve) y una sola descarga por imagen;
-  - **deja pendiente:** el estilo incremental, `ShellLayout` con las `@font-face` (para E3), las
-    imágenes de El País, Amazon y Apple, y perfilar el emparejamiento de selectores de RAE y
-    GitHub.
-- **`army/e3`** (sin integrar):
-  - **hecho:** una conexión HTTP/1.1 reutilizada y cerrada se repite solo con métodos
-    idempotentes (RFC 9110 §9.2.2); tests de los tres fallos de red; `FREEDOM_NET_LOG=cabeceras`
-    también en las peticiones de los scripts; `Freedom.app` reconstruida y probada sin ventana;
-    el cuarto barrido y los documentos;
-  - **gov.co:** la red está bien (88 respuestas 200/204, CORS correcto); queda del lado de
-    JavaScript;
-  - **deja pendiente:** `ShellLayout` con las `@font-face`.
+- **`army/e1`:** su ronda 8 está en `master` (`fcdb9c7`):
+  - `crypto.subtle` con AES-CBC, AES-CTR y AES-GCM, PBKDF2 y HKDF (Amazon);
+  - la consola dice qué script se cortó por tiempo agotado.
+
+  Tenía en curso, sin commit, cambios en `custom_elements`; ver su nota.
+- **`army/e2`:** en `master` están su ronda 8 (`element.style`, el mapa de OpenStreetMap y
+  una sola descarga por imagen) y la tanda nueva (`1a4c877`): WOFF y WOFF2, con los
+  descompresores de `bf-net` registrados desde el shell, y la cascada incremental del CSSOM
+  tras cambios de atributo.
+- **`army/e3`** (sin integrar, con `master` `1a4c877` fusionado; `pendiente/mac/e3.md`,
+  "Tanda nueva"):
+  - **hecho:**
+    - `ShellLayout` mide con las `@font-face` del documento: sin el `ResizeObserver loop`
+      de más;
+    - `preconnect`, `dns-prefetch`, `preload` de fuentes e imágenes y la cabecera `Link`;
+    - los `fetch()` y XHR de los scripts van por la conexión h2 del origen, en vez de abrir
+      cada uno una conexión HTTP/1.1. Conexiones de la primera visita: MDN 4 → 2, GitLab
+      19 → 4 y El País 28 → 14;
+    - test de la reanudación de TLS, que rustls ya hacía;
+    - el quinto barrido;
+  - **deja pendiente:** que el `<link rel=preload>` de otro origen que procesa el motor
+    (`bf-web/src/cssom/sheets.rs`) pida con el cargador de la página, para no descargarlo
+    dos veces.
 
 ### 9c. `app.asimetrix.co` con sesión iniciada
 
@@ -281,12 +283,17 @@ retenía la pestaña 2,7 s (E3), los dos arreglados desde `3a7c372`.
 - **El barrido de sitios** (`docs/pendiente/mac/barrido-sitios.md`) dice qué le falta al
   navegador en 27 sitios públicos conocidos, con las carencias ordenadas por número de sitios
   y un dueño propuesto.
-  - Hay cuatro barridos, con una columna de cambio entre uno y otro.
-  - En el cuarto (`master` `cb41001`, 25 esperas), 7 sitios están bien, 12 tienen defectos
-    menores y 8 graves. Con `eb9776d`, OpenStreetMap pasa a menores: 7, 13 y 7.
+  - Hay cinco barridos, con una columna de cambio entre uno y otro.
+  - En el quinto (`master` `fcdb9c7`, 25 esperas), 7 sitios están bien, 13 tienen defectos
+    menores y 7 graves.
+  - GitHub tumba a veces la pestaña: "Gc liberado" en `bf-js/src/heap.rs`, durante
+    `run_animation_frames` (E1). Pasa también con `cb41001`.
 - `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de maqueta y la consola
   de cada sitio para depurarlo (`docs/rendimiento.md`, "Volcado de una sesión").
-- `FREEDOM_NET_LOG=1` registra cada petición, también las de los scripts y las que fallan;
+- `FREEDOM_NET_LOG=1` registra:
+  - cada petición, también las de los scripts y las que fallan;
+  - en `army/e3`, cada conexión nueva (con su TLS y si se reanudó) y cada espera de hueco.
+
   `FREEDOM_NET_LOG=cabeceras` añade las cabeceras de cada salto.
 - **`Freedom.app`:** `sh packaging/macos/build.sh` la deja en `dist/` (0.1.0, universal,
   58 MB; `.dmg` de 26 MB). No está instalada en `/Applications`.

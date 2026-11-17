@@ -434,6 +434,64 @@ seguir).
 - **No llegó a los 27 sitios:** la ronda 8. De E2 solo se vio OpenStreetMap con `eb9776d`; lo
   que E1 y E3 tengan sin integrar no está en ningún binario del barrido.
 
+## Quinto barrido (tanda nueva, 2026-11-17)
+
+- **Método:** los mismos 27 sitios con 25 esperas, con el release de `master` `fcdb9c7` (las
+  rondas 8 de E1, E2 y E3 integradas). Lo de `army/e3` de esta tanda no está en el binario.
+- **Carga:** de 9,9 a 16,4.
+- **Comparación:** un subagente comparó las capturas del paso 26 con las del cuarto barrido, y
+  para OpenStreetMap también con la del cuarto con `eb9776d`. Las regresiones aparentes se
+  repitieron con el binario de `cb41001`.
+
+| Sitio | Errores de consola, 4.º → 5.º | Captura, 5.º frente a 4.º | Estado |
+|---|---|---|---|
+| es.wikipedia.org | 0 → 0 | igual | menores |
+| en.wikipedia.org | 0 → 0 | igual | menores |
+| bbc.com | 0 → 0 | igual | menores |
+| elpais.com | 1 → 1 | **mejor** (dudoso): sale el aviso de cookies donde había un bloque en blanco | menores |
+| eltiempo.com | 3 → 3 | igual | menores: el hueco en blanco de arriba |
+| nytimes.com | 0 → 0 | igual | **graves**: la verificación de DataDome en blanco |
+| google.com | 0 → 0 | igual | bien |
+| duckduckgo.com | 1 → 0 | igual | bien |
+| bing.com | 1 → 1 | igual | menores |
+| developer.mozilla.org | 0 → 0 | igual | menores |
+| doc.rust-lang.org | 0 → 0 | igual | bien |
+| docs.python.org | 0 → 0 | igual | bien |
+| github.com | 0 → 0 | **peor**: la pestaña cae ("Esta página falló") | **graves** |
+| gitlab.com | 0 → 0 | **mejor**: el logo del proyecto, el botón "Código" y "Propietarios de códigos"; la lista de archivos sigue en esqueleto | menores |
+| news.ycombinator.com | 0 → 0 | igual | bien |
+| reddit.com | 0 → 0 | igual | **graves** (en el límite) |
+| stackoverflow.com | 0 → 0 | igual | bien |
+| amazon.com | 2 → 0 (AES-CBC, de E1) | **mejor** (poco): la flecha del carrusel y el desplegable de cuenta | menores |
+| mercadolibre.com.co | 0 → 0 | igual | menores |
+| openstreetmap.org | 0 → 0 | **mejor** que el 4.º con `cb41001`; igual que con `eb9776d`: el mapa entero | menores: iconos de los controles como "?" |
+| youtube.com | 2 → 2 | igual | **graves**: esqueletos |
+| vimeo.com | 1 → 106 | **peor**: en blanco (`#__next` mide 0 de alto) | **graves** |
+| excalidraw.com | 0 → 0 | **mejor**: ya no se queda en "Loading scene…"; salen la barra de herramientas, la bienvenida y el zoom | menores (quizá bien; la letra de la bienvenida no está comprobada) |
+| react.dev | 0 → 0 | igual | bien |
+| rae.es | 0 → 5 (CSP solo informe) | igual | menores |
+| gov.co | 1 → 1 | **peor** (dudoso): una foto sale como su texto alternativo | **graves** |
+| apple.com/es | 7 → 8 (`ResizeObserver loop`) | igual (el fondo de la portada, azul en vez de negro) | **graves** |
+
+**Resumen del quinto barrido:**
+- **Cambio frente al cuarto:**
+  - 5 mejoran (El País, GitLab, Amazon, OpenStreetMap y excalidraw), 19 siguen igual y 3
+    empeoran (GitHub, Vimeo y gov.co);
+  - **ninguno de los tres empeora por el motor de esta tanda:**
+    - **GitHub:** cae con `master` `fcdb9c7`, con `army/e3` y también con `cb41001` (1 de 2;
+      en el cuarto barrido no cayó). El pánico es "Gc liberado" (`bf-js/src/heap.rs:127`),
+      con `run_animation_frames` en la pila: un callback de `requestAnimationFrame` cuyo
+      objeto ya liberó el recolector. Es de `bf-js` (E1), intermitente y anterior a esta
+      tanda.
+    - **Vimeo:** el binario de `cb41001` da hoy 200 errores ("client-side exception" de
+      Next.js y `[object DOMException]`): cambió el sitio, no el motor. Queda sin
+      diagnosticar (E1).
+    - **gov.co:** una imagen que no salió; puede ser que no hubiera llegado a tiempo.
+- **Recuento:** **7 bien, 13 con defectos menores y 7 con defectos graves**, el mismo que el
+  cuarto con `eb9776d`. GitHub pasa a graves y excalidraw a menores.
+- **Errores de consola nuevos:** los 5 de RAE son avisos de CSP en modo solo informe (el sitio
+  manda ahora `Content-Security-Policy-Report-Only`), sin efecto en la página.
+
 ## Lo que no encontré
 
 - **"El sitio tardó demasiado"** (un tiempo de lectura agotado en `bf-net`, que vio E4): no
