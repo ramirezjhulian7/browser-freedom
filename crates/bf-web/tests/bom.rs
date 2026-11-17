@@ -547,6 +547,53 @@ fn screen_orientation() {
     assert_eq!(p.show("err"), "NotSupportedError");
 }
 
+/// `Screen`, `ScreenOrientation` y `Performance` heredan de `EventTarget` (Screen Orientation
+/// §3, HR Time §4): sus métodos de `EventTarget` funcionan sobre ellos. Antes lanzaban
+/// "Illegal invocation" (el wrapper no tenía target): lo hacía la limpieza de FullStory en
+/// `app.asimetrix.co`, con `removeEventListener` envuelto por Sentry.
+#[test]
+fn bom_event_targets_accept_listeners() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "var out = []; \
+             for (const [name, o] of [['performance', performance], ['screen', screen], \
+                                      ['orientation', screen.orientation]]) { \
+               var seen = null; var f = e => { seen = e.target === o && e.currentTarget === o; }; \
+               try { \
+                 o.addEventListener('x', f, { capture: true, passive: true }); \
+                 o.dispatchEvent(new Event('x')); \
+                 EventTarget.prototype.removeEventListener.call(o, 'x', f, true); \
+                 var again = seen; seen = 'removed'; o.dispatchEvent(new Event('x')); \
+                 out.push(name + ':' + again + ':' + seen); \
+               } catch (e) { out.push(name + ':' + e); } \
+             } \
+             out.join('|')"
+        ),
+        "performance:true:removed|screen:true:removed|orientation:true:removed"
+    );
+}
+
+/// Una promesa rechazada sin handler se reporta como "Uncaught (in promise) …" (HTML §8.1.7.3),
+/// sin el prefijo duplicado ("Uncaught Uncaught") que salía en la consola.
+#[test]
+fn unhandled_rejection_reported_once_prefixed() {
+    let mut p = Page::new(SIMPLE);
+    p.eval("Promise.reject(new TypeError('x'))");
+    p.idle();
+    let console = p.console();
+    assert!(
+        console
+            .iter()
+            .any(|l| l == "Uncaught (in promise) TypeError: x"),
+        "{console:?}"
+    );
+    assert!(
+        !console.iter().any(|l| l.contains("Uncaught Uncaught")),
+        "{console:?}"
+    );
+}
+
 // --- Storage ---
 
 #[test]

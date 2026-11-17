@@ -248,6 +248,13 @@ pub struct HostState {
     /// E3: HTML "report an exception" (§8.1.4.6) del embebedor: el `ErrorEvent` en el global
     /// antes de la consola. Sin él, las excepciones de las tareas van directo a los hooks.
     pub exception_reporter: Option<fn(&mut crate::vm::Agent, &Value)>,
+    /// E1: ¿Puede el host servir sus interfaces en este realm? (En `bf-web`, los realms con
+    /// `WebContext`: ventanas, marcos y workers; no un `ShadowRealm`.) Las operaciones, los
+    /// atributos y los constructores del host llamados en un realm que no lo cumple lanzan un
+    /// `TypeError` en lugar de entrar al código del host, que supone ese contexto; y al crear
+    /// un `ShadowRealm` se quitan de su global las interfaces del host (ver
+    /// [`hide_host_interfaces`]). Sin guarda, todos los realms valen.
+    pub realm_guard: Option<fn(&crate::vm::Agent, RealmId) -> bool>,
     /// Los getters/setters de los atributos `[LegacyUnforgeable]` por realm, clase y nombre:
     /// todas las instancias comparten las mismas funciones (WebIDL §3.7.6).
     unforgeable_fns: UnforgeableFns,
@@ -274,6 +281,7 @@ impl Default for HostState {
             realm_data: HashMap::new(),
             rejection_notifier: None,
             exception_reporter: None,
+            realm_guard: None,
             unforgeable_fns: HashMap::new(),
         }
     }
@@ -357,8 +365,50 @@ impl Agent {
 const CALL_METHOD: f64 = 0.0;
 const CALL_STATIC: f64 = 1.0;
 
+/// E1: ¿Sirve el host sus funciones en el realm en curso? (Ver [`HostState::realm_guard`].)
+fn realm_supported(agent: &Agent) -> bool {
+    agent
+        .host
+        .realm_guard
+        .is_none_or(|g| g(agent, agent.current_realm))
+}
+
+/// El `TypeError` de una función del host llamada en un realm que el host no sirve.
+fn unsupported_realm<T>(agent: &mut Agent) -> JsResult<T> {
+    agent.type_error("Illegal invocation: platform objects are not available in this realm")
+}
+
+/// E1: HostInitializeShadowRealm (ShadowRealm, "HostInitializeShadowRealm"; HTML lo define con
+/// las interfaces `[Exposed=*]`). Este host aún no tiene un global de `ShadowRealm` con su
+/// contexto, así que, si la guarda no acepta `realm`, sus interfaces no se exponen: el global
+/// queda con lo de ECMA-262, y el código que las detecta con `typeof` no las encuentra en vez
+/// de llegar a funciones que no pueden correr allí.
+pub fn hide_host_interfaces(agent: &mut Agent, realm: RealmId) {
+    let Some(guard) = agent.host.realm_guard else {
+        return;
+    };
+    if guard(agent, realm) {
+        return;
+    }
+    let g = agent.realms[realm].global_object;
+    let names: Vec<&'static str> = agent
+        .host
+        .classes
+        .iter()
+        .filter(|c| c.exposed)
+        .map(|c| c.name)
+        .collect();
+    for name in names {
+        agent.heap[g].props.remove(&PropertyKey::from(name));
+    }
+}
+
 /// Las operaciones, getters y setters: brand check y la función del host.
 fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    // E1: el realm de la función (lo fijó `call_internal`) tiene que tener el contexto del host.
+    if !realm_supported(agent) {
+        return unsupported_realm(agent);
+    }
     let s = slots(agent, a.callee);
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);
@@ -407,6 +457,9 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 /// `[[Call]]`/`[[Construct]]` del objeto interfaz (WebIDL §3.7.1).
 fn interface_trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if !realm_supported(agent) {
+        return unsupported_realm(agent);
+    }
     let s = slots(agent, a.callee);
     let class = s[0].as_number().unwrap_or(0.0) as usize;
     let (name, ctor) = {

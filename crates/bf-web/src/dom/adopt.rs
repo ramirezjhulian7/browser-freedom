@@ -567,9 +567,16 @@ struct Mirror {
 #[derive(Debug, Default)]
 struct Mirrors(Vec<Mirror>);
 
-/// ¿El documento 0 de la ventana actual tiene un parser que todavía construye el árbol?
+/// ¿El documento 0 de la ventana actual tiene un parser que todavía construye el árbol? También
+/// mientras el tree builder lo presta en mitad de un token ([`with_parser_document`]).
 fn parser_active(agent: &Agent) -> bool {
     let ctx = WebContextHandle::current(agent);
+    if agent
+        .realm_data::<ParserLent>(ctx.realm)
+        .is_some_and(|l| l.0 > 0)
+    {
+        return true;
+    }
     matches!(
         &ctx.get(agent).documents[0],
         crate::DocumentOwner::Parser(p) if matches!(
@@ -577,6 +584,53 @@ fn parser_active(agent: &Agent) -> bool {
             bf_html::ParserStatus::Parsing | bf_html::ParserStatus::Blocked(_)
         )
     )
+}
+
+/// Cuántos préstamos del documento del parser en mitad de un token hay en curso.
+#[derive(Debug, Default)]
+struct ParserLent(u32);
+
+/// E1: presta `doc`, el documento de un parser que está a medio procesar un token, al contexto
+/// de `realm` (como su documento 0) mientras corre `f`: los ganchos del tree builder que corren
+/// script en mitad de un token (`bf_html::ScriptHost::create_element_for_token`,
+/// `custom_element_inserted` y `script_children_changed`; HTML §13.2.6.1 y §4.12.1.1). El
+/// espejo de los nodos adoptados se sincroniza como en las fronteras de script del parser
+/// (`bom::script::put_parser`/`take_parser`) y no se suelta mientras dura el préstamo.
+pub fn with_parser_document(
+    agent: &mut Agent,
+    realm: RealmId,
+    doc: &mut bf_dom::Document,
+    f: impl FnOnce(&mut Agent),
+) {
+    let real = std::mem::take(doc);
+    let saved = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        crate::DocumentOwner::Document(Box::new(real)),
+    );
+    if agent.realm_data::<ParserLent>(realm).is_none() {
+        agent.set_realm_data(realm, ParserLent::default());
+    }
+    if let Some(l) = agent.realm_data_mut::<ParserLent>(realm) {
+        l.0 += 1;
+    }
+    let saved_realm = agent.current_realm;
+    agent.current_realm = realm;
+    mirror_sync_to_live(agent, realm);
+    f(agent);
+    mirror_sync_from_live(agent, realm);
+    agent.current_realm = saved_realm;
+    if let Some(l) = agent.realm_data_mut::<ParserLent>(realm) {
+        l.0 -= 1;
+    }
+    let back = std::mem::replace(
+        &mut WebContextHandle { realm }.get_mut(agent).documents[0],
+        saved,
+    );
+    *doc = match back {
+        crate::DocumentOwner::Document(d) => *d,
+        // `document.write()` sin *insertion point* envolvió el documento prestado en un parser.
+        crate::DocumentOwner::Parser(p) => p.into_document().0,
+    };
 }
 
 fn mirrors(agent: &mut Agent) -> Option<&mut Mirrors> {

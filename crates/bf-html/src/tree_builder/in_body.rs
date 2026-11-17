@@ -4,8 +4,7 @@ use bf_dom::{NodeData, QuirksMode};
 use bf_infra::Namespace;
 
 use super::{
-    Flow, Formatting, Mode, Scope, TagToken, Tok, TreeBuilder, foreign, is_ascii_whitespace,
-    is_special,
+    Flow, Formatting, Mode, Scope, Step, TagToken, Tok, foreign, is_ascii_whitespace, is_special,
 };
 use crate::tokenizer::State;
 
@@ -17,7 +16,7 @@ const BODY_END_OK: &[&str] = &[
     "th", "thead", "tr", "body", "html",
 ];
 
-impl TreeBuilder {
+impl Step<'_> {
     pub(super) fn in_body(&mut self, tok: Tok) -> Flow {
         match tok {
             Tok::Char('\0') => self.error(),
@@ -631,7 +630,7 @@ impl TreeBuilder {
                     bookmark = i + 1;
                     bookmark_moved = true;
                 }
-                self.doc.append(new, last_node);
+                self.append_if_valid(new, last_node);
                 last_node = new;
             }
 
@@ -647,6 +646,8 @@ impl TreeBuilder {
                     .is_none_or(|b| self.doc.parent(b) == Some(loc.parent))
             {
                 self.doc.insert_before(loc.parent, last_node, loc.before);
+                // E1: por foster parenting puede caer en un `script` (§4.12.1.1).
+                self.children_changed(loc.parent);
             }
 
             let new_element = self.create_element_for_token(&fe_tag, Namespace::Html);
@@ -669,9 +670,9 @@ impl TreeBuilder {
 
             let children: Vec<_> = self.doc.children(furthest_block).collect();
             for child in children {
-                self.doc.append(new_element, child);
+                self.append_if_valid(new_element, child);
             }
-            self.doc.append(furthest_block, new_element);
+            self.append_if_valid(furthest_block, new_element);
         }
     }
 }

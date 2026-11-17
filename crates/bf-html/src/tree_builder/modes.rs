@@ -3,7 +3,7 @@
 
 use bf_dom::NodeData;
 
-use super::{Flow, Loc, Mode, Scope, TagToken, Tok, TreeBuilder, is_ascii_whitespace, quirks};
+use super::{Flow, Loc, Mode, Scope, Step, TagToken, Tok, is_ascii_whitespace, quirks};
 use crate::tokenizer::State;
 
 /// Character token que es TAB, LF, FF, CR o SPACE.
@@ -19,13 +19,19 @@ fn is_end(tok: &Tok, names: &[&str]) -> bool {
     matches!(tok, Tok::End(t) if names.contains(&t.name.as_lossy_str()))
 }
 
-impl TreeBuilder {
+impl Step<'_> {
     /// 13.2.6.4.1
     pub(super) fn initial(&mut self, tok: Tok) -> Flow {
         match tok {
             _ if is_ws(&tok) => {}
-            Tok::Comment(data) => self.insert_comment(data, Some(self.document_loc())),
-            Tok::Pi(pi) => self.insert_processing_instruction(pi, Some(self.document_loc())),
+            Tok::Comment(data) => {
+                let loc = self.document_loc();
+                self.insert_comment(data, Some(loc));
+            }
+            Tok::Pi(pi) => {
+                let loc = self.document_loc();
+                self.insert_processing_instruction(pi, Some(loc));
+            }
             Tok::Doctype(d) => {
                 if d.name.as_deref() != Some("html")
                     || d.public_id.is_some()
@@ -71,8 +77,14 @@ impl TreeBuilder {
     pub(super) fn before_html(&mut self, tok: Tok) -> Flow {
         match tok {
             Tok::Doctype(_) => self.error(),
-            Tok::Comment(data) => self.insert_comment(data, Some(self.document_loc())),
-            Tok::Pi(pi) => self.insert_processing_instruction(pi, Some(self.document_loc())),
+            Tok::Comment(data) => {
+                let loc = self.document_loc();
+                self.insert_comment(data, Some(loc));
+            }
+            Tok::Pi(pi) => {
+                let loc = self.document_loc();
+                self.insert_processing_instruction(pi, Some(loc));
+            }
             _ if is_ws(&tok) => {}
             Tok::Start(ref t) if t.name == "html" => {
                 let html = self.create_element_for_token(t, bf_infra::Namespace::Html);
@@ -159,10 +171,11 @@ impl TreeBuilder {
                 let script = self.create_element_for_token(t, bf_infra::Namespace::Html);
                 // El *parser document* es este documento y *force async* es false; en el
                 // parseo de fragmentos, *already started* es true.
+                let fragment = self.context.is_some();
                 let state = self.doc.script_state_mut(script);
                 state.parser_inserted = true;
                 state.force_async = false;
-                if self.context.is_some() {
+                if fragment {
                     state.already_started = true;
                 }
                 self.insert_element_at(script, Some(location));
@@ -860,8 +873,14 @@ impl TreeBuilder {
     /// 13.2.6.4.20
     pub(super) fn after_after_body(&mut self, tok: Tok) -> Flow {
         match tok {
-            Tok::Comment(data) => self.insert_comment(data, Some(self.document_loc())),
-            Tok::Pi(pi) => self.insert_processing_instruction(pi, Some(self.document_loc())),
+            Tok::Comment(data) => {
+                let loc = self.document_loc();
+                self.insert_comment(data, Some(loc));
+            }
+            Tok::Pi(pi) => {
+                let loc = self.document_loc();
+                self.insert_processing_instruction(pi, Some(loc));
+            }
             Tok::Doctype(_) => return self.in_body(tok),
             _ if is_ws(&tok) || is_start(&tok, &["html"]) => return self.in_body(tok),
             Tok::Eof => self.stopped = true,
@@ -877,8 +896,14 @@ impl TreeBuilder {
     /// 13.2.6.4.21
     pub(super) fn after_after_frameset(&mut self, tok: Tok) -> Flow {
         match tok {
-            Tok::Comment(data) => self.insert_comment(data, Some(self.document_loc())),
-            Tok::Pi(pi) => self.insert_processing_instruction(pi, Some(self.document_loc())),
+            Tok::Comment(data) => {
+                let loc = self.document_loc();
+                self.insert_comment(data, Some(loc));
+            }
+            Tok::Pi(pi) => {
+                let loc = self.document_loc();
+                self.insert_processing_instruction(pi, Some(loc));
+            }
             Tok::Doctype(_) => return self.in_body(tok),
             _ if is_ws(&tok) || is_start(&tok, &["html"]) => return self.in_body(tok),
             Tok::Eof => self.stopped = true,

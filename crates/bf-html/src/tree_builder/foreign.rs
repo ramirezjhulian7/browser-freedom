@@ -4,7 +4,7 @@
 use bf_infra::Namespace;
 
 use super::{
-    Flow, TagToken, Tok, TreeBuilder, is_ascii_whitespace, is_html_integration_point,
+    Flow, Step, TagToken, Tok, is_ascii_whitespace, is_html_integration_point,
     is_mathml_text_integration_point,
 };
 
@@ -56,7 +56,7 @@ const BREAKOUT: &[&str] = &[
     "var",
 ];
 
-impl TreeBuilder {
+impl Step<'_> {
     pub(super) fn foreign_content(&mut self, tok: Tok) -> Flow {
         match tok {
             Tok::Char('\0') => {

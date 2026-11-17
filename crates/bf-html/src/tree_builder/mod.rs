@@ -201,6 +201,10 @@ struct TreeBuilder {
     skip_next_lf: bool,
     /// template contents → template, para "host-including inclusive ancestor".
     template_hosts: HashMap<NodeId, NodeId>,
+    /// E1: el host ya construyó algún custom element (ver
+    /// [`script::ScriptHost::create_element_for_token`]): solo entonces se mira, al insertar,
+    /// si el elemento es custom.
+    custom_elements_constructed: bool,
     stopped: bool,
     errors: Vec<ParseError>,
     /// El `script` cuyo end tag se acaba de procesar en el modo text: el parser corre los
@@ -224,7 +228,39 @@ struct TreeBuilder {
     saved_insertion_points: Vec<Option<usize>>,
 }
 
+/// E1: el tree builder con el host del parser mientras procesa un token. Los insertion modes
+/// son métodos de `Step` (el estado lo ven por `Deref`), así los pasos que corren script en
+/// mitad de un token llegan al host: *create an element for a token* con *will execute
+/// script* (HTML §13.2.6.1, la construcción síncrona de un custom element) y la inserción de
+/// un nodo en un `script` conectado que no insertó el parser (sus *children changed steps*,
+/// §4.12.1.1). Los ayudantes que no llaman al host siguen en [`TreeBuilder`].
+struct Step<'a> {
+    b: &'a mut TreeBuilder,
+    host: &'a mut dyn script::ScriptHost,
+}
+
+impl std::ops::Deref for Step<'_> {
+    type Target = TreeBuilder;
+
+    #[inline]
+    fn deref(&self) -> &TreeBuilder {
+        self.b
+    }
+}
+
+impl std::ops::DerefMut for Step<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut TreeBuilder {
+        self.b
+    }
+}
+
 impl TreeBuilder {
+    /// Procesa `tok` con `host` (ver [`Step`]).
+    fn process_token_with(&mut self, tok: Tok, host: &mut dyn script::ScriptHost) {
+        Step { b: self, host }.process_token(tok);
+    }
+
     fn new(input: &str, opts: &ParseOptions) -> Self {
         TreeBuilder {
             tokenizer: Tokenizer::new(input),
@@ -246,6 +282,7 @@ impl TreeBuilder {
             skip_next_lf: false,
             surrogate: None,
             template_hosts: HashMap::new(),
+            custom_elements_constructed: false,
             stopped: false,
             errors: Vec::new(),
             script_end: None,
@@ -315,7 +352,7 @@ impl TreeBuilder {
             let Some(tok) = self.next_tok() else {
                 break;
             };
-            self.process_token(tok);
+            self.process_token_with(tok, &mut bf_dom::events::NoScript);
             self.script_end = None;
             self.svg_script_end = None;
             self.inserted_links.clear();
@@ -353,7 +390,9 @@ impl TreeBuilder {
         errors.sort_by_key(|e| e.offset);
         (self.doc, errors)
     }
+}
 
+impl Step<'_> {
     fn process_token(&mut self, mut tok: Tok) {
         loop {
             match self.dispatch(tok) {
@@ -421,7 +460,9 @@ impl TreeBuilder {
             Mode::AfterAfterFrameset => self.after_after_frameset(tok),
         }
     }
+}
 
+impl TreeBuilder {
     fn error(&mut self) {
         self.errors.push(ParseError {
             code: TREE_ERROR,
@@ -650,7 +691,9 @@ impl TreeBuilder {
     fn is_open(&self, node: NodeId) -> bool {
         self.open.contains(&node)
     }
+}
 
+impl Step<'_> {
     /// Reconstruct the active formatting elements.
     fn reconstruct_formatting(&mut self) {
         let Some(last) = self.formatting.last() else {
@@ -684,7 +727,9 @@ impl TreeBuilder {
             index += 1;
         }
     }
+}
 
+impl TreeBuilder {
     /// Clear the list of active formatting elements up to the last marker.
     fn clear_formatting_to_last_marker(&mut self) {
         while let Some(entry) = self.formatting.pop() {
@@ -703,22 +748,64 @@ impl TreeBuilder {
         }
         id
     }
+}
 
+impl Step<'_> {
     /// Create an element for a token. El intended parent (para el form owner) se aproxima con
     /// el *appropriate place* actual.
     fn create_element_for_token(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
-        let id = self.create_element(Element {
+        // E1: un posible custom element (pasos 4-6: el *is value* y la definición, que solo
+        // conoce el host) se crea sin atributos: si hay definición, el constructor corre antes
+        // de que se añadan (paso 8, con el *synchronous custom elements flag*).
+        let is = if ns == Namespace::Html {
+            tag.attr("is")
+        } else {
+            None
+        };
+        let candidate = ns == Namespace::Html
+            && self.scripting
+            && self.context.is_none()
+            && (is.is_some() || {
+                let name = tag.name.as_lossy_str();
+                name.contains('-') && bf_dom::is_valid_custom_element_name(name)
+            })
+            // El *intended parent* de lo que va en el contenido de un `template` es del
+            // documento inerte del template, que no tiene registro (paso 4).
+            && !self.inserting_into_template_contents();
+        let mut id = self.create_element(Element {
             ns,
             prefix: None,
             name: tag.name.clone(),
-            attrs: tag.attrs.clone(),
+            attrs: if candidate {
+                Vec::new()
+            } else {
+                tag.attrs.clone()
+            },
             template_contents: None,
         });
         // E1: el *is value* (paso 4 de "create an element for a token").
-        if ns == Namespace::Html
-            && let Some(is) = tag.attr("is")
-        {
+        if let Some(is) = is {
             self.doc.set_is_value(id, Some(is.into()));
+        }
+        if candidate {
+            // Pasos 7-10. El *throw-on-dynamic-markup-insertion counter* (§8.4.1) cubre al
+            // constructor y a las reacciones: `document.write()` lanza.
+            self.b.doc.scripts_mut().throw_on_dynamic_markup_insertion += 1;
+            let constructed = self
+                .host
+                .create_element_for_token(&mut self.b.doc, id, &tag.attrs);
+            self.b.doc.scripts_mut().throw_on_dynamic_markup_insertion -= 1;
+            match constructed {
+                Some(element) => {
+                    id = element;
+                    self.b.custom_elements_constructed = true;
+                }
+                None => {
+                    if let Some(e) = self.doc.element_mut(id) {
+                        e.attrs = tag.attrs.clone();
+                    }
+                }
+            }
         }
         // E1: paso 13: un form-associated element (no custom) se asocia con el *form element
         // pointer* si no hay `template` en la pila, no es listed con atributo `form` y el
@@ -742,7 +829,9 @@ impl TreeBuilder {
         }
         id
     }
+}
 
+impl TreeBuilder {
     /// Appropriate place for inserting a node.
     fn appropriate_place(&self, override_target: Option<NodeId>) -> Loc {
         let mut parent = override_target.unwrap_or_else(|| self.current());
@@ -816,19 +905,48 @@ impl TreeBuilder {
         false
     }
 
+    /// E1: ¿el *appropriate place* está en el contenido de un `template` (no en un shadow
+    /// root declarativo, que es del documento)?
+    fn inserting_into_template_contents(&self) -> bool {
+        if self.open.is_empty() {
+            return false;
+        }
+        let root = self.doc.tree_root(self.appropriate_place(None).parent);
+        self.template_hosts.contains_key(&root) && self.doc.shadow_host(root).is_none()
+    }
+
+    /// E1: los `append` del adoption agency (§13.2.6.4.7) con el paso 2 de *ensure
+    /// pre-insertion validity* (DOM §4.2.3): no se inserta un nodo en sí mismo ni en un
+    /// descendiente suyo. Con la construcción síncrona de los custom elements, una reacción
+    /// del clon (`attributeChangedCallback`) puede meterlo en el *furthest block* antes de que
+    /// el algoritmo le pase los hijos de este (`custom-elements/append-children-to-new-parent-cycle.html`).
+    fn append_if_valid(&mut self, parent: NodeId, child: NodeId) {
+        if !self.is_host_including_inclusive_ancestor(child, parent) {
+            self.doc.append(parent, child);
+        }
+    }
+
     fn has_element_child(&self, node: NodeId) -> bool {
         self.doc
             .children(node)
             .any(|c| self.doc.element(c).is_some())
     }
+}
 
+impl Step<'_> {
     /// Insert an element at the adjusted insertion location.
     fn insert_element_at(&mut self, element: NodeId, location: Option<Loc>) {
         let loc = location.unwrap_or_else(|| self.appropriate_place(None));
         let parent_is_document = matches!(self.doc.get(loc.parent).data, NodeData::Document);
+        // E1: "if it is possible to insert element at the adjusted insertion location" (DOM
+        // §4.2.3, *ensure pre-insertion validity*): un script que corrió en mitad del token
+        // (el constructor de un custom element) pudo sacar al hijo de referencia del padre.
         if self.doc.parent(element).is_some()
             || self.is_host_including_inclusive_ancestor(element, loc.parent)
             || (parent_is_document && self.has_element_child(loc.parent))
+            || loc
+                .before
+                .is_some_and(|b| self.doc.parent(b) != Some(loc.parent))
         {
             return;
         }
@@ -844,12 +962,38 @@ impl TreeBuilder {
         {
             self.inserted_links.push(element);
         }
+        // E1: la cola de reacciones que rodea la inserción (§13.2.6.1, "insert an element at
+        // the adjusted insertion location", pasos 2.1-2.3) se invoca al cerrarla.
+        if self.custom_elements_constructed && self.doc.is_custom_element(element) {
+            self.host.custom_element_inserted(&mut self.b.doc, element);
+        }
+        self.children_changed(loc.parent);
     }
 
-    /// Insert a foreign element.
+    /// E1: los *children changed steps* de un `script` HTML (§4.12.1.1) en el que el parser
+    /// acaba de insertar un nodo: si está conectado y no lo insertó el parser, el host lo
+    /// prepara (y lo ejecuta si es inline). Solo puede pasar fuera de la pila de elementos
+    /// abiertos (foster parenting, el adoption agency): los `script` que crea el parser son
+    /// *parser-inserted* o, en un fragmento, *already started*.
+    fn children_changed(&mut self, parent: NodeId) {
+        if self.open.last() == Some(&parent) || !self.is_html(parent, "script") {
+            return;
+        }
+        if self.scripting
+            && !self.doc.script_state(parent).parser_inserted
+            && self.doc.is_connected(parent)
+        {
+            self.host.script_children_changed(&mut self.b.doc, parent);
+        }
+    }
+
+    /// Insert a foreign element. El *adjusted insertion location* se calcula antes de crear
+    /// el elemento (§13.2.6.1, pasos 1-2): el constructor de un custom element puede mover
+    /// el *intended parent*.
     fn insert_foreign(&mut self, tag: &TagToken, ns: Namespace) -> NodeId {
+        let location = self.appropriate_place(None);
         let element = self.create_element_for_token(tag, ns);
-        self.insert_element_at(element, None);
+        self.insert_element_at(element, Some(location));
         self.open.push(element);
         element
     }
@@ -858,7 +1002,9 @@ impl TreeBuilder {
     fn insert_html(&mut self, tag: &TagToken) -> NodeId {
         self.insert_foreign(tag, Namespace::Html)
     }
+}
 
+impl TreeBuilder {
     /// E1: pasos 8-9 del start tag `template` en "in head" (13.2.6.4.4): con
     /// `shadowrootmode` y *allow declarative shadow roots*, el template (ya en la stack, sin
     /// insertar) recibe como template contents el shadow root del *adjusted current node*.
@@ -912,7 +1058,9 @@ impl TreeBuilder {
         self.template_hosts.insert(shadow, template);
         true
     }
+}
 
+impl Step<'_> {
     /// Insert a character (acepta varios caracteres a la vez).
     fn insert_chars(&mut self, data: &str) {
         let loc = self.appropriate_place(None);
@@ -927,10 +1075,13 @@ impl TreeBuilder {
             && let NodeData::Text(text) = &mut self.doc.get_mut(prev).data
         {
             text.push_str(data);
+            // E1: *replace data* corre los *children changed steps* del padre (DOM §4.10).
+            self.children_changed(loc.parent);
             return;
         }
         let text = self.doc.create(NodeData::Text(data.into()));
         self.doc.insert_before(loc.parent, text, loc.before);
+        self.children_changed(loc.parent);
     }
 
     fn insert_char(&mut self, c: char) {
@@ -959,12 +1110,17 @@ impl TreeBuilder {
             && let NodeData::Text(text) = &mut self.doc.get_mut(prev).data
         {
             text.push_code_unit(u);
+            // E1: *replace data* corre los *children changed steps* del padre (DOM §4.10).
+            self.children_changed(loc.parent);
             return;
         }
         let text = self.doc.create(NodeData::Text(DomString::from_utf16(&[u])));
         self.doc.insert_before(loc.parent, text, loc.before);
+        self.children_changed(loc.parent);
     }
+}
 
+impl TreeBuilder {
     fn insert_comment(&mut self, data: DomString, location: Option<Loc>) {
         let loc = location.unwrap_or_else(|| self.appropriate_place(None));
         let comment = self.doc.create(NodeData::Comment(data));
@@ -988,14 +1144,18 @@ impl TreeBuilder {
     }
 
     // --- 13.2.6.2 Parsing elements that contain only text ---
+}
 
+impl Step<'_> {
     fn generic_text_element(&mut self, tag: &TagToken, state: State) {
         self.insert_html(tag);
         self.tokenizer.set_state(state);
         self.original_mode = self.mode;
         self.mode = Mode::Text;
     }
+}
 
+impl TreeBuilder {
     fn set_quirks_mode(&mut self, mode: QuirksMode) {
         self.doc.mode = mode;
     }

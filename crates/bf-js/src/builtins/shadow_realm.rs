@@ -37,6 +37,8 @@ fn shadow_realm_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     )?;
     // CreateRealm + SetDefaultGlobalBindings (+ HostInitializeShadowRealm del host).
     let realm = agent.create_realm();
+    // E1: HostInitializeShadowRealm: sin las interfaces que el host no puede servir allí.
+    crate::host::hide_host_interfaces(agent, realm);
     agent.heap[o].kind = ObjectKind::ShadowRealm(realm);
     Ok(Value::Object(o))
 }
