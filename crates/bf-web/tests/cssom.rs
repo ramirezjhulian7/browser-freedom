@@ -551,6 +551,47 @@ fn link_stylesheet_rules_are_loaded() {
     );
 }
 
+/// E2: los `@import` de una hoja enlazada (relativos a la URL de la hoja) y los de un
+/// `<style>` entran en la cascada del CSSOM (CSS Cascade 5 §2).
+#[test]
+fn imports_enter_the_cssom_cascade() {
+    let dir = std::env::temp_dir().join(format!("bf-cssom-import-{}", std::process::id()));
+    let sub = dir.join("css");
+    std::fs::create_dir_all(&sub).expect("directorio temporal");
+    std::fs::write(sub.join("a.css"), "@import \"b.css\"; p { color: red }").unwrap();
+    std::fs::write(sub.join("b.css"), "b { color: blue }").unwrap();
+    std::fs::write(dir.join("c.css"), "i { color: green }").unwrap();
+    // URLs absolutas: este `Page` resuelve contra `https://example.com/dir/page.html`.
+    let base = format!("file://{}/", dir.display());
+    let html = format!(
+        "<!DOCTYPE html><html><head><link rel=stylesheet href='{base}css/a.css'>\
+         <style>@import url({base}c.css);</style></head><body><p id=p>x</p><b id=b>y</b>\
+         <i id=i>z</i></body></html>"
+    );
+    let mut p = Page::new(&html);
+    let realm = p.ctx.realm;
+    p.rt.agent.set_realm_data(
+        realm,
+        bf_web::html::scripting::PageResources::new(std::sync::Arc::new(
+            bf_infra::resource::FileLoader::new(),
+        )),
+    );
+    let color = |p: &mut Page, id: &str| {
+        p.s(&format!(
+            "getComputedStyle(document.getElementById('{id}')).color"
+        ))
+    };
+    assert_eq!(color(&mut p, "p"), "rgb(255, 0, 0)");
+    assert_eq!(color(&mut p, "b"), "rgb(0, 0, 255)");
+    assert_eq!(color(&mut p, "i"), "rgb(0, 128, 0)");
+    // `cssRules` sigue mostrando la regla `@import`, no las importadas.
+    assert_eq!(
+        p.s("document.styleSheets[0].cssRules.length + ' ' + document.styleSheets[0].cssRules[0].href"),
+        "2 b.css"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// E2: la hoja de un `<link>` entra en la cascada del CSSOM ya parseada (compartida con el
 /// pintado por `bf_style::sheet_cache`) y sus `cssRules` se crean al pedirlas; `insertRule`
 /// sobre ella (antes o después de leer `cssRules`) cambia los estilos.

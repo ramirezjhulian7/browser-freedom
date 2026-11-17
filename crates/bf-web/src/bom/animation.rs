@@ -40,6 +40,10 @@ pub struct AnimationState {
     pub(crate) timeline: Option<bf_js::host::HostHandle>,
     /// Las promesas `finished` pendientes (fijadas) de cada animación.
     pub(crate) finished_waiting: Vec<(u64, bf_js::host::HostHandle)>,
+    /// E2: una animación o transición terminó en una actualización que todavía no se pintó
+    /// (se pone en [`animate`] cuando el animador deja de estar activo y se quita en
+    /// [`animate_in`], que es la que usa el pintado).
+    ended_unpainted: bool,
 }
 
 /// El estado de animaciones de la ventana en curso (se crea la primera vez).
@@ -93,6 +97,7 @@ pub fn animate(agent: &mut Agent, base: Arc<StyleMap>) -> Arc<StyleMap> {
         return base;
     }
     let mut animator = std::mem::take(&mut st.animator);
+    let was_active = animator.is_active();
     let media = crate::cssom::media_context(agent);
     let sheets = crate::cssom::sheets::document_sheets(agent, &media);
     let refs: Vec<&Stylesheet> = sheets.iter().collect();
@@ -111,6 +116,7 @@ pub fn animate(agent: &mut Agent, base: Arc<StyleMap>) -> Arc<StyleMap> {
     }
     let shown = Arc::new(styles);
     if let Some(st) = agent.realm_data_mut::<AnimationState>(realm) {
+        st.ended_unpainted |= was_active && !animator.is_active();
         st.animator = animator;
         st.last = Some((base, now, shown.clone()));
     }
@@ -143,12 +149,22 @@ pub fn wants_frame(agent: &Agent, realm: RealmId, after_mutation: bool) -> bool 
     animations || crate::cssom::observations_pending(agent, realm)
 }
 
-/// ¿Hay animaciones o transiciones en curso en la ventana `realm`? (Mientras las haya, cada
-/// cuadro muestra estilos nuevos.)
+/// ¿Hay animaciones o transiciones en curso en la ventana `realm`, o terminó alguna en una
+/// actualización que todavía no se pintó? (Mientras sí, cada cuadro se vuelve a pintar.)
+///
+/// E2: lo segundo cubre una animación que empieza y termina entre dos cuadros. HTML §8.1.7.3:
+/// cada "update the rendering" corre "update animations and send events" y después pinta
+/// ("update the rendering or user interface ... to reflect the current state"). Si el primer
+/// cuadro tras el arranque llega cuando la animación ya terminó (una página pesada, o una
+/// ventana que tarda en tomar el cuadro anterior), el animador ya no está activo, pero los
+/// estilos mostrados cambiaron (el estado final, con `animation-fill-mode`) y hay que
+/// pintarlos. El hilo de la pestaña repinta en el cuadro en que esto da `true`; como el
+/// animador ya no está activo, no pide más cuadros por esto (`wants_frame`). Sin esto, `https://asimetrix.co/` se quedaba con el titular en el primer
+/// fotograma de `fade-up` (`opacity: 0`).
 pub fn is_animating(agent: &Agent, realm: RealmId) -> bool {
     agent
         .realm_data::<AnimationState>(realm)
-        .is_some_and(|st| st.animator.is_active())
+        .is_some_and(|st| st.animator.is_active() || st.ended_unpainted)
 }
 
 /// Los estilos de la cascada `base` del documento de la ventana `realm` con sus animaciones y
@@ -159,7 +175,18 @@ pub fn animate_in(agent: &mut Agent, realm: RealmId, base: Arc<StyleMap>) -> Arc
     }
     let saved = agent.current_realm;
     agent.current_realm = realm;
+    // E2: pintar es actualizar la representación (HTML §8.1.7.3), que corre "update
+    // animations" (Web Animations 1 §4.6) antes de pintar: la línea de tiempo avanza a la hora
+    // de ahora. Sin esto, mientras había una animación en curso, todo lo que el navegador
+    // pintaba entre dos cuadros de `requestAnimationFrame` (por un cambio del DOM, con la
+    // ventana todavía sin tomar el cuadro anterior) usaba la hora congelada del último cuadro:
+    // en `https://asimetrix.co/`, que cambia el DOM sin parar, el titular se quedaba en el
+    // primer fotograma de `fade-up` (`opacity: 0`). Los eventos se despachan en el próximo
+    // cuadro ([`update_and_send_events`]).
+    let now = super::performance::now_ms(agent);
+    state_mut(agent).time = Some(now);
     let shown = animate(agent, base);
+    state_mut(agent).ended_unpainted = false;
     agent.current_realm = saved;
     shown
 }

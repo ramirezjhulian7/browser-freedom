@@ -39,6 +39,29 @@ pub fn https_enabled() -> bool {
     std::env::var("FREEDOM_WPT_HTTPS").is_ok_and(|v| v == "1")
 }
 
+/// E1: los orígenes en que el runner sirve el docroot de WPT: los dos hosts de wptserve
+/// (`web-platform.test` y el *alt*, `not-web-platform.test`) con sus subdominios (`www`,
+/// `www1`, `www2`), en los dos puertos HTTP y los dos HTTPS (ver `net::wptserve::sub_value`).
+pub fn wpt_origins() -> Vec<String> {
+    let mut out = vec![ORIGIN.to_owned(), HTTPS_ORIGIN.to_owned()];
+    for base in ["web-platform.test", "not-web-platform.test"] {
+        for sub in ["", "www.", "www1.", "www2."] {
+            for (scheme, port) in [
+                ("http", 8000),
+                ("http", 8001),
+                ("https", 8443),
+                ("https", 8444),
+            ] {
+                let o = format!("{scheme}://{sub}{base}:{port}");
+                if !out.contains(&o) {
+                    out.push(o);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// El origen desde el que se sirve el test `rel`.
 fn origin_for(rel: &str) -> &'static str {
     let name = rel.rsplit('/').next().unwrap_or(rel);
@@ -571,13 +594,16 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
         1,
         super::accessibility::node_properties_native,
     );
-    let origin = Url::parse(&format!("{ORIGIN}/"), None).expect("origen");
-    let https = Url::parse(&format!("{HTTPS_ORIGIN}/"), None).expect("origen");
-    let loader = crate::net::wptserve::SubLoader(
-        FileLoader::new()
-            .mount(&origin, root.to_path_buf())
-            .mount(&https, root.to_path_buf()),
-    );
+    // E1: el docroot también en los otros hosts de wptserve (`{{domains[www1]}}`,
+    // `{{hosts[alt][]}}`, el segundo puerto…): `get_host_info().HTTP_REMOTE_ORIGIN` y
+    // compañía. Sin ellos, un `<iframe>` de otro origen no cargaba, se quedaba en `about:blank`
+    // (del mismo origen que la página) y los tests entre orígenes no probaban nada.
+    let mut files = FileLoader::new();
+    for origin in wpt_origins() {
+        let url = Url::parse(&format!("{origin}/"), None).expect("origen");
+        files = files.mount(&url, root.to_path_buf());
+    }
+    let loader = crate::net::wptserve::SubLoader(files);
     let mut resources = PageResources::new(Arc::new(loader));
     for o in [ORIGIN, HTTPS_ORIGIN] {
         resources.overrides.insert(

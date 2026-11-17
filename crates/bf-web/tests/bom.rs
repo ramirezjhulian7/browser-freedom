@@ -1287,7 +1287,10 @@ fn cross_origin_location_is_restricted() {
 fn cross_origin_window_descriptors_and_keys() {
     let mut p = framed(
         "<iframe id=f src=https://otro.test/p.html></iframe>",
-        &[("https://otro.test/p.html", "<iframe srcdoc=x></iframe>")],
+        &[(
+            "https://otro.test/p.html",
+            "<iframe name=hijo srcdoc=x></iframe>",
+        )],
     );
     let realm = p.ctx.realm;
     bom::frames::sync_frames(&mut p.rt.agent, realm);
@@ -1307,10 +1310,84 @@ fn cross_origin_window_descriptors_and_keys() {
                     Object.setPrototypeOf(w, null) === w, err(() => Object.setPrototypeOf(w, {}))); \
              var keys = Reflect.ownKeys(w).map(String); \
              r.push(keys[0], keys.includes('postMessage'), keys.includes('then'), keys.length); \
+             r.push(w.hijo === w[0], 'hijo' in w, keys.includes('hijo'), \
+                    Object.getOwnPropertyDescriptor(w, 'hijo').value === w[0]); \
              return r.join(); })()"
         ),
         "function,false,false,true,function,function,true,true,SecurityError,SecurityError,\
-         SecurityError,SecurityError,TypeError,true,TypeError,0,true,true,18"
+         SecurityError,SecurityError,TypeError,true,TypeError,0,true,true,19,true,true,true,true"
+    );
+}
+
+/// E1: el `WindowProxy` de un marco (HTML §7.2.2) es estable y sigue al documento: el script
+/// guarda `contentWindow`, el marco navega y la variable ve el documento nuevo (mismo origen) o
+/// lanza `SecurityError` en lo que no es entre orígenes (otro origen).
+#[test]
+fn saved_content_window_follows_navigation() {
+    let mut p = framed(
+        "<iframe id=f src=https://example.test/uno.html></iframe>",
+        &[
+            ("https://example.test/uno.html", "<p id=x>uno</p>"),
+            ("https://example.test/dos.html", "<p id=x>dos</p>"),
+            ("https://otro.test/tres.html", "<p id=x>tres</p>"),
+        ],
+    );
+    let realm = p.ctx.realm;
+    assert_eq!(
+        p.show(
+            "var f = document.getElementById('f'); var w = f.contentWindow; \
+             [w === f.contentWindow, w === frames[0], w === window[0], w.window === w, \
+              w.self === w, w.frames === w, w.document.getElementById('x').textContent, \
+              w.parent === window, w.document.defaultView === w].join()"
+        ),
+        "true,true,true,true,true,true,uno,true,true"
+    );
+    p.show("f.src = 'https://example.test/dos.html'");
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    p.idle();
+    assert_eq!(
+        p.show(
+            "[w === f.contentWindow, w.document.getElementById('x').textContent, \
+              w.location.href].join()"
+        ),
+        "true,dos,https://example.test/dos.html"
+    );
+    p.show("f.src = 'https://otro.test/tres.html'");
+    bom::frames::sync_frames(&mut p.rt.agent, realm);
+    p.idle();
+    assert_eq!(
+        p.show(
+            "(function () { var r = []; \
+             function err(g) { try { g(); return 'ok'; } catch (e) { return e.name; } } \
+             r.push(w === f.contentWindow, err(() => w.document), err(() => w.location.href), \
+                    err(() => w.location.hash), err(() => w.secreto), err(() => { w.x = 1; }), \
+                    w.window === w, w.parent === window, typeof w.postMessage, w.closed, \
+                    Object.getPrototypeOf(w) === null, f.contentDocument === null); \
+             return r.join(); })()"
+        ),
+        "true,SecurityError,SecurityError,SecurityError,SecurityError,SecurityError,\
+         true,true,function,false,true,true"
+    );
+}
+
+/// E1: dentro del marco, `window`, `self`, `document.defaultView` y el `currentTarget` de un
+/// evento de la ventana son su `WindowProxy`, el mismo objeto que ve el padre en `frames[0]`.
+#[test]
+fn frame_window_identity_inside_and_out() {
+    let mut p = framed(
+        "<iframe srcdoc=\"<script>var log = []; \
+         addEventListener('x', function (e) { log.push(e.currentTarget === window, e.target === self); }); \
+         parent.dentro = [window === parent.frames[0], self === window, \
+                          document.defaultView === window, window.top === parent].join();</script>\"></iframe>",
+        &[],
+    );
+    assert_eq!(p.show("dentro"), "true,true,true,true");
+    assert_eq!(
+        p.show(
+            "var w = frames[0]; w.dispatchEvent(new w.Event('x')); \
+             w.log.join() + '|' + (w.addEventListener === w.EventTarget.prototype.addEventListener)"
+        ),
+        "true,true|true"
     );
 }
 
