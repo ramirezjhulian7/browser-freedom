@@ -2064,16 +2064,33 @@ fn extent_with_descendants(f: &Fragment, through_clip: bool) -> Rect {
 /// es el viewport). Antes las cajas posicionadas bajo un recorte no se recortaban nunca: el
 /// `<div class="absolute left-1/2 w-full">` dentro del vídeo con `relative overflow-hidden` de
 /// asimetrix.co ensanchaba el documento a 1658 px en una ventana de 1180.
+///
+/// E2: CSS Overflow 3 §2.2: el desbordamiento desplazable cuenta las cajas "accounting for
+/// transforms". Una caja transformada aporta su subárbol medido en su propio espacio (con sus
+/// recortes internos) y llevado por su matriz (`fragment_matrix`, CSS Transforms 1 §6): se
+/// toma el rectángulo que contiene las cuatro esquinas transformadas, recortado por el límite
+/// de fuera. Las transformaciones anidadas se componen por la recursión.
 pub fn document_extent(tree: &FragmentTree) -> Rect {
     /// Hasta dónde llega lo que se ve en cada eje (derecha, abajo).
     type Limit = (f32, f32);
+    const NONE: Limit = (f32::INFINITY, f32::INFINITY);
     #[derive(Clone, Copy)]
     struct Clips {
         flow: Limit,
         absolute: Limit,
         fixed: Limit,
     }
-    fn walk(f: &Fragment, clips: Clips, r: &mut (f32, f32)) {
+    /// El rectángulo que contiene lo visto (izquierda, arriba, derecha, abajo).
+    struct Bounds(f32, f32, f32, f32);
+    impl Bounds {
+        fn add(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+            self.0 = self.0.min(x0);
+            self.1 = self.1.min(y0);
+            self.2 = self.2.max(x1);
+            self.3 = self.3.max(y1);
+        }
+    }
+    fn walk(f: &Fragment, clips: Clips, b: &mut Bounds) {
         let position = if is_box(f) {
             f.style.position
         } else {
@@ -2084,9 +2101,53 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
             Position::Fixed => clips.fixed,
             _ => clips.flow,
         };
-        let m = f.margin_rect();
-        r.0 = r.0.max(m.right().min(limit.0));
-        r.1 = r.1.max(m.bottom().min(limit.1));
+        let Some([ma, mb, mc, md, me, mf]) = fragment_matrix(f) else {
+            walk_box(f, clips, limit, false, b);
+            return;
+        };
+        let all = Clips {
+            flow: NONE,
+            absolute: NONE,
+            fixed: NONE,
+        };
+        let mut local = Bounds(
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        walk_box(f, all, NONE, true, &mut local);
+        if !(local.0.is_finite()
+            && local.1.is_finite()
+            && local.2.is_finite()
+            && local.3.is_finite())
+        {
+            return;
+        }
+        let corners = [
+            (local.0, local.1),
+            (local.2, local.1),
+            (local.0, local.3),
+            (local.2, local.3),
+        ];
+        let mut t = Bounds(
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for (x, y) in corners {
+            let (px, py) = (ma * x + mc * y + me, mb * x + md * y + mf);
+            t.add(px, py, px, py);
+        }
+        b.add(t.0, t.1, t.2.min(limit.0), t.3.min(limit.1));
+    }
+    /// La caja `f` (ya en el espacio de su padre) y su subárbol. Con `border_box`, la caja
+    /// cuenta con su border box (la transformada: CSS Overflow 3 §2.2 cuenta "the border boxes
+    /// of all boxes"); si no, con su margin box, como antes.
+    fn walk_box(f: &Fragment, clips: Clips, limit: Limit, border_box: bool, b: &mut Bounds) {
+        let m = if border_box { f.rect } else { f.margin_rect() };
+        b.add(m.x, m.y, m.right().min(limit.0), m.bottom().min(limit.1));
         // E12: hasta el borde de recorte (todo en un eje que no recorta).
         let inner = match f.clip {
             Some(clip) => (limit.0.min(clip.right()), limit.1.min(clip.bottom())),
@@ -2103,20 +2164,19 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
             fixed: if transformed { inner } else { clips.fixed },
         };
         for c in &f.children {
-            walk(c, children, r);
+            walk(c, children, b);
         }
     }
-    let mut r = (tree.viewport.width, tree.viewport.height);
+    let mut b = Bounds(0.0, 0.0, tree.viewport.width, tree.viewport.height);
     if let Some(root) = &tree.root {
-        let none = (f32::INFINITY, f32::INFINITY);
         let clips = Clips {
-            flow: none,
-            absolute: none,
-            fixed: none,
+            flow: NONE,
+            absolute: NONE,
+            fixed: NONE,
         };
-        walk(root, clips, &mut r);
+        walk(root, clips, &mut b);
     }
-    Rect::new(0.0, 0.0, r.0, r.1)
+    Rect::new(0.0, 0.0, b.2, b.3)
 }
 
 /// Lista de visualización del documento (CSS 2.2 Apéndice E).

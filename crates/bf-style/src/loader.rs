@@ -209,6 +209,15 @@ fn process(
     resolve_imports(sheet, base, res, quirks, chain);
 }
 
+/// E2: inserta en `sheet` las hojas que importa (CSS Cascade 5 §2, `@import`), como al
+/// cargarla para el pintado: `base` es la URL contra la que se resuelven los `@import` (la de
+/// la hoja enlazada, o la base del documento para un `<style>`), y las `url()` de `sheet` ya
+/// deben estar resueltas (las de `sheet_cache` lo están). Para el CSSOM, que parsea sus hojas
+/// por su cuenta.
+pub fn resolve_sheet_imports(sheet: &mut Stylesheet, base: &Url, res: Resources<'_>, quirks: bool) {
+    resolve_imports(sheet, base, res, quirks, &mut vec![base.serialize(true)]);
+}
+
 /// Inserta las hojas que `sheet` importa (con sus URLs ya resueltas contra `base`).
 fn resolve_imports(
     sheet: &mut Stylesheet,

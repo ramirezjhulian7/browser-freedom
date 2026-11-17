@@ -208,3 +208,31 @@ fn asimetrix() {
     );
     assert!(s.title().contains("Asimetrix"), "{}", s.log);
 }
+
+/// E2: `https://app.asimetrix.co/ASIMETRIX` (Create React App, pantalla de acceso). Con
+/// scripting activo el `<noscript>` ("You need to enable JavaScript to run this app.") es texto
+/// que no se representa (HTML §4.12.2; la hoja UA lo oculta con `@media (scripting)`). Con la
+/// barra de búsqueda se comprueba que no está a la vista, y que no hay `ChunkLoadError`.
+#[test]
+#[ignore = "red: app.asimetrix.co"]
+fn asimetrix_app() {
+    let s = session(
+        "https://app.asimetrix.co/ASIMETRIX",
+        &[
+            "wait",
+            "wait",
+            "wait",
+            "key:f3",
+            "type:enable JavaScript",
+            "wait",
+        ],
+    );
+    assert!(
+        s.last
+            .contains("buscar=\"enable JavaScript\" \"Sin resultados\""),
+        "se ve el texto del <noscript>:\n{}",
+        s.log
+    );
+    assert!(!s.log.contains("ChunkLoadError"), "{}", s.log);
+    assert!(s.title().contains("Asimetrix"), "{}", s.log);
+}
