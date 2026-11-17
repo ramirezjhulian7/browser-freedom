@@ -26,6 +26,14 @@ use crate::theme::Theme;
 
 /// Intervalo mínimo entre dos cuadros producidos por scripts.
 const FRAME: Duration = Duration::from_millis(16);
+/// E3: cuánto corre seguido el hilo de la pestaña tareas del documento antes de dar paso a un
+/// cuadro (el umbral de una tarea larga, *Long Tasks API* §2: 50 ms). Una tarea sola puede
+/// durar más; entre tareas, el documento se vuelve a pintar.
+const TASK_BUDGET: Duration = Duration::from_millis(50);
+/// E3: durante una ráfaga de tareas, cada cuánto se vuelve a maquetar y pintar el documento,
+/// con animaciones o sin ellas (la maqueta es entera: hacerla tras cada `TASK_BUDGET` gastaba
+/// más que las tareas y retrasaba los scripts de Wikipedia).
+const BUSY_REFRESH: Duration = Duration::from_millis(200);
 
 /// Cargar `url` y maquetarla. `recent` y `theme` son para las páginas internas.
 pub struct LoadJob {
@@ -1005,9 +1013,16 @@ impl State {
         let Some(engine) = &mut current.engine else {
             return;
         };
-        let mut ran = engine.run_due_tasks();
+        // E3: como mucho `TASK_BUDGET` seguidos de tareas antes de pintar (HTML §8.1.7.3).
+        let mut ran = engine.run_due_tasks_for(Some(TASK_BUDGET));
+        // ¿Quedaron tareas vencidas (se cortó por el presupuesto)?
+        let busy = engine.next_wake().is_some_and(|d| d.is_zero());
+        let mut animated = false;
         // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
-        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME && !behind {
+        // E3: en mitad de una ráfaga de tareas, un cuadro cada `BUSY_REFRESH` (cada uno
+        // vuelve a maquetar entero).
+        let every = if busy { BUSY_REFRESH } else { FRAME };
+        if engine.wants_frame() && self.last_raf.elapsed() >= every && !behind {
             self.last_raf = Instant::now();
             engine.run_animation_frames();
             ran += 1;
@@ -1017,6 +1032,7 @@ impl State {
             let animating = engine.is_animating();
             current.animation_frame |= animating || current.animating;
             current.animating = animating;
+            animated = true;
         }
         if let Some((x, y)) = engine.take_scroll_request() {
             let _ = self.tx.send(FromDoc::Request {
@@ -1034,6 +1050,11 @@ impl State {
             (self.wake)();
         }
         if ran == 0 {
+            return;
+        }
+        // E3: en mitad de una ráfaga de tareas, la maqueta (entera, cara) solo con un cuadro de
+        // animación o cada `BUSY_REFRESH`; si no, al terminar la ráfaga.
+        if busy && !animated && self.last_frame.elapsed() < BUSY_REFRESH {
             return;
         }
         self.refresh();

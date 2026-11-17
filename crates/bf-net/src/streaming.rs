@@ -36,6 +36,28 @@ pub fn fetch_streaming(
     jar: Option<&CookieJar>,
     sink: &mut dyn StreamSink,
 ) -> Result<(), FetchError> {
+    let start = std::time::Instant::now();
+    let r = fetch_streaming_inner(url, req, jar, sink);
+    // E3: con `FREEDOM_NET_LOG`, también las que fallan (`fetch()`, XHR, `EventSource`).
+    if let Err(e) = &r
+        && crate::net_log_enabled()
+    {
+        eprintln!(
+            "red: {} {} falló tras {} ms: {e}",
+            req.method.to_ascii_uppercase(),
+            url.href(),
+            start.elapsed().as_millis()
+        );
+    }
+    r
+}
+
+fn fetch_streaming_inner(
+    url: &Url,
+    req: &RequestOptions,
+    jar: Option<&CookieJar>,
+    sink: &mut dyn StreamSink,
+) -> Result<(), FetchError> {
     let mut url = url.clone();
     let mut list = vec![url.clone()];
     let mut method = req.method.clone();
@@ -92,6 +114,16 @@ pub fn fetch_streaming(
         let mut head = http::read_head(&mut conn)?;
         while (100..200).contains(&head.status) && head.status != 101 {
             head = http::read_head(&mut conn)?;
+        }
+        // E3: con `FREEDOM_NET_LOG`, cada salto, como las de `Fetcher::fetch` (estas no pasan
+        // por la caché: XHR, `fetch()` y `EventSource` desde los scripts).
+        if crate::net_log_enabled() {
+            eprintln!(
+                "red: {} {} {} http/1.1 [red, por partes]",
+                method.to_ascii_uppercase(),
+                url.href(),
+                head.status
+            );
         }
         if req.credentials
             && let Some(j) = jar

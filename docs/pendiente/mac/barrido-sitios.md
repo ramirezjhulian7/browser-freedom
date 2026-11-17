@@ -84,7 +84,7 @@ red, caché, cookies, redirecciones, CSP, cabeceras y shell. "Arreglado" quiere 
 | 13 | CSP: los módulos importados (`import()`, `import`) se pedían sin el nonce del script que los importa, y `'strict-dynamic'` los bloqueaba | 2: Reddit, Mercado Libre | E3 | **Arreglado** |
 | 14 | El `User-Agent` de Freedom recibe 403 de Google (`accounts.google.com/gsi/client`; con uno de Chrome, 200) | 2: El País, El Tiempo | decisión del usuario (`bf-infra/src/identity.rs` no se toca) | — |
 | 15 | Elementos gigantes | 2: BBC (logo), react.dev (lupa: un SVG sin tamaño) | E2 | — |
-| 16 | Protección anti-bots | 1 bloqueado: Stack Overflow (Cloudflare, 403; el reto no dibuja nada). Amazon (202) y Reddit pasaron el suyo | E1 (JS del reto) y E3 (cabeceras) | — |
+| 16 | Protección anti-bots | 0: Stack Overflow parecía bloqueado, pero el reto de Cloudflare se supera en ~5,6 s y el barrido solo esperaba ~1 s (ver "Ronda 6"). Amazon (202) y Reddit también pasaron el suyo | — | **Diagnosticado**: no falta nada estándar |
 | 17 | CSS-in-JS por `insertRule` que no se aplica | 1: BBC (styled-components) | E2 | — |
 | 18 | Un módulo se evalúa dos veces (con y sin `crossorigin`): "Custom element … is already defined" | 1: NYT (5 módulos) | E1 | — |
 | 19 | `DOMMatrix` no es constructor | 1: Apple | E1 | — |
@@ -136,6 +136,112 @@ red, caché, cookies, redirecciones, CSP, cabeceras y shell. "Arreglado" quiere 
 - **`FREEDOM_NET_LOG`:** anota también las peticiones que fallan, con el error y el tiempo.
 - **El paso `dump` de `freedom session`:** deja el DOM, el árbol de maqueta y la consola de
   la pestaña. Con él salió este barrido (`docs/rendimiento.md`, "Volcado de una sesión").
+
+## Ronda 6 (2026-11-17)
+
+### El reto de Cloudflare (Stack Overflow)
+
+**Causa demostrada: no está bloqueado, es lento.** Con `freedom session
+https://stackoverflow.com/questions` y 60 esperas (~20 s), el reto se supera y Stack Overflow
+carga entero (captura con la lista de preguntas, sus hojas y sus scripts).
+
+Lo que hace el reto en Freedom. Los tiempos son desde el inicio, con el registro de red de
+este bloque y una instrumentación temporal de las llamadas a las APIs del host, sin commit:
+
+| Tiempo | Qué pasa |
+|---:|---|
+| 0,25 s | `GET /questions` → **403** con "Just a moment...". Es la respuesta normal del reto, no un rechazo. |
+| | La página trae su CSP en un `<meta>`: `script-src` con nonce y `'unsafe-eval'`; `connect-src`, `frame-src` y `child-src` a `challenges.cloudflare.com`; `worker-src blob:`. |
+| 0,5 s | `orchestrate/precursor_interstitial/v1` (200, 623 KB ofuscados, con nonce) |
+| | Usa `history.replaceState`, `createElement` y `appendChild`, `Performance.getEntries` y `PerformanceObserver.observe`, y `XMLHttpRequest` con `timeout`, `ontimeout`, `onerror`, `setRequestHeader` y `onreadystatechange`. |
+| 1,4 s | primer `XMLHttpRequest` |
+| 2,8 s | `scripts/precursor/…/main.js` |
+| 3,5 s | segundo `XMLHttpRequest` y un `Worker` dedicado (`blob:`), que termina con `terminate` a los 4,4 s |
+| 4,3 s | la página del reto, traducida: "Un momento…", "Verificación de seguridad en curso" |
+| 5,3 s | `BroadcastChannel.postMessage` |
+| 5,6 s | `POST /questions?__cf_chl_f_tk=…` → 200: Stack Overflow con sus hojas y scripts |
+
+- **Ninguna excepción del motor.** La instrumentación que anotaba cada error creado por el
+  motor, también los que el script atrapa, no vio ninguno durante el reto.
+- **Ninguna API ausente.** Ni bloqueos de CSP ni errores en la consola.
+- **Por qué el barrido lo dio por bloqueado:** sus 3 esperas (~1 s) cortaban el reto antes del
+  primer `XMLHttpRequest`, con la página aún en blanco.
+
+Lo que encontré en mi territorio y arreglé: las peticiones de los scripts (`XMLHttpRequest`,
+`fetch()`, `EventSource`) van por `bf_net::streaming` y no salían en `FREEDOM_NET_LOG`. Ahora
+salen, también las fallidas (`tests/net_log.rs`).
+
+Queda sin medir si 5,6 s es lo que tarda el reto en otros navegadores (parte son esperas del
+propio reto) o lo alarga la velocidad del JavaScript de Freedom (dueño: E1, si se quiere
+seguir).
+
+### Un `<iframe>` lento ya no congela su página (`asimetrix.co`)
+
+- **Causa demostrada:** el hilo de la pestaña hacía la navegación del marco de una vez, dentro
+  de una tarea: red, parseo y scripts.
+  - El `<iframe>` de YouTube, que crea `YT.Player` hacia 1,5 s, lo retenía 2,7 s: 239 ms de
+    red y 2500 ms de parseo y scripts.
+  - Antes, los scripts del propio padre lo ocupaban de 1,0 a 1,7 s, y el bucle corría todas
+    las tareas pendientes antes de pintar.
+  - Mientras tanto la ventana no recibía cuadros. El titular, una animación de entrada, salía
+    a los ~3,3 s de la primera pintura.
+- **Arreglo** (E3):
+  - la red del marco va en otro hilo y su documento se le da al parser en trozos, uno por
+    tarea (HTML §7.4.2.2 y §13.2.2);
+  - el bucle de la pestaña pinta como mucho cada 50 ms de tareas (HTML §8.1.7.3).
+- **Ahora:** el marco termina en 17 tareas, y el titular se ve en la primera captura tras la
+  primera pintura (0,33 s después).
+- **Test:** `bf-shell/tests/slow_frame.rs`, un marco que tarda 2 s y un clic que se atiende
+  antes.
+- **Queda:** un solo script largo del marco sigue siendo una tarea larga; no se puede partir
+  sin pausar el intérprete.
+
+## Segundo barrido (ronda 6, 2026-11-17)
+
+- **Método:** los mismos 27 sitios y los mismos pasos (`wait wait wait dump`), con el release de
+  `master` `2238e5c`. Incluye lo del primer barrido; no incluye lo de la ronda 6 (el marco
+  lento, el nonce de `<link rel=preload>`).
+- **Carga:** 10-15.
+- **Caché:** ya tenía los sitios, así que la primera pintura no es de primera visita como en el
+  primero y no se puede comparar sin más.
+- **Ningún sitio tumbó la pestaña.**
+- **Clasificación:** un subagente comparó las capturas del último paso de los dos barridos.
+
+| Sitio | 1.ª pintura (ms), 1.º → 2.º | Errores de consola, 1.º → 2.º | Captura, 2.º frente a 1.º |
+|---|---|---|---|
+| es.wikipedia.org | 944 → 477 | 0 → 0 | igual (bien) |
+| en.wikipedia.org | 1771 → 680 | 0 → 0 | **mejor**: la imagen de la ficha y el candado de "semi-protected" ya salen; el logo sigue cortado |
+| bbc.com | 4387 → 1452 | 0 → 0 | igual: sigue sin estilos |
+| elpais.com | 5015 → 2211 | 1 → 1 (`gsi/client`, 403) | **mejor** (poco): el selector de edición tiene texto |
+| eltiempo.com | 19 742 → 9390 | 1 → 1 (`gsi/client`, 403) | igual |
+| nytimes.com | 38 702 → 1749 | 6 → 0 | **peor, pero no es el motor**: el sitio respondió 403 con la verificación de DataDome (`captcha-delivery.com`) en vez de la portada |
+| google.com | 671 → 376 | 0 → 0 | igual (bien) |
+| duckduckgo.com | 5349 → 2639 | 0 → 0 | igual: sin resultados |
+| bing.com | 782 → 512 | 0 → 0 | igual |
+| developer.mozilla.org | 3167 → 1692 | 0 → 0 | igual (bien) |
+| doc.rust-lang.org | 1010 → 358 | 0 → 0 | igual (bien) |
+| docs.python.org | 603 → 700 | 1 → 1 (`select.add`) | igual (bien) |
+| github.com | 18 573 → 12 261 | 0 → 0 | igual |
+| gitlab.com | 7472 → 2273 | 5 → 5 (`SVGElement`) | **mejor**: el avatar del proyecto ya sale; sigue sin la barra superior |
+| news.ycombinator.com | 568 → 505 | 0 → 0 | igual (bien) |
+| reddit.com | 159 → 2917 | 9 → 0 (los módulos de CSP) | igual a la vista, sin reto JS esta vez |
+| stackoverflow.com | 237 → 206 | 0 → 0 | igual: con 3 esperas el reto de Cloudflare aún no terminó (necesita ~5,6 s) |
+| amazon.com | 766 → 1451 | 0 → 0 | **mejor**: las 4 tarjetas del carrusel tienen imagen y texto; aparece un desborde horizontal |
+| mercadolibre.com.co | 12 033 → 17 828 | 4 → 4 | **mejor**: ya no termina en "Esquema no soportado". Sus 4 errores eran ahora de `<link rel=preload as=script nonce>`; con la rama `army/e3` de la ronda 6, 0 errores |
+| openstreetmap.org | 1676 → 1088 | 0 → 0 | igual: el mapa gris |
+| youtube.com | 28 185 → 18 010 | 2 → 2 | igual: esqueletos |
+| vimeo.com | 7354 → 2949 | 0 → 0 | igual (el menú salió en inglés: probablemente el sitio) |
+| excalidraw.com | 3415 → 2476 | 0 → 0 | igual: en blanco |
+| react.dev | 10 658 → 5058 | 0 → 0 | igual: la lupa gigante |
+| rae.es | 28 054 → 9617 | 0 → 8 | **mejor**: sale la noticia principal, aunque desplazada a la derecha. Los 8 son avisos de CSP en "solo informe" del sitio, que ahora sirve un reto de Cloudflare; salían duplicados, y con la rama `army/e3` de la ronda 6 salen una vez cada uno (6) |
+| gov.co | 3417 → 1585 | 0 → 0 | igual: en blanco |
+| apple.com/es | 3730 → 1971 | 5 → 5 (`DOMMatrix`) | dudoso: cambia el color de la franja de financiación |
+
+**Resumen del segundo barrido:**
+- 6 mejoran: Wikipedia en inglés, El País, GitLab, Amazon, Mercado Libre y la RAE.
+- 19 siguen igual.
+- NYT sale peor porque el sitio sirvió su verificación antibots.
+- Apple queda dudoso.
 
 ## Lo que no encontré
 

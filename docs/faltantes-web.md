@@ -11,7 +11,7 @@ en [`pendiente/mac/barrido-sitios.md`](pendiente/mac/barrido-sitios.md).
 
 | Falta | Síntoma en los sitios | Spec | Dónde va |
 |---|---|---|---|
-| `crypto.subtle` | `undefined` (sí existe `crypto`). | Web Cryptography API | 2.2 |
+| `crypto.subtle`, salvo `digest` y HMAC | Desde el 2026-11-17 existe, con `digest` (SHA-1/256/384/512) y HMAC (E1). Lo demás (AES, RSA, ECDSA, `deriveKey`…) rechaza con `NotSupportedError`. | Web Cryptography API | 2.2 |
 | `localStorage` en páginas `file:` | `SecurityError: The operation is insecure`. Chrome y Firefox lo permiten (origen opaco con almacenamiento propio por archivo o carpeta). | HTML §12.2 | 2.2, `bf-web` bom |
 
 Ya funcionan (verificado en la misma prueba): eventos de clic al DOM, `fetch`,
@@ -61,6 +61,19 @@ Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
     después de la primera pintura, como pide HTML §8.1.7.3.
   - una imagen **no** perezosa que piden a la vez el motor y el primer pintado se descarga
     una sola vez aunque la respuesta no sea cacheable (E6, en `master` desde `84e2dd0`).
+
+Resueltos el 2026-11-17 en la rama `army/e3` (sin integrar todavía):
+- **Un `<iframe>` lento congelaba su página.** El hilo de la pestaña pedía, parseaba y ejecutaba
+  el documento del marco de una vez: el de YouTube en `asimetrix.co` lo retenía 2,7 s, y el
+  titular de la portada no se veía hasta ~3,3 s después de la primera pintura.
+  - Ahora la red del marco va en otro hilo y su documento se parsea en varias tareas (HTML
+    §7.4.2.2).
+  - El bucle de la pestaña pinta como mucho cada 50 ms de tareas (HTML §8.1.7.3).
+  - El titular se ve en la primera captura tras la primera pintura (E3).
+- **El reto de Cloudflare no estaba bloqueado.** Stack Overflow lo supera en ~5,6 s, con un
+  `XMLHttpRequest`, un `Worker`, `BroadcastChannel` y un `POST` del formulario, y luego carga.
+  El barrido solo esperaba ~1 s. No le falta ninguna función estándar
+  ([`pendiente/mac/barrido-sitios.md`](pendiente/mac/barrido-sitios.md)).
 
 Resueltos el 2026-11-17 (en `master`):
 - **Hojas enlazadas en la ventana.** `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y

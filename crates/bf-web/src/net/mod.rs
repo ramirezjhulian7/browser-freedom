@@ -386,7 +386,7 @@ fn default_fetcher() -> Arc<bf_net::Fetcher> {
     F.get_or_init(|| Arc::new(bf_net::Fetcher::new())).clone()
 }
 
-type Done = Box<dyn FnOnce(&mut Agent, NetResult)>;
+pub(crate) type Done = Box<dyn FnOnce(&mut Agent, NetResult)>;
 
 /// El estado de la red de una ventana (dato del realm).
 pub struct NetState {
@@ -503,6 +503,45 @@ pub fn pump(agent: &mut Agent, realm: RealmId) -> usize {
         n += 1;
     }
     n + from_workers
+}
+
+/// E3: ¿la red de `realm` corre en hilos ([`set_backend`] con `threaded`, el shell)?
+pub(crate) fn is_threaded(agent: &mut Agent, realm: RealmId) -> bool {
+    state_of(agent, realm).threaded
+}
+
+/// E3: corre `job` (bloqueante: una petición) en un hilo y, al terminar, `done` en una tarea
+/// *networking* de `realm` (como [`start`], con cualquier petición: la de un documento de un
+/// marco, con el loader de su ventana). Solo con la red en hilos ([`is_threaded`]); sin ellos,
+/// `job` corre aquí. Devuelve un id para [`cancel`].
+pub(crate) fn spawn_job(
+    agent: &mut Agent,
+    realm: RealmId,
+    job: Box<dyn FnOnce() -> NetResult + Send>,
+    done: Done,
+) -> u64 {
+    let s = state_of(agent, realm);
+    s.next_id += 1;
+    let id = s.next_id;
+    if s.threaded {
+        s.pending.insert(id, done);
+        let inbox = s.inbox.clone();
+        let waker = s.waker.clone();
+        std::thread::spawn(move || {
+            let r = job();
+            inbox
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((id, r));
+            if let Some(w) = waker {
+                w();
+            }
+        });
+    } else {
+        let r = job();
+        queue_result(agent, realm, done, r);
+    }
+    id
 }
 
 /// El backend de la ventana en curso (para las conexiones abiertas).
