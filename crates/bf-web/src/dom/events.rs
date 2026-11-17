@@ -231,6 +231,13 @@ pub fn event_target_of(agent: &Agent, v: &Value) -> Option<(DocIndex, EventTarge
     if agent.host_unwrap::<WindowData>(v).is_some() {
         return Some((0, EventTarget::Window));
     }
+    // E1: un `WindowProxy` es su `Window`.
+    if let Value::Object(o) = v
+        && let Some(w) = agent.window_proxy_window(*o)
+        && agent.host_unwrap::<WindowData>(&Value::Object(w)).is_some()
+    {
+        return Some((0, EventTarget::Window));
+    }
     agent.host_unwrap::<TargetRef>(v).map(|t| (t.doc, t.target))
 }
 
@@ -239,8 +246,9 @@ pub fn wrap_target(agent: &mut Agent, doc: DocIndex, t: EventTarget) -> Value {
     match t {
         EventTarget::Node(n) => wrap_node(agent, NodeRef::new(doc, n)),
         EventTarget::Window => {
+            // E1: el `WindowProxy` de la ventana (`target`/`currentTarget === window`).
             let realm = WebContextHandle::current(agent).realm;
-            Value::Object(agent.realms[realm].global_object)
+            crate::bom::frames::self_proxy(agent, realm)
         }
         EventTarget::Object(id) => {
             let realm = agent.current_realm;
@@ -792,7 +800,9 @@ fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc
 /// cancela, va a los hooks del motor.
 pub fn report_exception(agent: &mut Agent, e: &Value) {
     let err = bf_js::host::JsError::from_value(agent, e.clone());
-    if state(agent).reporting {
+    // E1: el bucle reporta con el realm que esté en curso; sin `WebContext` (un
+    // `ShadowRealm`) no hay global en el que disparar `error`: directo a la consola.
+    if WebContextHandle::current(agent).try_get(agent).is_none() || state(agent).reporting {
         agent.host.hooks.report_exception(&err.message, &err.stack);
         return;
     }

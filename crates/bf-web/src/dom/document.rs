@@ -243,7 +243,8 @@ fn default_view(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Null);
     }
     let realm = WebContextHandle::current(agent).realm;
-    Ok(Value::Object(agent.realms[realm].global_object))
+    // E1: el `WindowProxy` (HTML §3.1.3: "the document's browsing context's WindowProxy").
+    Ok(crate::bom::frames::self_proxy(agent, realm))
 }
 
 /// `activeElement` (HTML §6.6.2): sin foco en otro elemento, el `body` (o el elemento

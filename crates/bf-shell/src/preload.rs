@@ -33,13 +33,14 @@
 //! que no sea un 304 el hilo se detiene. Y [`precompile_window`] compila en otro hilo, una vez
 //! por proceso, el JavaScript propio de la ventana (`bf_web::precompile_window_scripts`).
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use bf_html::tokenizer::{State, Token, Tokenizer};
-use bf_infra::Url;
 use bf_infra::encoding::Encoding;
+use bf_infra::{Destination, ResourceLoader, Url};
 use bf_net::cache::{HttpCache, Staged};
 use bf_net::{MimeType, NetLoader};
 
@@ -57,6 +58,18 @@ pub struct Found {
     /// El `charset` de un `<script>`, si nombra un encoding (HTML §4.12.1.1, *prepare the
     /// script element*, paso 21; si no, el del documento).
     pub charset: Option<Encoding>,
+    /// E3: el `nonce` de un `<script>` (CSP 3 §6.7.1.1, para pedirlo como lo pedirá el parser).
+    pub nonce: Option<String>,
+}
+
+/// E3: lo que encuentra [`scan_document`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Scan {
+    pub found: Vec<Found>,
+    /// ¿Trae un `<meta http-equiv="Content-Security-Policy">`? Esa política solo se conoce
+    /// cuando el parser inserta el `<meta>` (CSP 3 §4.2.1): hasta entonces no se puede saber
+    /// qué pedidos permitirá.
+    pub meta_csp: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,14 +91,21 @@ pub enum Kind {
 /// `<link rel=stylesheet href>` (no las `alternate`), las `<link rel=preload|modulepreload>`
 /// de hojas y scripts, los `<script src>` de JavaScript (clásico o módulo) y los `<img src>`.
 pub fn scan(html: &str, document: &Url) -> Vec<Found> {
+    scan_document(html, document).found
+}
+
+/// E3: como [`scan`], y además si el documento trae CSP en un `<meta>` ([`Scan::meta_csp`]).
+pub fn scan_document(html: &str, document: &Url) -> Scan {
     let mut tok = Tokenizer::new(html);
     let mut base: Option<Url> = None;
     let mut out: Vec<Found> = Vec::new();
+    let mut meta_csp = false;
     let push = |out: &mut Vec<Found>,
                 base: &Option<Url>,
                 href: &str,
                 kind: Kind,
-                charset: Option<Encoding>| {
+                charset: Option<Encoding>,
+                nonce: Option<String>| {
         let href = href.trim_matches(|c: char| c.is_ascii_whitespace());
         if href.is_empty() {
             return;
@@ -94,7 +114,12 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
             && matches!(url.scheme.as_str(), "http" | "https")
             && !out.iter().any(|f| f.url == url)
         {
-            out.push(Found { url, kind, charset });
+            out.push(Found {
+                url,
+                kind,
+                charset,
+                nonce,
+            });
         }
     };
     while let Some(token) = tok.next_token() {
@@ -134,7 +159,7 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
                     None
                 };
                 if let (Some(kind), Some(href)) = (kind, attr("href")) {
-                    push(&mut out, &base, href, kind, None);
+                    push(&mut out, &base, href, kind, None, None);
                 }
             }
             "script" => {
@@ -149,13 +174,18 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
                 };
                 if let (Some(kind), Some(src)) = (kind, attr("src")) {
                     let charset = attr("charset").and_then(Encoding::for_label);
-                    push(&mut out, &base, src, kind, charset);
+                    let nonce = attr("nonce").map(str::to_owned);
+                    push(&mut out, &base, src, kind, charset, nonce);
                 }
             }
             "img" => {
                 if let Some(src) = attr("src") {
-                    push(&mut out, &base, src, Kind::Image, None);
+                    push(&mut out, &base, src, Kind::Image, None, None);
                 }
+            }
+            "meta" => {
+                meta_csp |= attr("http-equiv")
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("content-security-policy"));
             }
             _ => {}
         }
@@ -177,7 +207,10 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
             tok.set_last_start_tag(&tag.name);
         }
     }
-    out
+    Scan {
+        found: out,
+        meta_csp,
+    }
 }
 
 /// E3: el modo del documento según su DOCTYPE (HTML §13.2.6.4.1, el modo de inserción
@@ -237,6 +270,78 @@ pub fn precompile_window() {
                 }
             });
     });
+}
+
+/// E3: hilos de la descarga especulativa ([`speculative_fetch`]).
+const SPECULATIVE_THREADS: usize = 6;
+
+/// E3: la descarga especulativa de HTML §13.2.8 (*speculative fetch*) con la respuesta del
+/// documento ya en la mano: otro hilo recorre `html` con el escáner y pide en paralelo, con
+/// `loader` (el del documento, que junta las peticiones iguales y guarda lo que llega), las
+/// hojas y los scripts que nombra. El parser se detiene en cada `<script src>` hasta tenerlo;
+/// sin esto, los pedía de uno en uno (más de 1 s en 10 de 27 sitios del barrido de E3).
+///
+/// - Los scripts se piden con su `nonce` e insertados por el parser, como los pedirá el
+///   parser (CSP 3 §6.7.1.1), y las hojas como las pide el pintado.
+/// - Con CSP en un `<meta>` no se pide nada: esa política aún no se conoce.
+/// - No se ejecuta nada. Lo pedido y no usado (un script que otro quita antes de llegar a él)
+///   lo permite §13.2.8.
+/// - `BF_NO_PRECARGA=1` lo apaga.
+pub fn speculative_fetch(loader: Arc<dyn ResourceLoader>, html: String, document: Url) {
+    if std::env::var_os("BF_NO_PRECARGA").is_some() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("freedom-especulativa".into())
+        .spawn(move || {
+            let start = Instant::now();
+            let scan = scan_document(&html, &document);
+            drop(html);
+            if scan.meta_csp {
+                return;
+            }
+            let queue: VecDeque<Found> = scan
+                .found
+                .into_iter()
+                .filter(|f| f.kind != Kind::Image)
+                .collect();
+            let total = queue.len();
+            let queue = Arc::new(Mutex::new(queue));
+            let workers: Vec<_> = (0..SPECULATIVE_THREADS.min(total))
+                .filter_map(|_| {
+                    let (queue, loader) = (queue.clone(), loader.clone());
+                    std::thread::Builder::new()
+                        .name("freedom-especulativa".into())
+                        .spawn(move || {
+                            loop {
+                                let next =
+                                    queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                                let Some(f) = next else { break };
+                                match f.kind {
+                                    Kind::Style => {
+                                        loader.load_for(&f.url, Destination::Style);
+                                    }
+                                    Kind::Script | Kind::Module => {
+                                        loader.load_script(&f.url, f.nonce.as_deref(), true);
+                                    }
+                                    Kind::Image => {}
+                                }
+                            }
+                        })
+                        .ok()
+                })
+                .collect();
+            for w in workers {
+                let _ = w.join();
+            }
+            if std::env::var_os("BF_TRACE").is_some() {
+                eprintln!(
+                    "perf especulativa: {total} hojas y scripts pedidos en paralelo, listos en \
+                     {:.1} ms",
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        });
 }
 
 /// Lo que comparten la carga y el hilo de la precarga.
@@ -704,6 +809,22 @@ mod tests {
         .collect();
         assert_eq!(got, [Encoding::for_label("windows-1252"), None]);
         assert!(got[0].is_some());
+    }
+
+    /// E3: el `nonce` de los scripts y si hay CSP en un `<meta>` (para la descarga
+    /// especulativa).
+    #[test]
+    fn scanner_reports_nonces_and_meta_csp() {
+        let doc = url("https://sitio.test/");
+        let s = scan_document(
+            "<meta http-equiv=Content-Security-Policy content=\"script-src 'nonce-a'\">\
+             <script nonce=a src=a.js></script><script src=b.js></script>",
+            &doc,
+        );
+        assert!(s.meta_csp);
+        let nonces: Vec<Option<&str>> = s.found.iter().map(|f| f.nonce.as_deref()).collect();
+        assert_eq!(nonces, [Some("a"), None]);
+        assert!(!scan_document("<meta http-equiv=refresh content=5>", &doc).meta_csp);
     }
 
     /// El primer `<base href>` cambia la URL base de lo que sigue (HTML §4.2.3).

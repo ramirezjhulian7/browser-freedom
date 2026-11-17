@@ -1804,6 +1804,23 @@ impl App {
 
     // --- Navegación ---
 
+    /// E3: una navegación a un esquema que el navegador no carga (`mailto:`, `tel:` o el de
+    /// otra aplicación, como `meli://`). HTML §7.4.2.2 (*navigate*): si el esquema no es un
+    /// *fetch scheme* (Fetch §2.2: `about`, `blob`, `data`, `file`, `http(s)`) ni `javascript:`,
+    /// la URL se entrega a otra aplicación (*hand-off to external software*) y el documento no
+    /// cambia. Freedom no abre otras aplicaciones: la página se queda y la barra de estado lo
+    /// dice. `true` si era una de esas.
+    fn hand_off(&mut self, url: &Url) -> bool {
+        if !external_scheme(url) {
+            return false;
+        }
+        self.set_notice(format!(
+            "Freedom no abre enlaces {}: (son de otra aplicación)",
+            url.scheme
+        ));
+        true
+    }
+
     fn start_load(&mut self, url: Url, nav: Navigation) {
         self.start_load_with(url, nav, None);
     }
@@ -1892,6 +1909,9 @@ impl App {
 
     /// Navega a `url` (un enlace o lo escrito en la barra).
     fn navigate(&mut self, url: Url) {
+        if self.hand_off(&url) {
+            return;
+        }
         if url.scheme == "bf" {
             // Las acciones del perfil (borrar historial, marcadores…) solo desde una página
             // interna: una página de la web no puede dispararlas con un enlace.
@@ -1989,12 +2009,17 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let url = match (&self.loading, &self.current) {
-            (Some(l), _) => l.url.clone(),
-            (None, Some(c)) => c.url.clone(),
+        // E3: con una carga en curso, se repite esa navegación (`Push`, `Replace` o
+        // `Traverse`), no un `Reload`: su entrada del historial todavía no existe aquí, porque
+        // se pone al terminar la carga (en HTML ya existe mientras el documento se parsea: la
+        // crea *finalize a cross-document navigation*, §7.4.2). Antes, un `location.reload()` durante la primera carga (el `security.js` de
+        // Mercado Libre) dejaba la pestaña sin entrada: sin URL y con `historial=1/0`.
+        let (url, nav) = match (&self.loading, &self.current) {
+            (Some(l), _) => (l.url.clone(), l.nav),
+            (None, Some(c)) => (c.url.clone(), Navigation::Reload),
             _ => return,
         };
-        self.start_load(url, Navigation::Reload);
+        self.start_load(url, nav);
     }
 
     fn home(&mut self) {
@@ -2407,6 +2432,9 @@ impl App {
         match request {
             PageRequest::Navigate { url, replace, post } => {
                 self.with_tab(i, |app| {
+                    if app.hand_off(&url) {
+                        return;
+                    }
                     if post.is_some() {
                         app.start_load_with(url, Navigation::Push, post);
                     } else if replace {
@@ -4468,9 +4496,12 @@ pub fn open(arg: Option<&str>) -> Result<(), String> {
         .build()
         .map_err(|e| format!("no se pudo iniciar la ventana: {e}"))?;
     let mut browser = Browser::new(event_loop.create_proxy(), url);
-    event_loop
+    let r = event_loop
         .run_app(&mut browser)
-        .map_err(|e| format!("error en el bucle de eventos: {e}"))
+        .map_err(|e| format!("error en el bucle de eventos: {e}"));
+    // E3: la caché HTTP escribe el disco en su hilo; lo pendiente, antes de salir.
+    bf_net::cache::HttpCache::flush_all();
+    r
 }
 
 impl App {
@@ -4752,6 +4783,47 @@ impl App {
             + &self.downloads_line()
     }
 
+    /// E3: el paso `dump` de una sesión: escribe, de la pestaña activa,
+    /// - `<prefijo>.dom.html`: el DOM serializado (HTML §13.3, *serializing HTML fragments*,
+    ///   con los hijos del documento y el scripting activado, como `innerHTML`);
+    /// - `<prefijo>.layout.txt`: el árbol de fragmentos de la última maqueta
+    ///   ([`bf_layout::dump`]);
+    /// - `<prefijo>.console.txt`: la consola, un mensaje por entrada con su nivel.
+    ///
+    /// Los tres empiezan con la URL de la pestaña; si la pestaña no tiene documento o
+    /// maqueta, el archivo lo dice.
+    fn session_dump(&self, prefix: &str) -> Result<(), String> {
+        let write = |ext: &str, text: &str| {
+            let path = format!("{prefix}.{ext}");
+            std::fs::write(&path, text).map_err(|e| format!("no se pudo escribir {path}: {e}"))
+        };
+        let url = self
+            .history
+            .get(self.index)
+            .map_or_else(String::new, |e| e.url.href());
+        let dom = match &self.current {
+            Some(c) => {
+                bf_html::dom::serialize_children(&c.doc, c.doc.root(), true)
+                    .to_string_lossy()
+                    .into_owned()
+                    + "\n"
+            }
+            None => "(sin documento)\n".into(),
+        };
+        write("dom.html", &format!("<!-- {url} -->\n{dom}"))?;
+        let layout = match (&self.current, &self.page) {
+            (Some(c), Some(p)) => bf_layout::dump(&c.doc, &p.tree),
+            _ => "(sin maqueta)\n".to_owned(),
+        };
+        write("layout.txt", &format!("# {url}\n{layout}"))?;
+        let mut console = format!("# {url}\n");
+        for e in self.console() {
+            let level = format!("{:?}", e.level).to_lowercase();
+            console.push_str(&format!("[{level}] {}\n", e.text));
+        }
+        write("console.txt", &console)
+    }
+
     /// Un paso de una sesión sin ventana.
     fn step(&mut self, step: &str) -> Result<(), String> {
         let bad = || format!("paso inválido: {step}");
@@ -4961,11 +5033,23 @@ impl App {
     }
 }
 
+/// E3: ¿El esquema de `url` es uno que el navegador no carga? Los que sí: los *fetch schemes*
+/// (Fetch §2.2), `javascript:` (lo ejecuta el documento) y los del propio navegador
+/// (`freedom:` y `bf:`).
+fn external_scheme(url: &Url) -> bool {
+    !matches!(
+        url.scheme.as_str(),
+        "about" | "blob" | "data" | "file" | "http" | "https" | "javascript" | "freedom" | "bf"
+    )
+}
+
 /// `freedom session [url] <paso>... -o <prefijo>`: la lógica de la ventana sin abrir
 /// una (1180×800, escala 1), para probarla. Cada paso deja `<prefijo>-NN.png` con el cuadro
 /// completo (cromo y página) e imprime el estado. Pasos: `click:X,Y`, `move:X,Y`,
 /// `link:texto` (clic en el enlace con ese texto), `wheel:X,Y,DY` (la rueda), `type:texto`,
-/// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto), `resize:W,H` y `wait`.
+/// `key:[ctrl+|cmd+|mod+|alt+|shift+]tecla` (`mod`: `Cmd` en macOS, `Ctrl` en el resto),
+/// `resize:W,H`, `wait` y `dump` (E3: además de la captura, `<prefijo>-NN.dom.html`,
+/// `<prefijo>-NN.layout.txt` y `<prefijo>-NN.console.txt`; ver `App::session_dump`).
 pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     let url = bf_infra::url_from_arg(arg).ok_or_else(|| format!("URL o ruta inválida: {arg}"))?;
     // Sin `FREEDOM_PROFILE`, una sesión de prueba no toca el historial ni los marcadores.
@@ -4998,10 +5082,19 @@ pub fn session(arg: &str, steps: &[String], out: &str) -> Result<(), String> {
     println!("00 abrir {arg}: {}", app.state_line());
     save(&app, 0)?;
     for (i, step) in steps.iter().enumerate() {
-        app.step(step)?;
+        if step == "dump" {
+            app.receive();
+            app.settle();
+            app.session_dump(&format!("{out}-{:02}", i + 1))?;
+        } else {
+            app.step(step)?;
+        }
         println!("{:02} {step}: {}", i + 1, app.state_line());
         save(&app, i + 1)?;
     }
+    // E3: la caché HTTP escribe el disco en su hilo; lo pendiente, antes de salir (la sesión
+    // siguiente lo lee del disco).
+    bf_net::cache::HttpCache::flush_all();
     Ok(())
 }
 
@@ -5115,6 +5208,9 @@ mod tests {
         for needle in [
             "Esta página falló",
             "pánico de prueba en el hilo de la pestaña",
+            // E1: dónde cayó (`crate::crash`); esta pestaña aún no tenía motor.
+            "src/window/worker.rs:",
+            "Sin motor de JavaScript en la pestaña.",
             "Recargar",
             "about:blank#panico-de-prueba",
         ] {
@@ -5129,6 +5225,44 @@ mod tests {
         assert!(text(&app).contains("de nuevo"));
         app.activate_tab(0);
         assert!(text(&app).contains("sigo viva"));
+    }
+
+    /// E1: un pánico dentro de una función nativa que llama el script de la página (como el de
+    /// "el realm no tiene WebContext"): la página de error dice el archivo y la línea de Rust,
+    /// el realm y la pila de JavaScript, sin la consulta de la URL del script.
+    #[test]
+    fn tab_panic_in_javascript_shows_where() {
+        crate::profile::set_ephemeral();
+        let fonts = FontDb::system();
+        let worker = Documents::new(fonts.clone(), || {});
+        let net = Arc::new(NetLoader::new());
+        let mut app = App::new(worker, fonts, None, Theme::for_system(None), net);
+        app.headless = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let url = Url::parse(crate::crash::test_panic::URL, None).unwrap();
+        app.start_load(url, Navigation::Push);
+        app.settle();
+        let current = app.current.as_ref().unwrap();
+        assert_eq!(
+            current.meta.error.as_ref().map(|e| e.kind),
+            Some(crate::load::ErrorKind::Engine)
+        );
+        let shown = current
+            .doc
+            .descendant_text_content(current.doc.root())
+            .to_string();
+        for needle in [
+            "pánico de prueba en una función nativa",
+            "src/crash.rs:",
+            // Antes de `load_with` el realm aún no es una ventana: el informe lo dice.
+            "Realm 0: sin WebContext",
+            "at pagina_de_prueba (https://example.test/prueba.js:2:",
+        ] {
+            assert!(shown.contains(needle), "falta {needle:?} en {shown:?}");
+        }
+        assert!(!shown.contains("token"), "{shown}");
     }
 
     fn page(html: &str) -> Arc<Loaded> {

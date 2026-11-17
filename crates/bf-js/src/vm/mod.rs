@@ -386,8 +386,18 @@ impl Agent {
 
     /// La propiedad no estándar `stack` con la cadena de frames.
     pub fn attach_stack(&mut self, o: Gc<Object>) {
+        let out = self.stack_trace(32);
+        let key = self.keys.stack.clone();
+        self.put_data(o, key, Value::str(&out), true, false, true);
+    }
+
+    /// La pila de JavaScript en curso, del frame más interno hacia afuera (`max` frames como
+    /// mucho), una línea `    at nombre (script:línea:columna)` por frame. Vacía si no corre
+    /// JavaScript. E1: también sirve después de un pánico de Rust capturado, porque el
+    /// desenrollado no saca los frames del intérprete: dice qué script corría al caer.
+    pub fn stack_trace(&self, max: usize) -> String {
         let mut out = String::new();
-        for f in self.frames.iter().rev().take(32) {
+        for f in self.frames.iter().rev().take(max) {
             let name = f.code.name.to_string_lossy();
             let name = if name.is_empty() {
                 "<anonymous>".to_owned()
@@ -404,8 +414,7 @@ impl Agent {
                 f.code.source.name
             ));
         }
-        let key = self.keys.stack.clone();
-        self.put_data(o, key, Value::str(&out), true, false, true);
+        out
     }
 
     pub fn error(&mut self, kind: ErrorType, message: &str) -> Throw {

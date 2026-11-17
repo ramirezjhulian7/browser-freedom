@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bom;
+pub mod crypto; // E1: `crypto.subtle` (Web Cryptography API)
 pub mod cssom;
 pub mod dom;
 pub mod html;
@@ -237,26 +238,80 @@ impl WebContextHandle {
         }
     }
 
-    pub fn get<'a>(&self, agent: &'a Agent) -> &'a WebContext {
-        agent
-            .realm_data::<WebContext>(self.realm)
-            .expect("el realm no tiene WebContext")
+    /// E1: el contexto del realm en curso, o un `TypeError` de JavaScript si ese realm no tiene
+    /// (un `ShadowRealm`, un realm que el embebedor no instaló). Para el código que parte de una
+    /// llamada de script y puede lanzar; [`WebContextHandle::get`] supone el contexto.
+    pub fn checked(agent: &mut Agent) -> JsResult<WebContextHandle> {
+        let h = WebContextHandle::current(agent);
+        if h.try_get(agent).is_some() {
+            Ok(h)
+        } else {
+            agent.type_error("Illegal invocation: platform objects are not available in this realm")
+        }
     }
 
+    /// El contexto de este realm, si tiene.
+    pub fn try_get<'a>(&self, agent: &'a Agent) -> Option<&'a WebContext> {
+        agent.realm_data::<WebContext>(self.realm)
+    }
+
+    /// El contexto mutable de este realm, si tiene.
+    pub fn try_get_mut<'a>(&self, agent: &'a mut Agent) -> Option<&'a mut WebContext> {
+        agent.realm_data_mut::<WebContext>(self.realm)
+    }
+
+    /// El contexto de este realm. Supone que lo tiene: desde una función del host lo garantiza
+    /// la guarda de realm de `bf-js` (`HostState::realm_guard`, ver `dom::register_classes`);
+    /// sin contexto es un error interno, y el pánico dice qué realm.
+    #[track_caller]
+    pub fn get<'a>(&self, agent: &'a Agent) -> &'a WebContext {
+        match agent.realm_data::<WebContext>(self.realm) {
+            Some(c) => c,
+            None => missing(self.realm),
+        }
+    }
+
+    #[track_caller]
     pub fn get_mut<'a>(&self, agent: &'a mut Agent) -> &'a mut WebContext {
-        agent
-            .realm_data_mut::<WebContext>(self.realm)
-            .expect("el realm no tiene WebContext")
+        match agent.realm_data_mut::<WebContext>(self.realm) {
+            Some(c) => c,
+            None => missing(self.realm),
+        }
+    }
+}
+
+#[cold]
+#[track_caller]
+fn missing(realm: RealmId) -> ! {
+    panic!("el realm {realm} no tiene WebContext")
+}
+
+/// E1: qué es `realm` (para el diagnóstico de una caída de la pestaña): "ventana", "marco",
+/// "worker" o "sin WebContext (ShadowRealm u otro)".
+pub fn realm_kind(agent: &Agent, realm: RealmId) -> &'static str {
+    if agent.realm_data::<WebContext>(realm).is_none() {
+        "sin WebContext (ShadowRealm u otro)"
+    } else if agent
+        .embedder_data::<workers::WorkerHost>()
+        .is_some_and(|w| w.scope.is_some())
+    {
+        "worker"
+    } else if bom::frames::frame_of(agent, realm).is_some() {
+        "marco"
+    } else {
+        "ventana"
     }
 }
 
 /// El `Document` de `doc` en el contexto actual.
+#[track_caller]
 pub fn with_doc<R>(agent: &Agent, doc: DocIndex, f: impl FnOnce(&Document) -> R) -> R {
     let ctx = WebContextHandle::current(agent).get(agent);
     f(ctx.doc(doc))
 }
 
 /// El `Document` mutable de `doc` en el contexto actual.
+#[track_caller]
 pub fn with_doc_mut<R>(agent: &mut Agent, doc: DocIndex, f: impl FnOnce(&mut Document) -> R) -> R {
     let h = WebContextHandle::current(agent);
     f(h.get_mut(agent).doc_mut(doc))
@@ -330,5 +385,6 @@ pub fn register_all(agent: &mut Agent, realm: RealmId, ctx: &WebContextHandle) {
         net::register(agent, realm, ctx); // E2
         storage::register(agent, realm, ctx); // E2
         workers::register(agent, realm, ctx); // E3
+        crypto::register(agent, realm, ctx); // E1
     });
 }
