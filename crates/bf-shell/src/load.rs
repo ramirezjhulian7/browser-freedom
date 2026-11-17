@@ -493,7 +493,7 @@ fn trace_fetch(response: &bf_net::Response, total: Duration) {
     eprintln!(
         "perf red {}: {} ms ({:?}, {} {}, {} peticiones, {} conexiones nuevas): dns {} · tcp {} \
          · tls {} · h2 inicio {} · espera {} · cuerpo {} · h2 {} · descompresión {} · caché {} \
-         · resto {} ({} bytes)",
+         · resto {} ({} bytes) · TLS reanudado en {} de {} · espera de conexión {}",
         response.url,
         ms(total),
         response.cache,
@@ -512,6 +512,9 @@ fn trace_fetch(response: &bf_net::Response, total: Duration) {
         ms(t.cache),
         ms(total.saturating_sub(t.total())),
         response.body.len(),
+        t.resumed,
+        t.connections,
+        ms(t.slot_wait),
     );
 }
 

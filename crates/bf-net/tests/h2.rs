@@ -417,6 +417,72 @@ fn preconnect_opens_the_shared_h2_connection() {
     assert_eq!(*f.connections_opened.lock().unwrap(), 1);
 }
 
+/// E3: las peticiones por partes de los scripts (`fetch()`, XHR) van por la conexión h2 del
+/// origen (RFC 9113 §9.1), con la cabecera y cada DATA entregados en cuanto llegan, en vez de
+/// abrir una conexión HTTP/1.1 cada una.
+#[test]
+fn streaming_requests_share_the_h2_connection() {
+    use bf_net::streaming::{StreamHead, StreamSink};
+    struct Parts(Vec<String>);
+    impl StreamSink for Parts {
+        fn head(&mut self, h: &StreamHead) -> bool {
+            self.0.push(format!("head {}", h.status));
+            true
+        }
+        fn chunk(&mut self, b: &[u8]) -> bool {
+            self.0.push(String::from_utf8_lossy(b).into_owned());
+            true
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut s = Server::handshake(stream, &[]);
+        for _ in 0..3 {
+            let r = s.request(true);
+            let path = r.get(":path").unwrap().to_owned();
+            let method = r.get(":method").unwrap().to_owned();
+            s.headers(r.id, 0, &[(":status", "200")]);
+            s.send(ft::DATA, 0, r.id, format!("{method} ").as_bytes());
+            s.send(ft::DATA, 0, r.id, path.as_bytes());
+            s.send(ft::DATA, flags::END_STREAM, r.id, &[]);
+            assert_eq!(
+                r.body,
+                if method == "POST" {
+                    b"x=1".to_vec()
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "una sola conexión");
+    });
+    let f = h2c_fetcher();
+    let mut sink = Parts(Vec::new());
+    f.fetch_streaming(
+        &url(port, "/a"),
+        &bf_net::RequestOptions::default(),
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(sink.0, ["head 200", "GET ", "/a"]);
+    let post = bf_net::RequestOptions {
+        method: "POST".into(),
+        body: Some(b"x=1".to_vec()),
+        ..bf_net::RequestOptions::default()
+    };
+    let mut sink = Parts(Vec::new());
+    f.fetch_streaming(&url(port, "/p"), &post, &mut sink)
+        .unwrap();
+    assert_eq!(sink.0, ["head 200", "POST ", "/p"]);
+    let res = f.fetch(&url(port, "/b"), &FetchOptions::default()).unwrap();
+    assert_eq!(res.body, b"GET /b");
+    server.join().unwrap();
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
+}
+
 #[test]
 fn flow_control_in_both_directions() {
     let upload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();

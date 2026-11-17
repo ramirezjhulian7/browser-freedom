@@ -30,6 +30,11 @@ pub struct NetTimings {
     /// Peticiones a la red y conexiones nuevas.
     pub requests: u32,
     pub connections: u32,
+    /// E3: de las conexiones nuevas por TLS, cuántas reanudaron una sesión (RFC 8446 §2.2).
+    pub resumed: u32,
+    /// E3: lo que se esperó a que quedara libre una conexión HTTP/1.1 del origen (fuera de
+    /// [`NetTimings::total`]: no es trabajo de la red).
+    pub slot_wait: Duration,
 }
 
 impl NetTimings {
@@ -79,6 +84,11 @@ pub(crate) fn count(connection: bool) {
             t.requests += 1;
         }
     });
+}
+
+/// E3: cuenta una conexión TLS que reanudó una sesión.
+pub(crate) fn add_resumed() {
+    TIMINGS.with(|t| t.borrow_mut().resumed += 1);
 }
 
 /// La caché HTTP en disco, sumada en todos los hilos desde el último [`take_disk`]: lecturas

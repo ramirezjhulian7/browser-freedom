@@ -129,7 +129,8 @@ fn fetcher_streaming(
         }
         return Ok(());
     }
-    bf_net::streaming::fetch_streaming(&req.url, &req.options, Some(&f.cookies), sink)
+    // E3: con las conexiones del `Fetcher` (keep-alive y su caché de DNS).
+    f.fetch_streaming(&req.url, &req.options, sink)
         .map_err(|e| e.to_string())
 }
 

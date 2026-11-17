@@ -598,6 +598,10 @@ pub fn speculative_fetch(
 /// E3: `preconnect` y `dns-prefetch` (HTML §4.6.7.4 y §4.6.7.10), cada uno en su hilo: no
 /// esperan a nada ni nadie los espera. El origen del documento ya tiene su conexión.
 fn resource_hints(loader: &CachedLoader, document: &Url, hints: Vec<Hint>) -> Vec<JoinHandle<()>> {
+    // `BF_NO_SUGERENCIAS=1` las apaga (para comparar en el mismo binario).
+    if std::env::var_os("BF_NO_SUGERENCIAS").is_some() {
+        return Vec::new();
+    }
     let secure = document.scheme == "https";
     hints
         .into_iter()
