@@ -88,7 +88,10 @@ fn custom_element_is_constructed_before_its_attributes_and_children() {
         p.show("log.join('; ')"),
         "ctor attrs=0 parent=none; attr id=a kids=0; connected kids=0"
     );
-    assert_eq!(p.show("tree(document.getElementById('a'))"), "\"hola \"<b>[\"mundo\"]");
+    assert_eq!(
+        p.show("tree(document.getElementById('a'))"),
+        "\"hola \"<b>[\"mundo\"]"
+    );
     assert_eq!(
         p.show("document.getElementById('a') instanceof customElements.get('x-a')"),
         "true"
@@ -152,7 +155,9 @@ fn inserting_into_a_script_the_page_inserted_runs_it_between_two_insertions() {
                   b.firstElementChild && b.firstElementChild.localName === 'nobr')";
     assert_eq!(p.show(&format!("{second}.parentNode.id")), "destination");
     assert_eq!(
-        p.show(&format!("{second}.nextSibling === document.querySelector('table')")),
+        p.show(&format!(
+            "{second}.nextSibling === document.querySelector('table')"
+        )),
         "true"
     );
 }
@@ -190,7 +195,10 @@ fn a_node_adopted_by_a_constructor_keeps_being_built_in_the_other_document() {
            window.ca = document.getElementById('ca'); other.body.appendChild(ca) } })</script>\
          <div id=ca>1<x-m>2</x-m>3</div><i>después</i>",
     );
-    assert_eq!(p.show("tree(other.body)"), "<div#ca>[\"1\"<x-m>[\"2\"]\"3\"]");
+    assert_eq!(
+        p.show("tree(other.body)"),
+        "<div#ca>[\"1\"<x-m>[\"2\"]\"3\"]"
+    );
     assert_eq!(p.show("tree(document.body)"), "<script><i>[\"después\"]");
     assert_eq!(
         p.show("ca === other.getElementById('ca') && ca.ownerDocument === other"),

@@ -4,7 +4,7 @@
 use bf_infra::Namespace;
 
 use super::{
-    Flow, TagToken, Tok, Step, is_ascii_whitespace, is_html_integration_point,
+    Flow, Step, TagToken, Tok, is_ascii_whitespace, is_html_integration_point,
     is_mathml_text_integration_point,
 };
 

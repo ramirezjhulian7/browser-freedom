@@ -4,8 +4,7 @@ use bf_dom::{NodeData, QuirksMode};
 use bf_infra::Namespace;
 
 use super::{
-    Flow, Formatting, Mode, Scope, TagToken, Tok, Step, foreign, is_ascii_whitespace,
-    is_special,
+    Flow, Formatting, Mode, Scope, Step, TagToken, Tok, foreign, is_ascii_whitespace, is_special,
 };
 use crate::tokenizer::State;
 

@@ -390,7 +390,6 @@ impl TreeBuilder {
         errors.sort_by_key(|e| e.offset);
         (self.doc, errors)
     }
-
 }
 
 impl Step<'_> {
@@ -464,7 +463,6 @@ impl Step<'_> {
 }
 
 impl TreeBuilder {
-
     fn error(&mut self) {
         self.errors.push(ParseError {
             code: TREE_ERROR,
@@ -693,7 +691,6 @@ impl TreeBuilder {
     fn is_open(&self, node: NodeId) -> bool {
         self.open.contains(&node)
     }
-
 }
 
 impl Step<'_> {
@@ -733,7 +730,6 @@ impl Step<'_> {
 }
 
 impl TreeBuilder {
-
     /// Clear the list of active formatting elements up to the last marker.
     fn clear_formatting_to_last_marker(&mut self) {
         while let Some(entry) = self.formatting.pop() {
@@ -752,7 +748,6 @@ impl TreeBuilder {
         }
         id
     }
-
 }
 
 impl Step<'_> {
@@ -772,7 +767,7 @@ impl Step<'_> {
             && self.context.is_none()
             && (is.is_some() || {
                 let name = tag.name.as_lossy_str();
-                name.contains('-') && bf_dom::is_valid_custom_element_name(&name)
+                name.contains('-') && bf_dom::is_valid_custom_element_name(name)
             })
             // El *intended parent* de lo que va en el contenido de un `template` es del
             // documento inerte del template, que no tiene registro (paso 4).
@@ -834,7 +829,6 @@ impl Step<'_> {
         }
         id
     }
-
 }
 
 impl TreeBuilder {
@@ -937,7 +931,6 @@ impl TreeBuilder {
             .children(node)
             .any(|c| self.doc.element(c).is_some())
     }
-
 }
 
 impl Step<'_> {
@@ -1012,7 +1005,6 @@ impl Step<'_> {
 }
 
 impl TreeBuilder {
-
     /// E1: pasos 8-9 del start tag `template` en "in head" (13.2.6.4.4): con
     /// `shadowrootmode` y *allow declarative shadow roots*, el template (ya en la stack, sin
     /// insertar) recibe como template contents el shadow root del *adjusted current node*.
@@ -1066,7 +1058,6 @@ impl TreeBuilder {
         self.template_hosts.insert(shadow, template);
         true
     }
-
 }
 
 impl Step<'_> {
@@ -1130,7 +1121,6 @@ impl Step<'_> {
 }
 
 impl TreeBuilder {
-
     fn insert_comment(&mut self, data: DomString, location: Option<Loc>) {
         let loc = location.unwrap_or_else(|| self.appropriate_place(None));
         let comment = self.doc.create(NodeData::Comment(data));
@@ -1154,7 +1144,6 @@ impl TreeBuilder {
     }
 
     // --- 13.2.6.2 Parsing elements that contain only text ---
-
 }
 
 impl Step<'_> {
@@ -1167,7 +1156,6 @@ impl Step<'_> {
 }
 
 impl TreeBuilder {
-
     fn set_quirks_mode(&mut self, mode: QuirksMode) {
         self.doc.mode = mode;
     }

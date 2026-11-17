@@ -3,7 +3,7 @@
 
 use bf_dom::NodeData;
 
-use super::{Flow, Loc, Mode, Scope, TagToken, Tok, Step, is_ascii_whitespace, quirks};
+use super::{Flow, Loc, Mode, Scope, Step, TagToken, Tok, is_ascii_whitespace, quirks};
 use crate::tokenizer::State;
 
 /// Character token que es TAB, LF, FF, CR o SPACE.
