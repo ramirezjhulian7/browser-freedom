@@ -147,6 +147,12 @@ pub enum PseudoClass {
     /// E5: `:popover-open` (HTML §4.16.3): elementos HTML con `popover` cuya *popover
     /// visibility state* es `showing`.
     PopoverOpen,
+    /// E6: pseudo-clases estándar que, con lo que el motor sabe hoy, no coinciden con ningún
+    /// elemento, así que reconocerlas y no hacerlas coincidir es el comportamiento correcto:
+    /// `:user-valid`/`:user-invalid` (Selectors 4 §14.5: solo tras interactuar el usuario),
+    /// `:autofill` y su alias `:-webkit-autofill` (HTML §4.16.3: no hay autorrelleno),
+    /// `:fullscreen` (Fullscreen §4) y `:picture-in-picture` (Picture-in-Picture §6).
+    Unmatched(&'static str),
     /// `:heading` (vacío) o `:heading(<integer>#)` de HTML: elementos `h1`–`h6` con esos
     /// niveles.
     Heading(Vec<i32>),
@@ -172,6 +178,29 @@ pub enum PseudoElement {
     Marker,
     Placeholder,
     Selection,
+    /// E6: `::backdrop` (CSS Positioned Layout 4 §3.2): la caja detrás de un elemento de la
+    /// capa superior. El motor todavía no la genera: se reconoce para que una lista con ella
+    /// no invalide la regla (Selectors 4 §3.1), como el *preflight* de Tailwind v4.
+    Backdrop,
+    /// E6: `::file-selector-button` (CSS Pseudo-Elements 4 §8.1): el botón de
+    /// `<input type=file>`. Igual: reconocido, sin caja todavía.
+    FileSelectorButton,
+    /// E6: desde aquí, otros pseudo-elementos estándar que el motor reconoce pero todavía no genera:
+    /// `::details-content` (CSS Pseudo 4 §8.3), `::target-text`, `::spelling-error`,
+    /// `::grammar-error` y `::highlight()` (CSS Pseudo 4 §3), `::view-transition` y sus partes
+    /// (`-group()`, `-image-pair()`, `-old()`, `-new()`; CSS View Transitions 1 §3.2). Una regla
+    /// con ellos no coincide con nada, pero no invalida la lista (Selectors 4 §3.1). Los
+    /// funcionales guardan solo el nombre, sin el argumento.
+    DetailsContent,
+    TargetText,
+    SpellingError,
+    GrammarError,
+    Highlight,
+    ViewTransition,
+    ViewTransitionGroup,
+    ViewTransitionImagePair,
+    ViewTransitionOld,
+    ViewTransitionNew,
 }
 
 impl PseudoElement {
@@ -184,6 +213,18 @@ impl PseudoElement {
             PseudoElement::Marker => "marker",
             PseudoElement::Placeholder => "placeholder",
             PseudoElement::Selection => "selection",
+            PseudoElement::Backdrop => "backdrop",
+            PseudoElement::FileSelectorButton => "file-selector-button",
+            PseudoElement::DetailsContent => "details-content",
+            PseudoElement::TargetText => "target-text",
+            PseudoElement::SpellingError => "spelling-error",
+            PseudoElement::GrammarError => "grammar-error",
+            PseudoElement::Highlight => "highlight",
+            PseudoElement::ViewTransition => "view-transition",
+            PseudoElement::ViewTransitionGroup => "view-transition-group",
+            PseudoElement::ViewTransitionImagePair => "view-transition-image-pair",
+            PseudoElement::ViewTransitionOld => "view-transition-old",
+            PseudoElement::ViewTransitionNew => "view-transition-new",
         }
     }
 }
@@ -626,6 +667,7 @@ fn write_pseudo_class(f: &mut fmt::Formatter<'_>, pc: &PseudoClass) -> fmt::Resu
         PseudoClass::Scope => "scope",
         PseudoClass::Defined => "defined",
         PseudoClass::PopoverOpen => "popover-open",
+        PseudoClass::Unmatched(name) => name,
         PseudoClass::Valid => "valid",
         PseudoClass::Invalid => "invalid",
     };

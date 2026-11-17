@@ -135,10 +135,14 @@ fn hacker_news() {
     assert_eq!(s.title(), "Hacker News", "{}", s.log);
 }
 
-/// E6: `https://asimetrix.co/` (Next.js). Hoy muestra su propia pantalla de error ("This page
-/// couldn't load") porque el motor no tiene `IntersectionObserver` (lo implementa E2); la lista
-/// de tropiezos está en `docs/pendiente/mac/e6.md`. Comprueba que la consola no tiene errores
-/// (`[pestaña N] …` en stderr) y, con la barra de búsqueda, que la pantalla de error no está.
+/// E6: `https://asimetrix.co/` (Next.js con Tailwind v4); los tropiezos están en
+/// `docs/pendiente/mac/e6.md`. Comprueba:
+/// - que la consola no tiene errores (`[pestaña N] …` en stderr);
+/// - con la barra de búsqueda, que no está la pantalla de error del sitio ("This page
+///   couldn't load") ni el texto del `<noscript>` de Google Tag Manager (con scripts no se
+///   muestra: `@media (scripting)`);
+/// - que el documento no desborda en horizontal: la flecha derecha no lo desplaza (con el
+///   *preflight* de Tailwind aplicado, `scrollWidth <= clientWidth`).
 #[test]
 #[ignore = "red: asimetrix.co"]
 fn asimetrix() {
@@ -149,8 +153,14 @@ fn asimetrix() {
             "wait",
             "wait",
             "wait",
+            "key:right",
+            "key:right",
+            "key:right",
             "key:f3",
             "type:This page couldn",
+            "wait",
+            "key:mod+a",
+            "type:googletagmanager.com/ns.html",
             "wait",
         ],
     );
@@ -164,10 +174,28 @@ fn asimetrix() {
         "errores de consola: {errors:#?}\n{}",
         s.log
     );
+    let step = |label: &str| {
+        s.log
+            .lines()
+            .filter(|l| l.contains(&format!(" {label}: ")))
+            .last()
+            .unwrap_or_else(|| panic!("sin el paso {label}:\n{}", s.log))
+            .to_owned()
+    };
+    assert!(
+        step("key:right").contains(" scroll=0,"),
+        "el documento desborda en horizontal:\n{}",
+        s.log
+    );
+    assert!(
+        step("type:This page couldn").contains("\"Sin resultados\""),
+        "la pantalla de error del sitio sigue a la vista:\n{}",
+        s.log
+    );
     assert!(
         s.last
-            .contains("buscar=\"This page couldn\" \"Sin resultados\""),
-        "la pantalla de error del sitio sigue a la vista:\n{}",
+            .contains("buscar=\"googletagmanager.com/ns.html\" \"Sin resultados\""),
+        "se ve el texto del <noscript>:\n{}",
         s.log
     );
     assert!(s.title().contains("Asimetrix"), "{}", s.log);

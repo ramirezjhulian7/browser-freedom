@@ -34,6 +34,8 @@ input[type=hidden i] { display: none !important; }
 
 /* §15.3.2 The page */
 html, body { display: block; }
+/* E6: HTML §15.3.2 ("The page"): el margen por omisión es de la hoja UA, no un hint. */
+body { margin: 8px; }
 
 /* §15.3.3 Flow content */
 address, blockquote, center, dialog, div, figure, figcaption, footer, form,

@@ -106,21 +106,28 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
     let attr = |name: &str| el.attr(name);
     let name = el.name.as_lossy_str();
 
-    // §15.3.2: márgenes del body (8px por defecto) y colores.
+    // E6: §15.3.2 ("The page"): los márgenes del body son hints solo con sus atributos (el
+    // primero que haya con un entero no negativo); los 8px por omisión están en la hoja UA
+    // (`body { margin: 8px }`), así que una regla de autor en una capa les gana (CSS Cascade 5
+    // §6.1: el origen va antes que las capas).
     if name == "body" {
         let px = |names: &[&str]| {
             names
                 .iter()
                 .find_map(|n| attr(n))
                 .and_then(parse_non_negative_integer)
-                .map_or_else(|| "8px".to_owned(), |v| format!("{v}px"))
+                .map(|v| format!("{v}px"))
         };
-        let vertical = px(&["marginheight", "topmargin"]);
-        let horizontal = px(&["marginwidth", "leftmargin"]);
-        h.push("margin-top", &vertical);
-        h.push("margin-bottom", &vertical);
-        h.push("margin-left", &horizontal);
-        h.push("margin-right", &horizontal);
+        for (property, names) in [
+            ("margin-top", ["marginheight", "topmargin"]),
+            ("margin-bottom", ["marginheight", "bottommargin"]),
+            ("margin-left", ["marginwidth", "leftmargin"]),
+            ("margin-right", ["marginwidth", "rightmargin"]),
+        ] {
+            if let Some(v) = px(&names) {
+                h.push(property, &v);
+            }
+        }
         if let Some(c) = attr("text").and_then(color_css) {
             h.push("color", &c);
         }
