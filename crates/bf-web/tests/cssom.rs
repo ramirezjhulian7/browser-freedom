@@ -694,3 +694,30 @@ fn cssom_changes_reach_the_painted_cascade() {
     // El texto del elemento no cambia (CSSOM no lo reescribe).
     assert_eq!(p.s("document.getElementById('sc').textContent"), "");
 }
+
+/// E2: CSSOM §6.7.5: el bloque de `element.style` y el atributo `style` quedan sincronizados,
+/// pero el bloque no se vuelve a parsear en cada acceso (React escribe estilos en línea sin
+/// parar: DuckDuckGo pasaba un tercio del hilo en el tokenizador de CSS). Solo se parsea si el
+/// atributo cambió por otro camino.
+#[test]
+fn inline_style_is_not_reparsed_on_every_access() {
+    let mut p = Page::new("<!DOCTYPE html><div id=d style='color: red'></div>");
+    p.run("var d = document.getElementById('d');");
+    let before = bf_web::cssom::declaration::parse_count();
+    p.run(
+        "for (let i = 0; i < 100; i++) { d.style.setProperty('width', i + 'px'); \
+         d.style.left = i + 'px'; void d.style.length; void d.style.color; }",
+    );
+    let parses = bf_web::cssom::declaration::parse_count() - before;
+    assert!(parses <= 2, "{parses} parseos");
+    assert_eq!(
+        p.s("d.getAttribute('style')"),
+        "color: red; width: 99px; left: 99px;"
+    );
+    // Un cambio del atributo por otro camino se ve en el bloque.
+    p.run("d.setAttribute('style', 'top: 3px')");
+    assert_eq!(
+        p.s("d.style.top + '|' + d.style.color + '|' + d.style.length"),
+        "3px||1"
+    );
+}
