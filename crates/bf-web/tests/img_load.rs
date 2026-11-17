@@ -155,9 +155,12 @@ fn decode_promise() {
     assert_eq!(p.show("log.includes('g otra vez')"), "true");
 }
 
-/// Los `<link>` del parser también disparan su evento antes que la ventana: una hoja (aquí
-/// `error`: el cargador de la página no sirve `data:` para hojas) y un `preload` (que con
-/// `onload="this.rel='stylesheet'"` es como cargan CSS muchos sitios).
+/// Los `<link>` del parser también disparan su evento antes que la ventana: una hoja y un
+/// `preload` (que con `onload="this.rel='stylesheet'"` es como cargan CSS muchos sitios).
+/// E2: la hoja de `data:` carga (el CSSOM usa el loader de la ventana; antes daba `error`), y
+/// el `preload` que pasa a `stylesheet` dispara `load` otra vez, como hoja, también antes que
+/// la ventana (la hoja demora el `load` del documento, HTML §4.6.7.2); volver a poner el mismo
+/// `rel` no crea otro enlace y no la vuelve a pedir.
 #[test]
 fn parser_links_fire_load() {
     let mut p = Page::load(&format!(
@@ -170,9 +173,10 @@ fn parser_links_fire_load() {
     ));
     let log = p.show("log.join('|')");
     assert!(log.ends_with("window"), "{log}");
-    for e in ["css error", "preload", "swap"] {
+    for e in ["css load", "preload", "swap"] {
         assert!(log.contains(e), "{e}: {log}");
     }
+    assert_eq!(log.matches("swap").count(), 2, "{log}");
     // El `preload` que pasó a `stylesheet` ya es una hoja del documento.
     assert_eq!(p.show("document.styleSheets.length"), "2");
 }

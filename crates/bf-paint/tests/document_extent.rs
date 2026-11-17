@@ -1,0 +1,69 @@
+//! E2: la extensión del documento (`document_extent`, lo que se puede desplazar) recorta cada
+//! caja con el `overflow` que de verdad la recorta (CSS 2.2 §11.1.1, CSS Overflow 3 §2.2).
+//! El caso de asimetrix.co: un `absolute` centrado con `left: 50%` y `transform` dentro de un
+//! `relative overflow: hidden` ensanchaba el documento y la página se desplazaba en horizontal.
+
+use bf_css::media::MediaContext;
+use bf_css::selectors::MatchContext;
+use bf_html::{ParseOptions, parse_document};
+use bf_layout::{Size, TestFont, layout_document};
+use bf_paint::document_extent;
+use bf_style::style_document;
+
+/// (ancho, alto) de la extensión del documento en un viewport de 800×600.
+fn extent(html: &str) -> (f32, f32) {
+    let (doc, _) = parse_document(html, &ParseOptions::default());
+    let ctx = MatchContext::for_document(&doc);
+    let media = MediaContext {
+        width: 800.0,
+        height: 600.0,
+        ..MediaContext::default()
+    };
+    let styles = style_document(&doc, &[], &media, &ctx);
+    let tree = layout_document(
+        &doc,
+        &styles,
+        Size {
+            width: 800.0,
+            height: 600.0,
+        },
+        &TestFont,
+    );
+    let r = document_extent(&tree);
+    (r.width, r.height)
+}
+
+#[test]
+fn absolute_inside_its_clipping_containing_block_is_clipped() {
+    // El bloque contenedor del `absolute` es la caja que recorta: no cuenta lo que sobresale.
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='position: relative; overflow: hidden; width: 700px; height: 100px'>\
+        <div style='position: absolute; left: 50%; top: 50%; width: 100%; height: 100%; \
+        transform: translate(-50%, -50%)'></div></div>";
+    assert_eq!(extent(html), (800.0, 600.0));
+    // Lo mismo con un `relative` y con una caja en flujo más ancha.
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='overflow: hidden; width: 700px'>\
+        <div style='position: relative; left: 500px; width: 700px; height: 10px'></div>\
+        <div style='width: 2000px; height: 10px'></div></div>";
+    assert_eq!(extent(html), (800.0, 600.0));
+}
+
+#[test]
+fn absolute_escaping_a_static_clip_still_counts() {
+    // El bloque contenedor está fuera de la caja que recorta (es el bloque inicial): el
+    // `overflow` no lo recorta y el documento crece hasta él.
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='overflow: hidden; width: 300px; height: 100px'>\
+        <div style='position: absolute; left: 900px; width: 100px; height: 10px'></div></div>";
+    assert_eq!(extent(html), (1000.0, 600.0));
+    // Un `fixed` solo lo recorta un antepasado transformado.
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='overflow: hidden; width: 300px; height: 100px; position: relative'>\
+        <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
+    assert_eq!(extent(html), (800.0, 910.0));
+    let html = "<!doctype html><style>body { margin: 0 }</style>\
+        <div style='overflow: hidden; width: 300px; height: 100px; transform: scale(1)'>\
+        <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
+    assert_eq!(extent(html), (800.0, 600.0));
+}

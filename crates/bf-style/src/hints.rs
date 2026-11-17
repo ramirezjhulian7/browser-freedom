@@ -106,10 +106,15 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
     let attr = |name: &str| el.attr(name);
     let name = el.name.as_lossy_str();
 
-    // E6: §15.3.2 ("The page"): los márgenes del body son hints solo con sus atributos (el
-    // primero que haya con un entero no negativo); los 8px por omisión están en la hoja UA
-    // (`body { margin: 8px }`), así que una regla de autor en una capa les gana (CSS Cascade 5
-    // §6.1: el origen va antes que las capas).
+    // E6/E2: §15.3.2 ("The page"): `margin-top` y `margin-bottom` salen del primero de
+    // `marginheight` y `topmargin` que exista; `margin-left` y `margin-right`, del primero de
+    // `marginwidth` y `leftmargin` (no hay `bottommargin` ni `rightmargin`: WPT
+    // `body-margin-3a/3b`). Si el que existe no es un entero no negativo, o no hay ninguno, la
+    // especificación usa 8px como parte del mismo hint; aquí esos 8px están en la hoja UA
+    // (`body { margin: 8px }`), como en los motores de los navegadores. Las dos formas solo se
+    // distinguen con `revert` desde el autor (vuelve a los 8px de la hoja UA en vez de a 0),
+    // y en los dos casos una regla de autor, también en `@layer`, les gana (CSS Cascade 5
+    // §6.5).
     if name == "body" {
         let px = |names: &[&str]| {
             names
@@ -120,9 +125,9 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
         };
         for (property, names) in [
             ("margin-top", ["marginheight", "topmargin"]),
-            ("margin-bottom", ["marginheight", "bottommargin"]),
+            ("margin-bottom", ["marginheight", "topmargin"]),
             ("margin-left", ["marginwidth", "leftmargin"]),
-            ("margin-right", ["marginwidth", "rightmargin"]),
+            ("margin-right", ["marginwidth", "leftmargin"]),
         ] {
             if let Some(v) = px(&names) {
                 h.push(property, &v);
@@ -241,6 +246,20 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
         if let Some(v) = attr("height").and_then(|v| dimension_css(v, false)) {
             h.push("height", &v);
         }
+    }
+    // E2: §15.4.3: "The width and height attributes map to the aspect-ratio property (using
+    // dimension rules) on img and video elements, and input elements with a type attribute in
+    // the Image Button state". §15.2: si los dos se parsean como dimensiones sin error y sin
+    // porcentaje, son el hint `aspect-ratio: auto w / h`. Con `width: 100%; height: auto` de
+    // autor (Tailwind `w-full h-auto`), la caja tiene el alto bueno antes de que llegue la
+    // imagen; cuando llega, manda su relación natural (`auto`, CSS Sizing 4 §5.1).
+    if (matches!(name, "img" | "video") || image_button)
+        && let (Some((w, false)), Some((hgt, false))) = (
+            attr("width").and_then(parse_dimension),
+            attr("height").and_then(parse_dimension),
+        )
+    {
+        h.push("aspect-ratio", &format!("auto {w} / {hgt}"));
     }
     if matches!(name, "img" | "embed" | "object") || image_button {
         if let Some(v) = attr("hspace").and_then(|v| dimension_css(v, false)) {

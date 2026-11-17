@@ -387,7 +387,7 @@ pub fn modified_document_sheets(
     agent.current_realm = realm;
     let r = sheets::document_sheets(agent, media);
     agent.current_realm = saved;
-    Some(r)
+    Some(Arc::unwrap_or_clone(r))
 }
 
 /// El snapshot del shell si está al día con el documento y las hojas.

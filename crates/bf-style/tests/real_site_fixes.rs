@@ -1,4 +1,4 @@
-//! E6: tres defectos de CSS de `https://asimetrix.co/` (Next.js con Tailwind v4), con un caso
+//! E6 y E2: cuatro defectos de CSS de `https://asimetrix.co/` (Next.js con Tailwind v4), con un caso
 //! mínimo escrito a mano para cada uno:
 //!
 //! 1. `@media (scripting)` (Media Queries 5 §8.1): con scripts, la regla UA
@@ -6,9 +6,11 @@
 //! 2. `::backdrop` y `::file-selector-button` (y los demás pseudo-elementos estándar sin caja
 //!    todavía) no invalidan la lista de selectores del *preflight* de Tailwind (Selectors 4
 //!    §3.1); uno desconocido sí.
-//! 3. El margen por omisión del `<body>` es de la hoja UA (HTML §15.3.2): un `margin: 0` de
+//! 3. El margen por omisión del `<body>` (HTML §15.3.2) va en la hoja UA: un `margin: 0` de
 //!    autor dentro de `@layer` le gana; los atributos `marginwidth`/`topmargin`… siguen siendo
 //!    hints.
+//! 4. Los presentational hints van debajo de toda regla de autor, también de las de `@layer`
+//!    (CSS Cascade 5 §6.5), y `width`/`height` dan `aspect-ratio` (HTML §15.4.3).
 
 use bf_css::media::{MediaContext, Scripting};
 use bf_css::selectors::{MatchContext, NamespaceMap, PseudoElement, matches, parse_selector_list};
@@ -155,23 +157,72 @@ fn body_margin_is_a_ua_rule() {
     );
     assert_eq!(get(&doc, &map, "body", "margin-left"), "0px");
     assert_eq!(get(&doc, &map, "h1", "margin-top"), "0px");
-    // Los atributos siguen siendo hints (HTML §15.3.2), cada lado con el suyo.
+    // Los atributos siguen siendo hints (HTML §15.3.2): `topmargin` y `marginheight` dan arriba
+    // y abajo; `leftmargin` y `marginwidth`, izquierda y derecha. `bottommargin` y
+    // `rightmargin` no existen (WPT `body-margin-3a/3b`).
     let (doc, map) = styled(
         "<!doctype html><body marginwidth=3 topmargin=5 bottommargin=7 rightmargin=9>t",
         true,
     );
     assert_eq!(get(&doc, &map, "body", "margin-top"), "5px");
-    assert_eq!(get(&doc, &map, "body", "margin-bottom"), "7px");
+    assert_eq!(get(&doc, &map, "body", "margin-bottom"), "5px");
     assert_eq!(get(&doc, &map, "body", "margin-left"), "3px");
     assert_eq!(get(&doc, &map, "body", "margin-right"), "3px");
     let (doc, map) = styled("<!doctype html><body leftmargin=2>t", true);
     assert_eq!(get(&doc, &map, "body", "margin-left"), "2px");
+    assert_eq!(get(&doc, &map, "body", "margin-right"), "2px");
+    let (doc, map) = styled(
+        "<!doctype html><body rightmargin=100 bottommargin=100>t",
+        true,
+    );
     assert_eq!(get(&doc, &map, "body", "margin-right"), "8px");
+    assert_eq!(get(&doc, &map, "body", "margin-bottom"), "8px");
     // Un hint es de autor, así que le gana a la hoja UA, y una regla de autor le gana al hint
-    // (especificidad 0, al principio de la hoja de autor; CSS Cascade 5 §6.4).
+    // (CSS Cascade 5 §6.5: un origen propio entre el de usuario y el de autor).
     let (doc, map) = styled(
         "<!doctype html><style>body { margin-top: 1px }</style><body topmargin=5>t",
         true,
     );
     assert_eq!(get(&doc, &map, "body", "margin-top"), "1px");
+}
+
+/// Caso 4: los presentational hints quedan debajo de las reglas de autor en `@layer` (CSS
+/// Cascade 5 §6.5: un origen propio entre el de usuario y el de autor). El logo de "Ecosistema"
+/// de asimetrix.co: `<img width=2932 height=1368 class="w-full h-auto">` con las utilidades de
+/// Tailwind en `@layer utilities`.
+#[test]
+fn presentational_hints_lose_to_layered_author_rules() {
+    let html = "<!doctype html><style>@layer utilities { .w-full { width: 100% } \
+        .h-auto { height: auto } } @layer x { #r1 { width: revert-layer } \
+        #r2 { width: revert } }</style>\
+        <div style=\"width:438px\"><img class=\"w-full h-auto\" width=2932 height=1368>\
+        <img id=sin width=2932 height=1368><img id=r1 width=44><img id=r2 width=44>\
+        <img id=pct width=50% height=10><iframe class=w-full width=640 height=360></iframe></div>";
+    let (doc, map) = styled(html, true);
+    assert_eq!(get(&doc, &map, "img.w-full", "width"), "100%");
+    assert_eq!(get(&doc, &map, "img.w-full", "height"), "auto");
+    assert_eq!(get(&doc, &map, "iframe", "width"), "100%");
+    assert_eq!(get(&doc, &map, "iframe", "height"), "360px");
+    // Sin regla de autor, el hint se aplica.
+    assert_eq!(get(&doc, &map, "#sin", "width"), "2932px");
+    // `revert-layer` en la única capa de autor vuelve al hint; `revert` lo salta (para `revert`
+    // es del origen de autor) y queda el valor de la hoja UA (WPT
+    // `css/css-cascade/presentational-hints-rollback.html`).
+    assert_eq!(get(&doc, &map, "#r1", "width"), "44px");
+    assert_eq!(get(&doc, &map, "#r2", "width"), "auto");
+    // HTML §15.4.3: el par width/height da `aspect-ratio: auto w / h`, salvo con porcentaje.
+    let ratio = get(&doc, &map, "#sin", "aspect-ratio");
+    assert!(ratio.starts_with("auto 2.14"), "{ratio}");
+    assert_eq!(get(&doc, &map, "#pct", "aspect-ratio"), "auto");
+    // El estilo compartido: dos elementos iguales sin hints siguen compartiendo, y uno con
+    // hints no toma el estilo de su hermano.
+    let (doc, map) = styled(
+        "<!doctype html><style>@layer u { .w { width: 10px } }</style>\
+         <p><img class=w id=a><img class=w id=b><img class=w id=c width=99></p>",
+        true,
+    );
+    assert_eq!(get(&doc, &map, "#a", "width"), "10px");
+    assert_eq!(get(&doc, &map, "#b", "width"), "10px");
+    assert_eq!(get(&doc, &map, "#c", "width"), "10px");
+    assert_eq!(get(&doc, &map, "#c", "aspect-ratio"), "auto");
 }

@@ -142,7 +142,11 @@ fn hacker_news() {
 ///   couldn't load") ni el texto del `<noscript>` de Google Tag Manager (con scripts no se
 ///   muestra: `@media (scripting)`);
 /// - que el documento no desborda en horizontal: la flecha derecha no lo desplaza (con el
-///   *preflight* de Tailwind aplicado, `scrollWidth <= clientWidth`).
+///   *preflight* de Tailwind aplicado, `scrollWidth <= clientWidth`). E2: también cubre el
+///   logo de "Ecosistema" (`<img width=2932 class="w-full">`, que con los hints por encima de
+///   `@layer utilities` medía 2932 px) y el `absolute` centrado dentro del vídeo con
+///   `overflow: hidden`, que `document_extent` no recortaba;
+/// - E2: que ninguna hoja enlazada falla en el CSSOM (sin `ChunkLoadError` en la consola).
 #[test]
 #[ignore = "red: asimetrix.co"]
 fn asimetrix() {
@@ -174,11 +178,15 @@ fn asimetrix() {
         "errores de consola: {errors:#?}\n{}",
         s.log
     );
+    assert!(
+        !s.log.contains("ChunkLoadError"),
+        "una hoja enlazada falló en el CSSOM:\n{}",
+        s.log
+    );
     let step = |label: &str| {
         s.log
             .lines()
-            .filter(|l| l.contains(&format!(" {label}: ")))
-            .last()
+            .rfind(|l| l.contains(&format!(" {label}: ")))
             .unwrap_or_else(|| panic!("sin el paso {label}:\n{}", s.log))
             .to_owned()
     };

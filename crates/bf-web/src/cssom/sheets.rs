@@ -8,6 +8,7 @@
 //! como modificada y la cascada usa entonces su serialización.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bf_css::media::{MediaContext, parse_media_query_list};
 use bf_css::selectors::parse_selector_list;
@@ -149,9 +150,23 @@ pub struct Sheet {
     /// CSS rule).
     pub parent: Option<SheetId>,
     pub owner_rule: Option<RuleRef>,
-    /// El texto descargado de la hoja de un `<link>` (para la cascada).
+    /// El texto descargado de la hoja de un `<link>` mientras sus `cssRules` no se crearon
+    /// (después, `None`).
     pub fetched: Option<String>,
+    /// E2: la hoja de un `<link>` ya parseada para la cascada (con las `url()` resueltas contra
+    /// la URL de la hoja), compartida con el pintado por `bf_style::sheet_cache`: los dos la
+    /// parsean una sola vez.
+    pub parsed: Option<Arc<Stylesheet>>,
+    /// E2: `rules` todavía no se creó desde `fetched`. Las `cssRules` de una hoja enlazada se
+    /// crean la primera vez que alguien las pide ([`SheetStore::ensure_rules`]): pocas páginas
+    /// las leen, y así cargar una hoja enlazada no la vuelve a parsear en el hilo de la pestaña.
+    pub lazy: bool,
 }
+
+/// E2: lo que [`document_sheets`] armó la última vez: los ids de las hojas que entraron, la
+/// generación de las hojas y el resultado. Mientras nada de eso cambie, maquetar desde
+/// JavaScript o animar no vuelve a parsear ninguna hoja.
+type Assembled = (Vec<SheetId>, u64, Arc<Vec<Stylesheet>>);
 
 /// Las hojas de una ventana.
 #[derive(Debug, Default)]
@@ -171,6 +186,11 @@ pub struct SheetStore {
     imports: HashMap<RuleId, SheetId>,
     /// `document.adoptedStyleSheets`: el array (fijado) que ve el autor.
     adopted: Option<bf_js::host::HostHandle>,
+    /// E2: ver [`Assembled`].
+    assembled: Option<Assembled>,
+    /// E2: los `<link>` cuyo enlace externo de tipo `stylesheet` ya existe (se pidió su hoja y
+    /// su `rel` sigue teniendo `stylesheet`).
+    stylesheet_links: HashSet<NodeRef>,
 }
 
 impl SheetStore {
@@ -190,6 +210,7 @@ impl SheetStore {
         }
         self.by_owner = self.by_owner.drain().map(|(k, v)| (remap(k), v)).collect();
         self.explicitly_enabled = self.explicitly_enabled.drain().map(remap).collect();
+        self.stylesheet_links = self.stylesheet_links.drain().map(remap).collect();
         self.link_loads = self
             .link_loads
             .drain()
@@ -311,6 +332,23 @@ impl SheetStore {
     fn parse_rules(&mut self, text: &str) -> Vec<CssRule> {
         let sheet = Stylesheet::parse(text, Origin::Author);
         self.convert(&sheet.rules)
+    }
+
+    /// E2: crea las reglas de la hoja `id` si todavía no estaban (ver [`Sheet::lazy`]). Se
+    /// llama antes de todo lo que lee o cambia la lista de reglas de una hoja: `cssRules`,
+    /// `insertRule`, `deleteRule`, `addRule` y `removeRule` (las demás listas de reglas, las de
+    /// una regla, solo existen después).
+    pub fn ensure_rules(&mut self, id: SheetId) {
+        let Some(text) = self.sheets.get_mut(&id).filter(|s| s.lazy).map(|s| {
+            s.lazy = false;
+            s.fetched.take().unwrap_or_default()
+        }) else {
+            return;
+        };
+        let rules = self.parse_rules(&text);
+        if let Some(s) = self.sheets.get_mut(&id) {
+            s.rules = rules;
+        }
     }
 
     /// La regla `r` (en su hoja o entre las quitadas).
@@ -670,7 +708,7 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         |h: String| bf_infra::Url::parse(&h, Some(&base)).map_or(h, |u| u.serialize(false));
     // Las hojas de `<link>` nuevas o con otro `href`: su texto (HTML §4.6.7.1 "fetch and
     // process the linked resource", con el loader de la página).
-    let mut loaded: HashMap<NodeRef, Option<String>> = HashMap::new();
+    let mut loaded: HashMap<NodeRef, Option<LinkedSheet>> = HashMap::new();
     for f in &found {
         let Some(h) = &f.href else { continue };
         let href = resolve(h.clone());
@@ -699,14 +737,16 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
         let id = match reuse {
             Some(id) => id,
             None => {
-                let fetched = loaded.get(&f.owner).and_then(Option::as_deref);
+                let fetched = loaded.remove(&f.owner).flatten();
                 let failed = f.source.is_none() && fetched.is_none();
+                // Las reglas de un `<style>` se crean ya; las de un `<link>`, al pedirlas.
                 let rules = f
                     .source
                     .as_deref()
-                    .or(fetched)
                     .map_or_else(Vec::new, |t| st.parse_rules(t));
                 let disabled = f.alternate && !st.explicitly_enabled.contains(&f.owner);
+                let lazy = fetched.is_some();
+                let (fetched, parsed) = fetched.map(|l| (l.text, l.parsed)).unzip();
                 let id = st.new_sheet(Sheet {
                     owner: Some(f.owner),
                     source: f.source,
@@ -714,7 +754,9 @@ pub fn sync(agent: &mut Agent) -> Vec<SheetId> {
                     rules,
                     disabled,
                     failed,
-                    fetched: fetched.map(str::to_owned),
+                    fetched,
+                    parsed,
+                    lazy,
                     ..Sheet::default()
                 });
                 if let Some(old) = st.by_owner.insert(f.owner, id)
@@ -772,10 +814,14 @@ pub fn schedule_link_load(agent: &mut Agent, n: NodeRef) {
     if n.doc != 0 {
         return;
     }
+    let stylesheet = link_has_rel(agent, n, "stylesheet");
     let st = &mut state(agent).sheets;
     st.next_load += 1;
     let id = st.next_load;
     st.link_loads.insert(n, id);
+    if stylesheet {
+        st.stylesheet_links.insert(n);
+    }
     let realm = WebContextHandle::current(agent).realm;
     agent.queue_task(
         bf_js::host::TaskSource::Networking,
@@ -955,57 +1001,109 @@ pub fn link_attribute_changed(agent: &mut Agent, n: NodeRef, name: &str, removed
         }
         state(agent).sheets.explicitly_enabled.insert(n);
     }
+    // E2: cambiar `rel` solo vuelve a pedir la hoja si crea el enlace externo de tipo
+    // `stylesheet` (HTML §4.6.7.2: "When the external resource link is created on a link
+    // element that is already browsing-context connected"); si ya lo era y lo sigue siendo, no
+    // hay enlace nuevo. Sin esto, el patrón `<link rel=preload as=style onload="this.rel=
+    // 'stylesheet'">` (sin `this.onload = null`) volvía a cargar la hoja y a disparar `load`
+    // sin fin en cuanto la hoja cargaba.
+    if name == "rel" {
+        let stylesheet = !removed && link_has_rel(agent, n, "stylesheet");
+        let st = &mut state(agent).sheets;
+        if !stylesheet {
+            st.stylesheet_links.remove(&n);
+        } else if st.stylesheet_links.contains(&n) {
+            return;
+        }
+    }
     if connected_link {
         if link_has_rel(agent, n, "preload") && !link_has_rel(agent, n, "stylesheet") {
             schedule_preload(agent, n);
         } else {
+            // E2: como al conectarse (`link_connected`), la hoja demora el `load` del
+            // documento hasta que termina de pedirse (HTML §4.6.7.2: "the user agent must
+            // delay the load event of the element's node document"; `link_loaded` lo suelta).
+            if link_has_rel(agent, n, "stylesheet") {
+                crate::html::legacy_factories::delay_load(agent, n, true);
+            }
             schedule_link_load(agent, n);
         }
     }
 }
 
-/// El texto de la hoja de un `<link rel=stylesheet>` (decodificada como UTF-8, CSS Syntax
-/// §3.2 sin `@charset`), o `None` si no se pudo cargar.
-fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<String> {
+/// E2: una hoja de `<link>` o de `@import` cargada: su texto y la hoja parseada.
+struct LinkedSheet {
+    text: String,
+    parsed: Arc<Stylesheet>,
+}
+
+/// La hoja de un `<link rel=stylesheet>` o de un `@import`, o `None` si no se pudo cargar
+/// (HTML §4.6.7.1 "fetch and process the linked resource"; su `<link>` dispara entonces
+/// `error`, HTML §4.2.4.3 y §4.6.7.2).
+///
+/// E2: con el loader de la ventana (`bom::script::page_loader`: en el navegador, el del
+/// documento; en el runner de testharness, el de `PageResources`), como `FontFace.load()`;
+/// antes solo se buscaba el de `PageResources`, así que en el navegador ninguna hoja enlazada
+/// cargaba en el CSSOM (`document.styleSheets` sin reglas, `error` en vez de `load` y el
+/// `ChunkLoadError` de los sitios con Next.js). Se pide con *destination* `style` (Fetch
+/// §2.2.5: contenido mixto y CSP `style-src`). La hoja parseada sale de
+/// `bf_style::sheet_cache` con la misma clave que usa el pintado (URL final y hash de los
+/// bytes), así que se parsea una vez para los dos. El texto se decodifica como en CSS Syntax 3
+/// §3.2 (BOM, `@charset` o el encoding del documento).
+fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<LinkedSheet> {
     let url = bf_infra::Url::parse(href, None).ok()?;
     let realm = WebContextHandle::current(agent).realm;
-    let loader = agent
-        .realm_data::<crate::html::scripting::PageResources>(realm)?
-        .loader
-        .clone();
-    let r = loader.load(&url)?;
-    let bytes = r
-        .bytes
-        .strip_prefix(&[0xEF, 0xBB, 0xBF])
-        .unwrap_or(&r.bytes);
-    Some(String::from_utf8_lossy(bytes).into_owned())
+    let loader = crate::bom::script::page_loader(agent, realm)?;
+    let r = loader.load_for(&url, bf_infra::Destination::Style)?;
+    let ctx = with_doc(agent, 0, |d| bf_style::sheet_cache::SheetContext {
+        quirks: d.mode == bf_dom::QuirksMode::Quirks,
+        encoding: bf_infra::encoding::Encoding::for_label(&d.character_set)
+            .unwrap_or(bf_infra::encoding::Encoding::Utf8),
+    });
+    let parsed = bf_style::sheet_cache::warm(&r.url, &r.bytes, &ctx);
+    let text = bf_style::loader::decode_css(&r.bytes, ctx.encoding);
+    Some(LinkedSheet { text, parsed })
 }
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).
-pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Vec<Stylesheet> {
+///
+/// E2: el resultado se guarda mientras no cambien las hojas que entran ni la generación de
+/// las hojas (`sheets_changed`): antes se volvían a parsear todas en cada llamada (cada
+/// maqueta pedida desde JavaScript y cada cuadro de una animación).
+pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Arc<Vec<Stylesheet>> {
     let mut ids = sync(agent);
     // Las adoptadas van después de las del documento (CSSOM §6.6, "document or shadow root CSS
     // style sheets").
     ids.extend(adopted_ids(agent));
-    let st = &state(agent).sheets;
-    let mut out = Vec::new();
-    for id in ids {
-        let Some(s) = st.sheets.get(&id) else {
-            continue;
-        };
-        if s.disabled || (!s.media.is_empty() && !parse_media_query_list(&s.media).evaluate(media))
-        {
-            continue;
-        }
-        let text = if s.modified {
-            sheet_text(s)
-        } else if let Some(src) = s.source.as_ref().or(s.fetched.as_ref()) {
-            src.clone()
-        } else {
-            continue;
-        };
-        out.push(Stylesheet::parse(&text, Origin::Author));
+    let cssom = state(agent);
+    let generation = cssom.sheets_generation;
+    let st = &mut cssom.sheets;
+    ids.retain(|id| {
+        st.sheets.get(id).is_some_and(|s| {
+            !s.disabled && (s.media.is_empty() || parse_media_query_list(&s.media).evaluate(media))
+        })
+    });
+    if let Some((i, g, sheets)) = &st.assembled
+        && *i == ids
+        && *g == generation
+    {
+        return sheets.clone();
     }
+    let mut out = Vec::new();
+    for id in &ids {
+        let Some(s) = st.sheets.get(id) else {
+            continue;
+        };
+        if s.modified {
+            out.push(Stylesheet::parse(&sheet_text(s), Origin::Author));
+        } else if let Some(src) = &s.source {
+            out.push(Stylesheet::parse(src, Origin::Author));
+        } else if let Some(parsed) = &s.parsed {
+            out.push((**parsed).clone());
+        }
+    }
+    let out = Arc::new(out);
+    st.assembled = Some((ids, generation, out.clone()));
     out
 }
 
@@ -1621,6 +1719,7 @@ fn sheet_owner_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn sheet_css_rules(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    state(agent).sheets.ensure_rules(id);
     Ok(wrap_rule_list(agent, ListOwner::Sheet(id)))
 }
 
@@ -1839,6 +1938,7 @@ fn require_args(agent: &mut Agent, a: &CallArgs<'_>, n: usize, what: &str) -> Js
 
 fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    state(agent).sheets.ensure_rules(id);
     require_args(agent, a, 1, "insertRule")?;
     let text = str_arg(agent, &a.arg(0))?;
     let index = index_arg(agent, &a.arg(1))?;
@@ -1847,6 +1947,7 @@ fn sheet_insert_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn sheet_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    state(agent).sheets.ensure_rules(id);
     require_args(agent, a, 1, "deleteRule")?;
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Sheet(id), index)
@@ -1855,6 +1956,7 @@ fn sheet_delete_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `addRule(selector, style, index)` (CSSOM §6.1.2, legacy): siempre devuelve -1.
 fn sheet_add_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    state(agent).sheets.ensure_rules(id);
     let selector = str_arg(agent, &a.arg(0))?;
     let style = str_arg(agent, &a.arg(1))?;
     let mut text = format!("{selector} {{ ");
@@ -1874,6 +1976,7 @@ fn sheet_add_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn sheet_remove_rule(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let id = this_sheet(agent, a)?;
+    state(agent).sheets.ensure_rules(id);
     let index = index_arg(agent, &a.arg(0))?;
     delete_rule(agent, ListOwner::Sheet(id), index)
 }
@@ -2339,14 +2442,16 @@ fn import_style_sheet(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         return Ok(Value::Null);
     };
     let resolved = url.serialize(false);
-    let text = load_linked_sheet(agent, &resolved);
+    let loaded = load_linked_sheet(agent, &resolved);
     let st = &mut state(agent).sheets;
-    let rules = text.as_deref().map_or_else(Vec::new, |t| st.parse_rules(t));
+    let rules = loaded
+        .as_ref()
+        .map_or_else(Vec::new, |l| st.parse_rules(&l.text));
     let id = st.new_sheet(Sheet {
         href: Some(resolved),
         media: media_text(&media),
         rules,
-        failed: text.is_none(),
+        failed: loaded.is_none(),
         parent: Some(r.sheet),
         owner_rule: Some(r),
         ..Sheet::default()
