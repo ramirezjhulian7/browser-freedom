@@ -209,6 +209,8 @@ impl Document {
         } else {
             return;
         }
+        // E2: `:checked` sigue a la checkedness: el estilo cambia (y la copia que se pinta).
+        self.bump_version();
         if value {
             for other in self.radio_group(input) {
                 if other != input
@@ -342,7 +344,27 @@ impl Document {
         {
             *selectedness = value;
             *dirtiness = true;
+        } else {
+            return;
         }
+        // E2: "ask for a reset" (§4.10.10). En un `select` sin `multiple`, marcar una opción
+        // desmarca las demás ("whenever an option element … has its selectedness set to
+        // true … set the selectedness of all the other option elements … to false"), y luego
+        // el selectedness setting algorithm (si ninguna queda marcada, la primera habilitada).
+        if let Some(select) = self.cached_select(option)
+            && !self.has_attr(select, "multiple")
+        {
+            if value {
+                for other in self.list_of_options(select) {
+                    if other != option {
+                        self.set_option_selectedness(other, false);
+                    }
+                }
+            }
+            self.selectedness_setting(select);
+        }
+        // E2: `:checked` sigue a la selectedness: el estilo cambia (y la copia que se pinta).
+        self.bump_version();
     }
 
     fn set_option_selectedness(&mut self, option: NodeId, value: bool) {

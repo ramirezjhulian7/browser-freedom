@@ -758,3 +758,34 @@ fn attribute_changes_restyle_incrementally() {
     );
     assert_eq!(bf_web::cssom::incremental_cascades() - before, 3);
 }
+
+/// E2: `:checked` es la checkedness (HTML §4.16.3), no el atributo: un radio marcado por
+/// script (`input.checked = true`, como el panel "Apariencia" de Wikipedia, que pinta el
+/// círculo con `:checked + span`) cambia el estilo, y el del radio que se desmarca también.
+#[test]
+fn checked_follows_checkedness_set_by_script() {
+    let mut p = Page::new(
+        "<!DOCTYPE html><style>span { color: rgb(0, 0, 0) } :checked + span { color: rgb(0, 0, 255) }\
+         option:checked { color: rgb(0, 128, 0) }</style>\
+         <input type=radio name=g id=a checked><span id=sa>a</span>\
+         <input type=radio name=g id=b><span id=sb>b</span>\
+         <input type=checkbox id=c><span id=sc>c</span>\
+         <select><option id=o1>1</option><option id=o2>2</option></select>",
+    );
+    p.run("var g = (id) => getComputedStyle(document.getElementById(id)).color;");
+    assert_eq!(
+        p.s("[g('sa'), g('sb'), g('sc'), g('o1'), g('o2')].join('|')"),
+        "rgb(0, 0, 255)|rgb(0, 0, 0)|rgb(0, 0, 0)|rgb(0, 128, 0)|rgb(0, 0, 0)"
+    );
+    assert_eq!(
+        p.s("document.getElementById('b').checked = true, document.getElementById('c').checked = true, \
+             document.getElementById('o2').selected = true, \
+             [g('sa'), g('sb'), g('sc'), g('o1'), g('o2')].join('|')"),
+        "rgb(0, 0, 0)|rgb(0, 0, 255)|rgb(0, 0, 255)|rgb(0, 0, 0)|rgb(0, 128, 0)"
+    );
+    // El atributo ya no manda una vez que la checkedness está *dirty*.
+    assert_eq!(
+        p.s("document.getElementById('c').removeAttribute('checked'), g('sc')"),
+        "rgb(0, 0, 255)"
+    );
+}

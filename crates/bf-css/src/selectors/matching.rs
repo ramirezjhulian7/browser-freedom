@@ -620,13 +620,17 @@ impl Matcher<'_> {
                 .focus
                 .is_some_and(|f| self.doc.is_inclusive_ancestor(node, f)),
             PseudoClass::Target => self.ctx.target == Some(node),
+            // E2: HTML §4.16.3, `:checked`: la *checkedness* de checkbox y radio y la
+            // *selectedness* de `option`, no los atributos `checked`/`selected` (un
+            // `input.checked = true` de un script, como el panel "Apariencia" de Wikipedia,
+            // no pone el atributo).
             PseudoClass::Checked => {
                 (is("input")
                     && el.attr("type").is_some_and(|t| {
                         t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")
                     })
-                    && el.attr("checked").is_some())
-                    || (is("option") && el.attr("selected").is_some())
+                    && self.doc.checkedness(node))
+                    || (is("option") && self.doc.option_selectedness(node))
             }
             PseudoClass::Disabled => self.is_disabled(node, el),
             PseudoClass::Enabled => {
