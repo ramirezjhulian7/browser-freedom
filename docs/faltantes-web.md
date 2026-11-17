@@ -41,6 +41,17 @@ ronda 1"):
     `timestamp` (el tiempo de un observador de otro marco).
 - **`ResizeObserver`** (`bf-web/src/cssom/resize_observer.rs`). WPT `resize-observer` 94 / 115
   (81.7 %). Falla `fragments` (un elemento con varios fragmentos).
+  - El aviso "ResizeObserver loop completed with undelivered notifications" de más (Apple,
+    DuckDuckGo) venía de que la maqueta de los scripts medía sin las fuentes web. Está
+    arreglado en `army/e3`, todavía sin integrar (`pendiente/mac/e3.md`, "Tanda nueva").
+
+En `army/e3`, sin integrar todavía (`pendiente/mac/e3.md`, "Tanda nueva"):
+- **Sugerencias de recursos** (HTML §4.6.7):
+  - `preconnect` y `dns-prefetch`, que antes no hacían nada;
+  - `preload` de fuentes e imágenes, que se descargaban dos veces;
+  - la cabecera `Link` de la respuesta (RFC 8288), que se ignoraba.
+- **Los `fetch()` y XHR de los scripts** abrían una conexión TCP y TLS cada uno, con
+  `Connection: close`. Ahora van por la conexión h2 del origen, por partes.
 
 Resueltos en el ciclo del Mac (2026-11-12 y 13, en `master`):
 - **Carga de imágenes desde el documento y los scripts.** Los `<img>` siguen *update the image
@@ -166,7 +177,9 @@ protegida por ellas en Freedom:
 
 | Sitio | Lo que se ve | Pista |
 |---|---|---|
-| excalidraw.com y gov.co | Desde la ronda 7, las fuentes ya no congelan la pestaña (E2). excalidraw llega a "Loading scene…" y ahí se queda. gov.co monta su estructura, pero el contenido principal queda vacío. | **gov.co no es de red** (E3, ronda 8): 88 respuestas, todas 200 o 204, con CORS correcto, preflights que pasan y JSON válido. "Error al cargar banner informativo" es un `console.log` del sitio. El único error es `TypeError: Cannot read properties of null (reading 'datoconsultadousuario')`, de JavaScript (E1). excalidraw: sin diagnosticar tras el arreglo de las fuentes. |
+| excalidraw.com y gov.co | Desde la ronda 7, las fuentes ya no congelan la pestaña (E2). excalidraw ya monta en el quinto barrido (`fcdb9c7`, 25 esperas): espera a unas 111 `FontFace.load()` de fuentes CJK (E1, ronda 8). gov.co monta su estructura, pero el contenido principal queda vacío. | **gov.co no es de red** (E3, ronda 8): 88 respuestas, todas 200 o 204, con CORS correcto, preflights que pasan y JSON válido. "Error al cargar banner informativo" es un `console.log` del sitio. El único error es `TypeError: Cannot read properties of null (reading 'datoconsultadousuario')`, de JavaScript (E1). excalidraw: sin diagnosticar tras el arreglo de las fuentes. |
+| github.com (la pestaña cae) | En el quinto barrido la pestaña cae con "Gc liberado" (`bf-js/src/heap.rs:127`); también con `cb41001`, 1 de cada 2 veces. | En la pila, `run_animation_frames`: un callback de `requestAnimationFrame` cuyo objeto ya liberó el recolector (E1). |
+| vimeo.com | En blanco desde el quinto barrido: 33 "client-side exception" de Next.js y 66 `[object DOMException]`. | Cambió el sitio: el binario de `cb41001` da hoy lo mismo. Falta saber qué operación lanza la `DOMException` (E1). |
 | www.openstreetmap.org | El mapa se ve desde `eb9776d` (arriba). Los iconos de los controles del mapa salen como "?". | Sin diagnosticar: probablemente las imágenes o el SVG de los iconos de Leaflet (E2). |
 | www.nytimes.com | Desde el segundo barrido responde 403 con la verificación de DataDome (`captcha-delivery.com`), también a `curl`, con cualquier `User-Agent`. | Es la reputación de la IP tras muchas cargas automáticas, no el motor. El marco de verificación carga y manda su `POST` (200), pero la portada no se libera en ~7 s y se ve en blanco. Lo que muestra ese marco después del `POST` no está visto. |
 | Google (búsquedas) | Responde `429 Too Many Requests` y redirige a `/sorry` con reCAPTCHA; el reCAPTCHA falla con `TypeError: Type error.` dentro de `recaptcha__es_419.js`. Buscar desde la barra queda inutilizable. | Google es el buscador por defecto: es lo más visible para quien usa Freedom. Ver si el 429 depende del `User-Agent` nuevo, de las cabeceras (`Sec-CH-UA`, `Accept`) o del ritmo de peticiones, y qué operación falla en el reCAPTCHA. |

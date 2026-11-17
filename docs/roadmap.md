@@ -241,6 +241,22 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   - **E3, el `Accept` por destino** (Fetch §4): las imágenes piden
     `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`, las hojas `text/css,*/*;q=0.1`. Con
     `*/*`, el servidor de teselas de OpenStreetMap daba la imagen de bloqueo 418.
+- **Ronda 8** (en `master` desde `9625637`; notas de la ronda 8):
+  - **E2:** `element.style` ya no vuelve a parsear el atributo en cada acceso (CSSOM §6.7.5).
+  - **E2:** un stacking context con algo que se mezcla (`mix-blend-mode`) se pinta como grupo
+    aislado (Compositing and Blending 1 §3.2): el mapa de OpenStreetMap ya se ve.
+  - **E2:** una imagen insertada por un script se descarga una sola vez.
+  - **E3:** una conexión HTTP/1.1 reutilizada que el servidor cerró se repite solo con métodos
+    idempotentes (RFC 9110 §9.2.2). Hay tests de los tres fallos de red: conexión cerrada,
+    respuesta h2 cortada y servidor mudo.
+  - **E3:** `FREEDOM_NET_LOG=cabeceras` cubre las peticiones de los scripts. En gov.co, las 88
+    respuestas son 200 o 204, con CORS correcto: lo que falla es JavaScript.
+- **En `army/e3`, sin integrar todavía** (`pendiente/mac/e3.md`, "Tanda nueva"):
+  - la maqueta que ven los scripts mide con las `@font-face` del documento: sin el
+    `ResizeObserver loop` de más;
+  - `preconnect`, `dns-prefetch`, `preload` de fuentes e imágenes y la cabecera `Link`;
+  - los `fetch()` y XHR de los scripts van por la conexión h2 del origen. Conexiones de la
+    primera visita: GitLab 19 → 4 y El País 28 → 14.
 - **Hojas enlazadas en la ventana** (E2, en `master` desde `489e6f8`; `pendiente/mac/e2.md`,
   "Sesión nueva, ronda 1"): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
   `document.styleSheets` tiene sus reglas. La hoja sale de `bf_style::sheet_cache`, ya
@@ -546,6 +562,11 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
 - **Integrado** (`4bb212d`, `76d4eca`, ya en `master`): `immutable`,
   `stale-while-revalidate`, 6 conexiones por origen, coalescing h2, errores de red con causa,
   autenticación HTTP y caché de DNS (`pendiente/e6.md`).
+- **En `army/e3`** (`pendiente/mac/e3.md`, "Tanda nueva"):
+  - los `fetch()` y XHR de los scripts van por la conexión h2 del origen, por partes, en vez de
+    abrir cada uno una conexión HTTP/1.1;
+  - `preconnect` y `dns-prefetch`;
+  - la reanudación de TLS 1.3 (activa desde siempre en rustls) tiene test.
 
 ### 4.2 Formatos de imagen
 

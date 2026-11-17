@@ -120,13 +120,14 @@ cualquier programa del Mac.
   - **En macOS:** se instala como `Freedom.app`.
 - **En sitios conocidos** (barridos de 27 sitios públicos el 17 de noviembre de 2026, sin
   iniciar sesión):
-  - ninguno hizo caer la pestaña;
-  - en el cuarto barrido, 7 se ven bien (Google, DuckDuckGo, Hacker News, Stack Overflow, el
+  - solo GitHub hizo caer la pestaña, y no siempre (un fallo de la memoria del motor de
+    JavaScript que se está investigando);
+  - en el quinto barrido, 7 se ven bien (Google, DuckDuckGo, Hacker News, Stack Overflow, el
     libro de Rust, la documentación de Python y react.dev), 13 tienen defectos menores (entre
-    ellos las Wikipedias, la BBC, MDN, GitHub, Amazon y OpenStreetMap, que ya muestra el mapa)
-    y 7 defectos graves;
+    ellos las Wikipedias, la BBC, MDN, GitLab, Amazon, OpenStreetMap, que ya muestra el mapa,
+    y excalidraw, que ya carga) y 7 defectos graves;
   - Stack Overflow pasa la verificación de Cloudflare a los ~6 segundos y luego se ve bien;
-  - en YouTube, Vimeo, Reddit, excalidraw, gov.co y Apple falta buena parte del contenido,
+  - en YouTube, Vimeo, Reddit, gov.co y Apple falta buena parte del contenido,
     sobre todo porque sus scripts no terminan de montar la página; el NYT pide una
     verificación contra robots que no se libera.
 
