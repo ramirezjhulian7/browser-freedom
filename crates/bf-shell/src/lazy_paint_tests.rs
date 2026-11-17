@@ -212,3 +212,93 @@ fn window_paints_near_lazy_image_after_its_layout() {
     assert_eq!(shown, (true, false));
     assert_eq!(*paths.lock().unwrap(), ["/cerca.gif"]);
 }
+
+/// E2: una imagen que un script inserta y que tarda en llegar (las teselas de OpenStreetMap):
+/// mientras la petición del motor está en vuelo, el pintado no la pide (con la red en hilos,
+/// como la ventana); al llegar, la toma de la caché. Una sola petición.
+#[test]
+fn script_inserted_image_is_downloaded_once() {
+    let page = "<!doctype html><body style='margin:0'><script>\
+        const i = document.createElement('img'); i.id = 'tesela'; i.src = '/tesela.gif';\
+        i.onload = () => console.log('tesela-cargó'); document.body.append(i);</script>";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = paths.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                let path = line.split(' ').nth(1).unwrap_or("/").to_owned();
+                let (ty, body): (&str, &[u8]) = if path == "/" {
+                    ("text/html; charset=utf-8", page.as_bytes())
+                } else {
+                    seen.lock().unwrap().push(path);
+                    std::thread::sleep(Duration::from_secs(1));
+                    ("image/gif", GIF)
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nCache-Control: no-store\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            });
+        }
+    });
+    let net = Arc::new(NetLoader::new());
+    let ctx = LoadContext {
+        net: net.clone(),
+        fonts: bf_font::FontDb::system(),
+        viewport: Size {
+            width: 800.0,
+            height: 600.0,
+        },
+        recent: Vec::new(),
+        theme: Theme::for_system(None),
+        post: None,
+    };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let mut engine = Engine::new(Box::new(move |e: crate::script::ConsoleEntry| {
+        sink.borrow_mut().push(e.text)
+    }));
+    let env = PageEnv {
+        net_waker: Some(Arc::new(|| {})),
+        ..PageEnv::cli(net)
+    };
+    let url = bf_infra::Url::parse(&format!("http://127.0.0.1:{port}/"), None).unwrap();
+    let loaded = load_with(&url, &ctx, Some((&mut engine, &env)));
+    assert!(loaded.meta.error.is_none(), "{:?}", loaded.meta.error);
+    let paint = |engine: &mut Engine| {
+        let doc = engine.render_copy().unwrap();
+        let pctx = bf_paint::PageContext {
+            base: &loaded.base,
+            encoding: loaded.encoding,
+            loader: loaded.loader.clone(),
+            fonts: ctx.fonts.clone(),
+            extra: &[],
+            text_zoom: 1.0,
+            device_pixel_ratio: 1.0,
+        };
+        let page = bf_paint::prepare_page(&doc, &pctx, ctx.viewport);
+        page.images.for_node(by_id(&doc, "tesela")).is_some()
+    };
+    // Pintar mientras la imagen viene en camino: ni se pide ni se pinta.
+    assert!(!paint(&mut engine));
+    run_until(&mut engine, &log, "tesela-cargó");
+    assert!(log.borrow().iter().any(|l| l == "tesela-cargó"), "{log:?}");
+    assert!(paint(&mut engine));
+    assert_eq!(*paths.lock().unwrap(), ["/tesela.gif"]);
+}

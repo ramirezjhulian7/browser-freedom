@@ -637,6 +637,14 @@ fn update_image_data_with(agent: &mut Agent, n: NodeRef, resume: Option<Option<b
             ..Default::default()
         },
     };
+    // E2: con la red en hilos (la ventana), mientras la petición está en vuelo el pintado no
+    // pide esta imagen (la anotación es la misma que la de `loading=lazy`); al llegar
+    // (`finish`) la quita y el pintado la toma de la caché del navegador (`remember_image`).
+    // Antes, si el documento cambiaba durante la descarga, el pintado la pedía otra vez: las
+    // teselas de OpenStreetMap, insertadas por script, se descargaban dos veces.
+    if crate::net::is_threaded(agent, realm) {
+        mark_deferred(agent, n, true);
+    }
     crate::net::start(
         agent,
         req,
