@@ -11,8 +11,8 @@ pub mod document;
 pub mod element;
 pub mod event_types;
 pub mod events;
-pub mod geometry; // E1: DOMPoint, DOMQuad, DOMMatrix
 pub mod exception;
+pub mod geometry; // E1: DOMPoint, DOMQuad, DOMMatrix
 pub mod implementation;
 pub mod insertion;
 pub mod mixins;

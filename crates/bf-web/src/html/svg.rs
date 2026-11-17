@@ -39,7 +39,11 @@ const ELEMENTS: &[(&str, &str, &str)] = &[
     ("switch", "SVGSwitchElement", "SVGGraphicsElement"),
     ("symbol", "SVGSymbolElement", "SVGGraphicsElement"),
     ("a", "SVGAElement", "SVGGraphicsElement"),
-    ("foreignObject", "SVGForeignObjectElement", "SVGGraphicsElement"),
+    (
+        "foreignObject",
+        "SVGForeignObjectElement",
+        "SVGGraphicsElement",
+    ),
     ("path", "SVGPathElement", "SVGGeometryElement"),
     ("rect", "SVGRectElement", "SVGGeometryElement"),
     ("circle", "SVGCircleElement", "SVGGeometryElement"),
@@ -50,8 +54,16 @@ const ELEMENTS: &[(&str, &str, &str)] = &[
     ("text", "SVGTextElement", "SVGTextPositioningElement"),
     ("tspan", "SVGTSpanElement", "SVGTextPositioningElement"),
     ("textPath", "SVGTextPathElement", "SVGTextContentElement"),
-    ("linearGradient", "SVGLinearGradientElement", "SVGGradientElement"),
-    ("radialGradient", "SVGRadialGradientElement", "SVGGradientElement"),
+    (
+        "linearGradient",
+        "SVGLinearGradientElement",
+        "SVGGradientElement",
+    ),
+    (
+        "radialGradient",
+        "SVGRadialGradientElement",
+        "SVGGradientElement",
+    ),
     ("stop", "SVGStopElement", "SVGElement"),
     ("pattern", "SVGPatternElement", "SVGElement"),
     ("clipPath", "SVGClipPathElement", "SVGElement"),
@@ -145,7 +157,9 @@ fn get_class_name(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let Some(c) = agent.embedder_data::<SvgClasses>().copied() else {
         return Ok(Value::Undefined);
     };
-    Ok(Value::Object(agent.host_create(c.animated_string, Box::new(n))))
+    Ok(Value::Object(
+        agent.host_create(c.animated_string, Box::new(n)),
+    ))
 }
 
 fn get_base_val(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
