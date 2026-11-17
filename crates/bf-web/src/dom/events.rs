@@ -231,6 +231,13 @@ pub fn event_target_of(agent: &Agent, v: &Value) -> Option<(DocIndex, EventTarge
     if agent.host_unwrap::<WindowData>(v).is_some() {
         return Some((0, EventTarget::Window));
     }
+    // E1: un `WindowProxy` es su `Window`.
+    if let Value::Object(o) = v
+        && let Some(w) = agent.window_proxy_window(*o)
+        && agent.host_unwrap::<WindowData>(&Value::Object(w)).is_some()
+    {
+        return Some((0, EventTarget::Window));
+    }
     agent.host_unwrap::<TargetRef>(v).map(|t| (t.doc, t.target))
 }
 
@@ -239,8 +246,9 @@ pub fn wrap_target(agent: &mut Agent, doc: DocIndex, t: EventTarget) -> Value {
     match t {
         EventTarget::Node(n) => wrap_node(agent, NodeRef::new(doc, n)),
         EventTarget::Window => {
+            // E1: el `WindowProxy` de la ventana (`target`/`currentTarget === window`).
             let realm = WebContextHandle::current(agent).realm;
-            Value::Object(agent.realms[realm].global_object)
+            crate::bom::frames::self_proxy(agent, realm)
         }
         EventTarget::Object(id) => {
             let realm = agent.current_realm;

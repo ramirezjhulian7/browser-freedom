@@ -21,6 +21,7 @@ pub mod exotic;
 pub mod hooks;
 pub mod runtime;
 pub mod webidl;
+pub mod window_proxy; // E1
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -255,10 +256,17 @@ pub struct HostState {
     /// un `ShadowRealm` se quitan de su global las interfaces del host (ver
     /// [`hide_host_interfaces`]). Sin guarda, todos los realms valen.
     pub realm_guard: Option<fn(&crate::vm::Agent, RealmId) -> bool>,
+    /// E1: *IsPlatformObjectSameOrigin* del `WindowProxy` (HTML §7.2.2): con el `[[Window]]`,
+    /// `None` si el realm en curso es del mismo origen; si no, el objeto restringido entre
+    /// orígenes sobre el que van las operaciones (ver [`window_proxy`]).
+    pub window_proxy_view: Option<WindowProxyView>,
     /// Los getters/setters de los atributos `[LegacyUnforgeable]` por realm, clase y nombre:
     /// todas las instancias comparten las mismas funciones (WebIDL §3.7.6).
     unforgeable_fns: UnforgeableFns,
 }
+
+/// El gancho de [`HostState::window_proxy_view`].
+pub type WindowProxyView = fn(&mut crate::vm::Agent, Gc<Object>) -> JsResult<Option<Gc<Object>>>;
 
 type UnforgeableFns =
     HashMap<(RealmId, u32, &'static str), (Option<Gc<Object>>, Option<Gc<Object>>)>;
@@ -282,6 +290,7 @@ impl Default for HostState {
             rejection_notifier: None,
             exception_reporter: None,
             realm_guard: None,
+            window_proxy_view: None,
             unforgeable_fns: HashMap::new(),
         }
     }
@@ -409,6 +418,24 @@ fn trampoline(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if !realm_supported(agent) {
         return unsupported_realm(agent);
     }
+    // E1: un `WindowProxy` como `this` es su `[[Window]]` (HTML §7.2.2: las operaciones del
+    // `Window` se hacen sobre él).
+    let unwrapped;
+    let a = match a.this {
+        Value::Object(o) => match agent.window_proxy_window(o) {
+            Some(w) => {
+                unwrapped = CallArgs {
+                    this: Value::Object(w),
+                    args: a.args,
+                    new_target: a.new_target,
+                    callee: a.callee,
+                };
+                &unwrapped
+            }
+            None => a,
+        },
+        _ => a,
+    };
     let s = slots(agent, a.callee);
     let idx = s[0].as_number().unwrap_or(0.0) as usize;
     let class = HostClassId(s[1].as_number().unwrap_or(0.0) as u32);

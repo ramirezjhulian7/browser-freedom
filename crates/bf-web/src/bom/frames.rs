@@ -923,6 +923,8 @@ pub fn frame_element(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
 
 /// Agrega `contentWindow` y `contentDocument` reales a `HTMLIFrameElement` en `realm`.
 pub fn install(agent: &mut Agent, realm: RealmId) {
+    // E1: los `WindowProxy` de los marcos preguntan aquí si un acceso es entre orígenes.
+    agent.host.window_proxy_view = Some(window_proxy_view);
     let class = crate::dom::classes(agent)
         .element_classes
         .get(&(Namespace::Html, DomString::from("iframe")))
@@ -1034,11 +1036,22 @@ fn views(agent: &mut Agent) -> &mut CrossOriginViews {
         .expect("CrossOriginViews")
 }
 
-/// La vista de la que `v` es el `Proxy` o el objeto interior.
+/// La vista de la que `v` es el `Proxy` o el objeto interior. E1: de un `WindowProxy`, la de
+/// su ventana para el realm en curso (los getters de la vista corren en el realm de quien mira).
 fn view_of(agent: &Agent, v: &Value) -> Option<CrossOriginView> {
     let Value::Object(o) = v else {
         return None;
     };
+    if let Some(w) = agent.window_proxy_window(*o) {
+        let target = realm_of_global(agent, w)?;
+        let viewer = agent.current_realm;
+        return agent
+            .embedder_data::<CrossOriginViews>()?
+            .0
+            .iter()
+            .find(|v| v.viewer == viewer && v.target == target)
+            .copied();
+    }
     let is = |h: HostHandle| matches!(agent.host_pinned(h), Some(Value::Object(x)) if x == *o);
     agent
         .embedder_data::<CrossOriginViews>()?
@@ -1048,12 +1061,84 @@ fn view_of(agent: &Agent, v: &Value) -> Option<CrossOriginView> {
         .copied()
 }
 
-/// El `WindowProxy` de la ventana `target` visto desde la ventana `viewer`: el global si son
-/// del mismo origen; si no, un objeto que solo deja usar las propiedades entre orígenes.
+/// E1: los `WindowProxy` de los marcos, uno por contexto de navegación (HTML §7.2.2).
+#[derive(Debug, Default)]
+struct WindowProxies(std::collections::HashMap<RealmId, HostHandle>);
+
+/// E1: el `WindowProxy` de la ventana `realm` (lo que ven `window`, `self`, `frames`,
+/// `contentWindow`, `frames[i]` y `event.source`).
+///
+/// El de un marco es un objeto estable (`Agent::create_window_proxy`) que sigue al documento
+/// cuando el marco navega: navegar reutiliza el realm, y el origen se comprueba en cada acceso
+/// ([`window_proxy_view`]). El de la ventana de nivel superior sigue siendo su global (etapa 2:
+/// `bf-js` no separa todavía el `[[GlobalThisValue]]` del objeto global).
+pub fn self_proxy(agent: &mut Agent, realm: RealmId) -> Value {
+    if let Some(h) = agent
+        .embedder_data::<WindowProxies>()
+        .and_then(|m| m.0.get(&realm).copied())
+        && let Some(v) = agent.host_pinned(h)
+    {
+        return v;
+    }
+    let w = agent.realms[realm].global_object;
+    if frame_of(agent, realm).is_none() {
+        return Value::Object(w);
+    }
+    let p = Value::Object(agent.create_window_proxy(w));
+    let h = agent.host_pin(p.clone());
+    if agent.embedder_data::<WindowProxies>().is_none() {
+        agent.set_embedder_data(WindowProxies::default());
+    }
+    if let Some(m) = agent.embedder_data_mut::<WindowProxies>() {
+        m.0.insert(realm, h);
+    }
+    p
+}
+
+/// La ventana (realm) cuyo global es `w`.
+fn realm_of_global(agent: &Agent, w: bf_js::heap::Gc<bf_js::object::Object>) -> Option<RealmId> {
+    (0..agent.realms.len()).find(|&r| agent.realms[r].global_object == w)
+}
+
+/// E1: *IsPlatformObjectSameOrigin* del `WindowProxy` (el gancho
+/// `HostState::window_proxy_view` de `bf-js`): `None` si el realm en curso es del mismo origen
+/// que el `Window` `w`; si no, la vista restringida entre orígenes sobre la que van sus
+/// operaciones.
+fn window_proxy_view(
+    agent: &mut Agent,
+    w: bf_js::heap::Gc<bf_js::object::Object>,
+) -> JsResult<Option<bf_js::heap::Gc<bf_js::object::Object>>> {
+    let Some(target) = realm_of_global(agent, w) else {
+        return Ok(None);
+    };
+    let viewer = agent.current_realm;
+    if same_origin(agent, viewer, target) {
+        return Ok(None);
+    }
+    match cross_origin_view(agent, viewer, target) {
+        Value::Object(o) => Ok(Some(o)),
+        _ => security_error(agent, "WindowProxy"),
+    }
+}
+
+/// La ventana `target` vista desde la ventana `viewer`: el `WindowProxy` de un marco (que
+/// comprueba el origen en cada acceso); la ventana de nivel superior, su global si son del
+/// mismo origen, o la vista restringida entre orígenes si no.
 pub fn window_proxy(agent: &mut Agent, viewer: RealmId, target: RealmId) -> Value {
+    let has_proxy = agent
+        .embedder_data::<WindowProxies>()
+        .is_some_and(|m| m.0.contains_key(&target));
+    if has_proxy || frame_of(agent, target).is_some() {
+        return self_proxy(agent, target);
+    }
     if same_origin(agent, viewer, target) {
         return Value::Object(agent.realms[target].global_object);
     }
+    cross_origin_view(agent, viewer, target)
+}
+
+/// La vista restringida de la ventana `target` para la ventana `viewer` (la misma cada vez).
+fn cross_origin_view(agent: &mut Agent, viewer: RealmId, target: RealmId) -> Value {
     let existing = agent.embedder_data::<CrossOriginViews>().and_then(|v| {
         v.0.iter()
             .find(|w| w.viewer == viewer && w.target == target)
@@ -1189,6 +1274,43 @@ fn xo_child(agent: &mut Agent, view: CrossOriginView, i: u32) -> Option<Value> {
     Some(window_proxy(agent, view.viewer, k))
 }
 
+/// Los nombres de los marcos hijos de la ventana `target` y sus realms: la "document-tree child
+/// navigable target name property set" (HTML §7.2.3.3), que forma parte de las
+/// "CrossOriginProperties" de un `Window` (§7.2.1.3.1). Aquí, el atributo `name` de cada
+/// `<iframe>`; cada nombre una vez, el primero en orden de documento.
+fn child_names(agent: &Agent, target: RealmId) -> Vec<(String, RealmId)> {
+    let Some(ctx) = agent.realm_data::<WebContext>(target) else {
+        return Vec::new();
+    };
+    let doc = ctx.document();
+    let mut out: Vec<(String, RealmId)> = Vec::new();
+    for k in children_of(agent, target) {
+        let Some(f) = frame_of(agent, k) else {
+            continue;
+        };
+        let name = doc
+            .element(f.element)
+            .and_then(|e| e.attr("name"))
+            .unwrap_or("");
+        if !name.is_empty() && !out.iter().any(|(n, _)| n == name) {
+            out.push((name.to_owned(), k));
+        }
+    }
+    out
+}
+
+/// El marco hijo llamado `key` de la ventana de `view`, visto desde la otra ventana.
+fn xo_named_child(agent: &mut Agent, view: CrossOriginView, key: &PropertyKey) -> Option<Value> {
+    let PropertyKey::String(s) = key else {
+        return None;
+    };
+    let name = s.to_string();
+    let (_, k) = child_names(agent, view.target)
+        .into_iter()
+        .find(|(n, _)| *n == name)?;
+    Some(window_proxy(agent, view.viewer, k))
+}
+
 /// La propiedad entre orígenes `key` del objeto interior `inner`.
 fn inner_property(
     agent: &mut Agent,
@@ -1217,6 +1339,12 @@ fn xo_trap_get(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
             Some(w) => Ok(w),
             None => security_error(agent, &i.to_string()),
         };
+    }
+    if kind == XoKind::Window
+        && !is_cross_origin_name(kind, &key)
+        && let Some(w) = xo_named_child(agent, view, &key)
+    {
+        return Ok(w);
     }
     if is_cross_origin_name(kind, &key) {
         match inner_property(agent, &target, &key)? {
@@ -1283,6 +1411,11 @@ fn xo_trap_descriptor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
                 configurable: Some(true),
             },
         })
+    } else if let Some(w) = (kind == XoKind::Window)
+        .then(|| xo_named_child(agent, view, &key))
+        .flatten()
+    {
+        Some(data(w))
     } else if is_fallback_key(agent, &key) {
         Some(data(Value::Undefined))
     } else {
@@ -1303,7 +1436,11 @@ fn xo_trap_has(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     };
     let has = match key {
         PropertyKey::Index(i) if kind == XoKind::Window => xo_child(agent, view, i).is_some(),
-        _ => is_cross_origin_name(kind, &key) || is_fallback_key(agent, &key),
+        _ => {
+            is_cross_origin_name(kind, &key)
+                || is_fallback_key(agent, &key)
+                || (kind == XoKind::Window && xo_named_child(agent, view, &key).is_some())
+        }
     };
     if has {
         Ok(Value::from_bool(true))
@@ -1328,6 +1465,10 @@ fn xo_trap_keys(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         XoKind::Location => &CROSS_ORIGIN_LOCATION,
     };
     keys.extend(names.iter().map(|n| Value::str(n)));
+    if kind == XoKind::Window {
+        let named = child_names(agent, view.target);
+        keys.extend(named.iter().map(|(n, _)| Value::str(n)));
+    }
     keys.extend(fallback_keys(agent).iter().map(PropertyKey::to_value));
     Ok(Value::Object(agent.create_array_from_list(&keys)?))
 }

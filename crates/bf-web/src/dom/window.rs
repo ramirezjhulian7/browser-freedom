@@ -85,9 +85,11 @@ pub(crate) fn track_rejections(agent: &mut Agent, realm: RealmId) {
 
 /// `window`, `self`, `frames`, `parent`, `top`: el `WindowProxy` (sin iframes, el propio
 /// global).
+/// `window`, `self` y `frames` (HTML §7.2.2): el `WindowProxy` de la ventana (E1: el de un
+/// marco es estable al navegar; ver `bom::frames::self_proxy`).
 fn window_self(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
     let realm = WebContextHandle::current(agent).realm;
-    Ok(Value::Object(agent.realms[realm].global_object))
+    Ok(crate::bom::frames::self_proxy(agent, realm))
 }
 
 /// `window.parent` y `window.top`: los de los marcos (`crate::bom::frames`, E4).

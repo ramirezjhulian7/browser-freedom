@@ -14,11 +14,36 @@ pub struct ProxyData {
     pub handler: Option<Gc<Object>>,
     pub callable: bool,
     pub constructor: bool,
+    /// E1: un `WindowProxy` (HTML §7.2.2): `target` es su `[[Window]]` y los métodos internos
+    /// no llaman a trampas; delegan en [`crate::host::window_proxy`].
+    pub window: bool,
 }
 
 impl Agent {
     pub fn is_proxy(&self, o: Gc<Object>) -> bool {
         matches!(self.heap[o].kind, ObjectKind::Proxy(_))
+    }
+
+    /// E1: crea un `WindowProxy` (HTML §7.2.2) cuyo `[[Window]]` es `window`.
+    pub fn create_window_proxy(&mut self, window: Gc<Object>) -> Gc<Object> {
+        self.alloc(Object::new(
+            None,
+            ObjectKind::Proxy(Box::new(ProxyData {
+                target: Some(window),
+                handler: Some(window),
+                callable: false,
+                constructor: false,
+                window: true,
+            })),
+        ))
+    }
+
+    /// E1: el `[[Window]]` de `o`, si `o` es un `WindowProxy`.
+    pub fn window_proxy_window(&self, o: Gc<Object>) -> Option<Gc<Object>> {
+        match &self.heap[o].kind {
+            ObjectKind::Proxy(d) if d.window => d.target,
+            _ => None,
+        }
     }
 
     /// ProxyCreate (§10.5.14).
@@ -35,6 +60,7 @@ impl Agent {
                 handler: Some(*h),
                 callable,
                 constructor,
+                window: false,
             })),
         )))
     }
@@ -73,6 +99,9 @@ impl Agent {
 
     /// `[[GetPrototypeOf]]` (§10.5.1).
     pub fn proxy_get_prototype_of(&mut self, p: Gc<Object>) -> JsResult<Option<Gc<Object>>> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::get_prototype_of(self, w);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "getPrototypeOf")? else {
             return self.get_prototype_of(target);
@@ -102,6 +131,9 @@ impl Agent {
         p: Gc<Object>,
         v: Option<Gc<Object>>,
     ) -> JsResult<bool> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::set_prototype_of(self, w, v);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "setPrototypeOf")? else {
             return self.set_prototype_of(target, v);
@@ -125,6 +157,11 @@ impl Agent {
 
     /// `[[IsExtensible]]` (§10.5.3).
     pub fn proxy_is_extensible(&mut self, p: Gc<Object>) -> JsResult<bool> {
+        // E1: un `WindowProxy` es extensible y no se puede volver no extensible (HTML
+        // §7.2.2.3, §7.2.2.4).
+        if self.window_proxy_window(p).is_some() {
+            return Ok(true);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "isExtensible")? else {
             return self.is_extensible(target);
@@ -139,6 +176,11 @@ impl Agent {
 
     /// `[[PreventExtensions]]` (§10.5.4).
     pub fn proxy_prevent_extensions(&mut self, p: Gc<Object>) -> JsResult<bool> {
+        // E1: un `WindowProxy` es extensible y no se puede volver no extensible (HTML
+        // §7.2.2.3, §7.2.2.4).
+        if self.window_proxy_window(p).is_some() {
+            return Ok(false);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "preventExtensions")? else {
             return self.prevent_extensions(target);
@@ -157,6 +199,9 @@ impl Agent {
         p: Gc<Object>,
         key: &PropertyKey,
     ) -> JsResult<Option<PropertyDescriptor>> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::get_own_property(self, w, key);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "getOwnPropertyDescriptor")? else {
             return self.get_own_property(target, key);
@@ -222,6 +267,9 @@ impl Agent {
         key: PropertyKey,
         desc: PropertyDescriptor,
     ) -> JsResult<bool> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::define_own_property(self, w, key, desc);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "defineProperty")? else {
             return self.define_own_property(target, key, desc);
@@ -268,6 +316,9 @@ impl Agent {
 
     /// `[[HasProperty]]` (§10.5.7).
     pub fn proxy_has(&mut self, p: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::has(self, w, key);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "has")? else {
             return self.has_property(target, key);
@@ -298,6 +349,9 @@ impl Agent {
         key: &PropertyKey,
         receiver: Value,
     ) -> JsResult<Value> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::get(self, w, key, receiver);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "get")? else {
             return self.get(target, key, receiver);
@@ -331,6 +385,9 @@ impl Agent {
         v: Value,
         receiver: Value,
     ) -> JsResult<bool> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::set(self, w, key, v, receiver);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "set")? else {
             return self.set(target, key, v, receiver);
@@ -361,6 +418,9 @@ impl Agent {
 
     /// `[[Delete]]` (§10.5.10).
     pub fn proxy_delete(&mut self, p: Gc<Object>, key: &PropertyKey) -> JsResult<bool> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::delete(self, w, key);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "deleteProperty")? else {
             return self.delete(target, key);
@@ -389,6 +449,9 @@ impl Agent {
 
     /// `[[OwnPropertyKeys]]` (§10.5.11).
     pub fn proxy_own_keys(&mut self, p: Gc<Object>) -> JsResult<Vec<PropertyKey>> {
+        if let Some(w) = self.window_proxy_window(p) {
+            return crate::host::window_proxy::own_keys(self, w);
+        }
         let (target, handler) = self.proxy_parts(p)?;
         let Some(trap) = self.trap(handler, "ownKeys")? else {
             return self.own_property_keys(target);
