@@ -213,8 +213,11 @@ Además de lo de la sección 7, entró hoy:
   corrido por el planificador sobre `master`;
 - caché de líneas bit a bit y shaping con caras y planes guardados (E5, `3087f82`). **E5 lo
   marcó como sin verificar.** Pasó la verificación completa del planificador y
-  `css/css-flexbox` sigue en 803 / 949, pero faltan los grupos de reftests de flotantes,
-  líneas y tablas (4379 pases, mismo TSV) y el A/B de tiempos (`docs/pendiente/mac/e5.md`).
+  `css/css-flexbox` sigue en 803 / 949. Los grupos de reftests de flotantes, líneas y tablas
+  los comparó E3 el 2026-11-17 entre `64fcbbb` y `7be3431`: 4379 pases en los dos, los 7519
+  tests con el mismo estado; solo cambian los píxeles distintos de 5 (estable al repetir;
+  `docs/pendiente/mac/e3.md`, "Sesión del 2026-11-17, ronda 1"). Falta el A/B de tiempos de
+  E5.
 
 Verificación completa de `7681f2a`: formato, clippy y 137 grupos de tests en verde. Avance: 46
 / 51 criterios, **84.7 %** (87.8 % con la fase 1).
@@ -273,17 +276,17 @@ Pendiente:
 
 ### 9e. Rendimiento
 
-- Medir con la máquina libre la primera pintura de Wikipedia sobre `master`, con el método
-  de [`docs/rendimiento.md`](docs/rendimiento.md), y actualizar el criterio de la fase 5 en
-  `docs/roadmap.md`.
-- La última medida del planificador, sobre `276fa07`, dio 542-665 ms. Es de antes de la
-  cascada en hilos, la caché de código y los cambios de maqueta.
-- Falta adelantar trabajo a la espera de la red:
-  - que la precarga de E6 (`crates/bf-shell/src/preload.rs`) llame a
-    `bf_style::sheet_cache::warm` (clave con `SheetKey::new`: URL final más hash de los
-    bytes) y a `bf_js::code_cache::warm`;
-  - que la instalación de la ventana se adelante a esa espera
-    (`bf_web::precompile_window_scripts`, de E3, ya en `master`).
+- **Primera pintura de Wikipedia, 2026-11-17** (E3, rama `army/e3`, sin integrar;
+  `docs/rendimiento.md`, "Adelantar trabajo a la espera de la red"). Mientras se valida el
+  documento, la precarga (`crates/bf-shell/src/preload.rs`) ya parsea las hojas en
+  `bf_style::sheet_cache`, compila los scripts clásicos en `bf_js::code_cache` y compila el
+  JavaScript de la ventana (`bf_web::precompile_window_scripts`). A/B de 5 corridas contra
+  `master` `7be3431` con carga 11: mediana de 577 a 491 ms (mínimo de 526 a 446), 3 de 5
+  corridas por debajo de 500 ms. Con carga 25, mediana 747.
+- Lo que queda, en medianas: red 265 ms; fuera de la red, unos 225 de los 235 que deja la
+  meta (maqueta 61, parser 38, cascada 37, scripts 21, raster 19). El margen es pequeño: la
+  meta se cumple con la máquina casi libre y no con carga.
+- Siguen pendientes la decisión sobre el suelo de red (9f) y abaratar maqueta y cascada.
 
 ### 9f. Decisiones pendientes del usuario
 

@@ -913,6 +913,17 @@ impl State {
                     super::ms(m.after),
                     super::ms(m.copy),
                 ));
+                // E3: los scripts del parser y la caché de código (la precarga los compila
+                // mientras se valida el documento: salen "de la caché del proceso").
+                super::trace(&format!(
+                    "perf scripts {}: {} compilados ({} KB), {} copiados del hilo, {} de la \
+                     caché del proceso",
+                    loaded.url,
+                    m.code.compiled,
+                    m.code.compiled_bytes / 1024,
+                    m.code.thread_hits,
+                    m.code.process_hits,
+                ));
             }
             // E6: la caché HTTP en disco durante la carga (`bf_net::timing`).
             let d = bf_net::timing::take_disk();

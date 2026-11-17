@@ -61,7 +61,22 @@ Otras líneas de la carga, con `BF_TRACE=1`:
 - `perf hojas: H de la caché, P parseadas (T ms de parseo)` (E4, `bf_paint::prepare_page`
   con `bf_style::sheet_cache`): de las hojas externas de esa maqueta, cuántas salieron ya
   parseadas de la caché del proceso y cuántas se parsearon (y cuánto tardó). Sale también en
-  las maquetas de la interfaz, sin hojas externas (`0 de la caché, 0 parseadas`).
+  las maquetas de la interfaz, sin hojas externas (`0 de la caché, 0 parseadas`). El contador
+  es del proceso: las hojas que parseó la precarga cuentan en **P** y en su tiempo, aunque
+  se parsearon fuera del camino; con la precarga, Wikipedia da `3 de la caché, 3 parseadas`.
+- `perf precarga: …` (E6 y E3, `bf-shell/src/preload.rs`), tres líneas que imprimen hilos
+  distintos y pueden salir en cualquier orden antes de `perf red`:
+  - `JavaScript propio de la ventana precompilado en T ms` (el hilo `freedom-ventana`, una
+    vez por proceso);
+  - `H hojas parseadas y S scripts compilados en T ms, listos a los U ms de empezar` (el hilo
+    de la precarga, después de leer del disco);
+  - `N hojas, scripts e imágenes en la copia guardada · M frescos listos al llegar la
+    respuesta` (al llegar la respuesta del documento: lo que entra en la caché HTTP en
+    memoria con el 304).
+- `perf scripts <url>: C compilados (K KB), T copiados del hilo, P de la caché del proceso`
+  (E3, `bf-shell/src/window/worker.rs`, de `Engine::parse`): los scripts clásicos que corrieron
+  durante el parser según `bf_js::code_cache`. **P** son los que compiló la precarga; los
+  scripts de menos de 1 KB (`code_cache::MIN_SOURCE_LEN`) siempre se compilan.
 
 Para comparar la cascada con y sin el índice de reglas en el mismo binario y con la misma
 carga: `BF_NO_RULE_INDEX=1` usa el recorrido completo de antes. `BF_NO_ANCESTOR_FILTER=1`
@@ -444,7 +459,72 @@ hilo) ya no recompila el JavaScript propio de `bf-web` ni los scripts de la pág
 corridas alternadas, carga 41-57, medianas: ventana en la recarga de 63.9 a 17.1 ms y scripts
 de la página en la recarga de 32.5 a 23.6 ms. En la primera navegación de un proceso no cambia
 todavía: falta llamar a `bf_web::precompile_window_scripts` mientras se espera a la red, que
-deja la instalación en unos 22 ms (`pendiente/mac/e3.md`, "Ciclo nuevo, ronda 1").
+deja la instalación en unos 22 ms (`pendiente/mac/e3.md`, "Ciclo nuevo, ronda 1"). Hecho en la
+sección siguiente.
 
 **red/caché** es ahora la parte mayor de la primera pintura: 620-710 ms en estas corridas
 (287 ms en la medida de E4) con la caché de disco caliente.
+
+## Adelantar trabajo a la espera de la red (E3, sesión del 2026-11-17, ronda 1)
+
+Mientras se valida el documento de Wikipedia (`max-age=0, must-revalidate`: un 304 en cada
+visita), el hilo de la pestaña no tiene nada que hacer. Ahora se adelanta, en otros hilos
+(`bf-shell/src/preload.rs`):
+
+- **la ventana**: `bf_web::precompile_window_scripts` en el hilo `freedom-ventana` al empezar
+  la navegación, una vez por proceso. La instalación solo copia el código
+  (`perf ventana: … 0 compilados …, 7 de la caché del proceso`);
+- **las hojas**: el escáner de precarga (E6) ya leía del disco las hojas, scripts e imágenes
+  del documento guardado. Ahora, con todo leído, parsea las hojas en
+  `bf_style::sheet_cache` (`sheet_cache::warm`, con la clave de la carga: URL y hash de los
+  bytes, modo quirks del DOCTYPE y encoding del documento);
+- **los scripts clásicos**: los compila en `bf_js::code_cache` (`code_cache::warm`, con la URL
+  de la respuesta, el texto decodificado como lo hace la ventana y el `ETag` o
+  `Last-Modified` guardado).
+
+No se ejecuta nada ni sale ninguna petición. A la caché HTTP en memoria solo entra lo fresco y
+solo con el 304 (RFC 9111 §4.3.4), como antes. Las hojas y los scripts se parsean y compilan
+también si su copia guardada ya no está fresca: en Wikipedia las hojas de `load.php` llevan
+`max-age=300`, así que a los 5 minutos ya no lo están y la carga las valida o las sirve dentro
+de `stale-while-revalidate`. Es seguro porque las dos cachés llevan los bytes (o el texto) en
+la clave: lo que se parsea aquí solo lo encuentra una carga que reciba esos mismos bytes, y
+daría el mismo resultado al parsearlos ella.
+
+**A/B contra `master` `7be3431`** (el binario de antes en un `CARGO_TARGET_DIR` aparte; 5
+corridas alternadas de `freedom session`, caché de disco caliente, perfil propio; mínimo /
+mediana en ms):
+
+| Parte | antes, carga 11 | después, carga 11 | antes, carga 25 | después, carga 25 |
+|---|---:|---:|---:|---:|
+| **Primera pintura** | **526 / 577** | **446 / 491** | 763 / 850 | 621 / 747 |
+| Red y caché | 263 / 267 | 260 / 265 | 269 / 294 | 285 / 309 |
+| Ventana | 48 / 50 | 16 / 17 | 81 / 87 | 29 / 31 |
+| Parser | 45 / 48 | 34 / 38 | 68 / 75 | 58 / 70 |
+| Scripts | 25 / 31 | 18 / 21 | 39 / 44 | 26 / 36 |
+| Hojas | 26 / 37 | 7 / 8 | 51 / 58 | 15 / 17 |
+| Cascada | 32 / 37 | 33 / 37 | 67 / 86 | 61 / 78 |
+| Imágenes | 2 / 4 | 2 / 4 | 6 / 9 | 6 / 10 |
+| Maqueta | 52 / 58 | 42 / 61 | 80 / 104 | 82 / 103 |
+| Lista de pintado | 8 / 11 | 9 / 13 | 16 / 23 | 16 / 18 |
+| Raster | 18 / 22 | 18 / 19 | 27 / 30 | 29 / 31 |
+
+Con carga 11, 3 de las 5 corridas quedan por debajo de 500 ms (446, 481 y 491; las otras, 516
+y 554). Lo que se ahorra es lo que se adelantó: en medianas, unos 33 ms de la ventana, 29 de
+las hojas y 10 de los scripts. En las corridas de después, la traza dice siempre `perf hojas:
+3 de la caché`, `perf ventana: … 0 compilados` y `perf scripts: … 1 de la caché del proceso`
+(el script `startup` de `load.php`; los 3 compilados, 6 KB, son los scripts en línea, que la
+precarga no compila). La precarga de hojas y scripts termina a los 56-122 ms de empezar (carga
+25), mucho antes que la red.
+
+Lo que queda, con carga 11 (medianas de después): red 265, parser 38, scripts 21, cascada 37,
+maqueta 61, lista 13, raster 19, ventana 17, hojas 8. La red es más de la mitad; con la red en
+su suelo, la meta deja unos 235 ms para todo lo demás y hoy se usan unos 225. El margen es
+pequeño: con la máquina más cargada la primera pintura vuelve a pasar de 500 ms (carga 25:
+mediana 747). Lo siguiente que más pesa es la maqueta y la cascada, y la red (ver "Primera
+pintura, el suelo de la red" en el roadmap).
+
+Recarga (`FREEDOM_NET_LOG=1 … wait wait key:f5 wait wait`): 7 validaciones (el documento, 5
+scripts y 1 hoja) y 0 descargas, igual que antes. No sale ninguna petición que antes no
+saliera (la de antes pidió además `Special:CentralAutoLogin`, que lanzan los scripts de
+Wikipedia con un temporizador).
+

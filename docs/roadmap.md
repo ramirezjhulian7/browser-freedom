@@ -62,7 +62,7 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 | 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 95 / 107 en `master` (8 de los 12 que faltan son de CSS Flexbox 2) | pasan | `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3" |
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
-| 5 | Primera pintura de Wikipedia en release | 542-665 ms en cinco corridas (`276fa07`, caché caliente, ejecutores casi parados); la red sola, 247-315 ms | < 500 ms | medida del planificador, reparto de la ronda 1 del ciclo nuevo; desglose en el bloque **Estado** de la fase 5 |
+| 5 | Primera pintura de Wikipedia en release | `master` `7be3431`: 526-604 ms, mediana 577 (carga 11). Con la precarga de hojas, scripts y ventana (rama `army/e3`, sin integrar): 446-554 ms, mediana 491, 3 de 5 corridas por debajo de la meta; con carga 25, mediana 747. La red sola, 260-265 ms | < 500 ms | `rendimiento.md`, "Adelantar trabajo a la espera de la red"; desglose en el bloque **Estado** de la fase 5 |
 
 El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimiento.md).
 
@@ -661,8 +661,18 @@ y los list box se desplazan con la rueda.
     - densidad 1: mediana 3.7-4.0 ms;
     - densidad 2: mediana 5.2-6.1 ms, p95 9.4-11.2 ms; 2-3 cuadros de 120 pasan de 16.7 ms.
     - Antes: 8.0 y 17.7 ms (E4, `pendiente/mac/e4.md`, "Cierre, ronda 3", carga 15-36).
-  - **Primera pintura de Wikipedia: 542-665 ms** en cinco corridas (meta < 500 ms; misma
-    medida del planificador). Desglose de dos corridas con traza:
+  - **Primera pintura de Wikipedia, 2026-11-17** (meta < 500 ms; A/B de 5 corridas alternadas
+    con traza, caché caliente, carga 11; `rendimiento.md`, "Adelantar trabajo a la espera de la
+    red"):
+    - `master` `7be3431`: mediana 577 ms (mínimo 526);
+    - con la precarga que parsea las hojas, compila los scripts y la ventana mientras se valida
+      el documento (rama `army/e3`, sin integrar): mediana 491 ms (mínimo 446), 3 de 5
+      corridas por debajo de 500. Con carga 25 la mediana sube a 747: el margen es pequeño.
+    - Medianas de después: red 265, parser 38, scripts 21, cascada 37, maqueta 61, lista 13,
+      raster 19, ventana 17, hojas 8. Fuera de la red quedan unos 225 ms de los 235 que deja
+      la meta.
+  - Medida anterior, **542-665 ms** en cinco corridas (`276fa07`, medida del planificador).
+    Desglose de dos corridas con traza:
 
     | Parte | Corrida 1 (ms) | Corrida 2 (ms) |
     |---|---:|---:|
@@ -679,7 +689,7 @@ y los list box se desplazan con la rueda.
     baja de unos 250 ms, así que el resto tiene que caber en unos 200. Las dos vías del ciclo
     nuevo: abaratar cascada y maqueta, y adelantar a la espera de la red lo que no depende de
     la respuesta (instalar la ventana, parsear las hojas en caché, compilar los scripts en
-    caché).
+    caché). La segunda está hecha en la rama `army/e3` (2026-11-17, arriba).
   - **Suelo de red**: el documento se valida en cada visita (`max-age=0, must-revalidate`) y
     un proceso nuevo no tiene conexión abierta. TCP, TLS 1.3 y el 304 cuestan un viaje de ida
     y vuelta cada uno, unos 115 ms en esta red: unos 345 ms antes de parsear (E6). Qué hacer

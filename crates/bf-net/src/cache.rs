@@ -447,14 +447,26 @@ pub struct Staged {
 }
 
 impl Staged {
-    /// El cuerpo de la respuesta más reciente y su `Content-Type`.
-    pub fn body(&self) -> Option<(&[u8], Option<&str>)> {
-        let e = self
-            .entries
+    /// La respuesta completa (no parcial) más reciente: estado, cabeceras y cuerpo.
+    pub fn response(&self) -> Option<&CacheResponse> {
+        self.entries
             .iter()
             .filter(|e| e.range.is_none())
-            .max_by(|a, b| a.response_time.total_cmp(&b.response_time))?;
-        Some((&e.response.body, e.response.headers.get("content-type")))
+            .max_by(|a, b| a.response_time.total_cmp(&b.response_time))
+            .map(|e| &e.response)
+    }
+
+    /// El cuerpo de la respuesta más reciente y su `Content-Type`.
+    pub fn body(&self) -> Option<(&[u8], Option<&str>)> {
+        let r = self.response()?;
+        Some((&r.body, r.headers.get("content-type")))
+    }
+
+    /// E3: el validador de la respuesta más reciente (RFC 9110 §8.8): su `ETag` o, si no
+    /// tiene, su `Last-Modified`.
+    pub fn validator(&self) -> Option<&str> {
+        let h = &self.response()?.headers;
+        h.get("etag").or_else(|| h.get("last-modified"))
     }
 }
 
@@ -2366,7 +2378,7 @@ mod tests {
             r.get(
                 &[],
                 CacheMode::Default,
-                &[("Cache-Control", "max-age=60")],
+                &[("Cache-Control", "max-age=60"), ("ETag", "\"v1\"")],
                 200,
             );
         }
@@ -2375,6 +2387,8 @@ mod tests {
         let staged = r.cache.stage(&r.url, true).expect("en disco");
         assert!(staged.fresh);
         assert_eq!(staged.body().map(|(b, _)| b), Some(&b"cuerpo"[..]));
+        assert_eq!(staged.response().map(|r| r.status), Some(200));
+        assert_eq!(staged.validator(), Some("\"v1\""));
         assert!(r.cache.is_empty(), "stage no usa ni guarda en memoria");
         assert!(r.cache.stage(&r.url, false).is_none(), "otra clave");
         assert_eq!(
