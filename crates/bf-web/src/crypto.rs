@@ -143,8 +143,10 @@ struct CryptoClasses {
 #[derive(Debug, Default)]
 struct SubtleObjects(std::collections::HashMap<RealmId, HostHandle>);
 
-/// `[[usages]]`, en el orden del enum `KeyUsage` (§13.3).
-const USAGES: [&str; 8] = [
+/// `[[usages]]`, en el orden del enum `KeyUsage` (§13.3; E1: con los cuatro de "Modern
+/// Algorithms in the Web Cryptography API", que ningún algoritmo de aquí admite: dan
+/// `SyntaxError` y no `TypeError`).
+const USAGES: [&str; 12] = [
     "encrypt",
     "decrypt",
     "sign",
@@ -153,6 +155,10 @@ const USAGES: [&str; 8] = [
     "deriveBits",
     "wrapKey",
     "unwrapKey",
+    "encapsulateKey",
+    "encapsulateBits",
+    "decapsulateKey",
+    "decapsulateBits",
 ];
 
 /// El algoritmo de una clave (todas son secretas, `[[type]]` "secret").

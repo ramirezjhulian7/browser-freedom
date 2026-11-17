@@ -237,13 +237,14 @@ fn aes_errors() {
                       await name(s.encrypt({name: 'AES-CTR', counter: iv, length: 64}, k, new Uint8Array(1))), \
                       await name(s.importKey('raw', new Uint8Array(16), 'AES-GCM', true, ['sign'])), \
                       await name(s.encrypt({name: 'AES-GCM', iv, tagLength: 50}, g, new Uint8Array(1))), \
-                      await name(s.sign('HMAC', g, new Uint8Array(1)))); \
+                      await name(s.sign('HMAC', g, new Uint8Array(1))), \
+                      await name(s.generateKey({name: 'AES-CBC', length: 128}, true, ['encapsulateKey']))); \
                out = r.join(); \
              })();"
         ),
         "256,false,DataError,OperationError,TypeError,OperationError,OperationError,\
          OperationError,InvalidAccessError,InvalidAccessError,SyntaxError,InvalidAccessError,\
-         InvalidAccessError"
+         InvalidAccessError,SyntaxError"
     );
 }
 
