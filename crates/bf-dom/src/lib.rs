@@ -274,6 +274,22 @@ pub struct Document {
     pub(crate) parser_form_owners: HashMap<NodeId, NodeId>,
     /// E2: el texto de las hojas que el CSSOM cambió (ver `cssom_sheet_text`).
     cssom_sheet_texts: HashMap<NodeId, String>,
+    /// E2: los cambios de atributo recientes (ver [`Document::attribute_changes_since`]).
+    attribute_log: AttributeLog,
+}
+
+/// E2: los últimos cambios de atributo, como (versión tras el cambio, elemento), para que la
+/// cascada del CSSOM sepa qué elementos cambiaron desde la última vez. Acotado: al pasar de
+/// [`AttributeLog::MAX`] entradas se olvida la mitad más vieja y `floor` guarda la versión de
+/// la última olvidada (antes de ella ya no se sabe qué cambió).
+#[derive(Debug, Clone, Default)]
+struct AttributeLog {
+    entries: std::collections::VecDeque<(u64, NodeId)>,
+    floor: u64,
+}
+
+impl AttributeLog {
+    const MAX: usize = 4096;
 }
 
 impl Default for Document {
@@ -295,6 +311,7 @@ impl Document {
             is_html: true,
             scripting: false,
             cssom_sheet_texts: HashMap::new(),
+            attribute_log: AttributeLog::default(),
             version: 0,
             id_cache: IdCache::default(),
             attr_nodes: HashMap::new(),
@@ -531,6 +548,43 @@ impl Document {
 
     pub(crate) fn bump_version(&mut self) {
         self.version += 1;
+    }
+
+    /// E2: anota que la última subida de versión fue un cambio de atributo de `el`.
+    pub(crate) fn log_attribute_change(&mut self, el: NodeId) {
+        let log = &mut self.attribute_log;
+        log.entries.push_back((self.version, el));
+        if log.entries.len() > AttributeLog::MAX {
+            for _ in 0..AttributeLog::MAX / 2 {
+                if let Some((v, _)) = log.entries.pop_front() {
+                    log.floor = v;
+                }
+            }
+        }
+    }
+
+    /// E2: si **todos** los cambios del documento desde la versión `since` fueron cambios de
+    /// atributo (ninguna inserción, remoción, texto, estado…), los elementos que cambiaron, sin
+    /// repetir y en el orden del primer cambio; si no (o si ya no se sabe), `None`. Lo usa la
+    /// cascada del CSSOM para recalcular solo esos elementos y sus descendientes.
+    pub fn attribute_changes_since(&self, since: u64) -> Option<Vec<NodeId>> {
+        let log = &self.attribute_log;
+        if since < log.floor || since > self.version {
+            return None;
+        }
+        let start = log.entries.partition_point(|(v, _)| *v <= since);
+        let recent = log.entries.range(start..);
+        // Cada cambio de atributo sube la versión una vez: si hubo otras subidas, no cuadra.
+        if recent.len() as u64 != self.version - since {
+            return None;
+        }
+        let mut seen = HashSet::new();
+        Some(
+            recent
+                .filter(|(_, el)| seen.insert(*el))
+                .map(|(_, el)| *el)
+                .collect(),
+        )
     }
 
     /// E2: la hoja del `<style>` o `<link>` `node` tal como la dejó el CSSOM, serializada

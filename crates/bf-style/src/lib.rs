@@ -12,8 +12,8 @@ pub mod sheet_cache; // E4
 pub mod values;
 
 pub use cascade::{
-    FontMetricsSource, StyleMap, is_supported, style_document, style_document_parallel,
-    style_document_with_sheets,
+    FontMetricsSource, StyleMap, is_supported, restyle_after_attribute_changes, style_document,
+    style_document_parallel, style_document_with_sheets,
 };
 pub use loader::{Resources, document_stylesheets, font_face_rules};
 pub use properties::ComputedStyle;
