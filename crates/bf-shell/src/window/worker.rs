@@ -30,9 +30,9 @@ const FRAME: Duration = Duration::from_millis(16);
 /// cuadro (el umbral de una tarea larga, *Long Tasks API* §2: 50 ms). Una tarea sola puede
 /// durar más; entre tareas, el documento se vuelve a pintar.
 const TASK_BUDGET: Duration = Duration::from_millis(50);
-/// E3: durante una ráfaga de tareas sin animaciones, cada cuánto se vuelve a maquetar y pintar
-/// el documento (la maqueta es entera: hacerla tras cada `TASK_BUDGET` gastaba más que las
-/// tareas).
+/// E3: durante una ráfaga de tareas, cada cuánto se vuelve a maquetar y pintar el documento,
+/// con animaciones o sin ellas (la maqueta es entera: hacerla tras cada `TASK_BUDGET` gastaba
+/// más que las tareas y retrasaba los scripts de Wikipedia).
 const BUSY_REFRESH: Duration = Duration::from_millis(200);
 
 /// Cargar `url` y maquetarla. `recent` y `theme` son para las páginas internas.
@@ -1019,7 +1019,10 @@ impl State {
         let busy = engine.next_wake().is_some_and(|d| d.is_zero());
         let mut animated = false;
         // E4: "update the rendering" (HTML §8.1.7.3): como mucho un cuadro cada [`FRAME`].
-        if engine.wants_frame() && self.last_raf.elapsed() >= FRAME && !behind {
+        // E3: en mitad de una ráfaga de tareas, un cuadro cada `BUSY_REFRESH` (cada uno
+        // vuelve a maquetar entero).
+        let every = if busy { BUSY_REFRESH } else { FRAME };
+        if engine.wants_frame() && self.last_raf.elapsed() >= every && !behind {
             self.last_raf = Instant::now();
             engine.run_animation_frames();
             ran += 1;
