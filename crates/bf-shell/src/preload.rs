@@ -44,6 +44,8 @@ use bf_infra::{Destination, ResourceLoader, Url};
 use bf_net::cache::{HttpCache, Staged};
 use bf_net::{MimeType, NetLoader};
 
+use crate::load::CachedLoader;
+
 /// Cuántas URLs mira el escáner como mucho.
 const MAX_URLS: usize = 64;
 
@@ -70,7 +72,29 @@ pub struct Scan {
     /// cuando el parser inserta el `<meta>` (CSP 3 §4.2.1): hasta entonces no se puede saber
     /// qué pedidos permitirá.
     pub meta_csp: bool,
+    /// E3: los orígenes de `<link rel=preconnect|dns-prefetch>`, en orden y sin repetir.
+    pub hints: Vec<Hint>,
 }
+
+/// E3: una sugerencia que toca la red sin pedir nada (HTML §4.6.7.4 y §4.6.7.10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    /// El origen (esquema, nombre y puerto; el resto de la URL no cuenta).
+    pub url: Url,
+    pub kind: HintKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintKind {
+    /// `dns-prefetch`: resolver el nombre.
+    Dns,
+    /// `preconnect`: abrir la conexión (DNS, TCP, TLS).
+    Connect,
+}
+
+/// E3: cuántos orígenes distintos se preconectan o resuelven como mucho por documento: cada
+/// preconexión deja una conexión ociosa (HTML §4.6.7.10 deja el límite al navegador).
+const MAX_HINTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -83,6 +107,11 @@ pub enum Kind {
     /// Las imágenes no bloquean el renderizado, pero el pintado del shell las lee antes de la
     /// primera maqueta (`bf_paint::images::load_images_in`).
     Image,
+    /// E3: `<link rel=preload as=image>`: el autor pide adelantarla (la descarga especulativa
+    /// la pide; las `<img src>` las sigue pidiendo el pintado).
+    PreloadImage,
+    /// E3: `<link rel=preload as=font>`: la fuente que usará una `@font-face`.
+    Font,
 }
 
 /// El escáner de precarga (HTML §13.2.8, "speculative fetch" de los *speculative mock
@@ -100,6 +129,10 @@ pub fn scan_document(html: &str, document: &Url) -> Scan {
     let mut base: Option<Url> = None;
     let mut out: Vec<Found> = Vec::new();
     let mut meta_csp = false;
+    let mut hints: Vec<Hint> = Vec::new();
+    let hint = |hints: &mut Vec<Hint>, base: &Option<Url>, href: &str, rels: &[&str]| {
+        add_hint(hints, base.as_ref().unwrap_or(document), href, rels);
+    };
     let push = |out: &mut Vec<Found>,
                 base: &Option<Url>,
                 href: &str,
@@ -147,17 +180,14 @@ pub fn scan_document(html: &str, document: &Url) -> Scan {
                 let rel = attr("rel").unwrap_or("").to_ascii_lowercase();
                 let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
                 let as_ = attr("as").unwrap_or("").to_ascii_lowercase();
-                let kind = if rels.contains(&"stylesheet") && !rels.contains(&"alternate") {
-                    Some(Kind::Style)
-                } else if rels.contains(&"modulepreload") {
-                    Some(Kind::Module)
-                } else if rels.contains(&"preload") && as_ == "script" {
-                    Some(Kind::Script)
-                } else if rels.contains(&"preload") && as_ == "style" {
-                    Some(Kind::Style)
-                } else {
-                    None
-                };
+                // E3: un `preload` con `media` que no sabemos evaluar aquí, o una imagen con
+                // `imagesrcset` (la fuente la elige el navegador, HTML §4.6.7.12), no se adelanta.
+                let plain = attr("media").is_none_or(|m| m.trim().is_empty())
+                    && attr("imagesrcset").is_none();
+                let kind = preload_kind(&rels, &as_, plain);
+                if let Some(href) = attr("href") {
+                    hint(&mut hints, &base, href, &rels);
+                }
                 if let (Some(kind), Some(href)) = (kind, attr("href")) {
                     // E3: el `nonce` de un `<link rel=preload as=script nonce>` (Mercado
                     // Libre): sin él la CSP con `'strict-dynamic'` bloqueaba la petición
@@ -214,7 +244,182 @@ pub fn scan_document(html: &str, document: &Url) -> Scan {
     Scan {
         found: out,
         meta_csp,
+        hints,
     }
+}
+
+/// E3: qué adelanta un `<link>` (o un `Link`) con estos `rel` y este `as` (HTML §4.6.7.12,
+/// *preload*: el destino sale de `as`; §4.6.7.13 *modulepreload*).
+fn preload_kind(rels: &[&str], as_: &str, plain: bool) -> Option<Kind> {
+    let preload = rels.contains(&"preload") && plain;
+    if rels.contains(&"stylesheet") && !rels.contains(&"alternate") {
+        Some(Kind::Style)
+    } else if rels.contains(&"modulepreload") {
+        Some(Kind::Module)
+    } else if preload && as_ == "script" {
+        Some(Kind::Script)
+    } else if preload && as_ == "style" {
+        Some(Kind::Style)
+    } else if preload && as_ == "font" {
+        Some(Kind::Font)
+    } else if preload && as_ == "image" {
+        Some(Kind::PreloadImage)
+    } else {
+        None
+    }
+}
+
+/// E3: añade a `hints` el origen de `href` si `rels` tiene `preconnect` o `dns-prefetch` (los
+/// dos a la vez: `preconnect`, que también resuelve).
+fn add_hint(hints: &mut Vec<Hint>, base: &Url, href: &str, rels: &[&str]) {
+    let kind = if rels.contains(&"preconnect") {
+        HintKind::Connect
+    } else if rels.contains(&"dns-prefetch") {
+        HintKind::Dns
+    } else {
+        return;
+    };
+    let href = href.trim_matches(|c: char| c.is_ascii_whitespace());
+    let Ok(url) = Url::parse(href, Some(base)) else {
+        return;
+    };
+    if !matches!(url.scheme.as_str(), "http" | "https") || hints.len() >= MAX_HINTS {
+        return;
+    }
+    let Ok(url) = Url::parse(&format!("{}/", url.origin()), None) else {
+        return;
+    };
+    match hints.iter_mut().find(|h| h.url.origin() == url.origin()) {
+        Some(h) if kind == HintKind::Connect => h.kind = HintKind::Connect,
+        Some(_) => {}
+        None => hints.push(Hint { url, kind }),
+    }
+}
+
+/// E3: las sugerencias de la cabecera `Link` de la respuesta del documento (RFC 8288 §3; HTML,
+/// *process link headers*): `preconnect`, `dns-prefetch`, `preload` y `modulepreload`, como
+/// los `<link>` del mismo nombre. Las URI se resuelven contra la URL de la respuesta (§3.1).
+pub fn scan_link_header(value: &str, document: &Url) -> Scan {
+    let mut scan = Scan::default();
+    for link in split_links(value) {
+        let Some((target, params)) = parse_link(link) else {
+            continue;
+        };
+        let param = |name: &str| {
+            params
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        let rel = param("rel").unwrap_or("").to_ascii_lowercase();
+        let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
+        add_hint(&mut scan.hints, document, &target, &rels);
+        let as_ = param("as").unwrap_or("").to_ascii_lowercase();
+        let plain =
+            param("media").is_none_or(|m| m.trim().is_empty()) && param("imagesrcset").is_none();
+        // Una hoja de estilos por `Link` no se aplica en el motor: solo los adelantos.
+        if rels.contains(&"stylesheet") {
+            continue;
+        }
+        let Some(kind) = preload_kind(&rels, &as_, plain) else {
+            continue;
+        };
+        if let Ok(url) = Url::parse(target.trim(), Some(document))
+            && matches!(url.scheme.as_str(), "http" | "https")
+            && !scan.found.iter().any(|f| f.url == url)
+            && scan.found.len() < MAX_URLS
+        {
+            scan.found.push(Found {
+                url,
+                kind,
+                charset: None,
+                nonce: param("nonce").map(str::to_owned),
+            });
+        }
+    }
+    scan
+}
+
+/// Separa un valor de `Link` en sus *link-value* (RFC 8288 §3: separados por comas, que pueden
+/// ir dentro de `<…>` o de una cadena entre comillas).
+fn split_links(value: &str) -> Vec<&str> {
+    let (mut out, mut start, mut angle, mut quoted, mut escaped) =
+        (Vec::new(), 0, false, false, false);
+    for (i, c) in value.char_indices() {
+        if quoted {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '<' => angle = true,
+            '>' => angle = false,
+            '"' if !angle => quoted = true,
+            ',' if !angle => {
+                out.push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&value[start..]);
+    out
+}
+
+/// Un *link-value*: `<URI-Reference>` y sus parámetros (`nombre` o `nombre=valor`, con el
+/// valor como token o cadena entre comillas, RFC 8288 §3 y RFC 9110 §5.6.4).
+fn parse_link(link: &str) -> Option<(String, Vec<(String, String)>)> {
+    let link = link.trim();
+    let rest = link.strip_prefix('<')?;
+    let end = rest.find('>')?;
+    let target = rest[..end].to_owned();
+    let mut params = Vec::new();
+    for p in split_params(&rest[end + 1..]) {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let (name, value) = match p.split_once('=') {
+            Some((n, v)) => (n.trim(), v.trim()),
+            None => (p, ""),
+        };
+        let value = match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+            Some(q) => q.replace("\\\"", "\"").replace("\\\\", "\\"),
+            None => value.to_owned(),
+        };
+        params.push((name.to_ascii_lowercase(), value));
+    }
+    Some((target, params))
+}
+
+/// Los parámetros de un *link-value*, separados por `;` fuera de las comillas.
+fn split_params(s: &str) -> Vec<&str> {
+    let (mut out, mut start, mut quoted, mut escaped) = (Vec::new(), 0, false, false);
+    for (i, c) in s.char_indices() {
+        if quoted {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            ';' => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 /// E3: el modo del documento según su DOCTYPE (HTML §13.2.6.4.1, el modo de inserción
@@ -287,11 +492,26 @@ const SPECULATIVE_THREADS: usize = 6;
 ///
 /// - Los scripts se piden con su `nonce` e insertados por el parser, como los pedirá el
 ///   parser (CSP 3 §6.7.1.1), y las hojas como las pide el pintado.
+/// - E3: también las sugerencias de recursos (HTML §4.6.7) de los `<link>` y de la cabecera
+///   `Link` de la respuesta (`link`, RFC 8288), que van primero:
+///   - `preconnect` abre la conexión con el origen y `dns-prefetch` resuelve su nombre
+///     ([`bf_net::Fetcher::preconnect`], [`bf_net::Fetcher::prefetch_dns`]), sin pedir nada;
+///     no son peticiones (CSP 3 no las cubre), pero desde un documento `https` no se abre ni
+///     se resuelve nada `http` (contenido mixto, por prudencia);
+///   - `preload` de fuentes e imágenes se pide con su *destination* (Fetch §2.2.5: el
+///     `Accept`, CSP y contenido mixto, como la petición de quien la use después) con
+///     `loader`, que la guarda: la `@font-face` o el pintado la toman de ahí, sin otra
+///     descarga.
 /// - Con CSP en un `<meta>` no se pide nada: esa política aún no se conoce.
 /// - No se ejecuta nada. Lo pedido y no usado (un script que otro quita antes de llegar a él)
 ///   lo permite §13.2.8.
 /// - `BF_NO_PRECARGA=1` lo apaga.
-pub fn speculative_fetch(loader: Arc<dyn ResourceLoader>, html: String, document: Url) {
+pub fn speculative_fetch(
+    loader: Arc<CachedLoader>,
+    html: String,
+    document: Url,
+    link_header: Option<String>,
+) {
     if std::env::var_os("BF_NO_PRECARGA").is_some() {
         return;
     }
@@ -299,8 +519,26 @@ pub fn speculative_fetch(loader: Arc<dyn ResourceLoader>, html: String, document
         .name("freedom-especulativa".into())
         .spawn(move || {
             let start = Instant::now();
-            let scan = scan_document(&html, &document);
+            // La cabecera `Link` llega con la respuesta, antes que el cuerpo: lo suyo va primero.
+            let mut scan = link_header
+                .map(|v| scan_link_header(&v, &document))
+                .unwrap_or_default();
+            let body = scan_document(&html, &document);
             drop(html);
+            for h in body.hints {
+                if scan.hints.len() < MAX_HINTS
+                    && !scan.hints.iter().any(|x| x.url.origin() == h.url.origin())
+                {
+                    scan.hints.push(h);
+                }
+            }
+            for f in body.found {
+                if !scan.found.iter().any(|x| x.url == f.url) {
+                    scan.found.push(f);
+                }
+            }
+            scan.meta_csp = body.meta_csp;
+            let hints = resource_hints(&loader, &document, scan.hints);
             if scan.meta_csp {
                 return;
             }
@@ -328,6 +566,12 @@ pub fn speculative_fetch(loader: Arc<dyn ResourceLoader>, html: String, document
                                     Kind::Script | Kind::Module => {
                                         loader.load_script(&f.url, f.nonce.as_deref(), true);
                                     }
+                                    Kind::Font => {
+                                        loader.load_for(&f.url, Destination::Font);
+                                    }
+                                    Kind::PreloadImage => {
+                                        loader.load_for(&f.url, Destination::Image);
+                                    }
                                     Kind::Image => {}
                                 }
                             }
@@ -338,14 +582,44 @@ pub fn speculative_fetch(loader: Arc<dyn ResourceLoader>, html: String, document
             for w in workers {
                 let _ = w.join();
             }
+            for h in hints {
+                let _ = h.join();
+            }
             if std::env::var_os("BF_TRACE").is_some() {
                 eprintln!(
-                    "perf especulativa: {total} hojas y scripts pedidos en paralelo, listos en \
-                     {:.1} ms",
+                    "perf especulativa: {total} hojas, scripts, fuentes e imágenes pedidos en \
+                     paralelo, listos en {:.1} ms",
                     start.elapsed().as_secs_f64() * 1000.0
                 );
             }
         });
+}
+
+/// E3: `preconnect` y `dns-prefetch` (HTML §4.6.7.4 y §4.6.7.10), cada uno en su hilo: no
+/// esperan a nada ni nadie los espera. El origen del documento ya tiene su conexión.
+fn resource_hints(loader: &CachedLoader, document: &Url, hints: Vec<Hint>) -> Vec<JoinHandle<()>> {
+    let secure = document.scheme == "https";
+    hints
+        .into_iter()
+        .filter(|h| h.url.origin() != document.origin())
+        // Contenido mixto: desde un documento `https`, nada `http` (Mixed Content §4.3 bloquea
+        // esas peticiones; abrirles conexión sería trabajo para nada, o un aviso a la red).
+        .filter(|h| !(secure && h.url.scheme == "http"))
+        .filter_map(|h| {
+            let net = loader.net.clone();
+            std::thread::Builder::new()
+                .name("freedom-sugerencia".into())
+                .spawn(move || match h.kind {
+                    HintKind::Connect => {
+                        net.fetcher.preconnect(&h.url);
+                    }
+                    HintKind::Dns => {
+                        net.fetcher.prefetch_dns(&h.url);
+                    }
+                })
+                .ok()
+        })
+        .collect()
 }
 
 /// Lo que comparten la carga y el hilo de la precarga.
@@ -513,7 +787,7 @@ fn warm(cache: &HttpCache, shared: &Mutex<Shared>, document: &Url) {
                 bf_js::code_cache::warm(&w.url.href(), w.validator.as_deref(), &text);
                 scripts += 1;
             }
-            Kind::Module | Kind::Image => {}
+            Kind::Module | Kind::Image | Kind::PreloadImage | Kind::Font => {}
         }
     }
     if std::env::var_os("BF_TRACE").is_some() {
@@ -842,6 +1116,68 @@ mod tests {
         assert_eq!(
             got,
             ["https://sitio.test/x/antes.css", "https://cdn.test/r/s.js"]
+        );
+    }
+
+    /// E3: `preconnect` y `dns-prefetch` dan orígenes (sin repetir, `preconnect` gana) y
+    /// `preload` de fuentes e imágenes se adelanta; con `media` o `imagesrcset`, no.
+    #[test]
+    fn scanner_finds_resource_hints_and_font_and_image_preloads() {
+        let doc = url("https://sitio.test/a/");
+        let s = scan_document(
+            "<link rel=dns-prefetch href=//cdn.test/x.js>\
+             <link rel=preconnect href=https://cdn.test:443/otra>\
+             <link rel=preconnect href=https://fuentes.test crossorigin>\
+             <link rel=dns-prefetch href=javascript:void(0)>\
+             <link rel=preload as=font href=/f.woff2 crossorigin>\
+             <link rel=preload as=image href=i.png>\
+             <link rel=preload as=image href=m.png media=\"(max-width: 10px)\">\
+             <link rel=preload as=image imagesrcset=\"a.png 1x\" href=s.png>\
+             <link rel=preload as=fetch href=d.json>",
+            &doc,
+        );
+        let hints: Vec<(String, HintKind)> =
+            s.hints.iter().map(|h| (h.url.href(), h.kind)).collect();
+        assert_eq!(
+            hints,
+            [
+                ("https://cdn.test/".to_owned(), HintKind::Connect),
+                ("https://fuentes.test/".to_owned(), HintKind::Connect),
+            ]
+        );
+        let found: Vec<(String, Kind)> = s.found.iter().map(|f| (f.url.href(), f.kind)).collect();
+        assert_eq!(
+            found,
+            [
+                ("https://sitio.test/f.woff2".to_owned(), Kind::Font),
+                ("https://sitio.test/a/i.png".to_owned(), Kind::PreloadImage),
+            ]
+        );
+    }
+
+    /// E3: la cabecera `Link` (RFC 8288 §3): varios *link-value* separados por comas (también
+    /// dentro de comillas y de `<…>`), `rel` con varios valores y entre comillas, y URI
+    /// relativas a la respuesta.
+    #[test]
+    fn link_header_is_parsed() {
+        let doc = url("https://sitio.test/p/q");
+        let s = scan_link_header(
+            "<https://cdn.test/a,b>; rel=\"preconnect dns-prefetch\"; title=\"x, y; z\", \
+             </f.ttf>; rel=preload; as=font; crossorigin, <s.css>; rel=preload; as=style, \
+             <m.js>; rel=modulepreload, <h.css>; rel=stylesheet, <no>; rel=next, roto; rel=preload",
+            &doc,
+        );
+        let hints: Vec<(String, HintKind)> =
+            s.hints.iter().map(|h| (h.url.href(), h.kind)).collect();
+        assert_eq!(hints, [("https://cdn.test/".to_owned(), HintKind::Connect)]);
+        let found: Vec<(String, Kind)> = s.found.iter().map(|f| (f.url.href(), f.kind)).collect();
+        assert_eq!(
+            found,
+            [
+                ("https://sitio.test/f.ttf".to_owned(), Kind::Font),
+                ("https://sitio.test/p/s.css".to_owned(), Kind::Style),
+                ("https://sitio.test/p/m.js".to_owned(), Kind::Module),
+            ]
         );
     }
 }

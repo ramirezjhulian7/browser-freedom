@@ -1404,7 +1404,41 @@ pub(crate) struct DocumentNet {
 
 impl bf_web::net::NetBackend for DocumentNet {
     fn fetch(&self, req: &bf_web::net::NetRequest) -> bf_web::net::NetResult {
-        if req.options.destination != Some(bf_infra::Destination::Image) {
+        use bf_infra::Destination as D;
+        // E3: el recurso que el documento ya tiene (un `<link rel=preload>`, la descarga
+        // especulativa o lo que pidió el pintado) no se vuelve a pedir: HTML §4.6.7.12 (el
+        // *preload* lo consume la petición que coincide) y, para las imágenes, §4.8.4.3 (*list
+        // of available images*, que vale aunque HTTP no deje guardarla). Solo imágenes,
+        // fuentes, hojas y scripts del mismo origen que el documento, con credenciales y `GET`:
+        // la misma petición que hizo el cargador, sin CORS de por medio. `fetch()` y XHR no.
+        let (client, _) = self.loader.referrer();
+        if matches!(
+            req.options.destination,
+            Some(D::Image | D::Font | D::Style | D::Script)
+        ) && req.options.method.eq_ignore_ascii_case("GET")
+            && req.options.credentials
+            && req.options.body.is_none()
+            && client.is_some_and(|c| c.origin() == req.url.origin())
+            && let Some(r) = self.loader.available(&req.url)
+        {
+            let headers = r
+                .content_type
+                .iter()
+                .map(|t| ("Content-Type".to_owned(), t.clone()))
+                .collect();
+            return Ok(bf_web::net::NetResponse {
+                url_list: if r.url == req.url {
+                    vec![r.url]
+                } else {
+                    vec![req.url.clone(), r.url]
+                },
+                status: 200,
+                status_text: "OK".into(),
+                headers: bf_web::net::headers::HeaderList(headers),
+                body: r.bytes,
+            });
+        }
+        if req.options.destination != Some(D::Image) {
             return bf_web::net::NetBackend::fetch(&*self.net, req);
         }
         let mut req = req.clone();

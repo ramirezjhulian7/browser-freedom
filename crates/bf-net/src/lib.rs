@@ -637,6 +637,136 @@ impl Fetcher {
         self.lock_pool().open.get(&key).copied().unwrap_or(0)
     }
 
+    /// E3: `<link rel=dns-prefetch>` y la cabecera `Link` con ese `rel` (HTML §4.6.7.4,
+    /// "resolve the origin"): resuelve el nombre del origen de `url` y lo deja en la caché de
+    /// DNS ([`Dns`]), sin abrir ninguna conexión. `false` si no hay nada que resolver.
+    pub fn prefetch_dns(&self, url: &Url) -> bool {
+        let Some(host) = Self::http_host(url) else {
+            return false;
+        };
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let ok = self.dns.lookup_all(bare).is_ok();
+        if net_log_enabled() {
+            eprintln!(
+                "red: dns-prefetch {bare} {}",
+                if ok { "resuelto" } else { "falló" }
+            );
+        }
+        ok
+    }
+
+    /// E3: `<link rel=preconnect>` y la cabecera `Link` con ese `rel` (HTML §4.6.7.10;
+    /// Fetch §2.6, *obtain a connection*): abre la conexión con el origen de `url` (DNS, TCP,
+    /// TLS y, si se negocia, HTTP/2) sin pedir nada, y la deja en el pool para la primera
+    /// petición. Una conexión h2 queda compartida (RFC 9113 §9.1); una HTTP/1.1, libre.
+    ///
+    /// No hace nada si el origen ya tiene una conexión (abierta o abriéndose) o si otra h2
+    /// sirve para él (§9.1.1): el tope de conexiones ociosas que deja una preconexión es una
+    /// por origen. Un origen de la lista HSTS se abre por `https` (RFC 6797 §8.3), que es como
+    /// irán sus peticiones. Devuelve si abrió una.
+    pub fn preconnect(&self, url: &Url) -> bool {
+        let url = self.hsts.upgrade(url).unwrap_or_else(|| url.clone());
+        let Some(host) = Self::http_host(&url) else {
+            return false;
+        };
+        let tls = url.scheme == "https";
+        let port = url.port.unwrap_or(if tls { 443 } else { 80 });
+        let key: PoolKey = (host.clone(), port, tls);
+        let started = Instant::now();
+        let may_h2 = (tls || self.h2_prior_knowledge)
+            && !self
+                .h1_known
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key);
+        // El mismo turno que la primera petición a un origen que puede hablar h2: la que
+        // llegue mientras se abre espera a esta conexión en vez de abrir otra.
+        let gate = may_h2.then(|| {
+            self.connecting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(key.clone())
+                .or_default()
+                .clone()
+        });
+        let _turn = gate
+            .as_ref()
+            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()));
+        if self.h2_connection(&key).is_some() {
+            return false;
+        }
+        let guard = {
+            let mut pool = self.lock_pool();
+            let open = pool.open.entry(key.clone()).or_default();
+            if *open > 0 {
+                return false;
+            }
+            *open += 1;
+            SlotGuard {
+                fetcher: self,
+                key: &key,
+                held: true,
+            }
+        };
+        if tls
+            && !self
+                .h1_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key)
+            && self.coalesce(&host, &key).is_some()
+        {
+            return false;
+        }
+        *self
+            .connections_opened
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
+        let protocol = match self.open(&host, port, tls, &key) {
+            Ok(Opened::H1(s)) => {
+                self.h1_known
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key.clone());
+                guard.keep(BufReader::new(s));
+                "http/1.1"
+            }
+            Ok(Opened::H2(c)) => {
+                drop(guard);
+                let mut map = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+                if !map.get(&key).is_some_and(|c| c.is_alive()) {
+                    map.insert(key.clone(), Arc::new(c));
+                }
+                "h2"
+            }
+            Err(e) => {
+                if net_log_enabled() {
+                    eprintln!("red: preconexión {} falló: {e}", url.origin());
+                }
+                return false;
+            }
+        };
+        if net_log_enabled() {
+            eprintln!(
+                "red: preconexión {} {protocol} en {:.0} ms",
+                url.origin(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        true
+    }
+
+    /// El nombre del origen `http(s)` de `url`.
+    fn http_host(url: &Url) -> Option<String> {
+        if !matches!(url.scheme.as_str(), "http" | "https") {
+            return None;
+        }
+        match &url.host {
+            Some(Host::Empty) | None => None,
+            Some(h) => Some(h.to_string()),
+        }
+    }
+
     /// RFC 9113 §9.1.1 (*connection reuse*): una conexión h2 por TLS abierta con otro origen
     /// sirve para el `https` de `key` si `host` resuelve a la IP a la que está conectada y su
     /// certificado es válido para `host` (se verifica de nuevo, con las mismas raíces). Se

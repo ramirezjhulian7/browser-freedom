@@ -81,6 +81,32 @@ impl CachedLoader {
             .map_or((None, ReferrerPolicy::Default), |(u, p)| (Some(u), p))
     }
 
+    /// E3: un recurso que el documento ya obtuvo (o está obteniendo) por este cargador: un
+    /// `<link rel=preload>`, la descarga especulativa o el pintado. Si está en camino, espera
+    /// a que llegue. `None` si nunca se pidió (no sale ninguna petición) o si falló.
+    pub fn available(&self, url: &Url) -> Option<Resource> {
+        let key = url.href();
+        if let Some(hit) = self
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return hit.clone();
+        }
+        let flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()?;
+        let mut r = flight.result.lock().unwrap_or_else(|e| e.into_inner());
+        while r.is_none() {
+            r = flight.ready.wait(r).unwrap_or_else(|e| e.into_inner());
+        }
+        r.clone().flatten()
+    }
+
     /// El documento que pide los subrecursos: su URL (el referente) y su política.
     pub fn set_client(&self, url: Url, policy: ReferrerPolicy) {
         *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some((url, policy));
@@ -618,10 +644,17 @@ pub fn fetch_document_with(
             Some((engine, env)) => {
                 // E3: las hojas y los scripts del documento se piden en paralelo mientras el
                 // parser avanza (HTML §13.2.8, `preload::speculative_fetch`).
+                // Y lo que adelanta la cabecera `Link` (RFC 8288; todas sus líneas).
+                let link = response
+                    .headers
+                    .get_all("link")
+                    .collect::<Vec<_>>()
+                    .join(",");
                 crate::preload::speculative_fetch(
                     loader.clone(),
                     text.clone(),
                     response.url.clone(),
+                    (!link.is_empty()).then_some(link),
                 );
                 engine.set_navigation_policies(
                     response.headers.get("cross-origin-opener-policy"),

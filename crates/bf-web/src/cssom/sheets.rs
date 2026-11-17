@@ -870,10 +870,31 @@ pub fn link_connected(agent: &mut Agent, n: NodeRef) {
 /// enlace sigue conectado y siendo un `preload`.
 fn schedule_preload(agent: &mut Agent, n: NodeRef) {
     let realm = WebContextHandle::current(agent).realm;
-    let url = with_doc(agent, n.doc, |d| {
-        let href = d.element(n.node)?.attr("href")?.to_owned();
-        bf_infra::Url::parse(&href, Some(&d.base_url())).ok()
+    // E3: la petición lleva el *destination* de `as` (HTML §4.6.7.12, "translate a preload
+    // destination"; Fetch §2.2.5) y las credenciales de `crossorigin` (HTML §2.5.4: sin el
+    // atributo, `include`; `anonymous`, solo al mismo origen). Antes iba sin nada: el
+    // navegador no la reconocía como la imagen o la fuente que pedía después y la descargaba
+    // otra vez.
+    let found = with_doc(agent, n.doc, |d| {
+        let el = d.element(n.node)?;
+        let href = el.attr("href")?.to_owned();
+        let url = bf_infra::Url::parse(&href, Some(&d.base_url())).ok()?;
+        let destination = match el.attr("as").map(str::to_ascii_lowercase).as_deref() {
+            Some("image") => Some(bf_infra::Destination::Image),
+            Some("font") => Some(bf_infra::Destination::Font),
+            Some("style") => Some(bf_infra::Destination::Style),
+            Some("script") => Some(bf_infra::Destination::Script),
+            _ => None,
+        };
+        let same_origin = url.origin() == d.url.origin();
+        let credentials = match el.attr("crossorigin").map(str::to_ascii_lowercase) {
+            None => true,
+            Some(v) if v == "use-credentials" => true,
+            Some(_) => same_origin,
+        };
+        Some((url, destination, credentials))
     });
+    let url = found.as_ref().map(|(u, _, _)| u.clone());
     let fire = move |agent: &mut Agent, ok: bool| {
         crate::html::legacy_factories::delay_load(agent, n, false);
         let live =
@@ -903,9 +924,14 @@ fn schedule_preload(agent: &mut Agent, n: NodeRef) {
         );
         return;
     };
+    let (destination, credentials) = found.map_or((None, false), |(_, d, c)| (d, c));
     let req = crate::net::NetRequest {
         url,
-        options: bf_net::RequestOptions::default(),
+        options: bf_net::RequestOptions {
+            destination,
+            credentials,
+            ..bf_net::RequestOptions::default()
+        },
     };
     crate::net::start(
         agent,

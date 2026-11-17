@@ -368,6 +368,55 @@ fn concurrent_streams_share_one_connection() {
     assert_eq!(*f.connections_opened.lock().unwrap(), 1);
 }
 
+/// E3: `<link rel=preconnect>` (HTML §4.6.7.10): la preconexión abre la conexión h2 sin
+/// pedir nada, y las peticiones que llegan después (también a la vez) van todas por ella
+/// (RFC 9113 §9.1).
+#[test]
+fn preconnect_opens_the_shared_h2_connection() {
+    const N: usize = 4;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut s = Server::handshake(stream, &[]);
+        opened_tx.send(()).unwrap();
+        for _ in 0..N {
+            let r = s.request(false);
+            let path = r.get(":path").unwrap().to_owned();
+            s.respond(r.id, "200", &[], path.as_bytes());
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "una sola conexión");
+    });
+    let f = Arc::new(h2c_fetcher());
+    assert!(f.preconnect(&url(port, "/")));
+    // El servidor ya hizo el handshake sin recibir ninguna petición.
+    opened_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // Una segunda preconexión no abre otra.
+    assert!(!f.preconnect(&url(port, "/otra")));
+    let threads: Vec<_> = (0..N)
+        .map(|i| {
+            let f = f.clone();
+            thread::spawn(move || {
+                let path = format!("/r{i}");
+                let res = f
+                    .fetch(&url(port, &path), &FetchOptions::default())
+                    .unwrap();
+                assert_eq!(res.protocol, Protocol::H2);
+                assert_eq!(res.body, path.into_bytes());
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    server.join().unwrap();
+    assert_eq!(*f.connections_opened.lock().unwrap(), 1);
+}
+
 #[test]
 fn flow_control_in_both_directions() {
     let upload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
