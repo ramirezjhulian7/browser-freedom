@@ -84,7 +84,7 @@ red, caché, cookies, redirecciones, CSP, cabeceras y shell. "Arreglado" quiere 
 | 13 | CSP: los módulos importados (`import()`, `import`) se pedían sin el nonce del script que los importa, y `'strict-dynamic'` los bloqueaba | 2: Reddit, Mercado Libre | E3 | **Arreglado** |
 | 14 | El `User-Agent` de Freedom recibe 403 de Google (`accounts.google.com/gsi/client`; con uno de Chrome, 200) | 2: El País, El Tiempo | decisión del usuario (`bf-infra/src/identity.rs` no se toca) | — |
 | 15 | Elementos gigantes | 2: BBC (logo), react.dev (lupa: un SVG sin tamaño) | E2 | — |
-| 16 | Protección anti-bots | 1 bloqueado: Stack Overflow (Cloudflare, 403; el reto no dibuja nada). Amazon (202) y Reddit pasaron el suyo | E1 (JS del reto) y E3 (cabeceras) | — |
+| 16 | Protección anti-bots | 0: Stack Overflow parecía bloqueado, pero el reto de Cloudflare se supera en ~5,6 s y el barrido solo esperaba ~1 s (ver "Ronda 6"). Amazon (202) y Reddit también pasaron el suyo | — | **Diagnosticado**: no falta nada estándar |
 | 17 | CSS-in-JS por `insertRule` que no se aplica | 1: BBC (styled-components) | E2 | — |
 | 18 | Un módulo se evalúa dos veces (con y sin `crossorigin`): "Custom element … is already defined" | 1: NYT (5 módulos) | E1 | — |
 | 19 | `DOMMatrix` no es constructor | 1: Apple | E1 | — |
@@ -136,6 +136,65 @@ red, caché, cookies, redirecciones, CSP, cabeceras y shell. "Arreglado" quiere 
 - **`FREEDOM_NET_LOG`:** anota también las peticiones que fallan, con el error y el tiempo.
 - **El paso `dump` de `freedom session`:** deja el DOM, el árbol de maqueta y la consola de
   la pestaña. Con él salió este barrido (`docs/rendimiento.md`, "Volcado de una sesión").
+
+## Ronda 6 (2026-11-17)
+
+### El reto de Cloudflare (Stack Overflow)
+
+**Causa demostrada: no está bloqueado, es lento.** Con `freedom session
+https://stackoverflow.com/questions` y 60 esperas (~20 s), el reto se supera y Stack Overflow
+carga entero (captura con la lista de preguntas, sus hojas y sus scripts).
+
+Lo que hace el reto en Freedom. Los tiempos son desde el inicio, con el registro de red de
+este bloque y una instrumentación temporal de las llamadas a las APIs del host, sin commit:
+
+| Tiempo | Qué pasa |
+|---:|---|
+| 0,25 s | `GET /questions` → **403** con "Just a moment...". Es la respuesta normal del reto, no un rechazo. |
+| | La página trae su CSP en un `<meta>`: `script-src` con nonce y `'unsafe-eval'`; `connect-src`, `frame-src` y `child-src` a `challenges.cloudflare.com`; `worker-src blob:`. |
+| 0,5 s | `orchestrate/precursor_interstitial/v1` (200, 623 KB ofuscados, con nonce) |
+| | Usa `history.replaceState`, `createElement` y `appendChild`, `Performance.getEntries` y `PerformanceObserver.observe`, y `XMLHttpRequest` con `timeout`, `ontimeout`, `onerror`, `setRequestHeader` y `onreadystatechange`. |
+| 1,4 s | primer `XMLHttpRequest` |
+| 2,8 s | `scripts/precursor/…/main.js` |
+| 3,5 s | segundo `XMLHttpRequest` y un `Worker` dedicado (`blob:`), que termina con `terminate` a los 4,4 s |
+| 4,3 s | la página del reto, traducida: "Un momento…", "Verificación de seguridad en curso" |
+| 5,3 s | `BroadcastChannel.postMessage` |
+| 5,6 s | `POST /questions?__cf_chl_f_tk=…` → 200: Stack Overflow con sus hojas y scripts |
+
+- **Ninguna excepción del motor.** La instrumentación que anotaba cada error creado por el
+  motor, también los que el script atrapa, no vio ninguno durante el reto.
+- **Ninguna API ausente.** Ni bloqueos de CSP ni errores en la consola.
+- **Por qué el barrido lo dio por bloqueado:** sus 3 esperas (~1 s) cortaban el reto antes del
+  primer `XMLHttpRequest`, con la página aún en blanco.
+
+Lo que encontré en mi territorio y arreglé: las peticiones de los scripts (`XMLHttpRequest`,
+`fetch()`, `EventSource`) van por `bf_net::streaming` y no salían en `FREEDOM_NET_LOG`. Ahora
+salen, también las fallidas (`tests/net_log.rs`).
+
+Queda sin medir si 5,6 s es lo que tarda el reto en otros navegadores (parte son esperas del
+propio reto) o lo alarga la velocidad del JavaScript de Freedom (dueño: E1, si se quiere
+seguir).
+
+### Un `<iframe>` lento ya no congela su página (`asimetrix.co`)
+
+- **Causa demostrada:** el hilo de la pestaña hacía la navegación del marco de una vez, dentro
+  de una tarea: red, parseo y scripts.
+  - El `<iframe>` de YouTube, que crea `YT.Player` hacia 1,5 s, lo retenía 2,7 s: 239 ms de
+    red y 2500 ms de parseo y scripts.
+  - Antes, los scripts del propio padre lo ocupaban de 1,0 a 1,7 s, y el bucle corría todas
+    las tareas pendientes antes de pintar.
+  - Mientras tanto la ventana no recibía cuadros. El titular, una animación de entrada, salía
+    a los ~3,3 s de la primera pintura.
+- **Arreglo** (E3):
+  - la red del marco va en otro hilo y su documento se le da al parser en trozos, uno por
+    tarea (HTML §7.4.2.2 y §13.2.2);
+  - el bucle de la pestaña pinta como mucho cada 50 ms de tareas (HTML §8.1.7.3).
+- **Ahora:** el marco termina en 17 tareas, y el titular se ve en la primera captura tras la
+  primera pintura (0,33 s después).
+- **Test:** `bf-shell/tests/slow_frame.rs`, un marco que tarda 2 s y un clic que se atiende
+  antes.
+- **Queda:** un solo script largo del marco sigue siendo una tarea larga; no se puede partir
+  sin pausar el intérprete.
 
 ## Lo que no encontré
 

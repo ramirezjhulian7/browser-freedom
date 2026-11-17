@@ -64,7 +64,7 @@ Criterios no cumplidos, con su cifra actual y su meta (todas del Mac):
 | Apartado | Criterio | Cifra actual | Meta | Fuente |
 |---|---|---|---|---|
 | 2.3 | WPT `html/syntax/parsing` sin fallos, con los tests de `document.write` | 8164 / 8166 subtests en `master`; los 2 que quedan no se pueden cumplir (ver "Decisiones pendientes del usuario") | 0 fallos | `pendiente/mac/e1.md`, "Sesión nueva, ronda 1" (rama del parser, integrada en `1ee12fa`) |
-| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 95 / 107 en `master` (8 de los 12 que faltan son de CSS Flexbox 2) | pasan | `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3" |
+| 3.6 | Los ~50 reftests de css-flexbox por palabras clave de tamaño | 97 / 107 en `master`; de los 10 que faltan, 8 son de CSS Flexbox 2 y 2 no los pasa ningún navegador (ver "Decisiones pendientes del usuario") | pasan | `pendiente/mac/e2.md`, "Sesión nueva, ronda 4" |
 | 5 | Un lector de pantalla lee Wikipedia | no: el motor calcula rol y nombre accesibles, pero el árbol no se expone al sistema (ver "Decisiones pendientes del usuario") | lo lee | `pendiente/mac/e1.md`, "Ciclo de cierre, ronda 1" |
 | 5 | Un fuzzer de IPC no escapa del sandbox | no: no hay procesos ni IPC (ver "Decisiones pendientes del usuario") | no escapa | — |
 
@@ -72,20 +72,30 @@ El método de las dos cifras de rendimiento está en [`rendimiento.md`](rendimie
 
 ## Decisiones pendientes del usuario
 
-Cuatro puntos no avanzan sin una decisión que no le toca a ningún ejecutor:
+Cuatro puntos no avanzan sin una decisión que no le toca a ningún ejecutor (al 2026-11-17, sin
+respuesta; el planificador no excluye tests ni añade crates mientras tanto):
+- **Excluir los 12 tests que ningún navegador cumple.** Con eso, 2.3 y 3.6 quedarían cumplidos
+  y el avance subiría a 93.3 % con la fase 1. Son:
+  - **2.3, 2 subtests de `html/syntax/parsing`.** `DOMContentLoaded-defer.html` pide lo
+    contrario que `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
+    `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
+    no dispara.
+  - **3.6, 10 reftests de css-flexbox.**
+    - 8 son de CSS Flexbox 2 (`flex-wrap: balance`, `flex-line-count`), un borrador sin texto
+      estable.
+    - `flex-container-max-content-001` y `-min-content-001` contradicen §4.5 en su referencia,
+      y en wpt.fyi fallan en Chrome, Firefox y Safari (E2, "Sesión nueva, ronda 4").
 - **Lector de pantalla (fase 5).** El motor ya calcula rol y nombre accesibles, pero un lector
   de pantalla de macOS solo lee lo que se expone por `NSAccessibility`. Eso pide FFI con
-  Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo.
+  Objective-C, es decir `unsafe`, que el proyecto prohíbe, o un crate externo nuevo
+  (`accesskit`, la recomendación del planificador).
 - **Fuzzer de IPC (fase 5).** Hace falta separar el motor en procesos (navegador y contenido)
   con IPC propio. Hoy cada pestaña es un hilo del mismo proceso.
-- **3.6, flexbox por palabras clave de tamaño.** 8 de los 108 tests son de CSS Flexbox 2
-  (`flex-wrap: balance`, `flex-line-count`), un borrador sin texto estable. O se implementa
-  sin especificación estable o se sacan del criterio.
-- **2.3, los 2 subtests de `html/syntax/parsing` que no se pueden cumplir.**
-  `DOMContentLoaded-defer.html` pide lo contrario que
-  `DOMContentLoaded-defer-task-order.tentative.html`, que pasa, y
-  `adoption-agency-reparenting-pagehide.tentative.html` espera un `pagehide` que el estándar
-  no dispara. O se sacan del criterio o 2.3 no puede llegar a 0 fallos.
+- **El `User-Agent` de Freedom y Google.** `accounts.google.com/gsi/client`, el script de
+  inicio de sesión de Google que usan El País y El Tiempo, responde 403 al `User-Agent` de
+  Freedom y 200 a uno de Chrome (barrido de E3).
+  - La regla del proyecto es no imitar a Chrome, y `bf-infra/src/identity.rs` no se toca.
+  - El planificador lo deja así salvo que el usuario diga otra cosa.
 
 La del suelo de red de la primera pintura ya no hace falta: el criterio se cumple con la red
 incluida (fase 5, **Estado**).
@@ -200,6 +210,15 @@ Lo que falla hoy en sitios reales (funciones que faltan y errores por investigar
   allá del apartado (Mac, 2026-11-12): Shadow DOM (`shadow-dom/` 97.3 %), custom elements
   (`custom-elements/` 3556 / 4172, 85.2 %, E1, `0363c59`), `XMLSerializer` (E1,
   `bf-dom/src/{shadow,custom}.rs`, `bf-web/src/dom/`); `css/cssom-view` 56.5 %.
+- **Marcos y criptografía** (E1, en `master` desde `25b56f3`; `pendiente/mac/e1.md`, "Sesión
+  nueva, ronda 5"):
+  - **`WindowProxy` de los marcos.** La ventana de un `<iframe>` es el mismo objeto aunque el
+    marco navegue a otro origen, y el acceso pasa por las reglas entre orígenes (HTML §7.2.3).
+    `html/browsers/origin/cross-origin-objects`: **18 / 42** (11 antes).
+  - **`crypto.subtle`** (Web Cryptography API) en ventanas, marcos y workers, solo en
+    contextos seguros. Hace `digest` con SHA-1, SHA-256, SHA-384 y SHA-512, y HMAC con
+    `importKey`, `exportKey`, `generateKey`, `sign` y `verify`. Lo demás rechaza con el error
+    estándar (`NotSupportedError`).
 - **Hojas enlazadas en la ventana** (E2, en `master` desde `489e6f8`; `pendiente/mac/e2.md`,
   "Sesión nueva, ronda 1"): `<link rel=stylesheet>` dispara `load` (HTML §4.6.7.2) y
   `document.styleSheets` tiene sus reglas. La hoja sale de `bf_style::sheet_cache`, ya
@@ -442,15 +461,21 @@ por un `<iframe>` o envían un formulario a uno (`notrun`). Los 7 casos de
   auto w / h` (HTML §15.4.3) y reservan su hueco antes de llegar. Las pistas de presentación
   quedan por debajo de todas las capas de autor (CSS Cascade 5 §6.5): una regla en `@layer`
   les gana, como en `asimetrix.co` (`pendiente/mac/e2.md`, "Sesión nueva, ronda 1").
-- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **95 / 107** en
-  `master` (Mac, 2026-11-13, E5, `pendiente/mac/e5.md`, "Ciclo de cierre, ronda 3"; meta: que
-  pasen todos; 86 / 108 en la ronda 6 de E5, 74 / 108 antes; el 108 contaba un test que hoy no
-  se puede ejecutar). Entró el algoritmo de tamaños intrínsecos de flex, §9.9.1 (E5, "Ciclo de
-  cierre, ronda 1"). `css/css-flexbox` en total: **803 / 949** (780 antes). Fallan 12:
-  - `flex-wrap: balance` y `flex-line-count` (8). Son de CSS Flexbox 2, un borrador sin texto
-    estable, y no se implementan; sacarlos del criterio es una decisión pendiente.
-  - Otros 4 (el desglose por causa de la ronda 6, en
-    `pendiente/mac/e5-flexbox-subconjuntos.md`, es anterior a §9.9.1).
+- **Parcial**: los reftests de css-flexbox con palabras clave de tamaño: **97 / 107** en
+  `master` (Mac, 2026-11-17, E2, `pendiente/mac/e2.md`, "Sesión nueva, ronda 4"; meta: que
+  pasen todos). Antes: 95 / 107 (E5, "Ciclo de cierre, ronda 3"), 86 / 108 en la ronda 6 de E5 y
+  74 / 108 al principio; el 108 contaba un test que hoy no se puede ejecutar.
+  - Entró el algoritmo de tamaños intrínsecos de flex, §9.9.1 (E5, "Ciclo de cierre, ronda
+    1").
+  - `css/css-flexbox` en total: **813 / 949** (803 antes, 780 al principio). E2 arregló
+    `flexbox-min-width-auto-001` y `-min-height-auto-001` (el patrón de `dotted` ajustado al
+    píxel).
+  - Fallan 10, y ningún navegador los cumple:
+    - `flex-wrap: balance` y `flex-line-count` (8). Son de CSS Flexbox 2, un borrador sin
+      texto estable, y no se implementan.
+    - `flex-container-max-content-001` y `-min-content-001` (2): su referencia contradice
+      §4.5, y en wpt.fyi fallan en Chrome 157, Firefox 160 y Safari 27.2.
+  - Sacarlos del criterio es una decisión pendiente (ver "Decisiones pendientes del usuario").
 - **`Namespace::Other`**: `Other` y `Null` existen en `bf-infra`; el parser XML ya trata un
   URI vacío como *null* (E1), pero sigue mapeando el namespace ausente a HTML en otros casos.
 - **Falta**: `lookupNamespaceURI`/`isDefaultNamespace`, `@namespace` y `ns|E` en selectores,
