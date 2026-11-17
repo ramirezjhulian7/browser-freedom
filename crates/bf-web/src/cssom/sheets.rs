@@ -872,9 +872,9 @@ fn schedule_preload(agent: &mut Agent, n: NodeRef) {
     let realm = WebContextHandle::current(agent).realm;
     // E3: la petición lleva el *destination* de `as` (HTML §4.6.7.12, "translate a preload
     // destination"; Fetch §2.2.5) y las credenciales de `crossorigin` (HTML §2.5.4: sin el
-    // atributo, `include`; `anonymous`, solo al mismo origen). Antes iba sin nada: el
-    // navegador no la reconocía como la imagen o la fuente que pedía después y la descargaba
-    // otra vez.
+    // atributo, `include`; `anonymous`, solo al mismo origen). Antes iba sin *destination*
+    // (y siempre con credenciales): el navegador no la reconocía como la imagen o la fuente
+    // que pedía después y la descargaba otra vez.
     let found = with_doc(agent, n.doc, |d| {
         let el = d.element(n.node)?;
         let href = el.attr("href")?.to_owned();

@@ -152,8 +152,8 @@ fn fetch_streaming_inner(
                 &headers,
                 body.as_deref(),
             );
-            match c.request_parts(r) {
-                Ok(rx) => match rx.recv() {
+            if let Ok(rx) = c.request_parts(r) {
+                match rx.recv() {
                     Ok(http2::Part::Head(status, h)) => {
                         let head = http::Head {
                             version: (2, 0),
@@ -170,8 +170,7 @@ fn fetch_streaming_inner(
                     Ok(http2::Part::End(Err(http2::Error::Lost))) if idempotent => {}
                     Ok(http2::Part::End(Err(e))) => return Err(h2_error(e)),
                     Ok(_) | Err(_) => return Err(h2_error(http2::Error::Lost)),
-                },
-                Err(_) => {}
+                }
             }
         }
         if let Some((head, rx)) = h2_head {

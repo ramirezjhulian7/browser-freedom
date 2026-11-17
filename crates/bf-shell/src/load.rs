@@ -1633,16 +1633,29 @@ mod shared_requests {
         assert_eq!(paint.map(|r| r.bytes), Some(b"img".to_vec()));
         assert_eq!(count.load(Ordering::SeqCst), 1, "una sola petición");
         assert_eq!(*backend.net.fetcher.shared_requests.lock().unwrap(), 1);
-        // Ya terminada, otra petición del motor web sale de nuevo (`no-store`): solo se
-        // juntan las que se cruzan.
+        // E3: ya terminada, otra petición del motor web la toma de lo que tiene el documento
+        // aunque sea `no-store` (HTML §4.8.4.3, *list of available images*): no sale a la red.
         let again = NetRequest {
             url: img.clone(),
             options: bf_net::RequestOptions {
                 destination: Some(bf_infra::Destination::Image),
+                credentials: true,
                 ..Default::default()
             },
         };
-        assert!(backend.fetch(&again).is_ok());
+        assert_eq!(backend.fetch(&again).map(|r| r.body), Ok(b"img".to_vec()));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        // Sin credenciales no es la misma petición que hizo el cargador: va a la red, y como
+        // ya no se cruza con otra, sale de nuevo.
+        let anonymous = NetRequest {
+            url: img.clone(),
+            options: bf_net::RequestOptions {
+                destination: Some(bf_infra::Destination::Image),
+                credentials: false,
+                ..Default::default()
+            },
+        };
+        assert!(backend.fetch(&anonymous).is_ok());
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 

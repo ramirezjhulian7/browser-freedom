@@ -272,6 +272,9 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
+/// E3: una conexión libre de las peticiones por partes y desde cuándo.
+type IdleStream = (Instant, BufReader<Stream>);
+
 /// E3: cuánto se guarda libre una conexión de las peticiones por partes.
 const STREAM_IDLE: Duration = Duration::from_secs(4);
 
@@ -446,7 +449,7 @@ pub struct Fetcher {
     pub connections_opened: Mutex<usize>,
     /// E3: las conexiones HTTP/1.1 libres de las peticiones por partes
     /// ([`Fetcher::fetch_streaming`]), por origen.
-    stream_idle: Mutex<HashMap<PoolKey, Vec<(Instant, BufReader<Stream>)>>>,
+    stream_idle: Mutex<HashMap<PoolKey, Vec<IdleStream>>>,
     /// E6: las peticiones de imagen en vuelo que otras idénticas esperan
     /// ([`Fetcher::send_shared`]), y cuántas se juntaron con otra (para los tests).
     in_flight: Mutex<HashMap<FlightKey, Arc<Flight>>>,
