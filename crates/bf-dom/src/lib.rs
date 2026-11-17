@@ -272,6 +272,8 @@ pub struct Document {
     pub(crate) custom: custom::CustomState, // E1
     /// E1: los form owners que asoció el parser (HTML §13.2.6.1, *parser inserted flag*).
     pub(crate) parser_form_owners: HashMap<NodeId, NodeId>,
+    /// E2: el texto de las hojas que el CSSOM cambió (ver `cssom_sheet_text`).
+    cssom_sheet_texts: HashMap<NodeId, String>,
 }
 
 impl Default for Document {
@@ -292,6 +294,7 @@ impl Document {
             character_set: "UTF-8".into(),
             is_html: true,
             scripting: false,
+            cssom_sheet_texts: HashMap::new(),
             version: 0,
             id_cache: IdCache::default(),
             attr_nodes: HashMap::new(),
@@ -528,6 +531,24 @@ impl Document {
 
     pub(crate) fn bump_version(&mut self) {
         self.version += 1;
+    }
+
+    /// E2: la hoja del `<style>` o `<link>` `node` tal como la dejó el CSSOM, serializada
+    /// (`insertRule`, `deleteRule`…: CSSOM §6.1, la hoja es el objeto vivo y no el texto del
+    /// elemento), o, para la raíz del documento, sus `adoptedStyleSheets` (CSSOM §6.6). La pone
+    /// `bf-web` y la lee la cascada con la que se pinta (`bf_style::loader`); `None` si el CSSOM
+    /// no la cambió.
+    pub fn cssom_sheet_text(&self, node: NodeId) -> Option<&str> {
+        self.cssom_sheet_texts.get(&node).map(String::as_str)
+    }
+
+    /// E2: reemplaza todos los textos de [`Document::cssom_sheet_text`]; si cambian, el
+    /// documento cambia de versión (hay que volver a pintar).
+    pub fn set_cssom_sheet_texts(&mut self, texts: HashMap<NodeId, String>) {
+        if self.cssom_sheet_texts != texts {
+            self.cssom_sheet_texts = texts;
+            self.bump_version();
+        }
     }
 }
 

@@ -26,7 +26,8 @@ use bf_layout::fragment::{Edges, Fragment, FragmentKind, FragmentTree, Rect, Tab
 use bf_layout::{FontProvider, Widget, font_request};
 use bf_style::ComputedStyle;
 use bf_style::properties::types::{
-    BackgroundBox, BgSize, BorderStyle, Direction, Float, Image, Position, RepeatStyle, Visibility,
+    BackgroundBox, BgSize, BorderStyle, Direction, Display, Float, Image, Position, RepeatStyle,
+    Visibility,
 };
 
 use crate::images::PageImages;
@@ -2079,49 +2080,65 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
         flow: Limit,
         absolute: Limit,
         fixed: Limit,
+        /// E2: ¿el bloque contenedor de un `fixed` es el viewport (ningún antepasado
+        /// transformado)?
+        fixed_to_viewport: bool,
     }
     /// El rectángulo que contiene lo visto (izquierda, arriba, derecha, abajo).
     struct Bounds(f32, f32, f32, f32);
     impl Bounds {
+        fn empty() -> Bounds {
+            Bounds(
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            )
+        }
         fn add(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
             self.0 = self.0.min(x0);
             self.1 = self.1.min(y0);
             self.2 = self.2.max(x1);
             self.3 = self.3.max(y1);
         }
+        fn is_finite(&self) -> bool {
+            self.0.is_finite() && self.1.is_finite() && self.2.is_finite() && self.3.is_finite()
+        }
     }
-    fn walk(f: &Fragment, clips: Clips, b: &mut Bounds) {
+    /// `margin_box`: la caja cuenta con su margin box (la raíz y los ítems de flex y grid);
+    /// si no, con su border box.
+    fn walk(f: &Fragment, clips: Clips, margin_box: bool, b: &mut Bounds) {
         let position = if is_box(f) {
             f.style.position
         } else {
             Position::Static
         };
+        // E2: una caja `fixed` cuyo bloque contenedor es el viewport no se mueve al desplazar el
+        // documento (CSS Position 3 §2.1), y el desbordamiento desplazable del documento solo
+        // cuenta las cajas "for which it is the containing block" (CSS Overflow 3 §2.2): no lo
+        // agranda. El menú lateral de DuckDuckGo, escondido a la derecha con `transform`, hacía
+        // desplazable la página en horizontal.
+        if position == Position::Fixed && clips.fixed_to_viewport {
+            return;
+        }
         let limit = match position {
             Position::Absolute => clips.absolute,
             Position::Fixed => clips.fixed,
             _ => clips.flow,
         };
         let Some([ma, mb, mc, md, me, mf]) = fragment_matrix(f) else {
-            walk_box(f, clips, limit, false, b);
+            walk_box(f, clips, limit, margin_box, b);
             return;
         };
         let all = Clips {
             flow: NONE,
             absolute: NONE,
             fixed: NONE,
+            fixed_to_viewport: false,
         };
-        let mut local = Bounds(
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        );
-        walk_box(f, all, NONE, true, &mut local);
-        if !(local.0.is_finite()
-            && local.1.is_finite()
-            && local.2.is_finite()
-            && local.3.is_finite())
-        {
+        let mut local = Bounds::empty();
+        walk_box(f, all, NONE, false, &mut local);
+        if !local.is_finite() {
             return;
         }
         let corners = [
@@ -2130,23 +2147,22 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
             (local.0, local.3),
             (local.2, local.3),
         ];
-        let mut t = Bounds(
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        );
+        let mut t = Bounds::empty();
         for (x, y) in corners {
             let (px, py) = (ma * x + mc * y + me, mb * x + md * y + mf);
             t.add(px, py, px, py);
         }
         b.add(t.0, t.1, t.2.min(limit.0), t.3.min(limit.1));
     }
-    /// La caja `f` (ya en el espacio de su padre) y su subárbol. Con `border_box`, la caja
-    /// cuenta con su border box (la transformada: CSS Overflow 3 §2.2 cuenta "the border boxes
-    /// of all boxes"); si no, con su margin box, como antes.
-    fn walk_box(f: &Fragment, clips: Clips, limit: Limit, border_box: bool, b: &mut Bounds) {
-        let m = if border_box { f.rect } else { f.margin_rect() };
+    /// La caja `f` (ya en el espacio de su padre) y su subárbol.
+    ///
+    /// E2: CSS Overflow 3 §2.2 cuenta "the border boxes of all boxes for which it is the
+    /// containing block" y "the margin areas of grid item and flex item boxes": el margin box
+    /// solo para los ítems de flex y grid (y la raíz, para que el margen que colapsa a través de
+    /// ella siga siendo desplazable). Antes contaba el margin box de todas: en El País una caja
+    /// de 334 px con un margen derecho que llegaba a 1298 px ensanchaba la página.
+    fn walk_box(f: &Fragment, clips: Clips, limit: Limit, margin_box: bool, b: &mut Bounds) {
+        let m = if margin_box { f.margin_rect() } else { f.rect };
         b.add(m.x, m.y, m.right().min(limit.0), m.bottom().min(limit.1));
         // E12: hasta el borde de recorte (todo en un eje que no recorta).
         let inner = match f.clip {
@@ -2162,9 +2178,20 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
                 clips.absolute
             },
             fixed: if transformed { inner } else { clips.fixed },
+            fixed_to_viewport: clips.fixed_to_viewport && !transformed,
         };
+        let items = is_box(f)
+            && matches!(
+                f.style.display,
+                Display::Flex
+                    | Display::InlineFlex
+                    | Display::Grid
+                    | Display::InlineGrid
+                    | Display::GridLanes
+                    | Display::InlineGridLanes
+            );
         for c in &f.children {
-            walk(c, children, b);
+            walk(c, children, items && is_box(c), b);
         }
     }
     let mut b = Bounds(0.0, 0.0, tree.viewport.width, tree.viewport.height);
@@ -2173,8 +2200,9 @@ pub fn document_extent(tree: &FragmentTree) -> Rect {
             flow: NONE,
             absolute: NONE,
             fixed: NONE,
+            fixed_to_viewport: true,
         };
-        walk(root, clips, &mut b);
+        walk(root, clips, true, &mut b);
     }
     Rect::new(0.0, 0.0, b.2, b.3)
 }

@@ -100,6 +100,27 @@ pub fn presentational_hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
     let Some(el) = doc.element(node) else {
         return h.0;
     };
+    if el.ns == bf_infra::Namespace::Svg {
+        // E2: SVG 2 §8.2 y §6.6: `width` y `height` del `<svg>` son atributos de presentación
+        // de las propiedades `width` y `height`, con la gramática de CSS y números sin unidad
+        // como px (`1em`, `100%`, `24`). Solo el `<svg>` más externo, que es una caja de CSS;
+        // los de dentro los maqueta `bf-svg` con sus atributos.
+        let outermost = doc
+            .parent(node)
+            .and_then(|p| doc.element(p))
+            .is_none_or(|p| p.ns != bf_infra::Namespace::Svg);
+        if el.name.as_lossy_str() == "svg" && outermost {
+            for name in ["width", "height"] {
+                if let Some(v) = el.attr(name).map(str::trim).filter(|v| !v.is_empty()) {
+                    match v.parse::<f32>() {
+                        Ok(n) => h.push(name, &format!("{n}px")),
+                        Err(_) => h.push(name, v),
+                    }
+                }
+            }
+        }
+        return h.0;
+    }
     if el.ns != bf_infra::Namespace::Html {
         return h.0;
     }

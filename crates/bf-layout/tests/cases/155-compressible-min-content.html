@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- CSS Sizing 3 §5.2.1 y §5.2.2: un control "comprimible" (input, select, textarea…) o un
+     reemplazado con porcentaje en width se resuelve contra 0 para su contribución min-content:
+     la columna con el campo encoge y las dos caben (el buscador de la RAE). -->
+<style>body{margin:0} .s{display:flex;width:400px} .s>div{width:100%}</style><div class=s><div><input size=100 style="width:100%"></div><div>b</div></div><div class=s><div><textarea cols=100 style="width:100%"></textarea></div><div>b</div></div>
+<!-- expect
+Block <html> 0,0 800×57.199
+  Block <body> 0,0 800×57.199
+    Block <div.s> 0,0 400×19.333
+      Block <div> 0,0 200×19.333
+        Line 0,0 200×19.333
+          InlineBlock <input> 0,0 208×19.333
+      Block <div> 200,0 200×19.333
+        Line 200,0 200×16
+          Text "b" 200,0 8×16
+    Block <div.s> 0,19.333 400×37.866
+      Block <div> 0,19.333 200×37.866
+        Line 0,19.333 200×37.866
+          InlineBlock <textarea> 0,19.333 208×34.666
+      Block <div> 200,19.333 200×37.866
+        Line 200,19.333 200×16
+          Text "b" 200,19.333 8×16
+-->

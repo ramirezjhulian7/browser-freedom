@@ -7,7 +7,7 @@
 //! [`viewport_scrollbars`].
 
 use bf_layout::fragment::{Fragment, FragmentKind, FragmentTree, Rect, Size};
-use bf_style::properties::types::Position;
+use bf_style::properties::types::{Position, Visibility};
 use bf_style::values::color::Rgba;
 
 use crate::display_list::{DisplayItem, DisplayList, Radii};
@@ -109,6 +109,19 @@ fn bars(
     }
 }
 
+/// E2: las barras son parte de la caja: una con `visibility: hidden` (CSS 2 §11.2, "the
+/// generated box is invisible") o dentro de un `opacity: 0` (CSS Color 4 §7.2) no las pinta ni
+/// se pueden arrastrar. Los menús desplegables cerrados de Wikipedia (Vector:
+/// `visibility: hidden; opacity: 0; height: 0; overflow: hidden auto`) dejaban dos barras
+/// sueltas. Devuelve (`opacity: 0` aquí o en un antepasado, la caja no se ve).
+fn invisible(f: &Fragment, is_box: bool, transparent: bool) -> (bool, bool) {
+    let transparent = transparent || (is_box && f.style.opacity.0 <= 0.0);
+    (
+        transparent,
+        transparent || f.style.visibility != Visibility::Visible,
+    )
+}
+
 /// Los ejes con barra de un scroll container.
 fn shown(sb: &bf_layout::scroll::ScrollBox) -> (bool, bool) {
     let (ox, oy) = sb.overflows();
@@ -139,12 +152,13 @@ pub fn scrollbars(tree: &FragmentTree, color: Rgba) -> DisplayList {
         page: Vec<DisplayItem>,
         fixed: Vec<DisplayItem>,
     }
-    fn visit(w: &mut Walk<'_>, f: &Fragment, clip: Option<Rect>, fixed: bool) {
+    fn visit(w: &mut Walk<'_>, f: &Fragment, clip: Option<Rect>, fixed: bool, transparent: bool) {
         let is_box = !matches!(f.kind, FragmentKind::Line | FragmentKind::Text);
         let fixed = fixed || (is_box && f.style.position == Position::Fixed);
+        let (transparent, invisible) = invisible(f, is_box, transparent);
         if let Some(sb) = f
             .node
-            .filter(|_| f.pseudo.is_none() && !f.anonymous)
+            .filter(|_| f.pseudo.is_none() && !f.anonymous && !invisible)
             .and_then(|n| w.tree.scroll.boxes.get(&n))
         {
             let show = shown(sb);
@@ -187,7 +201,7 @@ pub fn scrollbars(tree: &FragmentTree, color: Rgba) -> DisplayList {
             } else {
                 inner
             };
-            visit(w, c, child_clip, fixed);
+            visit(w, c, child_clip, fixed, transparent);
         }
     }
     let mut w = Walk {
@@ -197,7 +211,7 @@ pub fn scrollbars(tree: &FragmentTree, color: Rgba) -> DisplayList {
         fixed: Vec::new(),
     };
     if let Some(root) = &tree.root {
-        visit(&mut w, root, None, false);
+        visit(&mut w, root, None, false, false);
     }
     let mut list = DisplayList::default();
     for item in w.page {
@@ -288,9 +302,10 @@ pub fn thumb_at(
         scroll: (f32, f32),
         hit: Option<ThumbHit>,
     }
-    fn visit(w: &mut Walk<'_>, f: &Fragment, clip: Option<Rect>, fixed: bool) {
+    fn visit(w: &mut Walk<'_>, f: &Fragment, clip: Option<Rect>, fixed: bool, transparent: bool) {
         let is_box = !matches!(f.kind, FragmentKind::Line | FragmentKind::Text);
         let fixed = fixed || (is_box && f.style.position == Position::Fixed);
+        let (transparent, invisible) = invisible(f, is_box, transparent);
         let p = if fixed {
             w.point
         } else {
@@ -300,7 +315,7 @@ pub fn thumb_at(
             clip.is_none_or(|c| p.0 >= c.x && p.0 < c.right() && p.1 >= c.y && p.1 < c.bottom());
         if let Some((node, sb)) = f
             .node
-            .filter(|_| f.pseudo.is_none() && !f.anonymous && inside_clip)
+            .filter(|_| f.pseudo.is_none() && !f.anonymous && inside_clip && !invisible)
             .and_then(|n| w.tree.scroll.boxes.get(&n).map(|sb| (n, sb)))
             && let Some(t) = thumbs(
                 f.padding_rect(),
@@ -329,7 +344,7 @@ pub fn thumb_at(
             } else {
                 inner
             };
-            visit(w, c, child_clip, fixed);
+            visit(w, c, child_clip, fixed, transparent);
         }
     }
     let mut w = Walk {
@@ -339,7 +354,7 @@ pub fn thumb_at(
         hit: None,
     };
     if let Some(root) = &tree.root {
-        visit(&mut w, root, None, false);
+        visit(&mut w, root, None, false, false);
     }
     w.hit
 }

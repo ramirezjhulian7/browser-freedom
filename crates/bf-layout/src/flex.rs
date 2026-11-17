@@ -314,19 +314,49 @@ impl<'a> Layout<'a> {
 
     /// Altura de contenido de un ítem maquetado con ancho de contenido `w`. E5: sin su propio
     /// `height` ni sus límites (el tamaño de contenido, §4.5 y §9.2.3 E).
+    ///
+    /// E2: dentro de un mismo [`Self::flex_layout`] el resultado se guarda por (caja, `cb`,
+    /// ancho): en columnas el mismo alto de contenido se pedía dos veces por ítem (tamaño base,
+    /// §9.2.3, y sugerencia de contenido del mínimo automático, §4.5), y como cada medida
+    /// maqueta el subárbol entero, el coste se multiplicaba por cada nivel de flex anidado
+    /// (GitHub: un `span` maquetado 82 944 veces). El contexto no cambia dentro de una misma
+    /// llamada, así que el resultado es el mismo.
     fn item_content_height(&mut self, b: &'a LayoutBox, cb: Cb, w: f32, bp_v: f32) -> f32 {
-        self.measuring(|this| {
+        let key = (
+            std::ptr::from_ref(b) as usize,
+            cb.width.to_bits(),
+            cb.height.map(f32::to_bits),
+            w.to_bits(),
+        );
+        if self.caches
+            && let Some(h) = self.content_height_memo.last().and_then(|m| m.get(&key))
+        {
+            return h - bp_v;
+        }
+        let h = self.measuring(|this| {
             // Con `aspect-ratio` el alto de contenido sale de la relación (CSS Sizing 4 §5.2).
             this.content_probe = b.style.aspect_ratio.preferred().is_none();
             let f = this.layout_item(b, cb, (0.0, 0.0), w, None, Edges::default());
             this.content_probe = false;
-            f.rect.height - bp_v
-        })
+            f.rect.height
+        });
+        if let Some(m) = self.content_height_memo.last_mut() {
+            m.insert(key, h);
+        }
+        h - bp_v
     }
 
     /// Layout del contenido de un contenedor flex: fragmentos de los ítems y altura del
     /// contenido. `cb` es el content box del contenedor (`height` si es definida).
     pub(crate) fn flex_layout(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
+        self.content_height_memo
+            .push(std::collections::HashMap::new());
+        let r = self.flex_layout_inner(container, cb);
+        self.content_height_memo.pop();
+        r
+    }
+
+    fn flex_layout_inner(&mut self, container: &'a LayoutBox, cb: Cb) -> (Vec<Fragment>, f32) {
         let pct_height_indefinite = std::mem::take(&mut self.flex_height_pct_indefinite);
         self.flex_layout_pass(container, cb, None, pct_height_indefinite)
     }

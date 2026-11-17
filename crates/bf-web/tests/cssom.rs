@@ -651,3 +651,46 @@ fn media_query_list_reports_changes() {
         "on false (min-width: 500px) true true|l false false"
     );
 }
+
+/// E2: CSSOM §6.1 y §6.4.2: la hoja de un `<style>` es el objeto vivo. Lo que un script cambia
+/// con `insertRule`/`deleteRule` (CSS-in-JS como styled-components, que llena un `<style>`
+/// vacío) y las `adoptedStyleSheets` del documento (CSSOM §6.6, `replaceSync`) llegan a la
+/// cascada con la que pinta el navegador, que lee el documento (`bf_style::style_document`).
+#[test]
+fn cssom_changes_reach_the_painted_cascade() {
+    let mut p = Page::new(
+        "<!DOCTYPE html><html><head><style id=sc></style><style>i { color: green }</style>\
+         </head><body><p id=p>x</p><b id=b>y</b><i id=i>z</i><u id=u>w</u></body></html>",
+    );
+    p.run(
+        "var sc = document.getElementById('sc').sheet;\
+         sc.insertRule('p { color: red }', 0);\
+         sc.insertRule('b { color: blue }', 1);\
+         sc.insertRule('i { color: black }', 2);\
+         sc.deleteRule(2);\
+         var c = new CSSStyleSheet(); c.replaceSync('u { color: rgb(1, 2, 3) }');\
+         document.adoptedStyleSheets = [c];",
+    );
+    let doc = p.ctx.get(&p.rt.agent).document().clone();
+    let styles = bf_style::style_document(
+        &doc,
+        &[],
+        &bf_css::media::MediaContext::default(),
+        &bf_css::selectors::MatchContext::for_document(&doc),
+    );
+    let color = |id: &str| {
+        let n = doc
+            .inclusive_descendants(doc.root())
+            .into_iter()
+            .find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(id))
+            .expect("elemento");
+        styles[&(n, None)].get_css("color").expect("color")
+    };
+    assert_eq!(color("p"), "rgb(255, 0, 0)");
+    assert_eq!(color("b"), "rgb(0, 0, 255)");
+    // La regla borrada no aplica: queda la del otro `<style>`.
+    assert_eq!(color("i"), "rgb(0, 128, 0)");
+    assert_eq!(color("u"), "rgb(1, 2, 3)");
+    // El texto del elemento no cambia (CSSOM no lo reescribe).
+    assert_eq!(p.s("document.getElementById('sc').textContent"), "");
+}
