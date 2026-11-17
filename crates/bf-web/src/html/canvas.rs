@@ -52,6 +52,8 @@ fn js_str(s: &str) -> Value {
 #[derive(Debug, Clone, Copy)]
 pub struct CanvasClasses {
     pub context: HostClassId,
+    /// E1: `Path2D` (HTML §4.12.5.1.7).
+    pub path2d: HostClassId,
     pub gradient: HostClassId,
     pub pattern: HostClassId,
     pub image_data: HostClassId,
@@ -107,8 +109,10 @@ pub fn register(agent: &mut Agent) {
         tm = tm.attribute(name, Some(f), None);
     }
     let text_metrics = agent.register_host_class(tm);
+    let path2d = agent.register_host_class(path2d_class());
     agent.set_embedder_data(CanvasClasses {
         context,
+        path2d,
         gradient,
         pattern,
         image_data,
@@ -123,6 +127,365 @@ pub fn extend_canvas(class: HostClass) -> HostClass {
         .attribute("height", Some(canvas_height), Some(set_canvas_height))
         .method("getContext", 1, get_context)
         .method("toDataURL", 0, to_data_url)
+}
+
+/// E1: `Path2D` (HTML §4.12.5.1.7): un trazado propio con los métodos de `CanvasPath`, que se
+/// usa en `fill`, `stroke`, `clip`, `isPointInPath` e `isPointInStroke` del contexto.
+fn path2d_class() -> HostClass {
+    HostClass::new("Path2D")
+        .constructor(path2d_ctor, 0)
+        .method("addPath", 1, path2d_add_path)
+        .method("closePath", 0, close_path)
+        .method("moveTo", 2, move_to)
+        .method("lineTo", 2, line_to)
+        .method("quadraticCurveTo", 4, quadratic_curve_to)
+        .method("bezierCurveTo", 6, bezier_curve_to)
+        .method("arcTo", 5, arc_to)
+        .method("rect", 4, rect)
+        .method("roundRect", 4, round_rect)
+        .method("arc", 5, arc)
+        .method("ellipse", 7, ellipse)
+}
+
+/// `new Path2D(path)`: vacío, una copia de otro `Path2D` o los datos de trazado de SVG (SVG 2
+/// §9.3, `d`).
+fn path2d_ctor(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(nt) = a.new_target else {
+        return agent.type_error("Failed to construct 'Path2D': Please use the 'new' operator");
+    };
+    let path = match a.arg(0) {
+        Value::Undefined => CanvasPath::default(),
+        v => match agent.host_unwrap::<Path2DData>(&v) {
+            Some(p) => p.0.clone(),
+            None => {
+                let d = webidl::to_dom_string(agent, &v)?.to_string_lossy();
+                parse_svg_path(&d)
+            }
+        },
+    };
+    let class = classes(agent).path2d;
+    let o = agent.host_create_from_new_target(nt, class, None, Box::new(Path2DData(path)))?;
+    Ok(Value::Object(o))
+}
+
+/// `addPath(path, transform)`: los subtrazados de `path`, transformados con la matriz
+/// (`DOMMatrix2DInit`: `a`…`f` o `m11`, `m12`, `m21`, `m22`, `m41`, `m42`).
+fn path2d_add_path(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    let Some(other) = agent
+        .host_unwrap::<Path2DData>(&a.arg(0))
+        .map(|p| p.0.clone())
+    else {
+        return agent.type_error(
+            "Failed to execute 'addPath' on 'Path2D': parameter 1 is not of type 'Path2D'.",
+        );
+    };
+    let m = matrix_2d_init(agent, &a.arg(1))?;
+    let Some(t) = m else {
+        return Ok(Value::Undefined);
+    };
+    let map = |p: Point| map_point(&t, p.x, p.y);
+    if let Some(this) = agent.host_unwrap_mut::<Path2DData>(&a.this) {
+        for seg in other.segs {
+            match seg {
+                Seg::Move(p) => this.0.move_to(map(p)),
+                Seg::Line(p) => this.0.line_to(map(p)),
+                Seg::Quad(c, p) => this.0.quad_to(map(c), map(p)),
+                Seg::Cubic(c1, c2, p) => this.0.cubic_to(map(c1), map(c2), map(p)),
+                Seg::Close => this.0.close(),
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+/// Un `DOMMatrix2DInit` como transformación (`None` si algún valor no es finito: Geometry
+/// Interfaces §6.2 "validate and fixup (2D)" y HTML: "if any … is infinite or NaN, return").
+fn matrix_2d_init(agent: &mut Agent, v: &Value) -> JsResult<Option<Transform>> {
+    let Value::Object(o) = v else {
+        return Ok(Some(Transform::identity()));
+    };
+    let mut vals = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let names = [
+        ("a", "m11"),
+        ("b", "m12"),
+        ("c", "m21"),
+        ("d", "m22"),
+        ("e", "m41"),
+        ("f", "m42"),
+    ];
+    for (i, (short, long)) in names.iter().enumerate() {
+        for name in [*long, *short] {
+            let x = agent.get(*o, &bf_js::value::PropertyKey::from(name), v.clone())?;
+            if !x.is_undefined() {
+                vals[i] = webidl::to_unrestricted_double(agent, &x)? as f32;
+                break;
+            }
+        }
+    }
+    if vals.iter().any(|x| !x.is_finite()) {
+        return Ok(None);
+    }
+    Ok(Some(Transform::from_row(
+        vals[0], vals[1], vals[2], vals[3], vals[4], vals[5],
+    )))
+}
+
+/// Los datos de trazado de SVG (SVG 2 §9.3.9, la gramática de `d`) como trazado de canvas. Ante
+/// un error se queda con lo leído hasta ahí (§9.5.4 "error handling in path data").
+fn parse_svg_path(d: &str) -> CanvasPath {
+    let mut p = CanvasPath::default();
+    let id = Transform::identity();
+    let b = d.as_bytes();
+    let mut i = 0;
+    let skip = |i: &mut usize| {
+        while *i < b.len() && (b[*i].is_ascii_whitespace() || b[*i] == b',') {
+            *i += 1;
+        }
+    };
+    let number = |i: &mut usize| -> Option<f32> {
+        skip(i);
+        let start = *i;
+        if *i < b.len() && (b[*i] == b'+' || b[*i] == b'-') {
+            *i += 1;
+        }
+        let mut digits = false;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+            digits = true;
+        }
+        if *i < b.len() && b[*i] == b'.' {
+            *i += 1;
+            while *i < b.len() && b[*i].is_ascii_digit() {
+                *i += 1;
+                digits = true;
+            }
+        }
+        if !digits {
+            *i = start;
+            return None;
+        }
+        if *i < b.len() && (b[*i] == b'e' || b[*i] == b'E') {
+            let save = *i;
+            *i += 1;
+            if *i < b.len() && (b[*i] == b'+' || b[*i] == b'-') {
+                *i += 1;
+            }
+            let ds = *i;
+            while *i < b.len() && b[*i].is_ascii_digit() {
+                *i += 1;
+            }
+            if *i == ds {
+                *i = save;
+            }
+        }
+        std::str::from_utf8(&b[start..*i]).ok()?.parse().ok()
+    };
+    let flag = |i: &mut usize| -> Option<bool> {
+        skip(i);
+        match b.get(*i) {
+            Some(b'0') => {
+                *i += 1;
+                Some(false)
+            }
+            Some(b'1') => {
+                *i += 1;
+                Some(true)
+            }
+            _ => None,
+        }
+    };
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    // El último punto de control (para S y T) y el comando anterior.
+    let (mut ctrl_x, mut ctrl_y) = (0.0f32, 0.0f32);
+    let mut prev = b' ';
+    let mut cmd = b' ';
+    loop {
+        skip(&mut i);
+        if i >= b.len() {
+            break;
+        }
+        if b[i].is_ascii_alphabetic() {
+            cmd = b[i];
+            i += 1;
+        } else if cmd == b' ' {
+            break;
+        } else if cmd == b'M' {
+            cmd = b'L';
+        } else if cmd == b'm' {
+            cmd = b'l';
+        }
+        let rel = cmd.is_ascii_lowercase();
+        let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+        let pt = |x: f32, y: f32| Point::from_xy(x, y);
+        match cmd.to_ascii_uppercase() {
+            b'Z' => {
+                p.close();
+                cx = sx;
+                cy = sy;
+            }
+            b'M' => {
+                let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                    break;
+                };
+                cx = ox + x;
+                cy = oy + y;
+                sx = cx;
+                sy = cy;
+                p.move_to(pt(cx, cy));
+            }
+            b'L' => {
+                let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                    break;
+                };
+                cx = ox + x;
+                cy = oy + y;
+                p.line_to(pt(cx, cy));
+            }
+            b'H' => {
+                let Some(x) = number(&mut i) else { break };
+                cx = ox + x;
+                p.line_to(pt(cx, cy));
+            }
+            b'V' => {
+                let Some(y) = number(&mut i) else { break };
+                cy = (if rel { cy } else { 0.0 }) + y;
+                p.line_to(pt(cx, cy));
+            }
+            b'C' | b'S' => {
+                let smooth = cmd.eq_ignore_ascii_case(&b'S');
+                let (x1, y1) = if smooth {
+                    if matches!(prev.to_ascii_uppercase(), b'C' | b'S') {
+                        (2.0 * cx - ctrl_x, 2.0 * cy - ctrl_y)
+                    } else {
+                        (cx, cy)
+                    }
+                } else {
+                    let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                        break;
+                    };
+                    (ox + x, oy + y)
+                };
+                let (Some(x2), Some(y2), Some(x), Some(y)) = (
+                    number(&mut i),
+                    number(&mut i),
+                    number(&mut i),
+                    number(&mut i),
+                ) else {
+                    break;
+                };
+                let (x2, y2, x, y) = (ox + x2, oy + y2, ox + x, oy + y);
+                p.cubic_to(pt(x1, y1), pt(x2, y2), pt(x, y));
+                ctrl_x = x2;
+                ctrl_y = y2;
+                cx = x;
+                cy = y;
+            }
+            b'Q' | b'T' => {
+                let smooth = cmd.eq_ignore_ascii_case(&b'T');
+                let (x1, y1) = if smooth {
+                    if matches!(prev.to_ascii_uppercase(), b'Q' | b'T') {
+                        (2.0 * cx - ctrl_x, 2.0 * cy - ctrl_y)
+                    } else {
+                        (cx, cy)
+                    }
+                } else {
+                    let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                        break;
+                    };
+                    (ox + x, oy + y)
+                };
+                let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                    break;
+                };
+                let (x, y) = (ox + x, oy + y);
+                p.quad_to(pt(x1, y1), pt(x, y));
+                ctrl_x = x1;
+                ctrl_y = y1;
+                cx = x;
+                cy = y;
+            }
+            b'A' => {
+                let (Some(rx), Some(ry), Some(rot)) =
+                    (number(&mut i), number(&mut i), number(&mut i))
+                else {
+                    break;
+                };
+                let (Some(large), Some(sweep)) = (flag(&mut i), flag(&mut i)) else {
+                    break;
+                };
+                let (Some(x), Some(y)) = (number(&mut i), number(&mut i)) else {
+                    break;
+                };
+                let (x, y) = (ox + x, oy + y);
+                svg_arc(&mut p, &id, (cx, cy), (rx, ry), rot, large, sweep, (x, y));
+                cx = x;
+                cy = y;
+            }
+            _ => break,
+        }
+        prev = cmd;
+    }
+    p
+}
+
+/// Un arco de SVG (`A`) con la parametrización por los extremos, convertido a centro, radios y
+/// ángulos (SVG 2, apéndice "Elliptical arc implementation notes", B.2.4 y B.2.5).
+#[allow(clippy::too_many_arguments)]
+fn svg_arc(
+    p: &mut CanvasPath,
+    t: &Transform,
+    (x1, y1): (f32, f32),
+    (rx, ry): (f32, f32),
+    rotation_deg: f32,
+    large: bool,
+    sweep: bool,
+    (x2, y2): (f32, f32),
+) {
+    if x1 == x2 && y1 == y2 {
+        return;
+    }
+    let (mut rx, mut ry) = (rx.abs(), ry.abs());
+    if rx == 0.0 || ry == 0.0 {
+        p.line_to(map_point(t, x2, y2));
+        return;
+    }
+    let phi = rotation_deg.to_radians();
+    let (sp, cp) = phi.sin_cos();
+    let (dx, dy) = ((x1 - x2) / 2.0, (y1 - y2) / 2.0);
+    let x1p = cp * dx + sp * dy;
+    let y1p = -sp * dx + cp * dy;
+    // B.2.5: radios demasiado pequeños se agrandan.
+    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        let s = lambda.sqrt();
+        rx *= s;
+        ry *= s;
+    }
+    let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+    let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+    let mut coef = if den == 0.0 {
+        0.0
+    } else {
+        (num / den).max(0.0).sqrt()
+    };
+    if large == sweep {
+        coef = -coef;
+    }
+    let cxp = coef * rx * y1p / ry;
+    let cyp = -coef * ry * x1p / rx;
+    let cx = cp * cxp - sp * cyp + (x1 + x2) / 2.0;
+    let cy = sp * cxp + cp * cyp + (y1 + y2) / 2.0;
+    let angle = |ux: f32, uy: f32| uy.atan2(ux);
+    let start = angle((x1p - cxp) / rx, (y1p - cyp) / ry);
+    let end = angle((-x1p - cxp) / rx, (-y1p - cyp) / ry);
+    let mut delta = end - start;
+    if sweep && delta < 0.0 {
+        delta += 2.0 * PI;
+    } else if !sweep && delta > 0.0 {
+        delta -= 2.0 * PI;
+    }
+    ellipse_path(p, t, cx, cy, rx, ry, phi, start, start + delta, !sweep);
 }
 
 fn context_class() -> HostClass {
@@ -1478,6 +1841,45 @@ fn map_point(t: &Transform, x: f32, y: f32) -> Point {
     p[0]
 }
 
+/// E1: de quién es el trazado de los métodos del mixin `CanvasPath` (HTML §4.12.5.1.7): el
+/// del contexto (en coordenadas del bitmap: cada punto se transforma con la matriz del momento)
+/// o el de un `Path2D` (en coordenadas de usuario, sin transformar: la matriz se aplica al
+/// usarlo en `fill`, `stroke`, `clip`…).
+#[derive(Clone, Copy)]
+enum PathOwner {
+    Canvas(NodeRef),
+    Path2D,
+}
+
+/// El payload de un `Path2D`.
+#[derive(Debug, Clone, Default)]
+struct Path2DData(CanvasPath);
+
+fn path_owner(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<PathOwner> {
+    if agent.host_unwrap::<Path2DData>(&a.this).is_some() {
+        return Ok(PathOwner::Path2D);
+    }
+    Ok(PathOwner::Canvas(this_canvas(agent, a)?))
+}
+
+/// El trazado de `owner` y la transformación con la que se le agregan puntos.
+fn path_mut<'a>(
+    agent: &'a mut Agent,
+    a: &CallArgs<'_>,
+    owner: PathOwner,
+) -> Option<(&'a mut CanvasPath, Transform)> {
+    match owner {
+        PathOwner::Canvas(n) => {
+            let c = canvas_mut(agent, n);
+            let t = c.state.transform;
+            Some((&mut c.path, t))
+        }
+        PathOwner::Path2D => agent
+            .host_unwrap_mut::<Path2DData>(&a.this)
+            .map(|p| (&mut p.0, Transform::identity())),
+    }
+}
+
 /// Agrega al path con la transformación actual.
 fn with_path(
     agent: &mut Agent,
@@ -1485,13 +1887,13 @@ fn with_path(
     n_args: usize,
     f: impl FnOnce(&mut CanvasPath, &Transform, &[f32]),
 ) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
+    let owner = path_owner(agent, a)?;
     let Some(v) = finite_args(agent, a, n_args)? else {
         return Ok(Value::Undefined);
     };
-    let c = canvas_mut(agent, n);
-    let t = c.state.transform;
-    f(&mut c.path, &t, &v);
+    if let Some((path, t)) = path_mut(agent, a, owner) {
+        f(path, &t, &v);
+    }
     Ok(Value::Undefined)
 }
 
@@ -1502,8 +1904,10 @@ fn begin_path(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 }
 
 fn close_path(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
-    canvas_mut(agent, n).path.close();
+    let owner = path_owner(agent, a)?;
+    if let Some((path, _)) = path_mut(agent, a, owner) {
+        path.close();
+    }
     Ok(Value::Undefined)
 }
 
@@ -1607,7 +2011,7 @@ fn ellipse_path(
 }
 
 fn arc(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
+    let owner = path_owner(agent, a)?;
     let ccw = webidl::to_boolean(agent, &a.arg(5));
     let Some(v) = finite_args(agent, a, 5)? else {
         return Ok(Value::Undefined);
@@ -1615,25 +2019,15 @@ fn arc(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if v[2] < 0.0 {
         return throw_dom(agent, DomException::IndexSizeError);
     }
-    let c = canvas_mut(agent, n);
-    let t = c.state.transform;
-    ellipse_path(
-        &mut c.path,
-        &t,
-        v[0],
-        v[1],
-        v[2],
-        v[2],
-        0.0,
-        v[3],
-        v[4],
-        ccw,
-    );
+    let Some((path, t)) = path_mut(agent, a, owner) else {
+        return Ok(Value::Undefined);
+    };
+    ellipse_path(path, &t, v[0], v[1], v[2], v[2], 0.0, v[3], v[4], ccw);
     Ok(Value::Undefined)
 }
 
 fn ellipse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
+    let owner = path_owner(agent, a)?;
     let ccw = webidl::to_boolean(agent, &a.arg(7));
     let Some(v) = finite_args(agent, a, 7)? else {
         return Ok(Value::Undefined);
@@ -1641,37 +2035,28 @@ fn ellipse(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if v[2] < 0.0 || v[3] < 0.0 {
         return throw_dom(agent, DomException::IndexSizeError);
     }
-    let c = canvas_mut(agent, n);
-    let t = c.state.transform;
-    ellipse_path(
-        &mut c.path,
-        &t,
-        v[0],
-        v[1],
-        v[2],
-        v[3],
-        v[4],
-        v[5],
-        v[6],
-        ccw,
-    );
+    let Some((path, t)) = path_mut(agent, a, owner) else {
+        return Ok(Value::Undefined);
+    };
+    ellipse_path(path, &t, v[0], v[1], v[2], v[3], v[4], v[5], v[6], ccw);
     Ok(Value::Undefined)
 }
 
 /// `arcTo(x1, y1, x2, y2, radius)` (§4.12.5.1.5), en coordenadas de usuario.
 fn arc_to(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
+    let owner = path_owner(agent, a)?;
     let Some(v) = finite_args(agent, a, 5)? else {
         return Ok(Value::Undefined);
     };
     if v[4] < 0.0 {
         return throw_dom(agent, DomException::IndexSizeError);
     }
-    let c = canvas_mut(agent, n);
-    let t = c.state.transform;
+    let Some((path, t)) = path_mut(agent, a, owner) else {
+        return Ok(Value::Undefined);
+    };
     let (x1, y1, x2, y2, r) = (v[0], v[1], v[2], v[3], v[4]);
-    let Some(last) = c.path.last else {
-        c.path.move_to(map_point(&t, x1, y1));
+    let Some(last) = path.last else {
+        path.move_to(map_point(&t, x1, y1));
         return Ok(Value::Undefined);
     };
     // El punto actual en coordenadas de usuario.
@@ -1682,7 +2067,7 @@ fn arc_to(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let (x0, y0) = (p0.x, p0.y);
     let collinear = ((x1 - x0) * (y2 - y1) - (y1 - y0) * (x2 - x1)).abs() < 1e-6;
     if (x0 == x1 && y0 == y1) || (x1 == x2 && y1 == y2) || r == 0.0 || collinear {
-        c.path.line_to(map_point(&t, x1, y1));
+        path.line_to(map_point(&t, x1, y1));
         return Ok(Value::Undefined);
     }
     // Las tangentes y el centro del círculo.
@@ -1705,13 +2090,13 @@ fn arc_to(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let a2 = (t2y - cy).atan2(t2x - cx);
     // El sentido: el arco corto entre las tangentes.
     let cross = u0x * u2y - u0y * u2x;
-    ellipse_path(&mut c.path, &t, cx, cy, r, r, 0.0, a0, a2, cross > 0.0);
+    ellipse_path(path, &t, cx, cy, r, r, 0.0, a0, a2, cross > 0.0);
     Ok(Value::Undefined)
 }
 
 /// `roundRect(x, y, w, h, radii)` con un radio uniforme (el primero de la lista).
 fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
-    let n = this_canvas(agent, a)?;
+    let owner = path_owner(agent, a)?;
     let Some(v) = finite_args(agent, a, 4)? else {
         return Ok(Value::Undefined);
     };
@@ -1729,18 +2114,19 @@ fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     if r < 0.0 {
         return agent.range_error("The radius provided is negative.");
     }
-    let c = canvas_mut(agent, n);
-    let t = c.state.transform;
+    let Some((path, t)) = path_mut(agent, a, owner) else {
+        return Ok(Value::Undefined);
+    };
     let (x, y, w, h) = (v[0], v[1], v[2], v[3]);
     let r = r.min(w.abs() / 2.0).min(h.abs() / 2.0);
     if r == 0.0 {
-        rect_path(&mut c.path, &t, x, y, w, h);
+        rect_path(path, &t, x, y, w, h);
         return Ok(Value::Undefined);
     }
     let (sx, sy) = (w.signum(), h.signum());
-    c.path.move_to(map_point(&t, x + r * sx, y));
+    path.move_to(map_point(&t, x + r * sx, y));
     ellipse_path(
-        &mut c.path,
+        path,
         &t,
         x + w - r * sx,
         y + r * sy,
@@ -1752,7 +2138,7 @@ fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         false,
     );
     ellipse_path(
-        &mut c.path,
+        path,
         &t,
         x + w - r * sx,
         y + h - r * sy,
@@ -1764,7 +2150,7 @@ fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         false,
     );
     ellipse_path(
-        &mut c.path,
+        path,
         &t,
         x + r * sx,
         y + h - r * sy,
@@ -1776,7 +2162,7 @@ fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         false,
     );
     ellipse_path(
-        &mut c.path,
+        path,
         &t,
         x + r * sx,
         y + r * sy,
@@ -1787,7 +2173,7 @@ fn round_rect(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
         1.5 * PI,
         false,
     );
-    c.path.close();
+    path.close();
     Ok(Value::Undefined)
 }
 
@@ -1989,10 +2375,24 @@ fn current_path(agent: &mut Agent, n: NodeRef) -> Option<Path> {
     canvas_mut(agent, n).path.build()
 }
 
+/// E1: el trazado de las operaciones que aceptan un `Path2D` como primer argumento (HTML
+/// §4.12.5.1.15, `fill(path, fillRule)` y compañía): el `Path2D` transformado con la matriz
+/// actual del contexto, o el trazado actual; y cuántos argumentos se consumieron (0 o 1).
+fn path_or_current(agent: &mut Agent, n: NodeRef, first: &Value) -> (Option<Path>, usize) {
+    match agent.host_unwrap::<Path2DData>(first).map(|p| p.0.clone()) {
+        Some(p2d) => {
+            let t = canvas_mut(agent, n).state.transform;
+            (p2d.build().and_then(|p| p.transform(t)), 1)
+        }
+        None => (current_path(agent, n), 0),
+    }
+}
+
 fn fill(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_canvas(agent, a)?;
-    let rule = fill_rule(agent, &a.arg(0))?;
-    if let Some(p) = current_path(agent, n) {
+    let (path, used) = path_or_current(agent, n, &a.arg(0));
+    let rule = fill_rule(agent, &a.arg(used))?;
+    if let Some(p) = path {
         paint_fill(agent, n, &p, rule, false);
     }
     Ok(Value::Undefined)
@@ -2000,17 +2400,18 @@ fn fill(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 
 fn stroke(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_canvas(agent, a)?;
-    if let Some(p) = current_path(agent, n) {
+    if let (Some(p), _) = path_or_current(agent, n, &a.arg(0)) {
         paint_stroke(agent, n, &p);
     }
     Ok(Value::Undefined)
 }
 
-/// `clip(fillRule)`: la región de recorte pasa a ser su intersección con el path.
+/// `clip(fillRule)` y `clip(path, fillRule)`: la región de recorte pasa a ser su intersección
+/// con el path.
 fn clip(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_canvas(agent, a)?;
-    let rule = fill_rule(agent, &a.arg(0))?;
-    let path = current_path(agent, n);
+    let (path, used) = path_or_current(agent, n, &a.arg(0));
+    let rule = fill_rule(agent, &a.arg(used))?;
     let c = canvas_mut(agent, n);
     let Some(pixmap) = c.pixmap.as_ref() else {
         return Ok(Value::Undefined);
@@ -2039,13 +2440,15 @@ fn clip(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `isPointInPath(x, y, fillRule)`: el punto (sin transformar) dentro del path actual.
 fn is_point_in_path(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_canvas(agent, a)?;
-    let x = webidl::to_unrestricted_double(agent, &a.arg(0))? as f32;
-    let y = webidl::to_unrestricted_double(agent, &a.arg(1))? as f32;
-    let rule = fill_rule(agent, &a.arg(2))?;
+    // E1: `isPointInPath(path, x, y, fillRule)` con un `Path2D`.
+    let (path, k) = path_or_current(agent, n, &a.arg(0));
+    let x = webidl::to_unrestricted_double(agent, &a.arg(k))? as f32;
+    let y = webidl::to_unrestricted_double(agent, &a.arg(k + 1))? as f32;
+    let rule = fill_rule(agent, &a.arg(k + 2))?;
     if !x.is_finite() || !y.is_finite() {
         return Ok(Value::Boolean(false));
     }
-    let Some(path) = current_path(agent, n) else {
+    let Some(path) = path else {
         return Ok(Value::Boolean(false));
     };
     Ok(Value::Boolean(point_in_path(&path, x, y, rule)))
@@ -2067,9 +2470,11 @@ fn point_in_path(path: &Path, x: f32, y: f32, rule: FillRule) -> bool {
 
 fn is_point_in_stroke(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_canvas(agent, a)?;
-    let x = webidl::to_unrestricted_double(agent, &a.arg(0))? as f32;
-    let y = webidl::to_unrestricted_double(agent, &a.arg(1))? as f32;
-    let Some(path) = current_path(agent, n) else {
+    // E1: `isPointInStroke(path, x, y)` con un `Path2D`.
+    let (path, k) = path_or_current(agent, n, &a.arg(0));
+    let x = webidl::to_unrestricted_double(agent, &a.arg(k))? as f32;
+    let y = webidl::to_unrestricted_double(agent, &a.arg(k + 1))? as f32;
+    let Some(path) = path else {
         return Ok(Value::Boolean(false));
     };
     let width = canvas_mut(agent, n).state.line_width;
