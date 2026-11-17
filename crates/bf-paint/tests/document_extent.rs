@@ -67,3 +67,34 @@ fn absolute_escaping_a_static_clip_still_counts() {
         <div style='position: fixed; top: 900px; width: 10px; height: 10px'></div></div>";
     assert_eq!(extent(html), (800.0, 600.0));
 }
+
+/// CSS Overflow 3 §2.2: el desbordamiento desplazable cuenta las cajas transformadas, donde
+/// quedan después de su `transform`.
+#[test]
+fn transforms_move_the_extent() {
+    let doc = |body: &str| format!("<!doctype html><style>body {{ margin: 0 }}</style>{body}");
+    // Una traslación que saca la caja del viewport lo agranda.
+    let html = doc("<div style='width: 100px; height: 10px; transform: translateX(900px)'></div>");
+    assert_eq!(extent(&html), (1000.0, 600.0));
+    // Una caja ancha encogida (o devuelta con una traslación) ya no lo agranda.
+    let html = doc(
+        "<div style='width: 2000px; height: 10px; transform-origin: 0 0; \
+         transform: scale(0.25)'></div>",
+    );
+    assert_eq!(extent(&html), (800.0, 600.0));
+    let html =
+        doc("<div style='width: 1500px; height: 10px; transform: translateX(-1000px)'></div>");
+    assert_eq!(extent(&html), (800.0, 600.0));
+    // Los hijos van con la caja, y las transformaciones anidadas se componen.
+    let html = doc(
+        "<div style='width: 10px; height: 10px; transform: translateY(700px)'>\
+         <div style='width: 10px; height: 50px; transform: translateY(100px)'></div></div>",
+    );
+    assert_eq!(extent(&html), (800.0, 850.0));
+    // Lo transformado sigue recortado por un `overflow` de fuera.
+    let html = doc(
+        "<div style='overflow: hidden; width: 300px; height: 100px'>\
+         <div style='width: 10px; height: 10px; transform: translateX(900px)'></div></div>",
+    );
+    assert_eq!(extent(&html), (800.0, 600.0));
+}

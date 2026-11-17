@@ -156,10 +156,15 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
     un cuadro después de la primera pintura (E3);
   - `IntersectionObserver` y `ResizeObserver` (E2; WPT `intersection-observer` 222 / 315 y
     `resize-observer` 94 / 115);
-  - `FontFace.load()` descarga por red también en la ventana (E6).
+  - `FontFace.load()` descarga por red también en la ventana (E6);
+  - `<link rel=stylesheet>` dispara `load` y `document.styleSheets` tiene reglas en la
+    ventana (E2).
 - **Estilo y maqueta:** estilo compartido entre elementos y cascada en varios hilos, y
   `bf_style::sheet_cache`, una caché de hojas ya parseadas (E4); caché de líneas idéntica bit
-  a bit y shaping con caras y planes guardados (E5, `3087f82`, ver la sección 9a).
+  a bit y shaping con caras y planes guardados (E5, `3087f82`; sus reftests de flotantes,
+  líneas y tablas dan el mismo estado en los 7519, comparados por E3). Las pistas de presentación
+  quedan debajo de las capas de autor (`@layer`) y las imágenes con `width` y `height`
+  reservan su hueco con esa proporción (E2).
 - **Accesibilidad:** el motor calcula el rol, el nombre y los estados de cada elemento y arma
   el árbol de accesibilidad del documento (`html-aam` 93.4 %, `wai-aria` 95.7 %). El árbol
   todavía no se expone a macOS.
@@ -171,136 +176,77 @@ El estado apartado por apartado, con sus cifras, está en `docs/roadmap.md`. A g
   a **60 fps**: mediana de 3.7-4.0 ms por cuadro a densidad 1 y de 5.2-6.1 ms a densidad 2
   (medida del planificador sobre `276fa07`, con los ejecutores casi parados; criterio
   cumplido). `monospace` y `<pre>` salen a 13 px.
-- **Primera pintura de Wikipedia:** 542-665 ms en cinco corridas (misma medida); la meta es
-  menos de 500 ms. La red sola se lleva 247-315 ms; el desglose está en `docs/roadmap.md`,
-  fase 5, "Rendimiento".
+- **Primera pintura de Wikipedia: 328-363 ms**, criterio cumplido (medida del planificador
+  sobre `489e6f8`, release, caché caliente, siete corridas; meta < 500 ms). La red se lleva
+  250-277 ms; parseo, estilos, maqueta y pintado, unos 80-90. Mientras se valida el documento,
+  la precarga ya parsea las hojas guardadas, compila los scripts y el JavaScript de la ventana
+  (E3). El desglose está en `docs/roadmap.md`, fase 5, "Rendimiento".
 - **Shell:** pestañas, historial, marcadores, descargas, búsqueda en página, zoom, atajos con
   `Cmd` y pantallas Retina. Una pestaña que falla muestra una página de error.
 - **Empaquetado:** `Freedom.app` firmada ad hoc con su `.dmg`
   (`sh packaging/macos/build.sh --native`; detalle en `packaging/README.md`).
 - **Runners de WPT:** `wpt-testharness` (testharness.js) y `freedom wpt-reftests-js`
-  (reftests con JavaScript). `html/syntax/parsing` está en 99.9 % y `event-loops` en 75 %.
+  (reftests con JavaScript). `html/syntax/parsing` está en 8164 / 8166 (los 2 que faltan no se
+  pueden cumplir), `custom-elements` en 3556 / 4172 y `event-loops` en 75 %.
 
 Las cifras de esta sección salen de `docs/roadmap.md` y `docs/test262-status.md`, con su
 fuente en cada apartado, y de [`docs/rendimiento.md`](docs/rendimiento.md). **Avance por
-criterios: 84.7 %** de las fases 2 a 5 (87.8 % contando la fase 1). Lo que falta está en la
-lista "Criterios no cumplidos" del roadmap; cinco puntos esperan una decisión del usuario
-(roadmap, "Decisiones pendientes del usuario").
+criterios: 88.9 %** de las fases 2 a 5 (91.1 % contando la fase 1). Lo que falta está en la
+lista "Criterios no cumplidos" del roadmap; los cuatro criterios que quedan esperan una
+decisión del usuario (roadmap, "Decisiones pendientes del usuario").
 
 ## 8. Ramas en integración
 
-Las ramas con trabajo que `master` no tiene, y por qué no entraron, están en la sección 9b.
-`git log --oneline master..army/e<n>` muestra qué trae cada una, y su nota
-(`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y qué falta.
+`git log --oneline master..army/e<n>` muestra qué trae cada rama que `master` no tiene, y su
+nota (`git show army/e<n>:docs/pendiente/mac/e<n>.md`) dice qué está hecho y qué falta.
 
 ## 9. Lo primero al retomar
 
-Estado al cierre del 2026-11-13. El usuario paró el trabajo del día; los seis ejecutores
-quedaron parados, con todo en commits y las carpetas limpias. Las seis carpetas
-`../browser-freedom-army-e<n>` se pueden borrar sin perder nada (`git worktree remove
-<carpeta>`, o borrarlas a mano y luego `git worktree prune`).
+Estado del 2026-11-17, `master` `f9dddce`: entraron la precarga durante la validación (E3),
+el CSS de `asimetrix.co` y las hojas enlazadas en la ventana (E2), el parser que cede al host
+en mitad de un token y el diagnóstico de caídas de pestaña (E1). **Avance: 88.9 %** (91.1 %
+con la fase 1): 47 de 51 criterios. Lo que E1 y E2 tengan en curso en sus ramas no está en
+`master` (`git log --oneline master..army/e<n>`).
 
-### 9a. Estado de `master` (`7681f2a`, en GitHub)
+### 9a. Las cuatro decisiones del usuario
 
-Además de lo de la sección 7, entró hoy:
-- `IntersectionObserver` y `ResizeObserver` (E2; WPT 222 / 315 y 94 / 115;
-  `docs/pendiente/mac/e2.md`, "Ciclo nuevo, ronda 1");
-- `FontFace.load()` por red en la ventana (E6; `docs/pendiente/mac/e6.md`);
-- estilo compartido y cascada en varios hilos, y `bf_style::sheet_cache` (E4;
-  `docs/pendiente/mac/e4.md`);
-- `bf_js::code_cache`: el JavaScript propio de la ventana se compila una vez por proceso
-  (E3; `docs/pendiente/mac/e3.md`, "Ciclo nuevo, ronda 1"). test262 sigue en 50 597 pases,
-  corrido por el planificador sobre `master`;
-- caché de líneas bit a bit y shaping con caras y planes guardados (E5, `3087f82`). **E5 lo
-  marcó como sin verificar.** Pasó la verificación completa del planificador y
-  `css/css-flexbox` sigue en 803 / 949. Los grupos de reftests de flotantes, líneas y tablas
-  los comparó E3 el 2026-11-17 entre `64fcbbb` y `7be3431`: 4379 pases en los dos, los 7519
-  tests con el mismo estado; solo cambian los píxeles distintos de 5 (estable al repetir;
-  `docs/pendiente/mac/e3.md`, "Sesión del 2026-11-17, ronda 1"). Falta el A/B de tiempos de
-  E5.
+Los cuatro criterios que faltan dependen de ellas (roadmap, "Decisiones pendientes del
+usuario"):
+- **2.3, `html/syntax/parsing` (8164 / 8166):** los 2 que quedan no se pueden cumplir. La
+  propuesta del planificador es excluirlos.
+- **3.6, flexbox por palabras clave de tamaño (95 / 107):** 8 son de CSS Flexbox 2, un
+  borrador sin texto estable. La propuesta es excluirlos; los otros 4 los sigue E2.
+- **Lector de pantalla:** hace falta un crate externo (`accesskit`, la recomendación del
+  planificador) o FFI con `unsafe`.
+- **Fuzzer de IPC:** pide separar el motor en procesos.
 
-Verificación completa de `7681f2a`: formato, clippy y 137 grupos de tests en verde. Avance: 46
-/ 51 criterios, **84.7 %** (87.8 % con la fase 1).
+### 9b. `app.asimetrix.co` con sesión iniciada
 
-### 9b. Ramas sin integrar (locales, no están en GitHub)
+Solo el usuario puede probarlo: sin entrar no se reproducen ni la pestaña que se caía (`el
+realm no tiene WebContext`) ni el `ChunkLoadError`. Lo que cambió desde la captura:
+- E1 quitó los pánicos de `WebContextHandle` y añadió el diagnóstico de caídas (`Esta página
+  falló` dice qué pasó; `pendiente/mac/e1.md`, "Sesión nueva, ronda 3");
+- E2 hizo que las hojas enlazadas carguen en la ventana, la causa probable del
+  `ChunkLoadError` (`pendiente/mac/e2.md`, "Sesión nueva, ronda 1").
 
-| Rama | Qué trae | Por qué no entró y qué falta |
-|---|---|---|
-| `army/e6` `cabf20c` | `@media (scripting)`; pseudoelementos reconocidos (`::backdrop`, `::file-selector-button`…); `body { margin: 8px }` en la hoja de UA | Los tests del workspace pasan (136 grupos), pero clippy falla con `double_ended_iterator_last` en `crates/bf-shell/tests/real_sites.rs:178`. Falta ese aviso, los reftests (`css/CSS2`, `css-cascade`, `selectors`) y que `https://asimetrix.co/` deje de desbordar en horizontal |
-| `army/e1` `2bad817` | El parser llama al host en mitad de un token: custom elements síncronos y `script` con hijos insertados | Los tests del workspace pasan (138 grupos), pero fallan `cargo fmt --all --check` (archivos de `crates/bf-html/src/tree_builder/` y `crates/bf-web/tests/parser_mid_token.rs`) y clippy (`needless_borrow` en la librería `bf-html`). Falta eso, medir `html/syntax/parsing`, `custom-elements` y `dom`, y el A/B de `perf parseo`. La lista está en la nota de la rama: `git show army/e1:docs/pendiente/mac/e1.md`, "Ciclo nuevo, ronda 1" |
+En `https://asimetrix.co/` a 1180 px ya no salen el texto del `<noscript>`, las franjas
+laterales ni el desborde horizontal; el logo de "Ecosistema" mide 446×208 y el hueco del vídeo
+1068×600 (negro: el motor no reproduce vídeo). El titular grande de la portada ya no aparece en
+la captura del planificador; E2 lo revisa (puede ser una animación de entrada).
 
-Los dos commits son `WIP (sin verificar)`.
+### 9c. Uso diario
 
-### 9c. Prioridad 1: el fallo que reportó el usuario al cierre
+El barrido de sitios de E3 (`docs/pendiente/mac/barrido-sitios.md`) dice qué le falta al
+navegador en sitios públicos conocidos, con las carencias ordenadas por número de sitios y un
+dueño propuesto. `freedom session <url> wait dump -o <prefijo>` deja el DOM, el árbol de
+maqueta y la consola de cada sitio para depurarlo (`docs/rendimiento.md`, "Volcado de una
+sesión").
 
-`https://app.asimetrix.co/ASIMETRIX`, con la build `ce1e596` y una ventana de 1390 × 946. La
-pestaña muestra la página interna "Esta página falló. Freedom tuvo un error interno con esta
-pestaña y la detuvo", con el detalle `el realm no tiene WebContext`. La consola tiene 4
-errores:
-- `Uncaught (in promise): 1 promesa(s) rechazada(s) sin manejar` (dos veces);
-- `Uncaught Uncaught (in promise) ChunkLoadError: Loading CSS chunk 9298 failed.`;
-- `Uncaught Uncaught (in promise) TypeError: Illegal invocation`.
+### 9d. Método
 
-Son tres fallos distintos:
-1. **La pestaña se cae con `el realm no tiene WebContext`.** Algún camino pide el
-   `WebContext` de un realm que no lo tiene, y el error tumba la pestaña. Candidatos a
-   comprobar: un realm de worker, uno de marco o uno ya desmontado. Hay que encontrar el
-   camino y que sea, como mucho, una excepción de JavaScript: ningún sitio debe poder
-   detener la pestaña.
-2. **`ChunkLoadError: Loading CSS chunk … failed`.** Coincide con el tropiezo 3b de
-   `docs/pendiente/mac/e6.md`: en la ventana, `load_linked_sheet` del CSSOM no encuentra el
-   loader, `document.styleSheets` queda sin reglas y los `<link rel=stylesheet>` disparan
-   `error` en vez de `load`.
-   - El arreglo es de una línea: usar `bf_web::bom::script::page_loader`.
-   - Costaba unos 100 ms de primera pintura, porque el CSSOM vuelve a parsear todas las
-     hojas. Con `bf_style::sheet_cache`, ya en `master`, debería poder entrar sin ese coste.
-   - Hipótesis sin confirmar en este sitio.
-3. **`TypeError: Illegal invocation`.** Sin diagnosticar. Es una comprobación de receptor que
-   falla: un método de la plataforma llamado con un `this` distinto del esperado.
-
-Detalles menores de la misma captura:
-- el prefijo `Uncaught Uncaught` sale duplicado en la consola;
-- el panel lateral de la página de error conserva textos viejos ("`<script>` 0 · sin motor
-  JS aún", "Formularios … sin interactividad aún").
-
-### 9d. `https://asimetrix.co/` (ya carga)
-
-Pendiente:
-- El arreglo de cascada que diagnosticó E2 (`docs/pendiente/mac/e2.md`, "Ciclo nuevo, ronda
-  3"): las pistas de presentación de `width`/`height` le ganan a las reglas de autor en
-  `@layer` (`Cascade::sources` en `crates/bf-style/src/cascade.rs`; CSS Cascade 5 §6.4.4 las
-  pone por debajo de todas las capas de autor).
-  - Es la misma causa que el margen del `<body>`.
-  - Explica el logo gigante de la sección "Ecosistema" y el tamaño del `<iframe>` de vídeo.
-- Lo de la rama `army/e6` (9b).
-
-### 9e. Rendimiento
-
-- **Primera pintura de Wikipedia, 2026-11-17** (E3, rama `army/e3`, sin integrar;
-  `docs/rendimiento.md`, "Adelantar trabajo a la espera de la red"). Mientras se valida el
-  documento, la precarga (`crates/bf-shell/src/preload.rs`) ya parsea las hojas en
-  `bf_style::sheet_cache`, compila los scripts clásicos en `bf_js::code_cache` y compila el
-  JavaScript de la ventana (`bf_web::precompile_window_scripts`). A/B de 5 corridas contra
-  `master` `7be3431` con carga 11: mediana de 577 a 491 ms (mínimo de 526 a 446), 3 de 5
-  corridas por debajo de 500 ms. Con carga 25, mediana 747.
-- Lo que queda, en medianas: red 265 ms; fuera de la red, unos 225 de los 235 que deja la
-  meta (maqueta 61, parser 38, cascada 37, scripts 21, raster 19). El margen es pequeño: la
-  meta se cumple con la máquina casi libre y no con carga.
-- Siguen pendientes la decisión sobre el suelo de red (9f) y abaratar maqueta y cascada.
-
-### 9f. Decisiones pendientes del usuario
-
-Sin cambios (roadmap, "Decisiones pendientes del usuario"):
-- lector de pantalla;
-- fuzzer de IPC;
-- las dos exclusiones de tests: los 8 de CSS Flexbox 2 de 3.6 y los 2 subtests de
-  `html/syntax/parsing` que no se pueden cumplir;
-- el suelo de red de la primera pintura.
-
-### 9g. Método
-
-- Rondas de dos o tres ejecutores, para que las medidas de tiempo valgan (sección 6,
-  "Medidas de tiempo").
+- Rondas de dos o tres ejecutores, con `CARGO_BUILD_JOBS=2` y una compilación a la vez por
+  ejecutor, para que las medidas de tiempo valgan (sección 6, "Medidas de tiempo"). Con
+  `uptime` por encima de 30, las medidas se repiten.
 - Si el usuario escribe mientras se entrega un reparto, comprobar que los bloques llegaron:
   el 2026-11-13 se perdió uno.
 

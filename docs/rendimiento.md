@@ -2,7 +2,9 @@
 
 Los dos criterios de la fase 5 del roadmap: **primera pintura** de Wikipedia en menos de
 500 ms y **60 cuadros por segundo** al desplazarla. Las dos se miden con
-`freedom session` (la lógica de la ventana sin abrir una) y `BF_TRACE=1`, en release.
+`freedom session` (la lógica de la ventana sin abrir una) y `BF_TRACE=1`, en release. Los dos
+están cumplidos: 60 fps desde `276fa07` y la primera pintura desde `489e6f8` (328-363 ms;
+"Primera pintura en `master` `489e6f8`", al final).
 
 ## Preparación
 
@@ -527,4 +529,49 @@ Recarga (`FREEDOM_NET_LOG=1 … wait wait key:f5 wait wait`): 7 validaciones (el
 scripts y 1 hoja) y 0 descargas, igual que antes. No sale ninguna petición que antes no
 saliera (la de antes pidió además `Special:CentralAutoLogin`, que lanzan los scripts de
 Wikipedia con un temporizador).
+
+## Primera pintura en `master` `489e6f8`: criterio cumplido
+
+Medida del planificador (2026-11-17, ronda 4): release, caché caliente, siete corridas
+seguidas de `freedom session https://es.wikipedia.org/wiki/Navegador_web -o <prefijo>` con
+`BF_TRACE=1`, con la máquina menos ocupada que en el A/B de arriba.
+
+| Parte | ms |
+|---|---:|
+| **Primera pintura** | **328-363** |
+| Red y caché | 250-277 |
+| Parseo | 14-32 |
+| Scripts | 7-12 |
+| Hojas | 3-5 |
+| Cascada | 13-15 |
+| Maqueta | 16-19 |
+| Lista de pintado | 3 |
+
+La red es tres cuartas partes de la primera pintura; parseo, estilos, maqueta y pintado suman
+unos 80-90 ms. Las mismas partes valían 2-4 veces más en el A/B de E3 con carga 11 (por
+ejemplo, cascada 37 y maqueta 61 de mediana): con esta máquina, las cifras dependen sobre todo
+de lo que estén haciendo los demás procesos.
+
+## Volcado de una sesión (paso `dump`)
+
+Para depurar un sitio sin abrir la ventana (E3, 2026-11-17, `App::session_dump` en
+`bf-shell/src/window/mod.rs`):
+
+```sh
+freedom session https://es.wikipedia.org/wiki/Navegador_web wait dump -o /tmp/w
+```
+
+El paso `dump` deja, además de la captura `/tmp/w-02.png`, tres archivos de la pestaña
+activa, cada uno con la URL en la primera línea:
+
+- `/tmp/w-02.dom.html`: el DOM después de los scripts, serializado como HTML (HTML §13.3,
+  como `innerHTML` del documento, con el scripting activado);
+- `/tmp/w-02.layout.txt`: el árbol de fragmentos de la última maqueta, una línea por
+  fragmento (`bf_layout::dump`, el mismo formato que `freedom dump-layout`);
+- `/tmp/w-02.console.txt`: la consola, un mensaje por línea con su nivel (`[log]`,
+  `[warn]`, `[error]`…); las excepciones sin atrapar salen como `[error] Uncaught …` con su
+  pila.
+
+Antes de escribir, el paso recibe lo que haya mandado el hilo de la pestaña. Lo cubre
+`bf-shell/tests/session_dump.rs`.
 

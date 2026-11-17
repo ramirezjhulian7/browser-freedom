@@ -1060,9 +1060,63 @@ fn load_linked_sheet(agent: &mut Agent, href: &str) -> Option<LinkedSheet> {
         encoding: bf_infra::encoding::Encoding::for_label(&d.character_set)
             .unwrap_or(bf_infra::encoding::Encoding::Utf8),
     });
-    let parsed = bf_style::sheet_cache::warm(&r.url, &r.bytes, &ctx);
+    let mut parsed = bf_style::sheet_cache::warm(&r.url, &r.bytes, &ctx);
+    // E2: sus `@import` entran en la cascada (CSS Cascade 5 §2), resueltos contra la URL de la
+    // hoja como en el pintado; la de la caché queda sin ellos (la comparte el pintado, que los
+    // resuelve al usarla).
+    if has_imports(&parsed) {
+        let style = bf_infra::resource::ForDestination {
+            inner: loader,
+            destination: bf_infra::Destination::Style,
+        };
+        let res = bf_style::loader::Resources {
+            loader: &style,
+            base: &r.url,
+            encoding: ctx.encoding,
+        };
+        let mut sheet = (*parsed).clone();
+        bf_style::loader::resolve_sheet_imports(&mut sheet, &r.url, res, ctx.quirks);
+        parsed = Arc::new(sheet);
+    }
     let text = bf_style::loader::decode_css(&r.bytes, ctx.encoding);
     Some(LinkedSheet { text, parsed })
+}
+
+fn has_imports(sheet: &Stylesheet) -> bool {
+    sheet.rules.iter().any(|r| matches!(r, Rule::Import(_)))
+}
+
+/// E2: la hoja de un `<style>` (o una modificada por el CSSOM) para la cascada, con sus
+/// `@import` resueltos contra la base del documento (CSS Cascade 5 §2), con el loader de la
+/// ventana. Sin loader (un documento sin red), sin ellos.
+fn cascade_sheet(agent: &mut Agent, text: &str) -> Stylesheet {
+    let mut sheet = Stylesheet::parse(text, Origin::Author);
+    if !has_imports(&sheet) {
+        return sheet;
+    }
+    let realm = WebContextHandle::current(agent).realm;
+    let Some(loader) = crate::bom::script::page_loader(agent, realm) else {
+        return sheet;
+    };
+    let base = WebContextHandle::current(agent).get(agent).base.clone();
+    let (quirks, encoding) = with_doc(agent, 0, |d| {
+        (
+            d.mode == bf_dom::QuirksMode::Quirks,
+            bf_infra::encoding::Encoding::for_label(&d.character_set)
+                .unwrap_or(bf_infra::encoding::Encoding::Utf8),
+        )
+    });
+    let style = bf_infra::resource::ForDestination {
+        inner: loader,
+        destination: bf_infra::Destination::Style,
+    };
+    let res = bf_style::loader::Resources {
+        loader: &style,
+        base: &base,
+        encoding,
+    };
+    bf_style::loader::resolve_sheet_imports(&mut sheet, &base, res, quirks);
+    sheet
 }
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).
@@ -1089,21 +1143,30 @@ pub fn document_sheets(agent: &mut Agent, media: &MediaContext) -> Arc<Vec<Style
     {
         return sheets.clone();
     }
+    // Lo de cada hoja, sin tener prestado el estado (resolver un `@import` usa el loader).
+    let parts: Vec<(Option<String>, Option<Arc<Stylesheet>>)> = ids
+        .iter()
+        .filter_map(|id| st.sheets.get(id))
+        .map(|s| {
+            if s.modified {
+                (Some(sheet_text(s)), None)
+            } else if let Some(src) = &s.source {
+                (Some(src.clone()), None)
+            } else {
+                (None, s.parsed.clone())
+            }
+        })
+        .collect();
     let mut out = Vec::new();
-    for id in &ids {
-        let Some(s) = st.sheets.get(id) else {
-            continue;
-        };
-        if s.modified {
-            out.push(Stylesheet::parse(&sheet_text(s), Origin::Author));
-        } else if let Some(src) = &s.source {
-            out.push(Stylesheet::parse(src, Origin::Author));
-        } else if let Some(parsed) = &s.parsed {
-            out.push((**parsed).clone());
+    for part in parts {
+        match part {
+            (Some(text), _) => out.push(cascade_sheet(agent, &text)),
+            (None, Some(parsed)) => out.push((*parsed).clone()),
+            (None, None) => {}
         }
     }
     let out = Arc::new(out);
-    st.assembled = Some((ids, generation, out.clone()));
+    state(agent).sheets.assembled = Some((ids, generation, out.clone()));
     out
 }
 

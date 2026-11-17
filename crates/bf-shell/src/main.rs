@@ -42,6 +42,7 @@ const USAGE: &str = "uso: freedom [<url|archivo>
                        | render <url|archivo> -o <salida.png> [--width <px>] [--height <px>] [--scale <n>] [--wait <ms>]
                        | open [<url|archivo>]
                        | session <url|archivo> <paso>... -o <prefijo>
+                         (pasos: wait, dump, click:X,Y, link:texto, type:texto, key:tecla, …)
                        | wpt-reftests-js [--wpt <dir>] [--out <dir>]]
 (<url> puede ser http(s)://, file://, data: o about:; sin argumentos, o open sin argumento,
 abre la página de inicio)";

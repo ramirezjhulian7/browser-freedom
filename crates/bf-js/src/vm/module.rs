@@ -39,6 +39,15 @@ pub trait ModuleLoader {
     fn resolve(&self, specifier: &str, referrer: Option<&str>) -> Result<String, String>;
     /// El código fuente del módulo `url`.
     fn load(&self, url: &str) -> Result<String, String>;
+
+    /// E3: como [`ModuleLoader::load`], para un módulo que pide el script o módulo de URL
+    /// `referrer` (HostLoadImportedModule, §16.2.1.10): el host puede pedirlo con las opciones
+    /// de quien lo importa (HTML §8.1.5.5, *descendant script fetch options*). Por defecto,
+    /// `load`.
+    fn load_from(&self, url: &str, referrer: Option<&str>) -> Result<String, String> {
+        let _ = referrer;
+        self.load(url)
+    }
 }
 
 /// Un [`ModuleLoader`] sobre el sistema de archivos: las URL son `file:///…` y los
@@ -364,7 +373,7 @@ impl Agent {
         if let Some(&id) = self.modules.map.get(&(realm, url.clone(), json)) {
             return Ok(id);
         }
-        let text = match loader.load(&url) {
+        let text = match loader.load_from(&url, referrer_url) {
             Ok(t) => t,
             Err(e) => return self.type_error(&format!("Cannot load module: {e}")),
         };
