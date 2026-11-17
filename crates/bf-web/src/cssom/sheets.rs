@@ -191,6 +191,8 @@ pub struct SheetStore {
     /// E2: los `<link>` cuyo enlace externo de tipo `stylesheet` ya existe (se pidió su hoja y
     /// su `rel` sigue teniendo `stylesheet`).
     stylesheet_links: HashSet<NodeRef>,
+    /// E2: hay un microtask pendiente de [`flush_paint_sheets`].
+    paint_flush_queued: bool,
 }
 
 impl SheetStore {
@@ -1117,6 +1119,63 @@ fn cascade_sheet(agent: &mut Agent, text: &str) -> Stylesheet {
     };
     bf_style::loader::resolve_sheet_imports(&mut sheet, &base, res, quirks);
     sheet
+}
+
+/// E2: después de un cambio del CSSOM, un microtask (uno por tanda de cambios) pasa al
+/// documento lo que el navegador debe pintar ([`flush_paint_sheets`]). Así un script que mete
+/// mil reglas con `insertRule` (styled-components, emotion) serializa la hoja una vez, no mil.
+pub fn schedule_paint_flush(agent: &mut Agent) {
+    let st = &mut state(agent).sheets;
+    if st.paint_flush_queued {
+        return;
+    }
+    st.paint_flush_queued = true;
+    let f = agent.create_builtin_function(paint_flush_microtask, 0, "", false);
+    let realm = WebContextHandle::current(agent).realm;
+    agent.enqueue_job(bf_js::builtins::promise::Job::Microtask {
+        callback: Value::Object(f),
+        realm,
+    });
+}
+
+fn paint_flush_microtask(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
+    flush_paint_sheets(agent);
+    Ok(Value::Undefined)
+}
+
+/// E2: CSSOM §6.1 y §6.4.2: la hoja de un `<style>` o `<link>` es el objeto vivo, no el texto
+/// del elemento. El navegador pinta con las hojas que lee del documento (`bf_style::loader`), así
+/// que aquí se le pasan, serializadas (`Document::set_cssom_sheet_texts`), las que el CSSOM
+/// cambió (`insertRule`, `deleteRule`, `replaceSync` de una regla, declaraciones…) y las
+/// `adoptedStyleSheets` del documento (CSSOM §6.6). Antes un sitio con CSS-in-JS en modo de
+/// producción (styled-components mete sus reglas en un `<style>` vacío con `insertRule`) se
+/// pintaba sin estilos: `https://www.bbc.com/news`.
+pub fn flush_paint_sheets(agent: &mut Agent) {
+    state(agent).sheets.paint_flush_queued = false;
+    let ids = sync(agent);
+    let adopted = adopted_ids(agent);
+    let st = &state(agent).sheets;
+    let mut texts = HashMap::new();
+    for id in &ids {
+        if let Some(s) = st.sheets.get(id)
+            && s.modified
+            && let Some(owner) = s.owner
+            && owner.doc == 0
+        {
+            texts.insert(owner.node, sheet_text(s));
+        }
+    }
+    let adopted: Vec<String> = adopted
+        .iter()
+        .filter_map(|id| st.sheets.get(id))
+        .filter(|s| !s.disabled)
+        .map(sheet_text)
+        .collect();
+    if !adopted.is_empty() {
+        let root = with_doc(agent, 0, bf_dom::Document::root);
+        texts.insert(root, adopted.join("\n"));
+    }
+    crate::with_doc_mut(agent, 0, |d| d.set_cssom_sheet_texts(texts));
 }
 
 /// Las hojas de autor del documento para la cascada (con los cambios del CSSOM).

@@ -604,6 +604,8 @@ pub fn sheets_changed(agent: &mut Agent) {
     state(agent).sheets_generation += 1;
     // E1: las `adoptedStyleSheets` siguen a sus hojas.
     crate::dom::shadow::sync_adopted(agent);
+    // E2: y lo que pinta el navegador, a la hoja viva (`sheets::flush_paint_sheets`).
+    sheets::schedule_paint_flush(agent);
     crate::dom::mutated(agent);
 }
 

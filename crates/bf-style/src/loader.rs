@@ -101,7 +101,12 @@ pub fn document_stylesheets(
             if !is_css_type(el.attr("type")) {
                 continue;
             }
-            let mut sheet = Stylesheet::parse(&text_content(doc, node), Origin::Author);
+            // E2: si el CSSOM cambió la hoja (`insertRule`…, como styled-components), manda
+            // la hoja viva y no el texto del elemento (CSSOM §6.1, §6.4.2).
+            let text = doc
+                .cssom_sheet_text(node)
+                .map_or_else(|| text_content(doc, node), str::to_owned);
+            let mut sheet = Stylesheet::parse(&text, Origin::Author);
             if let Some(res) = resources {
                 process(
                     &mut sheet,
@@ -128,10 +133,41 @@ pub fn document_stylesheets(
             let (Some(res), Some(href)) = (resources, el.attr("href")) else {
                 continue;
             };
+            // E2: la hoja enlazada que el CSSOM cambió, con sus URL y sus `@import` resueltos
+            // contra la URL de la hoja.
+            if let Some(text) = doc.cssom_sheet_text(node)
+                && let Ok(url) = Url::parse(href, Some(res.base))
+            {
+                let mut sheet = Stylesheet::parse(text, Origin::Author);
+                process(
+                    &mut sheet,
+                    &url,
+                    res,
+                    quirks,
+                    &mut vec![url.serialize(true)],
+                );
+                sheets.push(sheet);
+                continue;
+            }
             if let Some(sheet) = load_sheet(href, res.base, res, quirks, &mut Vec::new()) {
                 sheets.push(sheet);
             }
         }
+    }
+    // E2: las `adoptedStyleSheets` del documento, después de sus hojas (CSSOM §6.6, "document
+    // or shadow root CSS style sheets"), con las URL contra la base del documento.
+    if let Some(text) = doc.cssom_sheet_text(doc.root()) {
+        let mut sheet = Stylesheet::parse(text, Origin::Author);
+        if let Some(res) = resources {
+            process(
+                &mut sheet,
+                res.base,
+                res,
+                quirks,
+                &mut vec![res.base.serialize(true)],
+            );
+        }
+        sheets.push(sheet);
     }
     // E5: las caras de `document.fonts` añadidas desde scripts, después de las hojas (con URLs
     // ya absolutas).
