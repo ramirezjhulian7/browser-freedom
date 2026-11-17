@@ -24,7 +24,7 @@ struct DatasetFn(HostHandle);
 /// Los traps del `Proxy` (`[LegacyOverrideBuiltIns]`) y la conversión de nombres (HTML
 /// §3.2.6.6): recibe lo que necesita del realm recién creado y devuelve la función
 /// `elemento → DOMStringMap`.
-const FACTORY: &str = r#"(function (make, Element_proto, DOMException, Proxy, WeakMap, Reflect) {
+pub(crate) const FACTORY: &str = r#"(function (make, Element_proto, DOMException, Proxy, WeakMap, Reflect) {
   "use strict";
   var apply = Reflect.apply, getA = Element_proto.getAttribute,
       setA = Element_proto.setAttribute, remA = Element_proto.removeAttribute,
@@ -155,7 +155,7 @@ pub fn register(agent: &mut Agent, realm: RealmId) {
     let holder_pin = agent.host_pin(Value::Object(holder));
     let make = bf_js::builtins::method(agent, holder, "make", 0, make_map);
     let make_pin = agent.host_pin(Value::Object(make));
-    let f = match agent.eval_script(FACTORY, "dataset") {
+    let f = match agent.eval_script_cached(FACTORY, "dataset") {
         Ok(factory) => {
             let factory_pin = agent.host_pin(factory.clone());
             let r = agent.call(

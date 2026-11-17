@@ -109,7 +109,7 @@ impl PageHost<'_> {
         self.agent.current_realm = self.realm;
         let r = self
             .agent
-            .compile_script_text(text, url)
+            .compile_script_cached(text, url)
             .and_then(|code| self.agent.script_evaluation(code));
         let r = match r {
             Ok(_) => self.agent.perform_microtask_checkpoint(),

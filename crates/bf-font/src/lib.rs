@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use bf_css::syntax::Declaration;
 use bf_infra::ResourceLoader;
 use bf_layout::{FontKey, FontMetrics, FontProvider, FontRequest, Glyph, Outline};
-use bf_style::properties::types::FamilyName;
+use bf_style::properties::types::{FamilyName, FontFamily};
 
 pub use db::FontDb;
 pub use face::{FaceStyle, LoadedFace};
@@ -47,10 +47,21 @@ struct WebFace {
     loaded: OnceLock<Option<Arc<LoadedFace>>>,
 }
 
-type FamilyKey = (String, u32, bool);
-/// Familia, tamaño, texto y dirección (`None`: la que adivina el shaper; `Some(rtl)`: la del
-/// run bidi).
-type ShapeKey = (FamilyKey, u32, String, Option<bool>);
+/// E5: identificador de la lista de `font-family` ([`Fonts::family_id`]), peso e itálica.
+type FamilyKey = (u32, u32, bool);
+/// Familia, tamaño y dirección (`None`: la que adivina el shaper; `Some(rtl)`: la del run
+/// bidi); dentro, por texto (se busca con `&str`, sin copiarlo).
+type ShapeKey = (FamilyKey, u32, Option<bool>);
+type ShapeCache = HashMap<ShapeKey, HashMap<String, Arc<Vec<Glyph>>>>;
+/// E5: cara (con tamaño óptico), dirección y script de un plan de shaping (sin idioma ni
+/// features: no se usan).
+type PlanKey = (FontKey, rustybuzz::Direction, Option<rustybuzz::Script>);
+
+/// E5: una cara del sistema preparada para rustybuzz.
+struct RbFace {
+    face: rustybuzz::Face<'static>,
+    units_per_em: f32,
+}
 
 /// Fuentes de un documento.
 pub struct Fonts {
@@ -58,7 +69,17 @@ pub struct Fonts {
     web: Vec<WebFace>,
     loader: Option<Arc<dyn ResourceLoader>>,
     families: Mutex<HashMap<FamilyKey, Arc<Vec<Vec<FontKey>>>>>,
-    shaped: Mutex<HashMap<ShapeKey, Arc<Vec<Glyph>>>>,
+    /// E5: cada lista de `font-family` distinta con su identificador, por su hash (las que
+    /// comparten hash se distinguen comparándolas).
+    family_ids: Mutex<HashMap<u64, Vec<(FontFamily, u32)>>>,
+    shaped: Mutex<ShapeCache>,
+    /// E5: la base del sistema con vida `'static` si `db` es ella (ver [`Fonts::rb_face`]).
+    static_db: Option<&'static FontDb>,
+    /// E5: caras de rustybuzz ya preparadas (tablas leídas y variaciones puestas) de las caras
+    /// del sistema, por clave con tamaño óptico, y los planes de shaping de cada una por
+    /// dirección y script. Antes se rehacían en cada run.
+    rb_faces: Mutex<HashMap<FontKey, Option<Arc<RbFace>>>>,
+    plans: Mutex<HashMap<PlanKey, Arc<rustybuzz::ShapePlan>>>,
     web_outlines: db::OutlineCache,
     coverage: Mutex<HashMap<(FontKey, char), bool>>,
     vertical_fit: bool,
@@ -118,12 +139,19 @@ fn continues_cluster(c: char) -> bool {
 
 impl Fonts {
     pub fn new(db: Arc<FontDb>) -> Fonts {
+        let static_db = FontDb::system_if_loaded()
+            .filter(|s| Arc::ptr_eq(s, &db))
+            .map(|s| &**s);
         Fonts {
             db,
             web: Vec::new(),
             loader: None,
             families: Mutex::default(),
+            family_ids: Mutex::default(),
             shaped: Mutex::default(),
+            static_db,
+            rb_faces: Mutex::default(),
+            plans: Mutex::default(),
             web_outlines: Mutex::default(),
             coverage: Mutex::default(),
             vertical_fit: true,
@@ -258,11 +286,7 @@ impl Fonts {
     /// composición de caras `@font-face` con los mismos descriptores (las definidas después,
     /// primero).
     fn resolve(&self, request: &FontRequest<'_>) -> Arc<Vec<Vec<FontKey>>> {
-        let key: FamilyKey = (
-            format!("{:?}", request.family.0),
-            request.weight.to_bits(),
-            request.italic,
-        );
+        let key = self.family_key(request);
         if let Some(r) = lock(&self.families).get(&key) {
             return r.clone();
         }
@@ -365,15 +389,43 @@ impl Fonts {
             .collect()
     }
 
-    /// Shaping con caché por familia, tamaño, texto y dirección (ver [`ShapeKey`]).
-    fn shape_impl(&self, text: &str, request: &FontRequest<'_>, rtl: Option<bool>) -> Vec<Glyph> {
-        let fkey: FamilyKey = (
-            format!("{:?}", request.family.0),
+    /// E5: un identificador por cada lista de `font-family` distinta, sin formatearla (la
+    /// clave de las cachés de familias y de shaping se pide en cada medición de texto).
+    fn family_id(&self, family: &FontFamily) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for name in &family.0 {
+            match name {
+                FamilyName::Generic(g) => (0u8, g).hash(&mut h),
+                FamilyName::Named(n) => (1u8, n).hash(&mut h),
+            }
+        }
+        let hash = h.finish();
+        let mut ids = lock(&self.family_ids);
+        if let Some((_, id)) = ids
+            .get(&hash)
+            .and_then(|b| b.iter().find(|(f, _)| f == family))
+        {
+            return *id;
+        }
+        let next = ids.values().map(Vec::len).sum::<usize>() as u32;
+        ids.entry(hash).or_default().push((family.clone(), next));
+        next
+    }
+
+    fn family_key(&self, request: &FontRequest<'_>) -> FamilyKey {
+        (
+            self.family_id(request.family),
             request.weight.to_bits(),
             request.italic,
-        );
-        let key: ShapeKey = (fkey, request.size.to_bits(), text.to_owned(), rtl);
-        if let Some(g) = lock(&self.shaped).get(&key) {
+        )
+    }
+
+    /// Shaping con caché por familia, tamaño, texto y dirección (ver [`ShapeKey`]).
+    fn shape_impl(&self, text: &str, request: &FontRequest<'_>, rtl: Option<bool>) -> Vec<Glyph> {
+        let fkey = self.family_key(request);
+        let key: ShapeKey = (fkey, request.size.to_bits(), rtl);
+        if let Some(g) = lock(&self.shaped).get(&key).and_then(|m| m.get(text)) {
             return g.as_ref().clone();
         }
         // E5: sin dirección (`None`, tamaños intrínsecos) y con dirección LTR (`Some(false)`,
@@ -422,9 +474,13 @@ impl Fonts {
                 .all(|&(start, end, _, script)| guessed_ltr(&text[start..end], script.tag()))
         {
             let other_dir = if rtl.is_none() { Some(false) } else { None };
-            let other: ShapeKey = (key.0.clone(), key.1, key.2.clone(), other_dir);
-            if let Some(g) = lock(&self.shaped).get(&other).cloned() {
-                lock(&self.shaped).insert(key, g.clone());
+            let other: ShapeKey = (key.0, key.1, other_dir);
+            let mut shaped = lock(&self.shaped);
+            if let Some(g) = shaped.get(&other).and_then(|m| m.get(text)).cloned() {
+                shaped
+                    .entry(key)
+                    .or_default()
+                    .insert(text.to_owned(), g.clone());
                 return g.as_ref().clone();
             }
             twin = Some(other);
@@ -460,9 +516,15 @@ impl Fonts {
         let shared = Arc::new(glyphs.clone());
         let mut shaped = lock(&self.shaped);
         if let Some(twin) = twin {
-            shaped.insert(twin, shared.clone());
+            shaped
+                .entry(twin)
+                .or_default()
+                .insert(text.to_owned(), shared.clone());
         }
-        shaped.insert(key, shared);
+        shaped
+            .entry(key)
+            .or_default()
+            .insert(text.to_owned(), shared);
         glyphs
     }
 
@@ -622,6 +684,15 @@ impl Fonts {
         rtl: Option<bool>,
         out: &mut Vec<Glyph>,
     ) {
+        if let Some(rb) = self.rb_face(key) {
+            let buffer = run_buffer(text, script, rtl);
+            let dir = buffer.direction();
+            let script = Some(buffer.script()).filter(|s| *s != rustybuzz::script::UNKNOWN);
+            let plan = self.plan(key, &rb.face, dir, script);
+            let glyphs = rustybuzz::shape_with_plan(&rb.face, &plan, buffer);
+            push_glyphs(&glyphs, rb.units_per_em, size, key, map, out);
+            return;
+        }
         let face = self.face(key);
         let (_, opsz) = split_key(key);
         let shaped = face.as_ref().and_then(|f| {
@@ -636,23 +707,7 @@ impl Fonts {
             if !variations.is_empty() {
                 rb.set_variations(&variations);
             }
-            let mut buffer = rustybuzz::UnicodeBuffer::new();
-            buffer.push_str(text);
-            if let Some(script) = script
-                .filter(|t| !matches!(*t, "Zyyy" | "Zinh" | "Zzzz"))
-                .map(|t| rustybuzz::ttf_parser::Tag::from_bytes_lossy(t.as_bytes()))
-                .and_then(rustybuzz::Script::from_iso15924_tag)
-            {
-                buffer.set_script(script);
-            }
-            if let Some(rtl) = rtl {
-                buffer.set_direction(if rtl {
-                    rustybuzz::Direction::RightToLeft
-                } else {
-                    rustybuzz::Direction::LeftToRight
-                });
-            }
-            buffer.guess_segment_properties();
+            let buffer = run_buffer(text, script, rtl);
             Some((rustybuzz::shape(&rb, &[], buffer), f.units_per_em))
         });
         let Some((glyphs, upem)) = shaped else {
@@ -663,17 +718,103 @@ impl Fonts {
             );
             return;
         };
-        let scale = size / upem;
-        for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-            out.push(Glyph {
-                advance: pos.x_advance as f32 * scale,
-                cluster: map[info.cluster as usize],
-                id: u16::try_from(info.glyph_id).unwrap_or(0),
-                font: key,
-                x_offset: pos.x_offset as f32 * scale,
-                y_offset: pos.y_offset as f32 * scale,
-            });
+        push_glyphs(&glyphs, upem, size, key, map, out);
+    }
+
+    /// E5: la cara de rustybuzz de una cara del sistema (`key` con su tamaño óptico), preparada
+    /// una vez: `rustybuzz::Face::from_slice` lee las tablas de la fuente y hacerlo en cada run
+    /// costaba casi tanto como dar forma a un texto corto. Las caras `@font-face` (y una base
+    /// que no sea la del sistema) siguen el camino de siempre.
+    fn rb_face(&self, key: FontKey) -> Option<Arc<RbFace>> {
+        let db = self.static_db?;
+        let (base, opsz) = split_key(key);
+        if base == NO_FONT || base.0 & WEB_BIT != 0 {
+            return None;
         }
+        if let Some(r) = lock(&self.rb_faces).get(&key) {
+            return r.clone();
+        }
+        let r = db.load_ref(base.0 as usize).and_then(|f| {
+            let mut face = rustybuzz::Face::from_slice(&f.data, f.index)?;
+            let variations: Vec<rustybuzz::Variation> = f
+                .variations(opsz.map(f32::from))
+                .into_iter()
+                .map(|(tag, value)| rustybuzz::Variation { tag, value })
+                .collect();
+            if !variations.is_empty() {
+                face.set_variations(&variations);
+            }
+            Some(Arc::new(RbFace {
+                face,
+                units_per_em: f.units_per_em,
+            }))
+        });
+        lock(&self.rb_faces).insert(key, r.clone());
+        r
+    }
+
+    /// E5: el plan de shaping de `face` para una dirección y un script, guardado (es lo que
+    /// `rustybuzz::shape` crea en cada llamada, sin idioma ni features).
+    fn plan(
+        &self,
+        key: FontKey,
+        face: &rustybuzz::Face<'static>,
+        dir: rustybuzz::Direction,
+        script: Option<rustybuzz::Script>,
+    ) -> Arc<rustybuzz::ShapePlan> {
+        let k = (key, dir, script);
+        if let Some(p) = lock(&self.plans).get(&k) {
+            return p.clone();
+        }
+        let p = Arc::new(rustybuzz::ShapePlan::new(face, dir, script, None, &[]));
+        lock(&self.plans).insert(k, p.clone());
+        p
+    }
+}
+
+/// El buffer de un run: el texto, el script (salvo Zyyy, Zinh y Zzzz, que adivina el shaper),
+/// la dirección si se da y las propiedades que falten adivinadas (`guess_segment_properties`,
+/// como hace `rustybuzz::shape`).
+fn run_buffer(text: &str, script: Option<&str>, rtl: Option<bool>) -> rustybuzz::UnicodeBuffer {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    if let Some(script) = script
+        .filter(|t| !matches!(*t, "Zyyy" | "Zinh" | "Zzzz"))
+        .map(|t| rustybuzz::ttf_parser::Tag::from_bytes_lossy(t.as_bytes()))
+        .and_then(rustybuzz::Script::from_iso15924_tag)
+    {
+        buffer.set_script(script);
+    }
+    if let Some(rtl) = rtl {
+        buffer.set_direction(if rtl {
+            rustybuzz::Direction::RightToLeft
+        } else {
+            rustybuzz::Direction::LeftToRight
+        });
+    }
+    buffer.guess_segment_properties();
+    buffer
+}
+
+/// Los glifos de rustybuzz en px (`map[i]`: offset en el texto original del byte `i`).
+fn push_glyphs(
+    glyphs: &rustybuzz::GlyphBuffer,
+    upem: f32,
+    size: f32,
+    key: FontKey,
+    map: &[usize],
+    out: &mut Vec<Glyph>,
+) {
+    let scale = size / upem;
+    for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
+        out.push(Glyph {
+            advance: pos.x_advance as f32 * scale,
+            cluster: map[info.cluster as usize],
+            id: u16::try_from(info.glyph_id).unwrap_or(0),
+            font: key,
+            x_offset: pos.x_offset as f32 * scale,
+            y_offset: pos.y_offset as f32 * scale,
+        });
     }
 }
 

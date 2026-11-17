@@ -53,7 +53,7 @@ pub fn storage_class() -> HostClass {
 
 /// Las *named properties* de `Storage` sobre un `Proxy` (los métodos se llaman sobre el
 /// objeto de plataforma).
-const NAMED_PROPERTIES: &str = r#"(function (s) {
+pub(crate) const NAMED_PROPERTIES: &str = r#"(function (s) {
   var own = function (t, k) { return typeof k === "symbol" || k in t; };
   return new Proxy(s, {
     get: function (t, k) {
@@ -102,7 +102,7 @@ pub fn create(agent: &mut Agent, realm: RealmId, n: u64, local: bool) -> HostHan
     // marcos seguidos).
     let pin = agent.host_pin(Value::Object(o));
     let wrapped = agent
-        .eval_script(NAMED_PROPERTIES, "storage")
+        .eval_script_cached(NAMED_PROPERTIES, "storage")
         .and_then(|f| agent.call(&f, Value::Undefined, &[Value::Object(o)]))
         .unwrap_or(Value::Object(o));
     let handle = agent.host_pin(wrapped);

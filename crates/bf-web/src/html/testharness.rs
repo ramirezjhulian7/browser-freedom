@@ -668,6 +668,9 @@ fn run_doc_inner(root: &Path, doc: &TestDoc, limit: Duration) -> DocResult {
                 if let Err(Throw::Terminate(_)) = rt.agent.run_animation_frames(frame) {
                     return result(Harness::NoResult("tiempo agotado".into()), vec![]);
                 }
+                // E2: `ResizeObserver` e `IntersectionObserver` después de los callbacks
+                // (§8.1.7.3, pasos 14 y 19), con la maqueta del CSSOM.
+                crate::cssom::update_observations(&mut rt.agent, realm);
                 continue;
             }
         }

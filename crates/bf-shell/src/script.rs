@@ -730,6 +730,11 @@ impl Engine {
                 self.lazy_view = view;
                 bf_web::html::legacy_factories::check_lazy_images(&mut self.rt.agent, realm);
             }
+            // E2: la maqueta nueva (o el desplazamiento) es la de *update the rendering*: los
+            // `ResizeObserver` y los `IntersectionObserver` se calculan con ella (HTML
+            // §8.1.7.3, pasos 14 y 19).
+            bf_web::cssom::update_observations(&mut self.rt.agent, realm);
+            self.flush_rejections();
         }
     }
 
@@ -1215,6 +1220,12 @@ impl Engine {
             bf_web::bom::animation::update_and_send_events(&mut self.rt.agent, self.realm);
         }
         let r = self.rt.run_animation_frames(now);
+        // E2: `ResizeObserver` e `IntersectionObserver` (HTML §8.1.7.3, pasos 14 y 19) con la
+        // maqueta que entregó la ventana; si aún no llegó la del documento de ahora, esperan a
+        // ella (`set_layout`).
+        if self.has_window() {
+            bf_web::cssom::update_observations(&mut self.rt.agent, self.realm);
+        }
         self.rt.agent.options.deadline = None;
         if let Err(e) = r {
             self.report_error(&e);

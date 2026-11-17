@@ -862,6 +862,44 @@ struct Styler<'a> {
     expanded: std::cell::RefCell<HashMap<usize, std::rc::Rc<Expanded>>>,
     /// E4: el filtro de ancestros de cada nodo (ver `Styler::ancestor_bloom`).
     blooms: std::cell::RefCell<HashMap<NodeId, AncestorBloom>>,
+    /// E4: estilos ya calculados por (padre, raíz, lo emparejado), para compartirlos (ver
+    /// `Styler::style_if`). Los estilos de los padres viven toda la cascada, así que su
+    /// dirección no se repite.
+    shared: std::cell::RefCell<HashMap<ShareKey, Arc<ComputedStyle>>>,
+    /// `BF_NO_STYLE_SHARING=1` lo apaga (para medirlo).
+    sharing: bool,
+}
+
+thread_local! {
+    static SHARING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// E4: fuerza (o, con `None`, deja en manos de `BF_NO_STYLE_SHARING`) que la cascada de este
+/// hilo comparta estilos entre elementos. Para los tests que comparan con y sin.
+#[doc(hidden)]
+pub fn set_style_sharing(on: Option<bool>) {
+    SHARING.with(|s| s.set(on));
+}
+
+/// E4: la clave de compartir estilo: la dirección del estilo del padre, si es la raíz y lo
+/// emparejado.
+type ShareKey = (usize, bool, Vec<SharedDecl>);
+
+/// E4: un subárbol por calcular: su raíz y el estilo de su padre.
+type Subtree = (NodeId, Option<Arc<ComputedStyle>>);
+
+/// E4: una declaración emparejada tal como entra en la cascada (la clave de compartir estilo).
+#[derive(PartialEq, Eq, Hash)]
+struct SharedDecl {
+    group: u64,
+    unlayered: usize,
+    depth: u8,
+    decl: usize,
+    origin: Origin,
+    layer: usize,
+    specificity: bf_css::selectors::Specificity,
+    order: usize,
+    important: bool,
 }
 
 /// E4: en qué se va la cascada (con `BF_TRACE=1`, una línea `perf cascada` al terminar).
@@ -883,9 +921,46 @@ struct Timings {
     rules: usize,
     /// `::before`/`::after` sin `content` ni `all`: no se calculan sus valores.
     skipped: usize,
+    /// Elementos que compartieron el estilo de otro (no se calcularon sus valores).
+    shared: usize,
 }
 
 impl Timings {
+    /// Suma lo de otro hilo.
+    fn absorb(&mut self, o: &Timings) {
+        self.matching += o.matching;
+        self.declarations += o.declarations;
+        self.values += o.values;
+        self.pseudo += o.pseudo;
+        self.elements += o.elements;
+        self.pseudo_calls += o.pseudo_calls;
+        self.index += o.index;
+        self.rules = self.rules.max(o.rules);
+        self.skipped += o.skipped;
+        self.shared += o.shared;
+    }
+
+    /// La línea `perf cascada` (con `threads` hilos, los tiempos van sumados entre ellos).
+    fn print(&self, threads: usize) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "perf cascada: emparejar {:.1} ms (índices {:.1} ms, {} reglas) · declaraciones \
+             {:.1} ms · valores {:.1} ms; de eso, pseudoelementos {:.1} ms ({} elementos, {} \
+             llamadas de pseudoelementos, {} sin `content`); {} estilos compartidos; {} hilos",
+            ms(self.matching),
+            ms(self.index),
+            self.rules,
+            ms(self.declarations),
+            ms(self.values),
+            ms(self.pseudo),
+            self.elements,
+            self.pseudo_calls,
+            self.skipped,
+            self.shared,
+            threads
+        );
+    }
+
     fn add(cell: Option<&std::cell::RefCell<Timings>>, f: impl FnOnce(&mut Timings)) {
         if let Some(c) = cell {
             f(&mut c.borrow_mut());
@@ -1109,7 +1184,7 @@ impl<'a> Styler<'a> {
         pseudo: Option<PseudoElement>,
         parent: Option<&ComputedStyle>,
         is_root: bool,
-    ) -> ComputedStyle {
+    ) -> Arc<ComputedStyle> {
         self.style_if(node, pseudo, parent, is_root, false)
             .expect("estilo sin condición")
     }
@@ -1125,7 +1200,7 @@ impl<'a> Styler<'a> {
         parent: Option<&ComputedStyle>,
         is_root: bool,
         needs_content: bool,
-    ) -> Option<ComputedStyle> {
+    ) -> Option<Arc<ComputedStyle>> {
         let clock = self.timings.as_ref().map(|_| std::time::Instant::now());
         let sheets = ua_sheets();
         let mut matched: Vec<(u64, usize, u8, MatchedDeclaration<'a>)> = Vec::new();
@@ -1201,8 +1276,44 @@ impl<'a> Styler<'a> {
                 }
             }
         }
+        // E4: compartir estilo. Sin declaraciones propias (atributo `style`, hints, quirks), los
+        // valores computados de un elemento dependen solo de lo emparejado y del estilo del
+        // padre (`compute`): dos elementos con la misma lista y el mismo padre tienen el mismo
+        // estilo (CSS Cascade 5 §4 no cambia; es un caché). Se comparte el mismo `Arc`, así que
+        // sus hijos también tienen el mismo padre y pueden compartir entre primos.
+        let share = (pseudo.is_none() && owned.is_empty() && self.sharing).then(|| {
+            let decls: Vec<SharedDecl> = matched
+                .iter()
+                .map(|(group, unlayered, depth, m)| SharedDecl {
+                    group: *group,
+                    unlayered: *unlayered,
+                    depth: *depth,
+                    decl: std::ptr::from_ref(m.declaration) as usize,
+                    origin: m.origin,
+                    layer: m.layer_index,
+                    specificity: m.specificity,
+                    order: m.source_order,
+                    important: m.important,
+                })
+                .collect();
+            let parent = parent.map_or(0, |p| std::ptr::from_ref(p) as usize);
+            (parent, is_root, decls)
+        });
+        if let Some(key) = &share
+            && let Some(style) = self.shared.borrow().get(key)
+        {
+            Timings::add(self.timings.as_ref(), |t| {
+                t.matching += matched_at.unwrap_or_default();
+                t.elements += 1;
+                t.shared += 1;
+            });
+            return Some(style.clone());
+        }
         let sources = self.sources(&owned, &matched, depth);
-        let style = self.compute(&sources, parent, is_root, clock);
+        let style = Arc::new(self.compute(&sources, parent, is_root, clock));
+        if let Some(key) = share {
+            self.shared.borrow_mut().insert(key, style.clone());
+        }
         if let (Some(c), Some(m)) = (clock, matched_at) {
             let total = c.elapsed();
             Timings::add(self.timings.as_ref(), |t| {
@@ -1613,11 +1724,6 @@ pub fn style_document_with_sheets(
     ctx: &MatchContext,
     fonts: Option<&dyn FontMetricsSource>,
 ) -> StyleMap {
-    let ua = ua_sheets();
-    let mut ua_list: Vec<&Stylesheet> = vec![&ua.html];
-    if doc.mode == QuirksMode::Quirks {
-        ua_list.push(&ua.quirks);
-    }
     // E1: las hojas de cada shadow root (las `adoptedStyleSheets` del documento llegan en
     // `document_sheets`, desde el CSSOM de E2).
     let shadow_owned: Vec<(NodeId, Vec<Stylesheet>)> = doc
@@ -1625,6 +1731,156 @@ pub fn style_document_with_sheets(
         .into_iter()
         .map(|r| (r, crate::loader::shadow_tree_stylesheets(doc, r, media)))
         .collect();
+    let mut styler = new_styler(
+        doc,
+        document_sheets,
+        &shadow_owned,
+        sheets,
+        media,
+        ctx,
+        fonts,
+    );
+    let mut map = StyleMap::new();
+    let roots = styler
+        .element_children(doc.root())
+        .into_iter()
+        .map(|c| (c, None))
+        .collect();
+    styler.style_subtrees(roots, &mut map);
+    if let Some(t) = &styler.timings {
+        t.borrow().print(1);
+    }
+    map
+}
+
+/// E4: [`style_document_with_sheets`] repartida en `threads` hilos: se calculan en orden la
+/// raíz y los subárboles más grandes hasta tener bastantes subárboles independientes (con el
+/// estilo de su padre ya calculado), y esos se reparten por tamaño entre los hilos, cada uno
+/// con su propio `Styler` sobre las mismas hojas. El estilo de un elemento depende solo de lo
+/// que le aplica y del estilo de su padre, así que el resultado es el mismo. Con shadow roots
+/// (hojas por árbol) o pocos elementos, en un solo hilo.
+pub fn style_document_parallel(
+    doc: &Document,
+    document_sheets: &[Stylesheet],
+    sheets: &[&Stylesheet],
+    media: &MediaContext,
+    ctx: &MatchContext,
+    fonts: Option<&(dyn FontMetricsSource + Sync)>,
+    threads: usize,
+) -> StyleMap {
+    let plain = fonts.map(|f| f as &dyn FontMetricsSource);
+    if threads <= 1 || doc.has_shadow_roots() {
+        return style_document_with_sheets(doc, document_sheets, sheets, media, ctx, plain);
+    }
+    let no_shadow: Vec<(NodeId, Vec<Stylesheet>)> = Vec::new();
+    let mut main = new_styler(doc, document_sheets, &no_shadow, sheets, media, ctx, plain);
+    let sizes = subtree_sizes(doc, &main);
+    let mut map = StyleMap::new();
+    let mut frontier: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = main
+        .element_children(doc.root())
+        .into_iter()
+        .map(|c| (c, None))
+        .collect();
+    let total: usize = frontier.iter().map(|(n, _)| sizes[n]).sum();
+    // Subárboles de a lo sumo `chunk` elementos: unos cuatro por hilo, para repartir bien.
+    let chunk = (total / (threads * 4)).max(64);
+    while let Some((i, _)) = frontier
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, _))| sizes[n] > chunk)
+        .max_by_key(|(_, (n, _))| sizes[n])
+    {
+        let (node, parent) = frontier.swap_remove(i);
+        let style = main.style_node(node, parent, &mut map);
+        for c in main.element_children(node) {
+            frontier.push((c, Some(style.clone())));
+        }
+    }
+    frontier.sort_by_key(|(n, _)| std::cmp::Reverse(sizes[n]));
+    let mut buckets: Vec<(usize, Vec<Subtree>)> = (0..threads).map(|_| (0, Vec::new())).collect();
+    for (node, parent) in frontier {
+        if let Some(b) = buckets.iter_mut().min_by_key(|b| b.0) {
+            b.0 += sizes[&node];
+            b.1.push((node, parent));
+        }
+    }
+    let (root_font_size, root_line_height) = (main.root_font_size, main.root_line_height);
+    let parts: Vec<(StyleMap, Option<Timings>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = buckets
+            .into_iter()
+            .filter(|b| !b.1.is_empty())
+            .map(|(_, roots)| {
+                s.spawn(move || {
+                    let no_shadow: Vec<(NodeId, Vec<Stylesheet>)> = Vec::new();
+                    let plain = fonts.map(|f| f as &dyn FontMetricsSource);
+                    let mut styler =
+                        new_styler(doc, document_sheets, &no_shadow, sheets, media, ctx, plain);
+                    styler.root_font_size = root_font_size;
+                    styler.root_line_height = root_line_height;
+                    let mut part = StyleMap::new();
+                    styler.style_subtrees(roots, &mut part);
+                    (part, styler.timings.map(std::cell::RefCell::into_inner))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("hilo de la cascada"))
+            .collect()
+    });
+    let workers = parts.len();
+    for (part, timings) in parts {
+        map.extend(part);
+        if let (Some(main), Some(t)) = (&main.timings, timings) {
+            main.borrow_mut().absorb(&t);
+        }
+    }
+    if let Some(t) = &main.timings {
+        t.borrow().print(workers + 1);
+    }
+    map
+}
+
+/// E4: cuántos elementos tiene el subárbol (en el flat tree) de cada elemento.
+fn subtree_sizes(doc: &Document, styler: &Styler<'_>) -> HashMap<NodeId, usize> {
+    let mut order: Vec<(NodeId, Option<NodeId>)> = Vec::new();
+    let mut stack: Vec<(NodeId, Option<NodeId>)> = styler
+        .element_children(doc.root())
+        .into_iter()
+        .map(|c| (c, None))
+        .collect();
+    while let Some((node, parent)) = stack.pop() {
+        order.push((node, parent));
+        for c in styler.element_children(node) {
+            stack.push((c, Some(node)));
+        }
+    }
+    let mut sizes: HashMap<NodeId, usize> = HashMap::new();
+    for (node, parent) in order.into_iter().rev() {
+        let own = *sizes.entry(node).or_insert(0) + 1;
+        sizes.insert(node, own);
+        if let Some(p) = parent {
+            *sizes.entry(p).or_insert(0) += own;
+        }
+    }
+    sizes
+}
+
+/// El `Styler` de un documento con sus hojas.
+fn new_styler<'a>(
+    doc: &'a Document,
+    document_sheets: &'a [Stylesheet],
+    shadow_owned: &'a [(NodeId, Vec<Stylesheet>)],
+    sheets: &[&'a Stylesheet],
+    media: &'a MediaContext,
+    ctx: &'a MatchContext,
+    fonts: Option<&'a dyn FontMetricsSource>,
+) -> Styler<'a> {
+    let ua = ua_sheets();
+    let mut ua_list: Vec<&Stylesheet> = vec![&ua.html];
+    if doc.mode == QuirksMode::Quirks {
+        ua_list.push(&ua.quirks);
+    }
     let shadow_author: HashMap<NodeId, Vec<&Stylesheet>> = shadow_owned
         .iter()
         .map(|(r, s)| (*r, s.iter().collect()))
@@ -1640,7 +1896,7 @@ pub fn style_document_with_sheets(
     }
     // CSS Properties and Values API 1 §3: las `@property` de las hojas de autor.
     let registry = Registry::from_sheets(&author, media);
-    let mut styler = Styler {
+    Styler {
         registry,
         doc,
         ua: ua_list,
@@ -1657,64 +1913,69 @@ pub fn style_document_with_sheets(
         base: std::cell::RefCell::new(None),
         expanded: std::cell::RefCell::new(HashMap::new()),
         blooms: std::cell::RefCell::new(HashMap::new()),
-    };
-    let mut map = StyleMap::new();
-    let mut stack: Vec<(NodeId, Option<Arc<ComputedStyle>>)> = doc
-        .children(doc.root())
-        .filter(|&c| doc.element(c).is_some())
-        .map(|c| (c, None))
-        .collect();
-    stack.reverse();
-    while let Some((node, parent)) = stack.pop() {
+        shared: std::cell::RefCell::new(HashMap::new()),
+        sharing: SHARING
+            .with(std::cell::Cell::get)
+            .unwrap_or_else(|| std::env::var_os("BF_NO_STYLE_SHARING").is_none()),
+    }
+}
+
+impl Styler<'_> {
+    /// Los hijos elementos de `node` en el flat tree (E1: shadow trees y slots).
+    fn element_children(&self, node: NodeId) -> Vec<NodeId> {
+        self.doc
+            .flat_tree_children(node)
+            .into_iter()
+            .filter(|&c| self.doc.element(c).is_some())
+            .collect()
+    }
+
+    /// El estilo de `node` (y el de sus `::before`, `::after` y `::marker`) en `map`.
+    fn style_node(
+        &mut self,
+        node: NodeId,
+        parent: Option<Arc<ComputedStyle>>,
+        map: &mut StyleMap,
+    ) -> Arc<ComputedStyle> {
+        let doc = self.doc;
         let is_root = parent.is_none() && doc.parent(node) == Some(doc.root());
-        let style = Arc::new(styler.style_for(node, None, parent.as_deref(), is_root));
+        let style = self.style_for(node, None, parent.as_deref(), is_root);
         if is_root {
-            styler.root_font_size = style.font_size_px();
-            styler.root_line_height = style
+            self.root_font_size = style.font_size_px();
+            self.root_line_height = style
                 .line_height
                 .resolve(style.font_size_px(), NORMAL_LINE_HEIGHT);
         }
         for pseudo in [PseudoElement::Before, PseudoElement::After] {
-            let Some(ps) = styler.style_if(node, Some(pseudo), Some(&style), false, true) else {
+            let Some(ps) = self.style_if(node, Some(pseudo), Some(&style), false, true) else {
                 continue;
             };
             if !matches!(ps.content, Content::None | Content::Normal) && ps.display != Display::None
             {
-                map.insert((node, Some(pseudo)), Arc::new(ps));
+                map.insert((node, Some(pseudo)), ps);
             }
         }
         if style.display == Display::ListItem {
-            let marker = styler.style_for(node, Some(PseudoElement::Marker), Some(&style), false);
-            map.insert((node, Some(PseudoElement::Marker)), Arc::new(marker));
+            let marker = self.style_for(node, Some(PseudoElement::Marker), Some(&style), false);
+            map.insert((node, Some(PseudoElement::Marker)), marker);
         }
-        // E1: los hijos en el flat tree (shadow trees y slots).
-        let children: Vec<NodeId> = doc
-            .flat_tree_children(node)
-            .into_iter()
-            .filter(|&c| doc.element(c).is_some())
-            .collect();
-        for child in children.into_iter().rev() {
-            stack.push((child, Some(style.clone())));
+        map.insert((node, None), style.clone());
+        style
+    }
+
+    /// Los subárboles de `roots` (cada uno con el estilo de su padre), en orden de árbol.
+    fn style_subtrees(
+        &mut self,
+        mut roots: Vec<(NodeId, Option<Arc<ComputedStyle>>)>,
+        map: &mut StyleMap,
+    ) {
+        roots.reverse();
+        let mut stack = roots;
+        while let Some((node, parent)) = stack.pop() {
+            let style = self.style_node(node, parent, map);
+            for child in self.element_children(node).into_iter().rev() {
+                stack.push((child, Some(style.clone())));
+            }
         }
-        map.insert((node, None), style);
     }
-    if let Some(t) = &styler.timings {
-        let t = t.borrow();
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-        eprintln!(
-            "perf cascada: emparejar {:.1} ms (índices {:.1} ms, {} reglas) · declaraciones \
-             {:.1} ms · valores {:.1} ms; de eso, pseudoelementos {:.1} ms ({} elementos, {} \
-             llamadas de pseudoelementos, {} sin `content`)",
-            ms(t.matching),
-            ms(t.index),
-            t.rules,
-            ms(t.declarations),
-            ms(t.values),
-            ms(t.pseudo),
-            t.elements,
-            t.pseudo_calls,
-            t.skipped
-        );
-    }
-    map
 }

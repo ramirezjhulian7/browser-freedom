@@ -68,6 +68,24 @@ impl Agent {
         self.script_evaluation(code)
     }
 
+    /// E3: como [`Agent::eval_script`], con la caché de código ([`crate::code_cache`]).
+    pub fn eval_script_cached(&mut self, text: &str, name: &str) -> JsResult<Value> {
+        let code = self.compile_script_cached(text, name)?;
+        self.script_evaluation(code)
+    }
+
+    /// E3: como [`Agent::compile_script_text`], pero si el mismo texto con el mismo nombre ya
+    /// se compiló en este hilo o se precompiló en el proceso ([`crate::code_cache::warm`]),
+    /// se usa una copia de ese código en lugar de parsear y compilar otra vez. Un error de
+    /// sintaxis sale igual, aquí: lo que no compila no se guarda.
+    pub fn compile_script_cached(&mut self, text: &str, name: &str) -> JsResult<Rc<FunctionCode>> {
+        if let Some(code) = crate::code_cache::lookup(name, text) {
+            return Ok(code);
+        }
+        let code = self.compile_script_text(text, name)?;
+        Ok(crate::code_cache::remember(name, text, code))
+    }
+
     /// Compila un script (los errores de parsing son SyntaxError del realm actual).
     pub fn compile_script_text(&mut self, text: &str, name: &str) -> JsResult<Rc<FunctionCode>> {
         let opts = self.parse_options();

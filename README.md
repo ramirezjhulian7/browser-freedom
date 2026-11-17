@@ -170,10 +170,10 @@ La **fase 5** (accesibilidad, procesos con sandbox y rendimiento) está a medias
   calculan, pero no se exponen al sistema;
 - CSP (también `img-src` y el evento `securitypolicyviolation`) y contenido mixto ya se
   aplican;
-- desplazar Wikipedia cuesta 8.0 ms por cuadro a densidad 1 y 17.7 ms a densidad 2 (meta:
-  16.7 ms, 60 fps), sin confirmar con la máquina libre;
-- la primera pintura de Wikipedia midió 823-936 ms antes del último arreglo de red (meta:
-  menos de 500 ms), y falta medirla con la máquina libre;
+- Wikipedia se desplaza a 60 fps: 3.7-4.0 ms por cuadro a densidad 1 y 5.2-6.1 ms a
+  densidad 2 (meta: 16.7 ms; criterio cumplido);
+- la primera pintura de Wikipedia tarda 542-665 ms (meta: menos de 500 ms); la red sola se
+  lleva unos 250-315;
 - faltan los procesos separados con sandbox.
 
 Las cifras son del Mac. Lo hecho y lo que falta, apartado por apartado, está en

@@ -53,6 +53,21 @@ pub fn layout_document_with_images(
     fonts: &dyn FontProvider,
     images: &ImageSizes,
 ) -> FragmentTree {
+    layout_document_with_caches(doc, styles, viewport, fonts, images, None)
+}
+
+/// E5: [`layout_document_with_images`] con las cachés de la maqueta encendidas (`Some(true)`),
+/// apagadas (`Some(false)`) o según `BF_NO_LAYOUT_CACHE` (`None`). Para los tests que comprueban
+/// que con caché y sin ella el resultado tiene los mismos bits.
+#[doc(hidden)]
+pub fn layout_document_with_caches(
+    doc: &Document,
+    styles: &StyleMap,
+    viewport: Size,
+    fonts: &dyn FontProvider,
+    images: &ImageSizes,
+    caches: Option<bool>,
+) -> FragmentTree {
     let start = std::time::Instant::now();
     let (root, report) = box_tree::build_box_tree_report(doc, styles, images);
     let tree_time = start.elapsed();
@@ -72,6 +87,7 @@ pub fn layout_document_with_images(
                 viewport
             };
             let mut layout = block::Layout::new(fonts, logical_viewport);
+            layout.caches = caches.unwrap_or(layout.caches);
             layout.frame = frame;
             let mut f = block::layout_root(&mut layout, &tree);
             writing_mode::fragment_to_physical(&mut f, frame, (0.0, 0.0), viewport.width);
@@ -79,6 +95,7 @@ pub fn layout_document_with_images(
             return f;
         }
         let mut layout = block::Layout::new(fonts, viewport);
+        layout.caches = caches.unwrap_or(layout.caches);
         let f = block::layout_root(&mut layout, root);
         perf = Some(layout.perf);
         f

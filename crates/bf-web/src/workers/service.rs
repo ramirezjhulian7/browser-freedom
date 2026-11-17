@@ -67,7 +67,7 @@ use crate::net::fetch::{RequestData, ResponseData};
 use crate::net::headers::{Guard, HeaderList, HeadersData};
 use crate::net::{NetBackend, NetRequest};
 
-const SERVICE_JS: &str = include_str!("service.js");
+pub(crate) const SERVICE_JS: &str = include_str!("service.js");
 
 /// Cuánto espera un trabajo a que el service worker termine `install` o `activate`.
 const LIFECYCLE_LIMIT: Duration = Duration::from_secs(300);
@@ -1982,7 +1982,7 @@ fn install_js_rooted(agent: &mut Agent, realm: RealmId, mode: &str) {
         bf_js::builtins::method(agent, native, name, len, f);
     }
     let g = Value::Object(agent.realms[realm].global_object);
-    if let Ok(f) = agent.eval_script(SERVICE_JS, "bf-web:service.js")
+    if let Ok(f) = agent.eval_script_cached(SERVICE_JS, "bf-web:service.js")
         && let Ok(hooks) = agent.call(
             &f,
             Value::Undefined,

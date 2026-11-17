@@ -429,7 +429,11 @@ impl Runner {
         bf_web::bom::animation::update_and_send_events(&mut rt.agent, realm);
         match rt.agent.run_animation_frames(clock.get()) {
             Err(Throw::Terminate(_)) => Err(()),
-            _ => Ok(()),
+            _ => {
+                // E2: `ResizeObserver` e `IntersectionObserver` (HTML §8.1.7.3, pasos 14 y 19).
+                bf_web::cssom::update_observations(&mut rt.agent, realm);
+                Ok(())
+            }
         }
     }
 

@@ -129,14 +129,18 @@ pub fn wants_frame(agent: &Agent, realm: RealmId, after_mutation: bool) -> bool 
         ctx.document().version(),
         crate::cssom::sheets_generation(agent, realm),
     );
-    match agent.realm_data::<AnimationState>(realm) {
+    let animations = match agent.realm_data::<AnimationState>(realm) {
         Some(st) => {
             st.animator.is_active()
                 || st.animator.has_events()
                 || (after_mutation && st.seen != Some(version))
         }
         None => after_mutation,
-    }
+    };
+    // E2: los `IntersectionObserver` y `ResizeObserver` se calculan en *update the rendering*
+    // (HTML §8.1.7.3, pasos 14 y 19): con una observación nueva o la geometría cambiada, hace
+    // falta un cuadro aunque no haya nada más.
+    animations || crate::cssom::observations_pending(agent, realm)
 }
 
 /// ¿Hay animaciones o transiciones en curso en la ventana `realm`? (Mientras las haya, cada

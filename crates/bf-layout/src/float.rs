@@ -107,6 +107,22 @@ impl FloatContext {
             .max_by(f32::total_cmp)
     }
 
+    /// E5: el mismo contexto en coordenadas relativas a `(x, y)`.
+    pub(crate) fn relative_to(&self, x: f32, y: f32) -> FloatContext {
+        FloatContext {
+            floats: self
+                .floats
+                .iter()
+                .map(|f| {
+                    let mut f = *f;
+                    f.rect.translate(-x, -y);
+                    f
+                })
+                .collect(),
+            last_top: self.last_top - y,
+        }
+    }
+
     /// E5: el top del último float colocado (regla 5).
     pub(crate) fn last_top(&self) -> f32 {
         self.last_top
