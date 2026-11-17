@@ -2009,12 +2009,17 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let url = match (&self.loading, &self.current) {
-            (Some(l), _) => l.url.clone(),
-            (None, Some(c)) => c.url.clone(),
+        // E3: con una carga en curso, se repite esa navegación (`Push`, `Replace` o
+        // `Traverse`), no un `Reload`: su entrada del historial todavía no existe aquí, porque
+        // se pone al terminar la carga (en HTML ya existe mientras el documento se parsea: la
+        // crea *finalize a cross-document navigation*, §7.4.2). Antes, un `location.reload()` durante la primera carga (el `security.js` de
+        // Mercado Libre) dejaba la pestaña sin entrada: sin URL y con `historial=1/0`.
+        let (url, nav) = match (&self.loading, &self.current) {
+            (Some(l), _) => (l.url.clone(), l.nav),
+            (None, Some(c)) => (c.url.clone(), Navigation::Reload),
             _ => return,
         };
-        self.start_load(url, Navigation::Reload);
+        self.start_load(url, nav);
     }
 
     fn home(&mut self) {

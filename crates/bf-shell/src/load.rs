@@ -215,6 +215,22 @@ impl ResourceLoader for CachedLoader {
         self.load_as(&url, Some(destination))
     }
 
+    /// E3: un script con el `nonce` y los metadatos de parser de sus opciones de fetch (los
+    /// módulos que importa otro script los heredan, HTML §8.1.5.5): CSP 3 §6.7.1.1.
+    fn load_script(
+        &self,
+        url: &Url,
+        nonce: Option<&str>,
+        parser_inserted: bool,
+    ) -> Option<Resource> {
+        let destination = bf_infra::Destination::Script;
+        let url = match self.security() {
+            Some(p) => p.check_request_by(url, destination, nonce, parser_inserted)?,
+            None => url.clone(),
+        };
+        self.load_as(&url, Some(destination))
+    }
+
     /// E2: la imagen que ya descargó el motor web (un `<img>`, HTML §4.8.4.3.5): el pintado
     /// la toma de aquí en lugar de pedirla otra vez (las `loading=lazy`, §4.8.4.3.9, las pinta
     /// solo cuando el motor ya las tiene).
