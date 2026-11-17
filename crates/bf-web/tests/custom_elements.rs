@@ -440,3 +440,27 @@ fn parser_form_owner_and_delegates_focus_blur() {
         "true,1,true"
     );
 }
+
+/// E1: HTML §4.13.6, la pila de *element queues*. Un `[CEReactions]` dentro del constructor
+/// de un upgrade (aquí `createElement`, como el getter `template` de Polymer en YouTube) solo
+/// invoca lo encolado en su ámbito: ni el `connectedCallback` que el upgrade encoló para el
+/// mismo elemento (paso 5; corre después del constructor) ni el upgrade del siguiente
+/// candidato de `define`. Antes, Polymer hacía `ready()` dentro del constructor de `ytd-app`
+/// y su `delete this[prop]` fallaba ("Cannot delete property 'renderGuide'").
+#[test]
+fn nested_ce_reactions_only_run_their_own_queue() {
+    let mut p = Page::new("<x-q id=a></x-q><x-q id=b></x-q>");
+    assert_eq!(
+        p.show(
+            "var log = []; \
+             class Q extends HTMLElement { \
+               constructor() { super(); log.push('ctor:' + this.id); \
+                 document.createElement('div').setAttribute('x', '1'); \
+                 log.push('fin:' + this.id); } \
+               connectedCallback() { log.push('conn:' + this.id); } \
+             }; \
+             customElements.define('x-q', Q); log.join(' ')"
+        ),
+        "ctor:a fin:a conn:a ctor:b fin:b conn:b"
+    );
+}
