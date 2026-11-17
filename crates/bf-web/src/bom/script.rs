@@ -1032,7 +1032,7 @@ fn parser_op(
 ) -> JsResult<Value> {
     let n = this_document(agent, a)?;
     if n.doc != 0 {
-        // Un documento sin navegador (creado por script): no tiene parser.
+        // Un documento sin navegador (creado por script): `scripted_document_op`.
         return crate::dom::throw_dom(agent, bf_dom::DomException::InvalidStateError);
     }
     let realm = WebContextHandle::current(agent).realm;
@@ -1044,9 +1044,90 @@ fn parser_op(
     }
 }
 
+/// Lo que se le pide a un documento sin navegador.
+enum ScriptedOp {
+    Open,
+    Write(DomString),
+    Close,
+}
+
+/// E1: `open`/`write`/`close` en un documento sin navegador (el de
+/// `createHTMLDocument`, `DOMParser`…; HTML §8.4.1 a §8.4.3), que antes daban
+/// `InvalidStateError` (el consentimiento de Vimeo escribe así en un documento aparte). Solo
+/// un documento XML lanza `InvalidStateError`. `open` vacía el documento ("replace all with
+/// null") y crea el *script-created parser*; `write` añade al flujo de entrada (abriendo si
+/// hace falta) y, como el documento no tiene navegador y sus scripts no corren, se parsea de
+/// nuevo todo lo escrito y se reemplaza el contenido (el resultado es el de un parseo
+/// incremental, aunque los nodos de una escritura anterior se recrean); `close` cierra el
+/// flujo. Devuelve `None` si `this` es el documento de la ventana.
+fn scripted_document_op(
+    agent: &mut Agent,
+    a: &CallArgs<'_>,
+    op: ScriptedOp,
+) -> JsResult<Option<Value>> {
+    let n = this_document(agent, a)?;
+    if n.doc == 0 {
+        return Ok(None);
+    }
+    if !crate::with_doc(agent, n.doc, |d| d.is_html) {
+        return crate::dom::throw_dom(agent, bf_dom::DomException::InvalidStateError);
+    }
+    let doc = n.doc;
+    match op {
+        ScriptedOp::Open => {
+            crate::with_doc_mut(agent, doc, |d| {
+                let root = d.root();
+                d.replace_all(None, root);
+                d.mode = bf_dom::QuirksMode::NoQuirks;
+            });
+            crate::dom::state::state(agent)
+                .script_created
+                .insert(doc, DomString::new());
+        }
+        ScriptedOp::Write(text) => {
+            let st = crate::dom::state::state(agent);
+            if !st.script_created.contains_key(&doc) {
+                scripted_document_op(agent, a, ScriptedOp::Open)?;
+            }
+            let input = {
+                let buf = crate::dom::state::state(agent)
+                    .script_created
+                    .entry(doc)
+                    .or_default();
+                buf.push_dom_str(&text);
+                buf.to_string()
+            };
+            let opts = ParseOptions {
+                scripting: false,
+                iframe_srcdoc: false,
+                allow_declarative_shadow_roots: false,
+            };
+            let (parsed, _) = bf_html::parse_document(&input, &opts);
+            crate::with_doc_mut(agent, doc, |d| {
+                let root = d.root();
+                d.replace_all(None, root);
+                let kids: Vec<NodeId> = parsed.children(parsed.root()).collect();
+                for k in kids {
+                    let copy = d.import_from(&parsed, k);
+                    let _ = d.append_child(root, copy);
+                }
+                d.mode = parsed.mode;
+            });
+        }
+        ScriptedOp::Close => {
+            crate::dom::state::state(agent).script_created.remove(&doc);
+        }
+    }
+    WebContextHandle::current(agent).get_mut(agent).mutated();
+    Ok(Some(Value::Undefined))
+}
+
 /// `document.write(...text)`.
 pub fn document_write(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = concat_args(agent, a)?;
+    if let Some(v) = scripted_document_op(agent, a, ScriptedOp::Write(text.clone()))? {
+        return Ok(v);
+    }
     let start = Instant::now();
     let r = parser_op(agent, a, |p, host| p.write(host, &text));
     let realm = WebContextHandle::current(agent).realm;
@@ -1057,6 +1138,11 @@ pub fn document_write(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `document.writeln(...text)`.
 pub fn document_writeln(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let text = concat_args(agent, a)?;
+    let mut line = text.clone();
+    line.push_dom_str(&DomString::from("\n"));
+    if let Some(v) = scripted_document_op(agent, a, ScriptedOp::Write(line))? {
+        return Ok(v);
+    }
     let start = Instant::now();
     let r = parser_op(agent, a, |p, host| p.writeln(host, &text));
     let realm = WebContextHandle::current(agent).realm;
@@ -1066,6 +1152,9 @@ pub fn document_writeln(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> 
 
 /// `document.open()`: devuelve el documento.
 pub fn document_open(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+    if scripted_document_op(agent, a, ScriptedOp::Open)?.is_some() {
+        return Ok(a.this.clone());
+    }
     parser_op(agent, a, |p, host| p.open(host))?;
     Ok(a.this.clone())
 }
@@ -1073,6 +1162,9 @@ pub fn document_open(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
 /// `document.close()`.
 pub fn document_close(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     use bf_dom::script::DocumentReadiness;
+    if let Some(v) = scripted_document_op(agent, a, ScriptedOp::Close)? {
+        return Ok(v);
+    }
     let mut completed = false;
     let r = parser_op(agent, a, |p, host| {
         let before = p.document().scripts().readiness;

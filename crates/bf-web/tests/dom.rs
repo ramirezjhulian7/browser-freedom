@@ -1131,6 +1131,28 @@ fn document_write_while_parsing() {
     );
 }
 
+/// E1: HTML §8.4.1 a §8.4.3 en un documento sin navegador (`createHTMLDocument`): `open`,
+/// `write` y `close` funcionan (antes, `InvalidStateError`; el gestor de consentimiento de
+/// Vimeo escribe así cada cambio del `head` en un documento aparte). `open` vacía el
+/// documento; lo escrito se parsea sin scripts y se puede leer antes de `close`.
+#[test]
+fn document_write_in_a_document_without_browsing_context() {
+    let mut p = Page::new(SIMPLE);
+    assert_eq!(
+        p.show(
+            "const d = document.implementation.createHTMLDocument('t'); \
+             const r = [d.open() === d, d.documentElement]; \
+             d.write('<title>x</title><p id=a>uno'); r.push(d.getElementById('a').textContent); \
+             d.writeln('<script>window.malo = 1</script><b>dos</b>'); d.close(); \
+             r.push(d.title, d.body.childNodes.length, d.querySelector('b').textContent, \
+                    typeof window.malo, d.compatMode); \
+             d.write('<p>de nuevo'); r.push(d.body.textContent); \
+             r.join()"
+        ),
+        "true,,uno,x,1,dos,undefined,BackCompat,de nuevo"
+    );
+}
+
 #[test]
 fn document_write_in_xml_throws() {
     let mut p = Page::new(SIMPLE);
