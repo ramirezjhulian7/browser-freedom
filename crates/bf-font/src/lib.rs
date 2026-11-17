@@ -87,6 +87,114 @@ pub struct Fonts {
     used: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
+/// E2: el estado de una fuente web en la caché del proceso (por URL).
+enum WebFontState {
+    Loading,
+    Done(Option<Arc<LoadedFace>>),
+}
+
+enum WebFont {
+    Ready(Option<Arc<LoadedFace>>),
+    Pending,
+}
+
+fn web_font_cache() -> &'static Mutex<HashMap<String, WebFontState>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, WebFontState>>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+static ASYNC_WEB_FONTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// E2: la generación de las fuentes web (sube cada vez que termina de cargar una) y quien
+/// espera a que cambie.
+fn web_fonts_changed() -> &'static (Mutex<u64>, std::sync::Condvar) {
+    static GEN: OnceLock<(Mutex<u64>, std::sync::Condvar)> = OnceLock::new();
+    GEN.get_or_init(|| (Mutex::new(0), std::sync::Condvar::new()))
+}
+
+/// E2: activa la carga asíncrona de las fuentes web `http(s)` ([`Fonts::load_web`]). La pone
+/// la ventana del navegador, que vuelve a pintar cuando cambia [`web_fonts_generation`].
+pub fn set_async_web_fonts(on: bool) {
+    ASYNC_WEB_FONTS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// E2: cuántas fuentes web terminaron de cargarse en segundo plano en el proceso.
+pub fn web_fonts_generation() -> u64 {
+    *lock(&web_fonts_changed().0)
+}
+
+/// E2: espera hasta que [`web_fonts_generation`] pase de `since` o venza `timeout`; devuelve
+/// la generación de ese momento.
+pub fn wait_web_fonts_change(since: u64, timeout: std::time::Duration) -> u64 {
+    let (m, cv) = web_fonts_changed();
+    let guard = lock(m);
+    let (guard, _) = cv
+        .wait_timeout_while(guard, timeout, |g| *g <= since)
+        .unwrap_or_else(|e| e.into_inner());
+    *guard
+}
+
+fn bump_web_fonts() {
+    let (m, cv) = web_fonts_changed();
+    *lock(m) += 1;
+    cv.notify_all();
+}
+
+/// E2: guarda en la caché del proceso los bytes de la fuente de `url` que otro camino ya
+/// descargó (`FontFace.load()`), para que la maqueta no la vuelva a pedir.
+pub fn store_web_font(url: &bf_infra::Url, data: Vec<u8>) {
+    let face = is_sfnt(&data)
+        .then(|| LoadedFace::new(Arc::new(data), 0).map(Arc::new))
+        .flatten();
+    if face.is_none() {
+        return;
+    }
+    let key = url.serialize(false);
+    let was_loading = matches!(
+        lock(web_font_cache()).insert(key, WebFontState::Done(face)),
+        Some(WebFontState::Loading)
+    );
+    if was_loading {
+        bump_web_fonts();
+    }
+}
+
+fn load_face(url: &bf_infra::Url, loader: &dyn ResourceLoader) -> Option<Arc<LoadedFace>> {
+    let data = loader.load(url)?.bytes;
+    if !is_sfnt(&data) {
+        return None;
+    }
+    LoadedFace::new(Arc::new(data), 0).map(Arc::new)
+}
+
+/// La fuente de `url` de la caché del proceso; si no está, la carga (en un hilo, si la carga
+/// asíncrona está activa y es `http(s)`).
+fn web_font(url: &bf_infra::Url, loader: Arc<dyn ResourceLoader>) -> WebFont {
+    let key = url.serialize(false);
+    {
+        let mut cache = lock(web_font_cache());
+        match cache.get(&key) {
+            Some(WebFontState::Done(f)) => return WebFont::Ready(f.clone()),
+            Some(WebFontState::Loading) => return WebFont::Pending,
+            None => {}
+        }
+        let remote = matches!(url.scheme.as_str(), "http" | "https");
+        if ASYNC_WEB_FONTS.load(std::sync::atomic::Ordering::Relaxed) && remote {
+            cache.insert(key.clone(), WebFontState::Loading);
+            let url = url.clone();
+            std::thread::spawn(move || {
+                let face = load_face(&url, &*loader);
+                lock(web_font_cache()).insert(key, WebFontState::Done(face));
+                bump_web_fonts();
+            });
+            return WebFont::Pending;
+        }
+    }
+    let face = load_face(url, &*loader);
+    lock(web_font_cache()).insert(key, WebFontState::Done(face.clone()));
+    WebFont::Ready(face)
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -191,37 +299,57 @@ impl Fonts {
         lock(&self.shaped).clear();
     }
 
+    /// La cara de la regla `@font-face` `i`, si ya está cargada.
+    ///
+    /// E2: CSS Fonts 4 §4.3 y §4.9 y CSS Font Loading 3 §2.2: la carga de una fuente web es
+    /// asíncrona; mientras llega, el texto usa la fuente de respaldo y se vuelve a maquetar
+    /// cuando está lista. Con [`set_async_web_fonts`] (la ventana del navegador), una fuente
+    /// `http(s)` que no está en la caché del proceso se pide en un hilo y aquí da `None`; al
+    /// llegar sube [`web_fonts_generation`] (quien pinta la página vuelve a maquetar). Antes la
+    /// cascada (`ex`/`ch`) y la maqueta descargaban cada fuente en síncrono, en el hilo de la
+    /// pestaña y una tras otra (www.gov.co no terminaba de montarse). Las `data:` y `file:`, y
+    /// todo fuera de la ventana (tests, runners de WPT), siguen siendo síncronas.
     fn load_web(&self, i: usize) -> Option<Arc<LoadedFace>> {
         let web = &self.web[i];
-        web.loaded
-            .get_or_init(|| {
-                web.rule.sources.iter().find_map(|src| match src {
-                    Source::Url { url, format } => {
-                        let supported = format.as_deref().is_none_or(|f| {
-                            matches!(
-                                f,
-                                "truetype"
-                                    | "opentype"
-                                    | "collection"
-                                    | "truetype-variations"
-                                    | "opentype-variations"
-                            )
-                        });
-                        if !supported {
-                            return None;
-                        }
-                        let url = bf_infra::Url::parse(url, None).ok()?;
-                        let data = self.loader.as_ref()?.load(&url)?.bytes;
-                        if !is_sfnt(&data) {
-                            // WOFF/WOFF2 necesitan descompresión (pendiente).
-                            return None;
-                        }
-                        LoadedFace::new(Arc::new(data), 0).map(Arc::new)
+        if let Some(v) = web.loaded.get() {
+            return v.clone();
+        }
+        let mut pending = false;
+        let found = web.rule.sources.iter().find_map(|src| match src {
+            Source::Url { url, format } => {
+                let supported = format.as_deref().is_none_or(|f| {
+                    matches!(
+                        f,
+                        "truetype"
+                            | "opentype"
+                            | "collection"
+                            | "truetype-variations"
+                            | "opentype-variations"
+                    )
+                });
+                let url = bf_infra::Url::parse(url, None).ok()?;
+                // WOFF/WOFF2 necesitan descompresión (pendiente): ni se piden.
+                let path = url.path_string().to_ascii_lowercase();
+                if !supported || path.ends_with(".woff") || path.ends_with(".woff2") {
+                    return None;
+                }
+                let loader = self.loader.clone()?;
+                match web_font(&url, loader) {
+                    WebFont::Ready(face) => face,
+                    WebFont::Pending => {
+                        pending = true;
+                        None
                     }
-                    Source::Local(name) => self.db.by_name(name).and_then(|i| self.db.load(i)),
-                })
-            })
-            .clone()
+                }
+            }
+            Source::Local(name) => self.db.by_name(name).and_then(|i| self.db.load(i)),
+        });
+        // Mientras alguna fuente de la lista está en camino, no se fija el resultado (la
+        // siguiente maqueta, con la fuente ya en la caché, la usa).
+        if found.is_some() || !pending {
+            let _ = web.loaded.set(found.clone());
+        }
+        found
     }
 
     fn face(&self, key: FontKey) -> Option<Arc<LoadedFace>> {

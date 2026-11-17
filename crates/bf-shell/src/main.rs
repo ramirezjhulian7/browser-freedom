@@ -11,6 +11,8 @@ mod bookmarks;
 mod crash; // E1: diagnóstico de las caídas de la pestaña
 mod downloads;
 mod find;
+#[cfg(test)]
+mod font_tests; // E2
 mod history;
 mod internal;
 #[cfg(test)]
