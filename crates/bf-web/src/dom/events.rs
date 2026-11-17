@@ -792,7 +792,9 @@ fn call_script_listener(agent: &mut Agent, doc: DocIndex, handle: u64, event: Gc
 /// cancela, va a los hooks del motor.
 pub fn report_exception(agent: &mut Agent, e: &Value) {
     let err = bf_js::host::JsError::from_value(agent, e.clone());
-    if state(agent).reporting {
+    // E1: el bucle reporta con el realm que esté en curso; sin `WebContext` (un
+    // `ShadowRealm`) no hay global en el que disparar `error`: directo a la consola.
+    if WebContextHandle::current(agent).try_get(agent).is_none() || state(agent).reporting {
         agent.host.hooks.report_exception(&err.message, &err.stack);
         return;
     }

@@ -288,13 +288,6 @@ impl DocumentThread {
     }
 }
 
-fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
-    e.downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| e.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "error interno".to_owned())
-}
-
 fn engine_error(message: String) -> LoadError {
     LoadError {
         kind: ErrorKind::Engine,
@@ -340,6 +333,16 @@ struct State {
     frame_scroll: HashMap<Vec<bf_dom::NodeId>, (f32, f32)>,
 }
 
+impl State {
+    /// E1: el motor del documento actual (para el diagnóstico de una caída).
+    fn agent(&self) -> Option<&bf_js::vm::Agent> {
+        self.current
+            .as_ref()
+            .and_then(|c| c.engine.as_ref())
+            .map(|e| &e.rt.agent)
+    }
+}
+
 impl DocumentThread {
     fn spawn(
         tab: u64,
@@ -353,12 +356,14 @@ impl DocumentThread {
         let me = jobs.clone();
         // Para avisar a la ventana si el hilo entra en pánico (el estado se pierde con él).
         let (crash_tx, crash_wake) = (tx.clone(), wake.clone());
+        // E1: el pánico guarda su archivo y línea para el detalle de "Esta página falló".
+        crate::crash::install_hook();
         std::thread::Builder::new()
             .name(format!("freedom-pestana-{tab}"))
             .stack_size(THREAD_STACK)
             .spawn(move || {
                 // El motor de JavaScript no es `Send`: el estado nace en el hilo.
-                let state = State {
+                let mut state = State {
                     tab,
                     fonts,
                     tx,
@@ -378,7 +383,8 @@ impl DocumentThread {
                 // ventana muestra "Esta página falló" con otro hilo. El resto de las pestañas
                 // y la ventana no se enteran.
                 if let Err(e) = catch_unwind(AssertUnwindSafe(|| state.run(rx))) {
-                    let message = panic_message(&*e);
+                    // E1: con dónde cayó y qué corría el motor (`crate::crash`).
+                    let message = crate::crash::report(&*e, state.agent());
                     eprintln!("[pestaña {tab}] el hilo falló: {message}");
                     if crash_tx.send(FromDoc::Crashed { tab, message }).is_ok() {
                         crash_wake();
@@ -552,7 +558,7 @@ impl State {
     }
 
     /// El bucle del hilo: trabajos de la interfaz y, entre ellos, las tareas del documento.
-    fn run(mut self, rx: Receiver<Msg>) {
+    fn run(&mut self, rx: Receiver<Msg>) {
         let mut queue: VecDeque<Job> = VecDeque::new();
         // E6: los mensajes de la ventana recibidos (ver [`View::msgs_handled`]).
         let mut received: u64 = 0;
@@ -759,10 +765,12 @@ impl State {
                 #[cfg(test)]
                 crash_test::maybe_panic(&url);
                 catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    crate::crash::test_panic::maybe_panic(&mut engine.rt.agent, engine.realm, &url);
                     load_with(&url, &ctx, Some((&mut engine, &env)))
                 }))
                 .unwrap_or_else(|e| {
-                    let err = engine_error(panic_message(&*e));
+                    let err = engine_error(crate::crash::report(&*e, Some(&engine.rt.agent)));
                     internal::error_page(&url, &err, &ctx)
                 })
             }
@@ -840,7 +848,8 @@ impl State {
             // Un error del motor con este documento: se muestra como página de error en
             // lugar de terminar el hilo.
             Err(e) => {
-                let message = format!("error del motor: {}", panic_message(&*e));
+                let agent = current.engine.as_ref().map(|e| &e.rt.agent);
+                let message = format!("error del motor: {}", crate::crash::report(&*e, agent));
                 eprintln!("{message}");
                 let ctx = ctx.unwrap_or_else(|| LoadContext {
                     net: loaded.loader.net.clone(),

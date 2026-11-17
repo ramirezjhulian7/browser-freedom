@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 mod bookmarks;
+mod crash; // E1: diagnóstico de las caídas de la pestaña
 mod downloads;
 mod find;
 mod history;

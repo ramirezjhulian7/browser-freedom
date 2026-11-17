@@ -72,3 +72,31 @@ fn host_functions_throw_in_a_realm_without_web_context() {
         "TypeError,TypeError,TypeError,TypeError,TypeError"
     );
 }
+
+/// E1: el acceso sin pánico: `WebContextHandle::checked` da un `TypeError` en un realm sin
+/// `WebContext` y el contexto en la ventana; `try_get` da `None`. Y "report an exception" con
+/// ese realm en curso va a la consola en vez de hacer pánico buscando su global.
+#[test]
+fn checked_context_and_report_without_web_context() {
+    use bf_web::WebContextHandle;
+    let (mut rt, window) = window();
+    let bare = rt.create_realm();
+    rt.agent.current_realm = bare;
+    assert!(
+        WebContextHandle::current(&rt.agent)
+            .try_get(&rt.agent)
+            .is_none()
+    );
+    let err = WebContextHandle::checked(&mut rt.agent).err().map(|t| {
+        let e = bf_js::host::JsError::from_throw(&mut rt.agent, t);
+        e.message
+    });
+    assert!(
+        err.as_deref().is_some_and(|m| m.starts_with("TypeError")),
+        "{err:?}"
+    );
+    let e = bf_js::value::Value::str("fallo");
+    bf_web::dom::events::report_exception(&mut rt.agent, &e);
+    rt.agent.current_realm = window;
+    assert!(WebContextHandle::checked(&mut rt.agent).is_ok());
+}

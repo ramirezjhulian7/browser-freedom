@@ -522,8 +522,21 @@ fn set_name(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+/// `closed` (HTML §7.2.2): `true` si la ventana se cerró o ya no tiene contexto de navegación.
+/// E1: la de un marco quitado no lo tiene desde que se quita el `<iframe>` ("destroy a child
+/// navigable"): su documento deja de ser fully active, aunque la lista de marcos se sincronice
+/// después (entonces `frames::remove_frame` también marca `closed`).
 fn get_closed(agent: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
-    Ok(Value::Boolean(state(agent).closed))
+    let realm = WebContextHandle::current(agent).realm;
+    Ok(Value::Boolean(window_closed(agent, realm)))
+}
+
+/// ¿Está cerrada la ventana `realm`? (Ver [`get_closed`].)
+pub(crate) fn window_closed(agent: &mut Agent, realm: RealmId) -> bool {
+    agent
+        .realm_data::<BomState>(realm)
+        .is_some_and(|s| s.closed)
+        || !crate::dom::events::fully_active(agent, realm)
 }
 
 fn get_null(_: &mut Agent, _: &CallArgs<'_>) -> JsResult<Value> {
