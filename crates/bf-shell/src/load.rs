@@ -484,9 +484,15 @@ pub fn fetch_document_with(
     // E6: mientras se valida una copia guardada, la precarga lee del disco el documento y sus
     // hojas y scripts frescos (`preload`); solo se usa con un 304.
     // `BF_NO_PRECARGA=1` la apaga (para comparar en el mismo binario).
-    let warmup = (post.is_none() && std::env::var_os("BF_NO_PRECARGA").is_none())
+    let preload = std::env::var_os("BF_NO_PRECARGA").is_none();
+    let warmup = (post.is_none() && preload)
         .then(|| crate::preload::Warmup::start(&net, url))
         .flatten();
+    // E3: con scripts, el JavaScript propio de la ventana se compila en otro hilo mientras se
+    // espera la respuesta (una vez por proceso); la ventana se instala después de ella.
+    if engine.is_some() && preload {
+        crate::preload::precompile_window();
+    }
     if let Some(body) = post {
         options.method = bf_net::Method::Post;
         options.body = Some(body);

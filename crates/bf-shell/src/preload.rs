@@ -17,29 +17,56 @@
 //! hasta validarla; [`Warmup::finish`]). Con otra respuesta se descarta. Después, la carga pide
 //! esos recursos como siempre y la caché decide con sus reglas: la diferencia es que ya no
 //! leen del disco en el camino de la primera pintura.
+//!
+//! E3: además, con todo leído, el mismo hilo adelanta el trabajo de CPU de las hojas y los
+//! scripts guardados (frescos o no):
+//! 4. parsea las hojas en [`bf_style::sheet_cache`] ([`bf_style::sheet_cache::warm`], con la
+//!    clave de la carga: URL y hash de los bytes, modo quirks y encoding del documento);
+//! 5. compila los scripts clásicos en [`bf_js::code_cache`] ([`bf_js::code_cache::warm`], con
+//!    la URL y el texto con que los evalúa la ventana).
+//!
+//! Las dos cachés son funciones puras de su clave (los bytes o el texto van en ella): lo
+//! parseado o compilado aquí solo lo encuentra una carga que recibe exactamente esos bytes,
+//! que daría el mismo resultado al parsearlos ella; por eso también valen las copias que ya
+//! no están frescas y que la carga validará. No se ejecuta nada (un error de sintaxis
+//! queda para la evaluación, ECMA-262 §16.1.5) y no sale ninguna petición. Con otra respuesta
+//! que no sea un 304 el hilo se detiene. Y [`precompile_window`] compila en otro hilo, una vez
+//! por proceso, el JavaScript propio de la ventana (`bf_web::precompile_window_scripts`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use bf_html::tokenizer::{State, Token, Tokenizer};
 use bf_infra::Url;
+use bf_infra::encoding::Encoding;
 use bf_net::cache::{HttpCache, Staged};
 use bf_net::{MimeType, NetLoader};
 
 /// Cuántas URLs mira el escáner como mucho.
 const MAX_URLS: usize = 64;
 
+/// La pila de los hilos que parsean y compilan (el parser de JavaScript mide la que usa).
+const STACK: usize = 32 << 20;
+
 /// Lo que encuentra el escáner: hojas de estilo, scripts e imágenes, en orden de documento.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub url: Url,
     pub kind: Kind,
+    /// El `charset` de un `<script>`, si nombra un encoding (HTML §4.12.1.1, *prepare the
+    /// script element*, paso 21; si no, el del documento).
+    pub charset: Option<Encoding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Style,
+    /// Un script clásico (`<script src>` o `<link rel=preload as=script>`).
     Script,
+    /// Un script módulo (`<script type=module>` o `<link rel=modulepreload>`): un Module
+    /// Record del realm (ECMA-262 §16.2.1.6), que no pasa por la caché de código.
+    Module,
     /// Las imágenes no bloquean el renderizado, pero el pintado del shell las lee antes de la
     /// primera maqueta (`bf_paint::images::load_images_in`).
     Image,
@@ -54,7 +81,11 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
     let mut tok = Tokenizer::new(html);
     let mut base: Option<Url> = None;
     let mut out: Vec<Found> = Vec::new();
-    let push = |out: &mut Vec<Found>, base: &Option<Url>, href: &str, kind: Kind| {
+    let push = |out: &mut Vec<Found>,
+                base: &Option<Url>,
+                href: &str,
+                kind: Kind,
+                charset: Option<Encoding>| {
         let href = href.trim_matches(|c: char| c.is_ascii_whitespace());
         if href.is_empty() {
             return;
@@ -63,7 +94,7 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
             && matches!(url.scheme.as_str(), "http" | "https")
             && !out.iter().any(|f| f.url == url)
         {
-            out.push(Found { url, kind });
+            out.push(Found { url, kind, charset });
         }
     };
     while let Some(token) = tok.next_token() {
@@ -93,9 +124,9 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
                 let as_ = attr("as").unwrap_or("").to_ascii_lowercase();
                 let kind = if rels.contains(&"stylesheet") && !rels.contains(&"alternate") {
                     Some(Kind::Style)
-                } else if rels.contains(&"modulepreload")
-                    || (rels.contains(&"preload") && as_ == "script")
-                {
+                } else if rels.contains(&"modulepreload") {
+                    Some(Kind::Module)
+                } else if rels.contains(&"preload") && as_ == "script" {
                     Some(Kind::Script)
                 } else if rels.contains(&"preload") && as_ == "style" {
                     Some(Kind::Style)
@@ -103,22 +134,27 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
                     None
                 };
                 if let (Some(kind), Some(href)) = (kind, attr("href")) {
-                    push(&mut out, &base, href, kind);
+                    push(&mut out, &base, href, kind, None);
                 }
             }
             "script" => {
                 let ty = attr("type").unwrap_or("").trim().to_ascii_lowercase();
-                let js = ty.is_empty()
-                    || ty == "module"
-                    || ty == "text/javascript"
-                    || ty == "application/javascript";
-                if js && let Some(src) = attr("src") {
-                    push(&mut out, &base, src, Kind::Script);
+                let kind = if ty == "module" {
+                    Some(Kind::Module)
+                } else if ty.is_empty() || ty == "text/javascript" || ty == "application/javascript"
+                {
+                    Some(Kind::Script)
+                } else {
+                    None
+                };
+                if let (Some(kind), Some(src)) = (kind, attr("src")) {
+                    let charset = attr("charset").and_then(Encoding::for_label);
+                    push(&mut out, &base, src, kind, charset);
                 }
             }
             "img" => {
                 if let Some(src) = attr("src") {
-                    push(&mut out, &base, src, Kind::Image);
+                    push(&mut out, &base, src, Kind::Image, None);
                 }
             }
             _ => {}
@@ -142,6 +178,65 @@ pub fn scan(html: &str, document: &Url) -> Vec<Found> {
         }
     }
     out
+}
+
+/// E3: el modo del documento según su DOCTYPE (HTML §13.2.6.4.1, el modo de inserción
+/// "initial"), solo cuando no depende de las listas de identificadores públicos:
+/// `Some(false)` con el DOCTYPE de HTML (`<!DOCTYPE html>`, sin identificador público y sin
+/// identificador de sistema o con `about:legacy-compat`) y `Some(true)` sin DOCTYPE (lo
+/// primero que no es espacio ni comentario es otra cosa: quirks). Con otro DOCTYPE, `None`:
+/// la precarga no adivina, y no parsea las hojas (el modo va en su clave).
+pub fn document_quirks(html: &str) -> Option<bool> {
+    let mut tok = Tokenizer::new(html);
+    while let Some(token) = tok.next_token() {
+        match token {
+            Token::Character('\t' | '\n' | '\x0C' | '\r' | ' ') | Token::Comment(_) => {}
+            Token::Doctype(d) => {
+                let html = !d.force_quirks
+                    && d.name.as_deref() == Some("html")
+                    && d.public_id.is_none()
+                    && d.system_id
+                        .as_deref()
+                        .is_none_or(|s| s == "about:legacy-compat");
+                return html.then_some(false);
+            }
+            _ => return Some(true),
+        }
+    }
+    Some(true)
+}
+
+/// E3: una hoja o un script guardado que parsear o compilar después de leer todo del disco.
+struct Work {
+    url: Url,
+    kind: Kind,
+    charset: Option<Encoding>,
+    bytes: Vec<u8>,
+    validator: Option<String>,
+}
+
+/// E3: compila en otro hilo el JavaScript propio de la ventana en la caché de código del
+/// proceso (`bf_web::precompile_window_scripts`), para que instalar la ventana después de la
+/// respuesta solo tenga que copiarlo. Una vez por proceso: lo compilado no depende de la
+/// página. No espera al hilo; si la ventana se instala antes de que termine, la instalación
+/// compila lo que falte, como antes.
+pub fn precompile_window() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("freedom-ventana".into())
+            .stack_size(STACK)
+            .spawn(|| {
+                let start = Instant::now();
+                bf_web::precompile_window_scripts();
+                if std::env::var_os("BF_TRACE").is_some() {
+                    eprintln!(
+                        "perf precarga: JavaScript propio de la ventana precompilado en {:.1} ms",
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            });
+    });
 }
 
 /// Lo que comparten la carga y el hilo de la precarga.
@@ -187,6 +282,7 @@ impl Warmup {
         let (c, s, document) = (cache.clone(), shared.clone(), url.clone());
         let thread = std::thread::Builder::new()
             .name("freedom-precarga".into())
+            .stack_size(STACK)
             .spawn(move || warm(&c, &s, &document))
             .ok()?;
         Some(Warmup {
@@ -237,17 +333,42 @@ fn warm(cache: &HttpCache, shared: &Mutex<Shared>, document: &Url) {
     if mime.as_ref().is_some_and(|m| !m.is_html()) {
         return finish();
     }
+    let started = Instant::now();
     let (encoding, _) = bf_net::html_encoding_with_source(&body, mime.as_ref());
-    let (text, _) = bf_infra::encoding::decode(&body, encoding);
+    // El encoding con que la carga decodifica el documento (`load::fetch_document_with`):
+    // el de `document.characterSet`, el de respaldo de sus hojas y scripts.
+    let (text, encoding) = bf_infra::encoding::decode(&body, encoding);
     let found = scan(&text, document);
+    let quirks = document_quirks(&text);
     shared.lock().unwrap_or_else(|e| e.into_inner()).found = found.len();
+    let refused = || shared.lock().unwrap_or_else(|e| e.into_inner()).decision == Some(false);
+    let mut work: Vec<Work> = Vec::new();
     for f in found {
-        if shared.lock().unwrap_or_else(|e| e.into_inner()).decision == Some(false) {
+        if refused() {
             break;
         }
         let Some(staged) = cache.stage(&f.url, true) else {
             continue;
         };
+        // E3: las hojas y los scripts clásicos de una respuesta correcta se parsean o compilan
+        // después (los demás estados no los usa la carga como hoja o script). También los que
+        // ya no están frescos: lo parseado o compilado va con sus bytes en la clave, así que
+        // solo lo encuentra una carga que reciba esos mismos bytes, por ejemplo tras validarlos
+        // con un 304 (RFC 9111 §4.3.4) o al servirlos dentro de `stale-while-revalidate`
+        // (RFC 5861 §3). La respuesta guardada en sí no se usa: a la caché en memoria solo
+        // entra lo fresco, como antes.
+        if matches!(f.kind, Kind::Style | Kind::Script)
+            && let Some(r) = staged.response()
+            && (200..300).contains(&r.status)
+        {
+            work.push(Work {
+                url: f.url.clone(),
+                kind: f.kind,
+                charset: f.charset,
+                bytes: r.body.clone(),
+                validator: staged.validator().map(str::to_owned),
+            });
+        }
         if !staged.fresh {
             continue;
         }
@@ -258,6 +379,41 @@ fn warm(cache: &HttpCache, shared: &Mutex<Shared>, document: &Url) {
             None => s.staged.push(staged),
         }
         s.ready += 1;
+    }
+    let cpu = Instant::now();
+    let (mut sheets, mut scripts) = (0, 0);
+    for w in work {
+        if refused() {
+            break;
+        }
+        match w.kind {
+            // La clave con que la carga la busca (`bf_style::loader::load_sheet`): la URL final
+            // (una respuesta 2xx guardada no redirige), los bytes, el modo y el encoding del
+            // documento.
+            Kind::Style => {
+                if let Some(quirks) = quirks {
+                    let ctx = bf_style::sheet_cache::SheetContext { quirks, encoding };
+                    bf_style::sheet_cache::warm(&w.url, &w.bytes, &ctx);
+                    sheets += 1;
+                }
+            }
+            // El nombre y el texto con que la ventana lo evalúa (`bf_web::bom::script`): la URL
+            // de la respuesta y los bytes decodificados con el `charset` o el del documento.
+            Kind::Script => {
+                let (text, _) = bf_infra::encoding::decode(&w.bytes, w.charset.unwrap_or(encoding));
+                bf_js::code_cache::warm(&w.url.href(), w.validator.as_deref(), &text);
+                scripts += 1;
+            }
+            Kind::Module | Kind::Image => {}
+        }
+    }
+    if std::env::var_os("BF_TRACE").is_some() {
+        eprintln!(
+            "perf precarga: {sheets} hojas parseadas y {scripts} scripts compilados en {:.1} ms, \
+             listos a los {:.1} ms de empezar",
+            cpu.elapsed().as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
     finish();
 }
@@ -296,8 +452,8 @@ mod tests {
             [
                 ("https://sitio.test/a.css".to_owned(), Kind::Style),
                 ("https://sitio.test/b.js".to_owned(), Kind::Script),
-                ("https://sitio.test/wiki/m.js".to_owned(), Kind::Script),
-                ("https://sitio.test/c.js".to_owned(), Kind::Script),
+                ("https://sitio.test/wiki/m.js".to_owned(), Kind::Module),
+                ("https://sitio.test/c.js".to_owned(), Kind::Module),
                 ("https://sitio.test/d.css".to_owned(), Kind::Style),
                 ("https://sitio.test/e.png".to_owned(), Kind::Image),
             ]
@@ -307,6 +463,15 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// El script de `/b.js`: más largo que `code_cache::MIN_SOURCE_LEN`, para que se guarde.
+    fn big_script() -> String {
+        let mut s = String::from("var total = 0;\n");
+        while s.len() < 2 * bf_js::code_cache::MIN_SOURCE_LEN {
+            s.push_str("total = total + 1; // relleno para pasar del mínimo de la caché\n");
+        }
+        s
+    }
 
     /// Un servidor con `/` (HTML que valida con `ETag`, o que cambia si `changed`), `/a.css` y
     /// `/b.js` frescos diez minutos y `/c.css` sin frescura. Cuenta las peticiones.
@@ -331,18 +496,30 @@ mod tests {
                 }
                 seen.fetch_add(1, Ordering::SeqCst);
                 let path = line.split(' ').nth(1).unwrap_or("/").to_owned();
+                let script = big_script();
                 let (status, headers, body): (&str, &str, &str) = match path.as_str() {
                     "/" if conditional && !changed.load(Ordering::SeqCst) => {
                         ("304 Not Modified", "ETag: \"v1\"\r\n", "")
                     }
                     "/" => (
                         "200 OK",
-                        "Content-Type: text/html\r\nCache-Control: max-age=0, must-revalidate\r\n\
-                         ETag: \"v1\"\r\n",
+                        "Content-Type: text/html; charset=utf-8\r\n\
+                         Cache-Control: max-age=0, must-revalidate\r\nETag: \"v1\"\r\n",
                         "<!doctype html><link rel=stylesheet href=/a.css>\
                          <link rel=stylesheet href=/c.css><script src=/b.js></script>",
                     ),
                     "/c.css" => ("200 OK", "Content-Type: text/css\r\n", "p{}"),
+                    "/a.css" => (
+                        "200 OK",
+                        "Content-Type: text/css\r\nCache-Control: max-age=600\r\n",
+                        "p { color: green }",
+                    ),
+                    "/b.js" => (
+                        "200 OK",
+                        "Content-Type: text/javascript\r\nCache-Control: max-age=600\r\n\
+                         ETag: \"s1\"\r\n",
+                        &script,
+                    ),
                     _ => (
                         "200 OK",
                         "Content-Type: text/plain\r\nCache-Control: max-age=600\r\n",
@@ -402,6 +579,24 @@ mod tests {
         assert_eq!(r.cache, bf_net::CacheUse::Revalidated);
         let report = w.finish(true);
         assert_eq!((report.found, report.ready, report.done), (3, 2, true));
+        // E3: las hojas guardadas quedaron parseadas con la clave de la carga (documento sin
+        // quirks, UTF-8), también `c.css`, que no está fresca (su clave lleva sus bytes), y el
+        // script compilado con su URL. Una hoja con otros bytes no está.
+        let ctx = bf_style::sheet_cache::SheetContext {
+            quirks: false,
+            encoding: Encoding::Utf8,
+        };
+        let sheet = |p: &str, body: &[u8]| {
+            let u = url(&format!("http://127.0.0.1:{port}{p}"));
+            bf_style::sheet_cache::get(&bf_style::sheet_cache::SheetKey::new(&u, body), &ctx)
+        };
+        assert!(sheet("/a.css", b"p { color: green }").is_some());
+        assert!(sheet("/c.css", b"p{}").is_some());
+        assert!(sheet("/c.css", b"p{ }").is_none());
+        assert!(bf_js::code_cache::is_warm(
+            &format!("http://127.0.0.1:{port}/b.js"),
+            &big_script()
+        ));
         // El documento y las dos frescas.
         assert_eq!(cache.len(), 3);
         assert_eq!(count.load(Ordering::SeqCst), 5);
@@ -472,6 +667,43 @@ mod tests {
             parse_t,
             scan(&html, &doc).len()
         );
+    }
+
+    /// E3: el modo del documento, solo en los casos seguros (HTML §13.2.6.4.1).
+    #[test]
+    fn quirks_from_the_doctype() {
+        assert_eq!(document_quirks("<!DOCTYPE html><p>"), Some(false));
+        assert_eq!(document_quirks("\n<!-- c --> <!doctype HTML>"), Some(false));
+        assert_eq!(
+            document_quirks("<!DOCTYPE html SYSTEM \"about:legacy-compat\">"),
+            Some(false)
+        );
+        assert_eq!(document_quirks("<html><p>"), Some(true));
+        assert_eq!(document_quirks(""), Some(true));
+        assert_eq!(document_quirks("<!DOCTYPE foo>"), None);
+        assert_eq!(
+            document_quirks(
+                "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \
+                 \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">"
+            ),
+            None
+        );
+    }
+
+    /// El `charset` de un `<script>` va con lo encontrado.
+    #[test]
+    fn scanner_keeps_the_script_charset() {
+        let doc = url("https://sitio.test/");
+        let got: Vec<Option<Encoding>> = scan(
+            "<script src=a.js charset=windows-1252></script><script src=b.js charset=nada>\
+             </script>",
+            &doc,
+        )
+        .into_iter()
+        .map(|f| f.charset)
+        .collect();
+        assert_eq!(got, [Encoding::for_label("windows-1252"), None]);
+        assert!(got[0].is_some());
     }
 
     /// El primer `<base href>` cambia la URL base de lo que sigue (HTML §4.2.3).

@@ -533,6 +533,10 @@ pub struct ParseMarks {
     pub copy: Duration,
     /// El detalle de lo que el parser hizo en el navegador.
     pub profile: bf_web::bom::script::ParseProfile,
+    /// E3: los scripts clásicos que corrieron durante el parser, según la caché de código
+    /// ([`bf_js::code_cache`]): compilados, copiados del hilo o de la caché del proceso (los
+    /// que compiló la precarga).
+    pub code: bf_js::code_cache::Stats,
 }
 
 impl Engine {
@@ -792,10 +796,18 @@ impl Engine {
         );
         let window = start.elapsed();
         let start = Instant::now();
+        let code_before = bf_js::code_cache::stats();
         bf_web::bom::script::begin_parse(agent, realm, url);
         bf_web::bom::script::feed(agent, realm, text);
         bf_web::bom::script::finish(agent, realm);
         let parser = start.elapsed();
+        let code_after = bf_js::code_cache::stats();
+        let code = bf_js::code_cache::Stats {
+            compiled: code_after.compiled - code_before.compiled,
+            compiled_bytes: code_after.compiled_bytes - code_before.compiled_bytes,
+            thread_hits: code_after.thread_hits - code_before.thread_hits,
+            process_hits: code_after.process_hits - code_before.process_hits,
+        };
         let start = Instant::now();
         // E6: los `<meta>` de CSP que quedaron después del último script valen para los
         // subrecursos que se piden al maquetar.
@@ -818,6 +830,7 @@ impl Engine {
             profile: bf_web::bom::script::script_env(&self.rt.agent, self.realm)
                 .map(|e| e.parse_profile)
                 .unwrap_or_default(),
+            code,
         };
         doc
     }
