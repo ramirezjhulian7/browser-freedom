@@ -661,7 +661,7 @@ fn focusable_by_default(agent: &Agent, n: NodeRef) -> bool {
     }
 }
 
-fn get_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+pub(crate) fn get_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let v = attr_value(agent, n, "tabindex")
         .and_then(|s| reflect::parse_integer(&s.to_string_lossy()))
@@ -674,7 +674,7 @@ fn get_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     Ok(Value::Number(v.map_or(f64::from(d), |v| v as f64)))
 }
 
-fn set_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
+pub(crate) fn set_tab_index(agent: &mut Agent, a: &CallArgs<'_>) -> JsResult<Value> {
     let n = this_node(agent, a)?;
     let v = webidl::to_long(agent, &a.arg(0))?;
     set_attr(

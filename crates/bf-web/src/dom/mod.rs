@@ -11,6 +11,7 @@ pub mod document;
 pub mod element;
 pub mod event_types;
 pub mod events;
+pub mod geometry; // E1: DOMPoint, DOMQuad, DOMMatrix
 pub mod exception;
 pub mod implementation;
 pub mod insertion;
@@ -101,6 +102,8 @@ pub struct DomClasses {
     pub element_classes: HashMap<(Namespace, DomString), HostClassId>,
     /// La clase de los elementos HTML sin entrada propia (`HTMLUnknownElement`, de E1).
     pub html_default: Option<HostClassId>,
+    /// E1: la de los elementos SVG sin entrada propia (`SVGElement`, SVG 2 §4.4).
+    pub svg_default: Option<HostClassId>,
 }
 
 /// Los ids de las clases del DOM del agente.
@@ -114,6 +117,13 @@ pub fn classes(agent: &Agent) -> &DomClasses {
 pub fn set_element_class(agent: &mut Agent, ns: Namespace, local_name: &str, class: HostClassId) {
     if let Some(c) = agent.embedder_data_mut::<DomClasses>() {
         c.element_classes.insert((ns, local_name.into()), class);
+    }
+}
+
+/// E1: la clase por defecto de los elementos SVG (`SVGElement`).
+pub fn set_svg_default_class(agent: &mut Agent, class: HostClassId) {
+    if let Some(c) = agent.embedder_data_mut::<DomClasses>() {
+        c.svg_default = Some(class);
     }
 }
 
@@ -270,6 +280,7 @@ pub fn register_classes(agent: &mut Agent, realm: RealmId, _ctx: &WebContextHand
             dom_implementation,
             element_classes: HashMap::new(),
             html_default: None,
+            svg_default: None,
         });
     }
     exception::finish_realm(agent, realm);
@@ -305,6 +316,7 @@ fn class_for(agent: &Agent, n: NodeRef) -> HostClassId {
         NodeData::Element(e) => match c.element_classes.get(&(e.ns, e.name.clone())) {
             Some(k) => *k,
             None if e.ns == Namespace::Html => c.html_default.unwrap_or(c.element),
+            None if e.ns == Namespace::Svg => c.svg_default.unwrap_or(c.element),
             None => c.element,
         },
         NodeData::Attr(_) => c.attr,
