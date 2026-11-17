@@ -676,8 +676,14 @@ impl<'a> Builder<'a> {
             return;
         }
         // Imagen que no cargó con `alt`: el texto alternativo como contenido (HTML §15.4.2).
+        // E2: una imagen cargada sin dimensiones naturales, solo con proporción (un SVG con
+        // `viewBox` y sin `width`/`height`: `ImageState::Ratio`), sí está disponible: el logo
+        // y el lema de en.wikipedia salían como texto alternativo.
         if is_image_element(el)
-            && !matches!(self.images.get(&node), Some(ImageState::Loaded(_)))
+            && !matches!(
+                self.images.get(&node),
+                Some(ImageState::Loaded(_) | ImageState::Ratio(_))
+            )
             && let Some(alt) = el.attr("alt").filter(|a| !a.trim().is_empty())
         {
             let kind = if style.display.is_inline_level() {
