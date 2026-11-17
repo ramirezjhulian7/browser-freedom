@@ -1825,3 +1825,37 @@ fn module_evaluated_once_per_url() {
         p.console()
     );
 }
+
+/// E1: un script que se corta (tiempo agotado o agente interrumpido) dice cuál es en la consola.
+/// Antes era solo "Script terminado: tiempo agotado" y no se sabía qué script de YouTube era.
+#[test]
+fn terminated_script_names_its_url() {
+    let mut p = Page::new("");
+    let realm = p.ctx.realm;
+    let url = Url::parse("https://example.test/", None).unwrap();
+    let loader = MemLoader(
+        [(
+            "https://example.test/lento.js".to_owned(),
+            "for (;;) {}".to_owned(),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    p.rt.agent.interrupt = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    bom::script::install_scripting(&mut p.rt.agent, realm, &url, Arc::new(loader));
+    bom::script::begin_parse(&mut p.rt.agent, realm, &url);
+    bom::script::feed(
+        &mut p.rt.agent,
+        realm,
+        "<script src=https://example.test/lento.js></script>",
+    );
+    bom::script::finish(&mut p.rt.agent, realm);
+    p.rt.agent.interrupt = None;
+    let console = p.console();
+    assert!(
+        console
+            .iter()
+            .any(|l| l.contains("Script terminado") && l.contains("https://example.test/lento.js")),
+        "{console:?}"
+    );
+}
